@@ -1,5 +1,6 @@
 dist/
 release/
+colonist-assistant-*.zip
 node_modules/
 engine/target/
 benchmark-results/
