@@ -1,4 +1,5 @@
 import type { DecisionEngine } from "../core/engine";
+import { isExtensionContextInvalidatedError } from "./extension-context";
 
 export interface AssistantSettings {
   enabled: boolean;
@@ -55,16 +56,32 @@ export const readSettings = async (): Promise<AssistantSettings> => {
 };
 
 export const saveSettings = async (settings: AssistantSettings): Promise<void> => {
-  await chrome.storage.sync.set({ [SETTINGS_KEY]: settings });
+  try {
+    await chrome.storage.sync.set({ [SETTINGS_KEY]: settings });
+  } catch (error) {
+    if (!isExtensionContextInvalidatedError(error)) throw error;
+  }
 };
 
 export const readPosition = async (): Promise<OverlayPosition> => {
-  const result = await chrome.storage.local.get([POSITION_KEY, LEGACY_POSITION_KEY]);
-  return ((result[POSITION_KEY] ?? result[LEGACY_POSITION_KEY]) as
-    | OverlayPosition
-    | undefined) ?? {};
+  try {
+    const result = await chrome.storage.local.get([
+      POSITION_KEY,
+      LEGACY_POSITION_KEY,
+    ]);
+    return ((result[POSITION_KEY] ?? result[LEGACY_POSITION_KEY]) as
+      | OverlayPosition
+      | undefined) ?? {};
+  } catch (error) {
+    if (isExtensionContextInvalidatedError(error)) return {};
+    throw error;
+  }
 };
 
 export const savePosition = async (position: OverlayPosition): Promise<void> => {
-  await chrome.storage.local.set({ [POSITION_KEY]: position });
+  try {
+    await chrome.storage.local.set({ [POSITION_KEY]: position });
+  } catch (error) {
+    if (!isExtensionContextInvalidatedError(error)) throw error;
+  }
 };

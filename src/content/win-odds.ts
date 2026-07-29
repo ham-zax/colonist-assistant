@@ -3,6 +3,14 @@ import type { TrackerState } from "../core/types";
 
 const ROOT_ID = "colonist-assistant-win-odds";
 const FONT_STYLE_ID = "colonist-assistant-document-font";
+const STALE_AFTER_MS = 15_000;
+const REPOSITION_DELAY_MS = 48;
+
+let lastAnalysis: DecisionAnalysis | undefined;
+let lastState: TrackerState | undefined;
+let staleTimer: number | undefined;
+let repositionTimer: number | undefined;
+let observer: MutationObserver | undefined;
 
 const ensureFont = (): void => {
   if (document.getElementById(FONT_STYLE_ID)) return;
@@ -92,27 +100,107 @@ const ensureRoot = (): HTMLDivElement => {
   return root;
 };
 
-export const renderWinOdds = (
-  analysis: DecisionAnalysis | undefined,
-  state: TrackerState | undefined,
+const knownPlayerMutation = (
+  records: MutationRecord[],
+  players: Set<string>,
+): boolean =>
+  records.some((record) => {
+    const target =
+      record.target instanceof HTMLElement
+        ? record.target
+        : record.target.parentElement;
+    if (target?.closest(`#${ROOT_ID}`)) return false;
+    const candidates = [
+      ...record.addedNodes,
+      ...record.removedNodes,
+      ...(target ? [target] : []),
+    ];
+    return candidates.some((node) => {
+      const text = (node.textContent ?? "").replace(/\s+/gu, " ").trim();
+      if (!text || text.length > 500) return false;
+      return [...players].some((player) => text.includes(player));
+    });
+  });
+
+const scheduleReposition = (): void => {
+  if (repositionTimer !== undefined || !lastAnalysis || !lastState) return;
+  repositionTimer = window.setTimeout(() => {
+    repositionTimer = undefined;
+    if (lastAnalysis && lastState) {
+      renderCurrentWinOdds(lastAnalysis, lastState);
+    }
+  }, REPOSITION_DELAY_MS);
+};
+
+const ensureObserver = (): void => {
+  if (observer) return;
+  observer = new MutationObserver((records) => {
+    const players = new Set(
+      lastAnalysis?.players.map((estimate) => estimate.player) ?? [],
+    );
+    if (players.size && knownPlayerMutation(records, players)) {
+      scheduleReposition();
+    }
+  });
+  observer.observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+  });
+  window.addEventListener("resize", scheduleReposition, { passive: true });
+  window.addEventListener("scroll", scheduleReposition, {
+    capture: true,
+    passive: true,
+  });
+};
+
+const removeStaleBadges = (
+  root: HTMLDivElement,
+  players: Set<string>,
 ): void => {
-  const existing = document.getElementById(ROOT_ID);
-  if (!analysis || !state?.playerOrder.length) {
-    existing?.remove();
-    return;
+  for (const badge of root.querySelectorAll<HTMLElement>("[data-player]")) {
+    if (!badge.dataset.player || !players.has(badge.dataset.player)) {
+      badge.remove();
+    }
   }
+};
+
+const badgeFor = (
+  root: HTMLDivElement,
+  player: string,
+): HTMLSpanElement | undefined =>
+  [...root.querySelectorAll<HTMLSpanElement>("span[data-player]")].find(
+    (badge) => badge.dataset.player === player,
+  );
+
+const renderCurrentWinOdds = (
+  analysis: DecisionAnalysis,
+  state: TrackerState,
+): void => {
+  if (!state.playerOrder.length || !analysis.players.length) return;
   const root = ensureRoot();
+  const currentPlayers = new Set(
+    analysis.players.map((estimate) => estimate.player),
+  );
+  removeStaleBadges(root, currentPlayers);
   const claimed = new Set<HTMLElement>();
-  root.replaceChildren();
   for (const estimate of analysis.players) {
     const panel = findPlayerPanel(estimate.player, claimed);
+    const existingBadge = badgeFor(root, estimate.player);
+    if (existingBadge) {
+      existingBadge.textContent = `${Math.round(estimate.probability * 100)}% WIN`;
+      existingBadge.title = `${estimate.player}: ${Math.round(estimate.probability * 100)}% stabilized model estimate, not yet calibrated · ${estimate.etaTurns} turn ETA · ${estimate.confidence} hand-evidence confidence · ${analysis.model}`;
+    }
+    // Colonist briefly unmounts or empties player panels during React commits.
+    // Keep the last valid badge instead of flashing every player's odds off.
     if (!panel) continue;
     claimed.add(panel);
     const rect = panel.getBoundingClientRect();
-    const badge = document.createElement("span");
+    const badge = existingBadge ?? document.createElement("span");
     badge.dataset.player = estimate.player;
-    badge.textContent = `${Math.round(estimate.probability * 100)}% WIN`;
-    badge.title = `${estimate.player}: ${Math.round(estimate.probability * 100)}% stabilized model estimate, not yet calibrated · ${estimate.etaTurns} turn ETA · ${estimate.confidence} hand-evidence confidence · ${analysis.model}`;
+    if (!existingBadge) {
+      badge.textContent = `${Math.round(estimate.probability * 100)}% WIN`;
+      badge.title = `${estimate.player}: ${Math.round(estimate.probability * 100)}% stabilized model estimate, not yet calibrated · ${estimate.etaTurns} turn ETA · ${estimate.confidence} hand-evidence confidence · ${analysis.model}`;
+    }
     const left = Math.max(4, Math.min(window.innerWidth - 72, rect.right - 72));
     const top = Math.max(4, Math.min(window.innerHeight - 24, rect.top + 5));
     badge.style.cssText = [
@@ -134,10 +222,45 @@ export const renderWinOdds = (
       "font-variant-numeric:tabular-nums",
       "white-space:nowrap",
     ].join(";");
-    root.append(badge);
+    if (!existingBadge) root.append(badge);
   }
 };
 
+export const renderWinOdds = (
+  analysis: DecisionAnalysis | undefined,
+  state: TrackerState | undefined,
+): void => {
+  if (!analysis || !state?.playerOrder.length) {
+    // A missing scan is not proof that the game ended. Retain the last valid
+    // model briefly; explicit lifecycle events still call destroyWinOdds().
+    if (
+      document.getElementById(ROOT_ID) &&
+      staleTimer === undefined
+    ) {
+      staleTimer = window.setTimeout(destroyWinOdds, STALE_AFTER_MS);
+    }
+    return;
+  }
+  if (staleTimer !== undefined) {
+    window.clearTimeout(staleTimer);
+    staleTimer = undefined;
+  }
+  lastAnalysis = analysis;
+  lastState = state;
+  ensureObserver();
+  renderCurrentWinOdds(analysis, state);
+};
+
 export const destroyWinOdds = (): void => {
+  if (staleTimer !== undefined) window.clearTimeout(staleTimer);
+  if (repositionTimer !== undefined) window.clearTimeout(repositionTimer);
+  staleTimer = undefined;
+  repositionTimer = undefined;
+  lastAnalysis = undefined;
+  lastState = undefined;
+  observer?.disconnect();
+  observer = undefined;
+  window.removeEventListener("resize", scheduleReposition);
+  window.removeEventListener("scroll", scheduleReposition, true);
   document.getElementById(ROOT_ID)?.remove();
 };

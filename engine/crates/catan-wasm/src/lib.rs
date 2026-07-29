@@ -10,9 +10,10 @@ use colonist_catan_core::{
     Vertex,
 };
 use colonist_catan_search::{
-    ActionStats, BeliefParticle, ENGINE_REVISION, ExactActionFamily, Mcts, SearchConfig,
-    SearchMode, SearchReport, SearchStatistics, TacticalResult, exact_family_for_action,
-    learned_model_version, learned_trade_model_version, search_weighted_belief_maxn_bounded,
+    ActionStats, BeliefParticle, ENGINE_REVISION, ExactActionFamily, ExactActionValue,
+    ExactDecisionResult, Mcts, SearchConfig, SearchMode, SearchReport, SearchStatistics,
+    TacticalResult, evaluate, exact_family_for_action, learned_model_version,
+    learned_trade_model_version, search_weighted_belief_maxn_bounded,
     search_weighted_belief_paranoid_bounded, solve_belief_current_turn, solve_exact_belief,
 };
 use serde::{Deserialize, Serialize};
@@ -374,7 +375,11 @@ fn game_states(input: StateInput) -> Result<Vec<BeliefParticle>, JsValue> {
                 robber_return_phase,
                 free_roads: 0,
                 domestic_trade_used: input.domestic_trade_used,
-                domestic_trade_count: u8::from(input.domestic_trade_used),
+                // The live adapter's boolean means this turn's offer budget is
+                // exhausted. Mapping it to one left the simulator's second
+                // negotiation round open and made trivial end-turn states
+                // expand a full tree of redundant offers.
+                domestic_trade_count: if input.domestic_trade_used { 2 } else { 0 },
                 last_rejected_trade: None,
                 trade,
                 trade_cursor: input.trade_cursor,
@@ -560,11 +565,67 @@ fn effective_particle_count(particles: &[BeliefParticle]) -> f32 {
     1.0 / squared.max(f32::EPSILON)
 }
 
-/// Mandatory protocol decisions are compact exact families. Returning them
-/// before any long-range search keeps discard, robber/victim, and trade
-/// response latency independent of the strategic simulation budget.
+fn exact_single_action(particles: &[BeliefParticle]) -> Option<ExactDecisionResult> {
+    let first = particles.first()?;
+    let legal = first.state.legal_actions();
+    if legal.len() != 1 {
+        return None;
+    }
+    let chosen = legal[0].clone();
+    if particles
+        .iter()
+        .any(|particle| particle.state.legal_actions() != [chosen.clone()])
+    {
+        return None;
+    }
+    let total_weight = particles
+        .iter()
+        .map(|particle| particle.weight.max(0.0))
+        .sum::<f32>()
+        .max(f32::EPSILON);
+    let mut value = [0.0; 4];
+    let mut lower_bound = [f32::INFINITY; 4];
+    for particle in particles {
+        let weight = particle.weight.max(0.0) / total_weight;
+        if weight <= f32::EPSILON {
+            continue;
+        }
+        let mut next = particle.state.clone();
+        next.apply(&chosen)
+            .expect("the sole legal action must transition");
+        let evaluated = evaluate(&next);
+        for player in 0..4 {
+            value[player] += evaluated[player] * weight;
+            lower_bound[player] = lower_bound[player].min(evaluated[player]);
+        }
+    }
+    let actor = first.state.actor() as usize;
+    Some(ExactDecisionResult {
+        applicable: true,
+        chosen: Some(chosen.clone()),
+        actions: vec![ExactActionValue {
+            action: chosen,
+            value,
+            lower_bound,
+            legal_weight: 1.0,
+            decision_score: value[actor],
+            lower_score: lower_bound[actor],
+        }],
+        worlds: particles.len(),
+    })
+}
+
+/// Mandatory protocol decisions and positions with one universally legal
+/// action are exact. Returning them before any long-range search keeps roll,
+/// end-turn, discard, robber/victim, and trade-response latency independent of
+/// the strategic simulation budget.
 fn exact_mandatory_report(particles: &[BeliefParticle]) -> Option<SearchReport> {
-    let exact = solve_exact_belief(particles, ExactActionFamily::Mandatory);
+    let mandatory = solve_exact_belief(particles, ExactActionFamily::Mandatory);
+    let exact = if mandatory.applicable {
+        mandatory
+    } else {
+        exact_single_action(particles)?
+    };
     if !exact.applicable {
         return None;
     }

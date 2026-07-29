@@ -4,7 +4,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   DEFAULT_SETTINGS,
+  readPosition,
   readSettings,
+  savePosition,
+  saveSettings,
   SETTINGS_KEY,
 } from "../src/content/settings";
 
@@ -87,5 +90,28 @@ describe("assistant settings", () => {
 
     expect(settings.engine).toBe("deep-alpha-beta");
     expect(set).not.toHaveBeenCalled();
+  });
+
+  it("silences storage cleanup after the extension context is replaced", async () => {
+    const invalidated = () => {
+      throw new Error("Extension context invalidated.");
+    };
+    vi.stubGlobal("chrome", {
+      storage: {
+        local: {
+          get: vi.fn(invalidated),
+          set: vi.fn(invalidated),
+        },
+        sync: {
+          set: vi.fn(invalidated),
+        },
+      },
+    });
+
+    await expect(readPosition()).resolves.toEqual({});
+    await expect(savePosition({ left: 10, top: 20 })).resolves.toBeUndefined();
+    await expect(
+      saveSettings(DEFAULT_SETTINGS),
+    ).resolves.toBeUndefined();
   });
 });
