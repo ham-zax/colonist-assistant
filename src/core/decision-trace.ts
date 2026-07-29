@@ -183,10 +183,11 @@ export class DecisionTraceRecorder {
 
   private schedulePersist(): void {
     if (this.persistTimer !== undefined) return;
+    const storage = chrome.storage.local;
     this.persistTimer = globalThis.setTimeout(() => {
       this.persistTimer = undefined;
       const traces = [...this.traces.values()].slice(-MAX_TRACES);
-      void chrome.storage.local.set({ [STORAGE_KEY]: traces });
+      void storage.set({ [STORAGE_KEY]: traces });
     }, 200);
   }
 }

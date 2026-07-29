@@ -553,6 +553,31 @@ struct CandidateMetrics {
     calibration_count: u64,
 }
 
+fn compact_engine_metrics(metrics: &[CandidateMetrics; 6]) -> String {
+    [
+        Engine::Random,
+        Engine::Weighted,
+        Engine::MaxN,
+        Engine::AlphaBeta,
+        Engine::Uct,
+        Engine::Puct,
+    ]
+    .into_iter()
+    .map(|engine| {
+        let metric = &metrics[engine as usize];
+        let seats = metric.seats.max(1) as f64;
+        format!(
+            "\"{}\":{{\"seatSamples\":{},\"meanRank\":{:.6},\"meanVictoryPoints\":{:.6}}}",
+            engine.as_str(),
+            metric.seats,
+            metric.ranks / seats,
+            metric.points as f64 / seats,
+        )
+    })
+    .collect::<Vec<_>>()
+    .join(",")
+}
+
 fn play_game(board_seed: u64, chance_seed: u64, engines: &[Engine], config: &Config) -> GameResult {
     let mut state = GameState::standard(board_seed, config.players);
     // Rotate explicit bounded-rational styles independently of engine family.
@@ -851,7 +876,8 @@ fn main() {
     let mut turns = 0u64;
     let mut actions = 0u64;
     let mut block_scores = Vec::with_capacity(config.blocks as usize);
-    let mut candidate_metrics = CandidateMetrics::default();
+    let mut engine_metrics: [CandidateMetrics; 6] =
+        std::array::from_fn(|_| CandidateMetrics::default());
 
     if !config.json {
         println!(
@@ -960,9 +986,7 @@ fn main() {
         candidate_wins += u32::from(won);
         engine_wins[winner_engine as usize] += 1;
         for (player, engine) in result.engines.iter().enumerate() {
-            if *engine != config.candidate {
-                continue;
-            }
+            let candidate_metrics = &mut engine_metrics[*engine as usize];
             let metrics = &result.game.metrics;
             candidate_metrics.seats += 1;
             candidate_metrics.points += result.game.points[player] as u64;
@@ -1034,6 +1058,8 @@ fn main() {
     let mean_turns = turns as f64 / total_games as f64;
     let mean_actions = actions as f64 / total_games as f64;
     let games_per_second = total_games as f64 / elapsed.as_secs_f64();
+    let candidate_metrics = &engine_metrics[config.candidate as usize];
+    let compact_engine_metrics = compact_engine_metrics(&engine_metrics);
     if config.json {
         println!(
             concat!(
@@ -1048,6 +1074,7 @@ fn main() {
                 "\"games\":{},",
                 "\"candidateWins\":{},",
                 "\"engineWins\":{{\"random\":{},\"weighted\":{},\"maxn\":{},\"alphabeta\":{},\"uct\":{},\"puct\":{}}},",
+                "\"engineMetrics\":{{{}}},",
                 "\"winShare\":{:.8},",
                 "\"fairShare\":{:.8},",
                 "\"fairShareDelta\":{:.8},",
@@ -1112,6 +1139,7 @@ fn main() {
             engine_wins[Engine::AlphaBeta as usize],
             engine_wins[Engine::Uct as usize],
             engine_wins[Engine::Puct as usize],
+            compact_engine_metrics,
             win_share,
             fair_share,
             win_share - fair_share,

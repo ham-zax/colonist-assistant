@@ -1,6 +1,6 @@
 {
   "name": "colonist-assistant",
-  "version": "0.7.13",
+  "version": "0.7.14",
   "private": true,
   "type": "module",
   "description": "Explainable, board-aware guidance for friendly Colonist games.",
@@ -8,7 +8,7 @@
     "build": "node scripts/build.mjs",
     "build:wasm": "node scripts/build-wasm.mjs",
     "check": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=1",
     "test:watch": "vitest",
     "benchmark:colonist": "node scripts/benchmark-colonist.mjs",
     "benchmark:catanatron": "python3 scripts/benchmark-catanatron.py",
