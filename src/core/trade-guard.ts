@@ -2,7 +2,10 @@ import type {
   DeepSearchAction,
   DeepSearchResult,
 } from "./engine";
-import type { ActiveTradeOffer } from "./placement";
+import type {
+  ActiveTradeOffer,
+  BoardSnapshot,
+} from "./placement";
 import {
   RESOURCE_ORDER,
   hasResources,
@@ -31,15 +34,42 @@ export const canAnyOpponentFulfillTrade = (
   player: string | undefined,
   receive: ResourceVector,
   recipients?: string[],
+  board?: BoardSnapshot,
 ): boolean => {
-  if (!state?.worlds.length || !player) return true;
+  if (!player) return true;
   const candidates =
     recipients?.length
       ? recipients.filter((candidate) => candidate !== player)
-      : state.playerOrder.filter((candidate) => candidate !== player);
+      : (state?.playerOrder ?? Object.keys(board?.players ?? {}))
+          .filter((candidate) => candidate !== player);
   if (!candidates.length) return false;
+  const requestedCards = RESOURCE_ORDER.reduce(
+    (sum, resource) => sum + receive[resource],
+    0,
+  );
+  const candidatesWithEnoughCards = candidates.filter(
+    (candidate) =>
+      (board?.players?.[candidate]?.handSize ?? requestedCards) >=
+      requestedCards,
+  );
+  if (!candidatesWithEnoughCards.length) return false;
+
+  if (board?.bankVisible && board.bank) {
+    const standardSupply =
+      Object.keys(board.players ?? {}).length > 4 ? 24 : 19;
+    const impossibleFromExactBank = RESOURCE_ORDER.some((resource) => {
+      const opponentsHoldAtMost =
+        standardSupply -
+        board.bank![resource] -
+        (board.ownHand?.[resource] ?? 0);
+      return opponentsHoldAtMost < receive[resource];
+    });
+    if (impossibleFromExactBank) return false;
+  }
+
+  if (!state?.worlds.length) return true;
   return state.worlds.some((world) =>
-    candidates.some((candidate) => {
+    candidatesWithEnoughCards.some((candidate) => {
       const hand = world.hands[candidate];
       return Boolean(hand && hasResources(hand, receive));
     }),
@@ -51,6 +81,7 @@ export const selectUsableDeepAction = (
   state: TrackerState | undefined,
   player: string | undefined,
   attemptedTradeOffers: ReadonlySet<string>,
+  board?: BoardSnapshot,
 ): DeepSearchAction | undefined => {
   const chosen = search?.chosen;
   if (!search || !chosen) return chosen;
@@ -71,6 +102,7 @@ export const selectUsableDeepAction = (
         player,
         receive,
         action.recipients,
+        board,
       )
     );
   };

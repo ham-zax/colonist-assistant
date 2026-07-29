@@ -4,6 +4,10 @@ import type {
   KnownDevelopmentCard,
 } from "../core/placement";
 import type { BuildKind, Resource, ResourceVector } from "../core/resources";
+import {
+  findLogRoot,
+  findMessageElements,
+} from "./dom";
 
 export type NextClick =
   | {
@@ -1018,17 +1022,52 @@ const tradeResourceSteps = (
     }),
   );
 
-const visibleTradeFailure = (): string | undefined => {
-  const failure =
-    /no one has (?:the )?wanted resource|no player has (?:the )?wanted resource|identical trade|trade (?:offer )?limit|too many (?:identical )?trades|cannot (?:make|send|offer) (?:this )?trade|invalid trade|not enough (?:cards|resources)/iu;
+const TRADE_FAILURE_PATTERN =
+  /no one has (?:the )?wanted resource|no player has (?:the )?wanted resource|(?:nobody|none of the players?) (?:has|have) (?:the )?(?:wanted|requested|required) resource|(?:players?|opponents?) (?:do not|don't|does not|doesn't) have enough (?:cards|resources)|insufficient (?:cards|resources)(?: for (?:this )?trade)?|identical trade|trade (?:offer )?limit|too many (?:identical )?trades|cannot (?:make|send|offer) (?:this )?trade|invalid trade|not enough (?:cards|resources)/iu;
+
+const tradeFailureLogKeys = (): Set<string> => {
+  const root = findLogRoot();
+  if (!root) return new Set();
+  return new Set(
+    findMessageElements(root)
+      .slice(-16)
+      .map(
+        (element) =>
+          `${element.getAttribute("data-index") ?? "unindexed"}|${normalized(element.textContent ?? "")}`,
+      )
+      .filter((key) => TRADE_FAILURE_PATTERN.test(key)),
+  );
+};
+
+const visibleTradeFailure = (
+  ignoredLogKeys: ReadonlySet<string> = new Set(),
+): string | undefined => {
   const candidates = [
     ...document.querySelectorAll<HTMLElement>(
-      "[role='alert'], [class*='toast'], [class*='snackbar'], [class*='notification'], [class*='errorMessage'], [class*='error-message']",
+      "[role='alert'], [aria-live='assertive'], [class*='toast'], [class*='snackbar'], [class*='notification'], [class*='errorMessage'], [class*='error-message'], [class*='floatingText'], [class*='floating-text'], [class*='insufficient']",
     ),
   ].filter(visible);
-  return candidates
+  const floatingFailure = candidates
     .map((element) => element.textContent?.trim())
-    .find((text): text is string => Boolean(text && failure.test(text)));
+    .find(
+      (text): text is string =>
+        Boolean(text && TRADE_FAILURE_PATTERN.test(text)),
+    );
+  if (floatingFailure) return floatingFailure;
+
+  const root = findLogRoot();
+  if (!root) return undefined;
+  return findMessageElements(root)
+    .slice(-16)
+    .map((element) => ({
+      key: `${element.getAttribute("data-index") ?? "unindexed"}|${normalized(element.textContent ?? "")}`,
+      text: element.textContent?.trim(),
+    }))
+    .find(
+      ({ key, text }) =>
+        !ignoredLogKeys.has(key) &&
+        Boolean(text && TRADE_FAILURE_PATTERN.test(text)),
+    )?.text;
 };
 
 const closeTradePanelStep = (label: string): WorkflowStep => ({
@@ -1240,6 +1279,9 @@ const startWorkflow = (
   const tradeTransaction =
     action.kind === "trade-builder" ||
     (action.kind === "trade" && action.verdict === "counter");
+  const ignoredTradeFailureLogKeys = tradeTransaction
+    ? tradeFailureLogKeys()
+    : new Set<string>();
 
   const fail = (reason: string): void => {
     const activeOptions = workflowOptions ?? options;
@@ -1248,14 +1290,21 @@ const startWorkflow = (
       signature: action.signature,
       reason,
     });
-    if (tradeTransaction && tradePanelIsOpen()) {
-      const close = findTradePanelControl();
-      if (close) {
-        later(() => {
-          close.click();
+    if (tradeTransaction) {
+      const closeTradePanel = (attempt = 0): void => {
+        if (!tradePanelIsOpen()) {
           requestBoardRefresh();
-        }, 180);
-      }
+          return;
+        }
+        const close = findTradePanelControl();
+        if (close) close.click();
+        if (attempt < 2) {
+          later(() => closeTradePanel(attempt + 1), 240);
+        } else {
+          requestBoardRefresh();
+        }
+      };
+      later(() => closeTradePanel(), 120);
     }
     cancelWorkflow();
     document.getElementById(ROOT_ID)?.remove();
@@ -1269,7 +1318,9 @@ const startWorkflow = (
     ) {
       return;
     }
-    const tradeFailure = tradeTransaction ? visibleTradeFailure() : undefined;
+    const tradeFailure = tradeTransaction
+      ? visibleTradeFailure(ignoredTradeFailureLogKeys)
+      : undefined;
     if (tradeFailure) {
       fail(`Colonist rejected the trade workflow: ${tradeFailure}`);
       return;
@@ -1325,7 +1376,9 @@ const startWorkflow = (
         ) {
           return;
         }
-        const failure = tradeTransaction ? visibleTradeFailure() : undefined;
+        const failure = tradeTransaction
+          ? visibleTradeFailure(ignoredTradeFailureLogKeys)
+          : undefined;
         if (failure) {
           fail(`Colonist rejected the trade workflow: ${failure}`);
           return;

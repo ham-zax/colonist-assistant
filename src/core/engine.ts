@@ -37,8 +37,7 @@ export const isDeepDecisionEngine = (
 
 export type DecisionRuntime =
   | "background-wasm"
-  | "background-rollout"
-  | "local-fallback";
+  | "background-rollout";
 
 export interface DeepSearchAction {
   kind: string;

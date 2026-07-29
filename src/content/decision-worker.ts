@@ -1,8 +1,6 @@
-import {
-  analyzeDecision,
-  isDeepDecisionEngine,
-  type DecisionAnalysis,
-  type DecisionEngine,
+import type {
+  DecisionAnalysis,
+  DecisionEngine,
 } from "../core/engine";
 import type { BoardSnapshot } from "../core/placement";
 import type { TrackerState } from "../core/types";
@@ -16,11 +14,10 @@ import {
 } from "../worker/protocol";
 import type { DecisionRequest } from "../worker/analyze";
 
-const STATUS_TIMEOUT_MS = 5_000;
-const ANALYSIS_TIMEOUT_MS = 1_250;
+const SLOW_DECISION_MS = 5_000;
 
 export interface DecisionServiceStatus {
-  runtime: "background-wasm" | "local-fallback";
+  runtime: "background-wasm" | "engine-error";
   detail: string;
   initializationMs?: number;
 }
@@ -31,6 +28,8 @@ interface PendingDecision extends DecisionRequest {
   generation: number;
   enqueuedAt: number;
   callback: (analysis: DecisionAnalysis) => void;
+  slowCallback?: (elapsedMs: number) => void;
+  failureCallback?: (detail: string) => void;
 }
 
 export class DecisionWorkerClient {
@@ -41,6 +40,7 @@ export class DecisionWorkerClient {
   private completedKey = "";
   private desiredKey = "";
   private readiness?: Promise<DecisionStatusMessageResponse>;
+  private destroyed = false;
 
   warm(callback: (status: DecisionServiceStatus) => void): void {
     this.readiness ??= this.queryStatus();
@@ -63,7 +63,7 @@ export class DecisionWorkerClient {
       .catch((error: unknown) => {
         this.readiness = undefined;
         callback({
-          runtime: "local-fallback",
+          runtime: "engine-error",
           detail:
             error instanceof Error
               ? error.message
@@ -79,14 +79,23 @@ export class DecisionWorkerClient {
     rootPlayer: string,
     engine: DecisionEngine,
     callback: (analysis: DecisionAnalysis) => void,
-  ): void {
+    slowCallback?: (elapsedMs: number) => void,
+    failureCallback?: (detail: string) => void,
+  ): boolean {
     if (
+      this.destroyed ||
       engine === "race-eta" ||
-      this.active?.key === key ||
-      this.queued?.key === key ||
+      (
+        this.active?.key === key &&
+        this.active.generation === this.generation
+      ) ||
+      (
+        this.queued?.key === key &&
+        this.queued.generation === this.generation
+      ) ||
       key === this.completedKey
     ) {
-      return;
+      return false;
     }
     this.queued = {
       id: this.nextId++,
@@ -98,9 +107,12 @@ export class DecisionWorkerClient {
       rootPlayer,
       engine,
       callback,
+      ...(slowCallback ? { slowCallback } : {}),
+      ...(failureCallback ? { failureCallback } : {}),
     };
     this.desiredKey = key;
     this.pump();
+    return true;
   }
 
   private pump(): void {
@@ -117,6 +129,27 @@ export class DecisionWorkerClient {
       rootPlayer: request.rootPlayer,
       engine: request.engine,
     };
+    const slowTimer = globalThis.setTimeout(() => {
+      const elapsedMs = performance.now() - startedAt;
+      const stale =
+        request.generation !== this.generation ||
+        request.key !== this.desiredKey;
+      console.warn("[Colonist Assistant] Decision still running", {
+        key: request.key,
+        engine: request.engine,
+        elapsedMs: Math.round(elapsedMs),
+        gameKey: request.board.gameKey,
+        turn: request.board.turn,
+        phase: request.board.action ?? "none",
+        isMyTurn: Boolean(request.board.isMyTurn),
+        currentPlayer: request.board.currentPlayer,
+        activeTrades: request.board.activeTrades?.length ?? 0,
+        stale,
+        policy: "selected-engine-only",
+        fallbackStarted: false,
+      });
+      if (!stale) request.slowCallback?.(elapsedMs);
+    }, SLOW_DECISION_MS);
     void this.send(message)
       .then((response) => {
         const finishedAt = performance.now();
@@ -148,21 +181,29 @@ export class DecisionWorkerClient {
             stale:
               request.generation !== this.generation ||
               request.key !== this.desiredKey,
-            error: response.error,
+            error:
+              response.error ??
+              response.analysis?.runtimeReason,
           });
         }
-        if (
+        const stale =
           request.generation !== this.generation ||
           request.key !== this.desiredKey ||
-          response.id !== request.id ||
-          !response.analysis
-        ) {
+          response.id !== request.id;
+        if (stale) {
+          return;
+        }
+        if (!response.analysis) {
+          request.failureCallback?.(
+            response.error ?? "Decision service returned no analysis",
+          );
           return;
         }
         this.completedKey = request.key;
         request.callback(response.analysis);
       })
       .finally(() => {
+        globalThis.clearTimeout(slowTimer);
         if (this.active?.id === request.id) this.active = undefined;
         this.pump();
       });
@@ -172,11 +213,8 @@ export class DecisionWorkerClient {
     message: DecisionMessage,
   ): Promise<DecisionMessageResponse> {
     try {
-      const response = await this.withTimeout(
-        chrome.runtime.sendMessage<DecisionMessageResponse>(message),
-        ANALYSIS_TIMEOUT_MS,
-        "Deep search exceeded the 1.25-second interactive limit",
-      );
+      const response =
+        await chrome.runtime.sendMessage<DecisionMessageResponse>(message);
       if (response?.id === message.id && response.analysis) {
         return {
           ...response,
@@ -188,49 +226,20 @@ export class DecisionWorkerClient {
           },
         };
       }
-      throw new Error("Decision service returned no response");
+      return {
+        id: message.id,
+        error:
+          response?.error ??
+          "Decision service returned no response",
+      };
     } catch (error) {
-      // Edge can restrict extension worker URLs from a content-script origin.
-      // The extension service worker is preferred. A lightweight local model
-      // keeps rendering and synchronization alive if that context is absent.
-      try {
-        const deep = isDeepDecisionEngine(message.engine);
-        const fallback = analyzeDecision(
-          message.state,
-          message.board,
-          message.rootPlayer,
-          deep ? "hybrid" : message.engine,
-        );
-        const analysis = deep
-          ? {
-              ...fallback,
-              engine: message.engine,
-              model:
-                "Deep Search service unavailable; using the local multiplayer rollout fallback",
-              runtime: "local-fallback" as const,
-              runtimeReason:
-                error instanceof Error
-                  ? error.message
-                  : "The extension background service did not respond",
-            }
-          : {
-              ...fallback,
-              runtime: "local-fallback" as const,
-              runtimeReason:
-                error instanceof Error
-                  ? error.message
-                  : "The extension background service did not respond",
-            };
-        return { id: message.id, analysis };
-      } catch (error) {
-        return {
-          id: message.id,
-          error:
-            error instanceof Error
-              ? error.message
-              : "Decision analysis failed",
-        };
-      }
+      return {
+        id: message.id,
+        error:
+          error instanceof Error
+            ? error.message
+            : "The extension background service did not respond",
+      };
     }
   }
 
@@ -239,45 +248,18 @@ export class DecisionWorkerClient {
       type: DECISION_STATUS_MESSAGE_TYPE,
       id: this.nextId++,
     };
-    return this.withTimeout(
-      chrome.runtime.sendMessage<DecisionStatusMessageResponse>(message),
-      STATUS_TIMEOUT_MS,
-      "Background WASM did not initialize within 5 seconds",
-    );
-  }
-
-  private withTimeout<T>(
-    promise: Promise<T>,
-    timeoutMs: number,
-    message: string,
-  ): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      const timeout = globalThis.setTimeout(
-        () => reject(new Error(message)),
-        timeoutMs,
-      );
-      void promise.then(
-        (value) => {
-          globalThis.clearTimeout(timeout);
-          resolve(value);
-        },
-        (error: unknown) => {
-          globalThis.clearTimeout(timeout);
-          reject(error);
-        },
-      );
-    });
+    return chrome.runtime.sendMessage<DecisionStatusMessageResponse>(message);
   }
 
   reset(): void {
     this.generation += 1;
-    this.active = undefined;
     this.queued = undefined;
     this.completedKey = "";
     this.desiredKey = "";
   }
 
   destroy(): void {
+    this.destroyed = true;
     this.reset();
   }
 }

@@ -130,7 +130,7 @@ The live priority is:
 1. mandatory protocol action;
 2. belief-wide proven tactical action;
 3. current deep-plan first action;
-4. explicit hard-timeout fallback.
+4. explicit engine-error state with no policy substitution.
 
 Heuristics cannot click while a valid deep request is pending. Multi-click
 workflows assert game, turn, phase, state signature, and legal targets before

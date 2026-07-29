@@ -56,12 +56,11 @@ the unpacked build, refresh every already-open Colonist tab; Chrome does not
 replace a running content script until its page reloads. The live panel’s
 settings screen shows the installed build number and active decision engine.
 
-`Background WASM` means the packaged Rust engine is authoritative. The red
-`Local fallback` state is reserved for a service-worker/WASM initialization
-failure, an invalid live snapshot, or the explicit 1.25-second interactive
-watchdog. A
-fallback is labelled in the UI and decision trace; it is never silently
-presented as a completed PUCT result.
+`Background WASM` means the packaged Rust engine is authoritative. Selected
+engines are never replaced by a local JavaScript policy. A decision that is
+still running after five seconds is labelled `WASM · 5s+` and continues in the
+same background request. A genuine service-worker or WASM failure is shown as
+`WASM error`; autopilot waits instead of executing a different algorithm.
 
 ## Decision engines
 

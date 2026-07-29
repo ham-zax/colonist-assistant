@@ -179,9 +179,10 @@ export const OVERLAY_STYLES = `
     font-weight: 700;
     letter-spacing: .065em;
   }
-  .engine-strip.fallback small { color: var(--ca-danger); }
+  .engine-strip.error small { color: var(--ca-danger); }
   .engine-strip.connecting small { color: var(--ca-quiet); }
-  .engine-strip.searching small {
+  .engine-strip.searching small,
+  .engine-strip.slow small {
     color: var(--ca-accent);
     animation: ca-search-pulse 1.25s cubic-bezier(.16, 1, .3, 1) infinite alternate;
   }
@@ -190,7 +191,8 @@ export const OVERLAY_STYLES = `
     to { opacity: 1; }
   }
   @media (prefers-reduced-motion: reduce) {
-    .engine-strip.searching small { animation: none; }
+    .engine-strip.searching small,
+    .engine-strip.slow small { animation: none; }
   }
   .model-strip b {
     flex: 0 0 auto;
@@ -381,8 +383,8 @@ export const OVERLAY_STYLES = `
   }
   .trade-next {
     display: grid;
-    grid-template-columns: 62px minmax(0, 1fr);
-    gap: 10px;
+    grid-template-columns: max-content minmax(0, 1fr);
+    column-gap: 16px;
     min-height: 44px;
     align-items: center;
     margin: 0 -17px;
@@ -390,13 +392,16 @@ export const OVERLAY_STYLES = `
     border-bottom: 1px solid var(--ca-line);
   }
   .trade-next span {
+    display: block;
     color: var(--ca-accent);
     font-size: 9px;
     font-weight: 700;
     letter-spacing: .075em;
   }
   .trade-next strong {
+    display: block;
     min-width: 0;
+    line-height: 1.25;
     overflow-wrap: anywhere;
     font-size: 11.5px;
   }
@@ -813,7 +818,7 @@ export const OVERLAY_STYLES = `
     border-radius: 50%;
     background: currentColor;
   }
-  .runtime-field[data-runtime="fallback"] > strong {
+  .runtime-field[data-runtime="error"] > strong {
     color: var(--ca-danger);
   }
   .runtime-field[data-runtime="connecting"] > strong {
@@ -821,6 +826,9 @@ export const OVERLAY_STYLES = `
   }
   .runtime-field[data-runtime="searching"] > strong {
     color: var(--ca-accent);
+  }
+  .runtime-field[data-runtime="slow"] > strong {
+    color: var(--ca-accent-hover);
   }
   .settings-field > span {
     display: grid;

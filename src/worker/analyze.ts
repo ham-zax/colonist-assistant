@@ -18,14 +18,18 @@ export interface DecisionRequest {
 export const analyzeDecisionRequest = async (
   request: DecisionRequest,
 ): Promise<DecisionAnalysis> => {
-  const fallback = analyzeDecision(
+  const deep = isDeepDecisionEngine(request.engine);
+  // Deep engines use this only for auxiliary ETA/win-race presentation.
+  // Running the full JavaScript rollout policy here delayed WASM by roughly
+  // two seconds and did not influence the selected deep-search action.
+  const baseline = analyzeDecision(
     request.state,
     request.board,
     request.rootPlayer,
-    isDeepDecisionEngine(request.engine) ? "hybrid" : request.engine,
+    deep ? "race-eta" : request.engine,
   );
-  if (!isDeepDecisionEngine(request.engine)) {
-    return fallback;
+  if (!deep) {
+    return baseline;
   }
   const algorithm =
     request.engine === "deep-puct"
@@ -37,7 +41,7 @@ export const analyzeDecisionRequest = async (
     request.state,
     request.board,
     request.rootPlayer,
-    fallback,
+    baseline,
     algorithm,
   );
 };
