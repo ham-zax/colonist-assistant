@@ -1,42 +1,90 @@
-# Privacy Policy — Colonist Assistant
+# Colonist Assistant Privacy Policy
 
-Last updated: July 28, 2026
+Last updated: July 29, 2026
 
-Colonist Assistant does not collect, transmit, sell, or share personal data. It has no server, analytics, telemetry, advertising, remote code, or extension backend.
+Colonist Assistant reads game data shown to you on `colonist.io`. It uses that
+data to track the game, give advice, and carry out moves when you turn on
+autopilot. It does not send game data to the developer.
 
-## Data the extension processes
+## Data it reads
 
-While you are on `colonist.io`, the extension processes visible public game-log entries and the game information already available to you. This can include player display names, public in-game actions, tiles, ports, roads, buildings, robber position, public hand and development-card totals, public victory/trophy state and trade ratios, the current turn/action, legal placement targets, your own visible resource hand, and bank counts when the room setting makes them public. A narrowly scoped page bridge sanitizes that game slice before the extension uses it.
+While the extension is on, it may read:
 
-For recognizable in-game iconography, the bridge resolves current card and piece image URLs already published by Colonist. The content script accepts only `https://colonist.io/dist/assets/*` or `https://cdn.colonist.io/dist/assets/*` SVG/PNG URLs. Your browser may load those static images from Colonist’s CDN. They are not an analytics channel and no game/session data is placed in the URL.
+- player display names;
+- the public game log and public game actions;
+- tiles, ports, roads, buildings, and the robber;
+- public card totals, points, turn state, trade rates, and legal move targets;
+- your own visible resource cards; and
+- bank card counts when the room shows them.
 
-Colonist Assistant does not read opponents’ hidden resource identities, hidden development-card identities, cookies, account tokens, or network messages. Processing happens entirely inside your browser.
+The extension does not read game chat, cookies, account tokens, network
+messages, or hidden card data that Colonist has not shown to you.
 
-## Data stored locally
+## How it uses data
 
-Colonist Assistant uses Chrome’s storage APIs for:
+The extension uses this data to:
 
-- extension preferences and overlay position;
-- parsed events from the current game;
-- derived possible hand states and a short session summary.
+- track known cards and honest ranges for unknown cards;
+- suggest legal moves, builds, trades, and other game steps;
+- show win estimates; and
+- carry out a move when you turn on autopilot.
 
-This information stays in your Chrome profile on your device. The extension developer cannot access it.
+The extension uses the data only for these features.
+
+## Where data goes
+
+Game work runs in your browser. The extension has no server, ads, tracking,
+or usage reports. It does not sell or share game data.
+
+The extension may load card and piece images from Colonist or its image host.
+Those image links contain no game or player data.
+
+Chrome may sync your extension settings through your Google account when
+Chrome Sync is on. Google runs that sync. The developer cannot read the synced
+settings.
+
+## Data it stores
+
+The extension stores:
+
+- settings, such as the chosen game engine and whether hints are on;
+- the overlay place on screen;
+- events from the current game;
+- possible card states made from those events; and
+- a short game summary.
+
+It keeps game events, card states, and the game summary in your local Chrome
+profile. It may keep settings in Chrome Sync.
 
 ## Permissions
 
-- `storage`: saves preferences and the current session locally.
-- `https://colonist.io/*`: lets the content script read the public game log, receive the sanitized board/self-hand snapshot, and render the overlay only on Colonist.
+The extension asks for:
 
-Colonist Assistant does not request cookies, browsing history, tabs, identity, downloads, web request, or access to all websites.
+- `storage`, to save settings and current game data; and
+- `https://colonist.io/*`, to read shown game data and add the assistant to
+  Colonist pages.
 
-## Deletion and retention
+It does not ask for cookies, browser history, tabs, identity, downloads, web
+requests, or access to all sites.
 
-Use **Reset session** to clear the active in-game model. Chrome removes all extension storage when the extension is uninstalled. Session records are not transmitted or retained anywhere else.
+## Delete your data
+
+Use **Reset session** to clear the current game state. Remove the extension to
+delete its local data. You can clear synced settings through Chrome.
+
+## Chrome Web Store data rules
+
+Colonist Assistant uses data only to provide or improve its stated game help
+features. Its use of data follows the
+[Chrome Web Store User Data Policy](https://developer.chrome.com/docs/webstore/program-policies/user-data-faq),
+including the Limited Use rules.
 
 ## Changes
 
-Material changes to this policy will be included with the extension source and store update. Because Colonist Assistant has no backend, a policy change cannot silently alter server-side data handling.
+The store page, the extension, and the
+[public privacy page](https://rgo.pt/privacy/colonist-assistant) will state any
+change to how the extension handles data.
 
 ## Contact
 
-For privacy questions, use the project’s public issue tracker after the source repository is published.
+For privacy questions, email [support@rgo.pt](mailto:support@rgo.pt).

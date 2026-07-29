@@ -1,17 +1,13 @@
 # Colonist Assistant
 
-Colonist Assistant is an unofficial, local-only Chrome extension for friendly,
-fully informed Colonist games. It tracks public resource evidence, reads the
-user’s own visible hand, models hidden opponent hands as legal belief
-particles, and keeps one recommended next action highlighted in the Colonist
-interface.
+Colonist Assistant is an unofficial Chrome extension for friendly Colonist
+games where all players agree to its use. It reads game data shown to the
+player, tracks known cards, keeps honest ranges for unknown cards, and marks
+one legal next step in the Colonist page.
 
-The default decision engine is a clean-room Rust/WASM implementation of
-belief-aware multiplayer MaxN. It combines weighted hidden-card worlds, exact
-mandatory-action solvers, complete-turn plans, learned value/trade models,
-and a state-validated live executor. A defensive paranoid AlphaBeta peer,
-experimental PUCT, JavaScript multiplayer rollouts, a deterministic race
-model, and a blended legacy model remain selectable comparisons.
+The main game engine runs as Rust and WebAssembly in the browser. Deep MaxN is
+the default. AlphaBeta is a more guarded peer. Belief PUCT is still an
+experiment. Older JavaScript and race models remain as test choices.
 
 This project is not affiliated with, endorsed by, or sponsored by Colonist or
 CATAN Studio. Use it only in games where every participant has agreed to
@@ -28,13 +24,28 @@ assistant use, and review the platform rules before playing.
   card timing.
 - Shows live win estimates by player.
 - Highlights the next Colonist control or board location.
-- Provides an opt-in autopilot for the current match. It is off by default.
+- Can carry out the next step when the user turns on autopilot. Autopilot is
+  off by default.
 - Resets its game state when Colonist publishes a new game identity.
 
-The extension does not intercept WebSockets, read cookies, inspect account
-tokens, reveal server-only information, use analytics, or make runtime network
-requests. It cannot know hidden cards Colonist has not shown; uncertainty is
-represented explicitly.
+Before each automatic step, the extension checks that the board still matches
+the state used to pick the move. It stops and plans again when the state has
+changed.
+
+## What it reads
+
+On `colonist.io`, the extension may read player display names, the public game
+log, public game actions, the board, public card totals, legal move targets,
+your own shown resource cards, and bank counts when the room shows them.
+
+It does not read game chat, cookies, account tokens, network messages,
+opponents’ hidden cards, or hidden development cards. It does not use a
+server, ads, tracking, or usage reports. Game work stays in the browser.
+Chrome may sync settings through the user’s Google account when Chrome Sync is
+on.
+
+Read the full
+[privacy policy](https://rgo.pt/privacy/colonist-assistant).
 
 ## Build
 
@@ -46,7 +57,7 @@ Requirements:
 - `wasm-bindgen-cli`
 
 ```bash
-npm install
+npm ci
 npm run verify
 ```
 
@@ -55,6 +66,9 @@ The unpacked extension is written to `dist/`. Load that directory from
 the unpacked build, refresh every already-open Colonist tab; Chrome does not
 replace a running content script until its page reloads. The live panel’s
 settings screen shows the installed build number and active decision engine.
+
+For the Chrome Web Store field copy, test steps, and release package command,
+see [docs/CHROME_WEB_STORE.md](docs/CHROME_WEB_STORE.md).
 
 `Background WASM` means the packaged Rust engine is authoritative. Selected
 engines are never replaced by a local JavaScript policy. A decision that is
