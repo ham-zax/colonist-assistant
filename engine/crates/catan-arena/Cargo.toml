@@ -1,0 +1,16 @@
+[package]
+name = "colonist-catan-arena"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "colonist-arena"
+path = "src/main.rs"
+
+[dependencies]
+colonist-catan-core = { path = "../catan-core" }
+colonist-catan-search = { path = "../catan-search" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

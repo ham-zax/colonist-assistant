@@ -1,0 +1,1682 @@
+import type {
+  BoardAction,
+  BoardPoint,
+  KnownDevelopmentCard,
+} from "../core/placement";
+import type { BuildKind, Resource, ResourceVector } from "../core/resources";
+
+export type NextClick =
+  | {
+      kind: "board";
+      boardAction: "road" | "settlement" | "city" | "robber";
+      targetId: string;
+      point: BoardPoint;
+      label: string;
+      signature: string;
+      confidence: number;
+      followupPlayer?: string;
+    }
+  | {
+      kind: "build";
+      build: BuildKind;
+      label: string;
+      signature: string;
+      confidence: number;
+    }
+  | {
+      kind: "development";
+      card: KnownDevelopmentCard;
+      label: string;
+      signature: string;
+      confidence: number;
+      followupResources?: Resource[];
+    }
+  | {
+      kind: "trade";
+      offerIndex: number;
+      tradeId?: string;
+      verdict: "accept" | "counter" | "decline";
+      label: string;
+      signature: string;
+      confidence: number;
+      counterGive?: ResourceVector;
+      counterReceive?: ResourceVector;
+      existingGive?: ResourceVector;
+      existingReceive?: ResourceVector;
+    }
+  | {
+      kind: "trade-builder";
+      mode: "player" | "bank";
+      give: ResourceVector;
+      receive: ResourceVector;
+      recipients?: string[];
+      label: string;
+      signature: string;
+      confidence: number;
+    }
+  | {
+      kind: "trade-partner";
+      offerIndex: number;
+      acceptedIndex: number;
+      player: string;
+      label: string;
+      signature: string;
+      confidence: number;
+    }
+  | {
+      kind: "trade-cancel";
+      offerIndex: number;
+      label: string;
+      signature: string;
+      confidence: number;
+    }
+  | {
+      kind: "discard";
+      cards: ResourceVector;
+      label: string;
+      signature: string;
+      confidence: number;
+    }
+  | {
+      kind: "turn-control";
+      control: "roll" | "end" | "confirm";
+      label: string;
+      signature: string;
+      confidence: number;
+    }
+  | {
+      kind: "resource";
+      resource: Resource;
+      label: string;
+      signature: string;
+      confidence: number;
+    }
+  | {
+      kind: "player";
+      player: string;
+      label: string;
+      signature: string;
+      confidence: number;
+    };
+
+export interface ActionGuideOptions {
+  highlight: boolean;
+  autonomous: boolean;
+  validate?: () => boolean;
+  /// Multi-click workflows legitimately change the original action's phase
+  /// after their first click (for example, confirming Year of Plenty before
+  /// choosing two resources). The owner must validate that the transaction,
+  /// turn, and modal workflow still belong to this action without requiring
+  /// the original first click to remain legal.
+  validateContinuation?: () => boolean;
+  onExecution?: (result: {
+    succeeded: boolean;
+    signature: string;
+    reason?: string;
+  }) => void;
+}
+
+const ROOT_ID = "colonist-assistant-action-guide";
+const FONT_STYLE_ID = "colonist-assistant-document-font";
+let lastClickSignature = "";
+const followupTimers = new Set<number>();
+let boardFollowupCleanup: (() => void) | undefined;
+let workflowSignature = "";
+let workflowAction: NextClick | undefined;
+let workflowGeneration = 0;
+let workflowOptions: ActionGuideOptions | undefined;
+let workflowCurrentElement: HTMLElement | undefined;
+let currentGuideOptions: ActionGuideOptions | undefined;
+let activeBoardFollowupSignature = "";
+let tradePreflightSignature = "";
+const boardCommandAttempts = new Map<string, number>();
+
+const normalized = (value: string): string =>
+  value.toLowerCase().replace(/\s+/gu, " ").trim();
+
+const visible = (element: HTMLElement): boolean => {
+  const rect = element.getBoundingClientRect();
+  const style = getComputedStyle(element);
+  return (
+    rect.width >= 12 &&
+    rect.height >= 12 &&
+    rect.bottom > 0 &&
+    rect.right > 0 &&
+    rect.top < innerHeight &&
+    rect.left < innerWidth &&
+    style.display !== "none" &&
+    style.visibility !== "hidden" &&
+    Number(style.opacity) > 0 &&
+    !element.hasAttribute("disabled") &&
+    element.getAttribute("aria-disabled") !== "true"
+  );
+};
+
+const CONTROL_SELECTOR =
+  "button, [role='button'], input[type='button'], input[type='submit'], [class*='actionButton-'], [class*='tradeButton-'], [class*='confirmButton-']";
+
+const allControls = (): HTMLElement[] =>
+  [
+    ...document.querySelectorAll<HTMLElement>(CONTROL_SELECTOR),
+  ].filter(
+    (element) =>
+      !element.closest(
+        `#${ROOT_ID}, #colonist-assistant-root, [data-colonist-assistant-trade-verdict]`,
+      ) && visible(element),
+  );
+
+const controlText = (element: HTMLElement): string =>
+  normalized(
+    [
+      element.textContent ?? "",
+      element.getAttribute("aria-label") ?? "",
+      element.getAttribute("title") ?? "",
+      element.querySelector("img")?.getAttribute("alt") ?? "",
+      element.querySelector("img")?.getAttribute("src") ?? "",
+    ].join(" "),
+  );
+
+const findControl = (
+  preferred: string[],
+  rejected: string[] = [],
+  root: ParentNode = document,
+): HTMLElement | undefined => {
+  const controls = (
+    root === document
+      ? allControls()
+      : [...root.querySelectorAll<HTMLElement>(CONTROL_SELECTOR)].filter(
+          visible,
+        )
+  ).map((element) => {
+    const text = controlText(element);
+    const hits = preferred.reduce(
+      (sum, token) => sum + (text.includes(normalized(token)) ? 1 : 0),
+      0,
+    );
+    const rejects = rejected.reduce(
+      (sum, token) => sum + (text.includes(normalized(token)) ? 1 : 0),
+      0,
+    );
+    return {
+      element,
+      score:
+        hits * 18 -
+        rejects * 30 -
+        Math.min(9, text.length / 45) +
+        (preferred.some((token) => text === normalized(token)) ? 12 : 0),
+    };
+  });
+  return controls
+    .filter((candidate) => candidate.score > 0)
+    .sort((left, right) => right.score - left.score)[0]?.element;
+};
+
+const findRollDiceControl = (): HTMLElement | undefined => {
+  const rollGroup = document.querySelector<HTMLElement>("#roll-dice-button");
+  if (rollGroup) {
+    const diceWrappers = [
+      ...rollGroup.querySelectorAll<HTMLElement>("[class*='diceWrapper-']"),
+    ];
+    const dice = diceWrappers.filter(
+      (element) =>
+        visible(element) &&
+        !normalized(element.className).includes("inactive-") &&
+        !element.querySelector("[class*='inactive-']"),
+    );
+    if (dice[0]) return dice[0];
+    // Colonist keeps the dice group mounted after a roll while marking only
+    // the child images inactive. The visible parent is then a dead target.
+    if (
+      diceWrappers.length === 0 &&
+      visible(rollGroup) &&
+      !normalized(rollGroup.className).includes("inactive-")
+    ) {
+      return rollGroup;
+    }
+    return undefined;
+  }
+  return findControl(
+    ["roll dice", "roll"],
+    ["end turn", "pass turn", "finish turn"],
+  );
+};
+
+const findEndTurnControl = (): HTMLElement | undefined => {
+  const exact = document.querySelector<HTMLElement>(
+    "#action-button-pass-turn",
+  );
+  if (exact && visible(exact)) return exact;
+  return findControl(
+    ["end turn", "pass turn", "finish turn"],
+    ["roll dice", "roll"],
+  );
+};
+
+export const visibleTurnControl = (): "roll" | "end" | undefined => {
+  if (findRollDiceControl()) return "roll";
+  if (findEndTurnControl()) return "end";
+  return undefined;
+};
+
+const buildTokens: Record<BuildKind, string[]> = {
+  road: ["build road", "road_blue", "road_red", "road_green", "road_orange"],
+  settlement: ["build settlement", "settlement_blue", "settlement_red", "settlement_green"],
+  city: ["build city", "city_blue", "city_red", "city_green"],
+  development: ["buy development", "development card", "card_devcardback"],
+};
+
+const developmentTokens: Record<KnownDevelopmentCard, string[]> = {
+  knight: ["card_knight", "play knight", "knight"],
+  monopoly: ["card_monopoly", "play monopoly", "monopoly"],
+  "road-building": ["card_roadbuilding", "road building"],
+  "year-of-plenty": ["card_yearofplenty", "year of plenty"],
+  "victory-point": ["card_vp", "victory point"],
+};
+
+const resourceAsset: Record<Resource, string> = {
+  lumber: "card_lumber",
+  brick: "card_brick",
+  wool: "card_wool",
+  grain: "card_grain",
+  ore: "card_ore",
+};
+
+const resourceCardEnum: Record<Resource, number> = {
+  lumber: 1,
+  brick: 2,
+  wool: 3,
+  grain: 4,
+  ore: 5,
+};
+
+const nearestClickable = (element: Element | null): HTMLElement | undefined => {
+  const clickable = element?.closest<HTMLElement>(
+    "button, [role='button'], [tabindex], [class*='actionButton-'], [class*='tradeButton-'], [class*='confirmButton-'], [class*='cardContainer-']",
+  );
+  return clickable && visible(clickable) ? clickable : undefined;
+};
+
+const activeColonistControl = (
+  element: HTMLElement | undefined,
+): HTMLElement | undefined => {
+  if (!element) return undefined;
+  const control = element.matches("[class*='actionButton-'], [class*='tradeButton-']")
+    ? element
+    : element.querySelector<HTMLElement>(
+        "[class*='actionButton-'], [class*='tradeButton-']",
+      );
+  if (
+    !control ||
+    !visible(control) ||
+    control.querySelector("[class*='foregroundDisabled-']")
+  ) {
+    return undefined;
+  }
+  return control;
+};
+
+const findPieceBuildControl = (
+  build: "road" | "settlement",
+): HTMLElement | undefined => {
+  for (const image of document.querySelectorAll<HTMLImageElement>("img[src]")) {
+    if (
+      image.closest("#colonist-assistant-root") ||
+      !new RegExp(`(?:^|/)${build}_[a-z]+[.]`, "iu").test(image.src)
+    ) {
+      continue;
+    }
+    const control = activeColonistControl(
+      image.closest<HTMLElement>("[class*='actionButton-']") ?? undefined,
+    );
+    if (control) return control;
+  }
+  return undefined;
+};
+
+const findDevelopmentCard = (
+  card: KnownDevelopmentCard,
+): HTMLElement | undefined => {
+  const control = findControl(developmentTokens[card]);
+  if (control) return control;
+  for (const image of document.querySelectorAll<HTMLImageElement>("img[src]")) {
+    if (
+      !image.closest("#colonist-assistant-root") &&
+      developmentTokens[card].some((token) =>
+        normalized(image.src).includes(normalized(token)),
+      )
+    ) {
+      const clickable = nearestClickable(image);
+      if (clickable) return clickable;
+    }
+  }
+  return undefined;
+};
+
+const findTradeControl = (
+  offerIndex: number,
+  verdict: "accept" | "counter" | "decline",
+): HTMLElement | undefined => {
+  const nestedOffers = [
+    ...document.querySelectorAll<HTMLElement>(
+      "[class*='gameTradeOffersWrapper-'] [class*='tradeContainer-']",
+    ),
+  ].filter(visible);
+  const offers = nestedOffers.length
+    ? nestedOffers
+    : [
+        ...document.querySelectorAll<HTMLElement>(
+          "[class*='tradeContainer-']",
+        ),
+      ].filter(visible);
+  const offer = offers[offerIndex];
+  if (!offer) return undefined;
+  const tradeButtons = [
+    ...offer.querySelectorAll<HTMLElement>(
+      "[class*='tradeButton-'], button, [role='button']",
+    ),
+  ]
+    .map((element) => activeColonistControl(element) ?? element)
+    .filter(visible);
+  if (verdict === "accept") {
+    return (
+      findControl(["accept", "check", "yes"], ["counter", "reject"], offer) ??
+      tradeButtons.at(-1)
+    );
+  }
+  if (verdict === "counter") {
+    return (
+      findControl(["counter", "edit"], ["accept", "reject"], offer) ??
+      tradeButtons[0]
+    );
+  }
+  return (
+    findControl(
+      ["decline", "reject", "cancel", "close", "no"],
+      ["accept", "counter"],
+      offer,
+    ) ??
+    tradeButtons[Math.min(1, tradeButtons.length - 1)]
+  );
+};
+
+const findResourceCard = (resource: Resource): HTMLElement | undefined => {
+  const images = [...document.querySelectorAll<HTMLImageElement>("img[src]")].filter(
+    (image) =>
+      !image.closest("#colonist-assistant-root") &&
+      normalized(image.src).includes(resourceAsset[resource]) &&
+      visible(image),
+  );
+  return images
+    .map((image) => nearestClickable(image))
+    .filter((element): element is HTMLElement => Boolean(element))
+    .sort((left, right) => {
+      const leftRect = left.getBoundingClientRect();
+      const rightRect = right.getBoundingClientRect();
+      return rightRect.top - leftRect.top || rightRect.left - leftRect.left;
+    })[0];
+};
+
+const resourceEvidence = (
+  element: Element,
+  resource: Resource,
+): boolean =>
+  normalized(
+    [
+      element.getAttribute("src") ?? "",
+      element.getAttribute("aria-label") ?? "",
+      element.getAttribute("title") ?? "",
+      element.getAttribute("alt") ?? "",
+      element.textContent ?? "",
+    ].join(" "),
+  ).includes(resourceAsset[resource]) ||
+  normalized(
+    [
+      element.getAttribute("aria-label") ?? "",
+      element.getAttribute("title") ?? "",
+      element.getAttribute("alt") ?? "",
+      element.textContent ?? "",
+    ].join(" "),
+  ).includes(resource);
+
+const findResourceInRoot = (
+  root: ParentNode | undefined,
+  resource: Resource,
+): HTMLElement | undefined => {
+  if (!root) return undefined;
+  const exact = root.querySelector<HTMLElement>(
+    `[data-card-enum="${resourceCardEnum[resource]}"]`,
+  );
+  if (exact && visible(exact)) return exact;
+  const candidates = [
+    ...root.querySelectorAll<HTMLElement>(
+      "img[src], [aria-label], [title], [role='button'], button",
+    ),
+  ].filter((element) => resourceEvidence(element, resource));
+  for (const candidate of candidates) {
+    const clickable = nearestClickable(candidate);
+    if (clickable) return clickable;
+  }
+  return undefined;
+};
+
+const findTradePanelControl = (): HTMLElement | undefined =>
+  document.querySelector<HTMLElement>("#action-button-trade") ??
+  findControl(
+    ["make trade", "create trade", "offer trade", "trade"],
+    ["accept", "decline", "reject", "history"],
+  );
+
+const findTradeResourceChoice = (
+  resource: Resource,
+  side: "give" | "receive",
+): HTMLElement | undefined => {
+  const root =
+    side === "give"
+      ? document.querySelector<HTMLElement>("#player-card-inventory")
+      : document.querySelector<HTMLElement>(
+          "[class*='wantedCardSelectorContainer-']",
+        );
+  return findResourceInRoot(root ?? undefined, resource);
+};
+
+const findTradeSubmit = (
+  mode: "player" | "bank",
+): HTMLElement | undefined => {
+  const exact = document.querySelector<HTMLElement>(
+    mode === "bank"
+      ? "#action-button-trade-bank"
+      : "#action-button-trade-players",
+  );
+  if (exact && visible(exact)) return exact;
+  return mode === "bank"
+    ? findControl(["trade with bank", "bank trade"], ["player"])
+    : findControl(["trade with players", "send offer", "offer"], ["bank"]);
+};
+
+const findTradePartnerControl = (
+  offerIndex: number,
+  acceptedIndex: number,
+): HTMLElement | undefined => {
+  const offers = [
+    ...document.querySelectorAll<HTMLElement>(
+      "[class*='gameTradeOffersWrapper-'] [class*='tradeContainer-']",
+    ),
+  ].filter(visible);
+  const offer = offers[offerIndex];
+  if (!offer) return undefined;
+  // Colonist's player-response controls are divs, so disabled responses do
+  // not carry a native `disabled` attribute. The accepted responses are the
+  // enabled controls whose icon is the green check. Select among those
+  // directly; otherwise the first rejected player's inert X can be chosen.
+  const accepted = [
+    ...offer.querySelectorAll<HTMLImageElement>("img[src*='icon_check']"),
+  ]
+    .map((image) =>
+      image.closest<HTMLElement>("[class*='tradeButton-']"),
+    )
+    .filter((element): element is HTMLElement =>
+      Boolean(
+        element &&
+          visible(element) &&
+          !/disabled/iu.test(element.outerHTML),
+      ),
+    );
+  return accepted[acceptedIndex] ?? accepted[0];
+};
+
+const modalRoots = (): HTMLElement[] =>
+  [
+    ...document.querySelectorAll<HTMLElement>(
+      "[role='dialog'], [class*='modal-'], [class*='popup-'], [class*='actionBox-'], [class*='selectResource-'], [class*='chooseResource-'], [class*='selectPlayer-']",
+    ),
+  ].filter(visible);
+
+const findDiscardRoot = (): HTMLElement | undefined => {
+  const actionBoxes = [
+    ...document.querySelectorAll<HTMLElement>(
+      "[class*='gameActionBox-'], [class*='actionBoxContainer-'], [class*='actionBox-']",
+    ),
+  ].filter(visible);
+  return (
+    actionBoxes.find(
+      (root) =>
+        root.querySelector("[data-card-enum], img[src*='card_']") &&
+        (
+          normalized(root.textContent ?? "").includes("discard") ||
+          root.querySelector("button, [role='button']")
+        ),
+    ) ??
+    modalRoots().find((root) =>
+      normalized(root.textContent ?? "").includes("discard"),
+    )
+  );
+};
+
+const findDiscardCard = (resource: Resource): HTMLElement | undefined => {
+  const inventory = document.querySelector<HTMLElement>(
+    "#player-card-inventory",
+  );
+  const discardRoot = findDiscardRoot();
+  return (
+    findResourceInRoot(inventory ?? undefined, resource) ??
+    findResourceInRoot(discardRoot, resource) ??
+    findResourceCard(resource)
+  );
+};
+
+const findResourceChoice = (resource: Resource): HTMLElement | undefined => {
+  for (const root of modalRoots()) {
+    const images = [
+      ...root.querySelectorAll<HTMLImageElement>("img[src], [aria-label]"),
+    ];
+    for (const image of images) {
+      const evidence = normalized(
+        [
+          image.getAttribute("src") ?? "",
+          image.getAttribute("aria-label") ?? "",
+          image.getAttribute("title") ?? "",
+          image.getAttribute("alt") ?? "",
+        ].join(" "),
+      );
+      if (
+        evidence.includes(resourceAsset[resource]) ||
+        evidence.includes(resource)
+      ) {
+        const clickable = nearestClickable(image);
+        if (clickable) return clickable;
+      }
+    }
+  }
+  return undefined;
+};
+
+const findPlayerChoice = (player: string): HTMLElement | undefined => {
+  const wanted = normalized(player);
+  for (const root of modalRoots()) {
+    const candidates = [
+      ...root.querySelectorAll<HTMLElement>(
+        "button, [role='button'], [tabindex], [class*='player']",
+      ),
+    ].filter(visible);
+    const exact = candidates.find(
+      (candidate) => normalized(candidate.textContent ?? "") === wanted,
+    );
+    if (exact) {
+      return (
+        exact.closest<HTMLElement>("[class*='playerOption-']") ??
+        nearestClickable(exact) ??
+        exact
+      );
+    }
+    const containing = candidates.find((candidate) =>
+      normalized(candidate.textContent ?? "").includes(wanted),
+    );
+    if (containing) {
+      return (
+        containing.closest<HTMLElement>("[class*='playerOption-']") ??
+        nearestClickable(containing) ??
+        containing
+      );
+    }
+  }
+  return undefined;
+};
+
+const findConfirmationControl = (
+  root: ParentNode = document,
+): HTMLElement | undefined => {
+  const exact = [
+    ...root.querySelectorAll<HTMLElement>("[class*='confirmButton-']"),
+  ].filter(visible).at(-1);
+  return (
+    exact ??
+    findControl(
+      ["confirm", "select", "okay", "continue", "done", "icon_check", "check"],
+      ["cancel", "close"],
+      root,
+    )
+  );
+};
+
+const resolveElement = (action: NextClick): HTMLElement | undefined => {
+  if (action.kind === "build") {
+    const exact =
+      action.build === "city"
+        ? document.querySelector<HTMLElement>("#action-button-build-city")
+        : action.build === "development"
+          ? document.querySelector<HTMLElement>(
+              "#action-button-buy-dev-card",
+            )
+          : action.build === "road"
+            ? findPieceBuildControl("road")
+            : findPieceBuildControl("settlement");
+    return (
+      activeColonistControl(exact ?? undefined) ??
+      findControl(buildTokens[action.build])
+    );
+  }
+  if (action.kind === "development") {
+    return findDevelopmentCard(action.card);
+  }
+  if (action.kind === "trade") {
+    return findTradeControl(action.offerIndex, action.verdict);
+  }
+  if (action.kind === "trade-builder") {
+    return findTradePanelControl();
+  }
+  if (action.kind === "trade-partner") {
+    return findTradePartnerControl(
+      action.offerIndex,
+      action.acceptedIndex,
+    );
+  }
+  if (action.kind === "trade-cancel") {
+    return findTradeControl(action.offerIndex, "decline");
+  }
+  if (action.kind === "discard") {
+    const resource = (Object.keys(action.cards) as Resource[]).find(
+      (candidate) => action.cards[candidate] > 0,
+    );
+    return resource ? findDiscardCard(resource) : undefined;
+  }
+  if (action.kind === "turn-control") {
+    if (action.control === "roll") return findRollDiceControl();
+    if (action.control === "end") return findEndTurnControl();
+    return findControl(
+      ["confirm", "select", "okay", "continue", "done"],
+      ["cancel", "close"],
+      modalRoots()[0] ?? document,
+    );
+  }
+  if (action.kind === "resource") {
+    return findResourceChoice(action.resource);
+  }
+  if (action.kind === "player") {
+    return findPlayerChoice(action.player);
+  }
+  return undefined;
+};
+
+const ensureRoot = (): HTMLDivElement => {
+  if (!document.getElementById(FONT_STYLE_ID)) {
+    const style = document.createElement("style");
+    style.id = FONT_STYLE_ID;
+    style.textContent = `@font-face{font-family:"Colonist Assistant Archivo";src:url("${chrome.runtime.getURL("assets/fonts/ArchivoNarrow-Variable.ttf")}") format("truetype");font-style:normal;font-weight:400 700;font-display:swap}`;
+    (document.head ?? document.documentElement).append(style);
+  }
+  const existing = document.getElementById(ROOT_ID);
+  if (existing instanceof HTMLDivElement) return existing;
+  const root = document.createElement("div");
+  root.id = ROOT_ID;
+  root.style.cssText =
+    'position:fixed;inset:0;z-index:2147482997;pointer-events:none;font-family:"Colonist Assistant Archivo",ui-sans-serif,system-ui,sans-serif;';
+  document.documentElement.append(root);
+  return root;
+};
+
+const drawHighlight = (
+  action: NextClick,
+  element?: HTMLElement,
+): void => {
+  const root = ensureRoot();
+  root.replaceChildren();
+  const rect =
+    action.kind === "board"
+      ? {
+          left: action.point.x - 25,
+          top: action.point.y - 25,
+          width: 50,
+          height: 50,
+          right: action.point.x + 25,
+          bottom: action.point.y + 25,
+        }
+      : element?.getBoundingClientRect();
+  if (!rect) return;
+  const ring = document.createElement("div");
+  ring.style.cssText = [
+    "position:fixed",
+    `left:${Math.round(rect.left - 5)}px`,
+    `top:${Math.round(rect.top - 5)}px`,
+    `width:${Math.round(rect.width + 10)}px`,
+    `height:${Math.round(rect.height + 10)}px`,
+    "border:3px solid #f1c84b",
+    "border-radius:12px",
+    "box-shadow:0 0 0 2px rgba(13,24,33,.85),0 0 0 7px rgba(241,200,75,.18)",
+    "animation:ca-next-click-pulse 1.5s ease-in-out infinite",
+  ].join(";");
+  const label = document.createElement("span");
+  label.textContent = `NEXT · ${action.label}`;
+  const labelTop =
+    rect.top >= 34 ? rect.top - 30 : Math.min(innerHeight - 25, rect.bottom + 8);
+  label.style.cssText = [
+    "position:fixed",
+    `left:${Math.max(4, Math.min(innerWidth - 190, Math.round(rect.left)))}px`,
+    `top:${Math.round(labelTop)}px`,
+    "max-width:186px",
+    "min-height:22px",
+    "padding:4px 8px",
+    "background:#f1c84b",
+    "color:#0d1821",
+    "font-size:10px",
+    "font-weight:900",
+    "letter-spacing:.055em",
+    "line-height:14px",
+  ].join(";");
+  const style = document.createElement("style");
+  style.textContent =
+    "@keyframes ca-next-click-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.58;transform:scale(1.035)}}@media(prefers-reduced-motion:reduce){#colonist-assistant-action-guide div{animation:none!important}}";
+  root.append(style, ring, label);
+};
+
+const executeBoardAction = (
+  action: Extract<NextClick, { kind: "board" }>,
+): void => {
+  window.postMessage(
+    {
+      source: "colonist-assistant-content",
+      type: "execute-board-action",
+      action: action.boardAction,
+      targetId: action.targetId,
+      signature: action.signature,
+    },
+    window.location.origin,
+  );
+};
+
+const requestBoardRefresh = (): void => {
+  window.dispatchEvent(
+    new CustomEvent("colonist-assistant-board-refresh"),
+  );
+};
+
+const validatedClick = (
+  element: HTMLElement,
+  options: ActionGuideOptions,
+  signature: string,
+  reportExecution = true,
+): boolean => {
+  if (options.validate && !options.validate()) {
+    options.onExecution?.({
+      succeeded: false,
+      signature,
+      reason: "State signature or legal target set changed before execution",
+    });
+    return false;
+  }
+  element.click();
+  if (reportExecution) {
+    options.onExecution?.({ succeeded: true, signature });
+  }
+  return true;
+};
+
+const maybeAutoclick = (
+  action: NextClick,
+  element: HTMLElement | undefined,
+  options: ActionGuideOptions,
+): void => {
+  if (
+    !options.autonomous ||
+    action.kind === "discard" ||
+    action.kind === "trade-builder" ||
+    (action.kind === "trade" && action.verdict === "counter")
+  ) {
+    return;
+  }
+  if (action.signature === lastClickSignature) {
+    return;
+  }
+  lastClickSignature = action.signature;
+  if (action.kind === "board") {
+    if (options.validate && !options.validate()) {
+      options.onExecution?.({
+        succeeded: false,
+        signature: action.signature,
+        reason: "Board state changed before the requested placement",
+      });
+      return;
+    }
+    executeBoardAction(action);
+    options.onExecution?.({
+      succeeded: true,
+      signature: action.signature,
+    });
+    const attempt = (boardCommandAttempts.get(action.signature) ?? 0) + 1;
+    boardCommandAttempts.set(action.signature, attempt);
+    if (action.followupPlayer && attempt === 1) {
+      activeBoardFollowupSignature = action.signature;
+      const stillCurrent = () =>
+        activeBoardFollowupSignature === action.signature;
+      later(
+        () =>
+          pollForFollowup(
+            {
+              kind: "player",
+              player: action.followupPlayer!,
+              label: `Steal from ${action.followupPlayer}`,
+              signature: `robber-player|${action.signature}|${action.followupPlayer}`,
+              confidence: 0.94,
+            },
+            options,
+            () =>
+              pollForConfirmation(
+                "Confirm player",
+                options,
+                undefined,
+                0,
+                stillCurrent,
+              ),
+            0,
+            stillCurrent,
+          ),
+        220,
+      );
+    }
+    if (attempt < 5) {
+      later(() => {
+        if (
+          currentGuideOptions?.autonomous &&
+          lastClickSignature === action.signature
+        ) {
+          lastClickSignature = "";
+          maybeAutoclick(action, undefined, currentGuideOptions);
+        }
+      }, 1_400);
+    }
+  } else {
+    if (element && validatedClick(element, options, action.signature)) {
+      requestBoardRefresh();
+    } else if (!element) {
+      options.onExecution?.({
+        succeeded: false,
+        signature: action.signature,
+        reason: "Recommended Colonist control was not present",
+      });
+    }
+  }
+};
+
+const later = (callback: () => void, delay: number): void => {
+  const timer = window.setTimeout(() => {
+    followupTimers.delete(timer);
+    callback();
+  }, delay);
+  followupTimers.add(timer);
+};
+
+interface WorkflowStep {
+  label: string;
+  resolve: () => HTMLElement | undefined;
+  /** The step has already reached its intended state and can be skipped. */
+  ready?: () => boolean;
+  /** Verify that Colonist committed the click before advancing. */
+  complete?: () => boolean;
+  /** Re-run this step until `ready` is true (used to clear stale drafts). */
+  repeatUntilReady?: boolean;
+  settleMs?: number;
+}
+
+const resourceSteps = (
+  cards: ResourceVector,
+  side: "give" | "receive",
+  resolver: (
+    resource: Resource,
+    side: "give" | "receive",
+  ) => HTMLElement | undefined,
+  verb: string,
+): WorkflowStep[] =>
+  (Object.keys(cards) as Resource[]).flatMap((resource) =>
+    Array.from({ length: cards[resource] }, (_, index) => ({
+      label: `${verb} ${resource}${cards[resource] > 1 ? ` ${index + 1}/${cards[resource]}` : ""}`,
+      resolve: () => resolver(resource, side),
+      settleMs: 150,
+    })),
+  );
+
+export const tradePanelIsOpen = (): boolean =>
+  [
+    document.querySelector<HTMLElement>(
+      "[class*='proposalWantedHalfContainer-']",
+    ),
+    document.querySelector<HTMLElement>(
+      "[class*='proposalOfferedHalfContainer-']",
+    ),
+  ].some((element) => Boolean(element && visible(element))) &&
+  Boolean(
+    [
+      document.querySelector<HTMLElement>("#action-button-trade-players"),
+      document.querySelector<HTMLElement>("#action-button-trade-bank"),
+    ].some((element) => Boolean(element && visible(element))),
+  );
+
+const selectedTradeCards = (): HTMLElement[] =>
+  [
+    ...new Set(
+      [
+        ...document.querySelectorAll<HTMLImageElement>(
+          "[class*='proposalWantedHalfContainer-'] img[src*='card_'], [class*='proposalOfferedHalfContainer-'] img[src*='card_']",
+        ),
+      ]
+        .map((image) => nearestClickable(image))
+        .filter((element): element is HTMLElement => Boolean(element)),
+    ),
+  ];
+
+const tradeDraftIsEmpty = (): boolean => selectedTradeCards().length === 0;
+
+const proposalResourceCount = (
+  side: "give" | "receive",
+  resource: Resource,
+): number => {
+  const selector =
+    side === "give"
+      ? "[class*='proposalOfferedHalfContainer-']"
+      : "[class*='proposalWantedHalfContainer-']";
+  const root = document.querySelector<HTMLElement>(selector);
+  if (!root) return 0;
+  const matches = [
+    ...root.querySelectorAll<HTMLElement>(
+      `[data-card-enum="${resourceCardEnum[resource]}"], img[src], [aria-label], [title]`,
+    ),
+  ].filter((element) => resourceEvidence(element, resource));
+  const counts = matches.map((element) => {
+    const stack =
+      element.closest<HTMLElement>(
+        "[class*='cardStackContainer-'], [class*='cardContainer-'], [data-card-enum], button, [role='button']",
+      ) ?? element;
+    const badge = stack.querySelector<HTMLElement>(
+      "[class*='countBadge-'], [class*='cardCount-'], [class*='amount-']",
+    );
+    const value = Number.parseInt(
+      normalized(badge?.textContent ?? "").match(/\d+/u)?.[0] ?? "1",
+      10,
+    );
+    return Number.isFinite(value) ? Math.max(1, value) : 1;
+  });
+  // Colonist animates old and new stacks at the same time. The largest stack
+  // count is the committed draft state; summing would double-count animation.
+  return counts.length ? Math.max(...counts) : 0;
+};
+
+const tradeResourceSteps = (
+  cards: ResourceVector,
+  side: "give" | "receive",
+  verb: string,
+): WorkflowStep[] =>
+  (Object.keys(cards) as Resource[]).flatMap((resource) =>
+    Array.from({ length: cards[resource] }, (_, index) => {
+      const expected = index + 1;
+      const complete = () =>
+        proposalResourceCount(side, resource) >= expected;
+      return {
+        label: `${verb} ${resource}${cards[resource] > 1 ? ` ${expected}/${cards[resource]}` : ""}`,
+        resolve: () => findTradeResourceChoice(resource, side),
+        ready: complete,
+        complete,
+        settleMs: 320,
+      };
+    }),
+  );
+
+const visibleTradeFailure = (): string | undefined => {
+  const failure =
+    /no one has (?:the )?wanted resource|no player has (?:the )?wanted resource|identical trade|trade (?:offer )?limit|too many (?:identical )?trades|cannot (?:make|send|offer) (?:this )?trade|invalid trade|not enough (?:cards|resources)/iu;
+  const candidates = [
+    ...document.querySelectorAll<HTMLElement>(
+      "[role='alert'], [class*='toast'], [class*='snackbar'], [class*='notification'], [class*='errorMessage'], [class*='error-message']",
+    ),
+  ].filter(visible);
+  return candidates
+    .map((element) => element.textContent?.trim())
+    .find((text): text is string => Boolean(text && failure.test(text)));
+};
+
+const closeTradePanelStep = (label: string): WorkflowStep => ({
+  label,
+  resolve: findTradePanelControl,
+  ready: () => !tradePanelIsOpen(),
+  complete: () => !tradePanelIsOpen(),
+  settleMs: 320,
+});
+
+const clearTradeDraftStep = (): WorkflowStep => ({
+  label: "Clear previous trade draft",
+  resolve: () => selectedTradeCards()[0],
+  ready: tradeDraftIsEmpty,
+  repeatUntilReady: true,
+  settleMs: 220,
+});
+
+const tradeWorkflow = (
+  action: Extract<NextClick, { kind: "trade-builder" }>,
+): WorkflowStep[] => [
+  {
+    ...closeTradePanelStep("Close previous trade draft"),
+  },
+  {
+    label: "Open trade builder",
+    resolve: findTradePanelControl,
+    ready: tradePanelIsOpen,
+    complete: tradePanelIsOpen,
+    settleMs: 320,
+  },
+  clearTradeDraftStep(),
+  ...tradeResourceSteps(action.give, "give", "Offer"),
+  ...tradeResourceSteps(action.receive, "receive", "Request"),
+  {
+    label:
+      action.mode === "bank"
+        ? "Confirm bank trade"
+        : "Send this offer",
+    resolve: () => findTradeSubmit(action.mode),
+    settleMs: 460,
+  },
+  closeTradePanelStep("Close completed trade panel"),
+];
+
+const counterWorkflow = (
+  action: Extract<NextClick, { kind: "trade" }>,
+): WorkflowStep[] => {
+  if (
+    action.verdict !== "counter" ||
+    !action.counterGive ||
+    !action.counterReceive
+  ) {
+    return [];
+  }
+  return [
+    {
+      label: "Open counteroffer",
+      resolve: () =>
+        findTradeControl(action.offerIndex, "counter"),
+      ready: tradePanelIsOpen,
+      complete: tradePanelIsOpen,
+      settleMs: 340,
+    },
+    clearTradeDraftStep(),
+    ...tradeResourceSteps(action.counterGive, "give", "Offer"),
+    ...tradeResourceSteps(action.counterReceive, "receive", "Request"),
+    {
+      label: "Send counteroffer",
+      resolve: () => findTradeSubmit("player"),
+      settleMs: 460,
+    },
+    closeTradePanelStep("Close completed counteroffer"),
+  ];
+};
+
+const discardWorkflow = (
+  action: Extract<NextClick, { kind: "discard" }>,
+): WorkflowStep[] => {
+  const selectionComplete = (): boolean =>
+    modalRoots().some((root) => {
+      const match = normalized(root.textContent ?? "").match(
+        /(?:^|\D)(\d{1,3})\s*\/\s*(\d{1,3})(?:\D|$)/u,
+      );
+      return Boolean(
+        match &&
+          Number(match[1]) > 0 &&
+          Number(match[1]) === Number(match[2]),
+      );
+    });
+  const selectionSteps = resourceSteps(
+    action.cards,
+    "give",
+    (resource) => findDiscardCard(resource),
+    "Discard",
+  ).map((step) => ({ ...step, ready: selectionComplete }));
+  return [
+  ...selectionSteps,
+  {
+    label: "Confirm discard",
+    resolve: () => {
+      const discardRoot = findDiscardRoot();
+      return findConfirmationControl(discardRoot ?? document);
+    },
+    settleMs: 240,
+  },
+  ];
+};
+
+const developmentWorkflow = (
+  action: Extract<NextClick, { kind: "development" }>,
+): WorkflowStep[] => {
+  const actionPanelOpen = (): boolean =>
+    modalRoots().some((root) =>
+      Boolean(root.querySelector("[class*='confirmButton-']")),
+    );
+  const steps: WorkflowStep[] = [
+    {
+      label: `Play ${action.card.replaceAll("-", " ")}`,
+      resolve: () => findDevelopmentCard(action.card),
+      ready: actionPanelOpen,
+      settleMs: 180,
+    },
+    {
+      label: `Confirm ${action.card.replaceAll("-", " ")}`,
+      resolve: () =>
+        findConfirmationControl(modalRoots()[0] ?? document),
+      settleMs: 240,
+    },
+  ];
+  if (action.followupResources?.length) {
+    steps.push(
+      ...action.followupResources.map((resource, index) => ({
+        label: `Choose ${resource}${action.followupResources!.length > 1 ? ` ${index + 1}/${action.followupResources!.length}` : ""}`,
+        resolve: () => findResourceChoice(resource),
+        settleMs: 170,
+      })),
+      {
+        label: "Confirm resource choice",
+        resolve: () =>
+          findConfirmationControl(modalRoots()[0] ?? document),
+        settleMs: 240,
+      },
+    );
+  }
+  return steps;
+};
+
+const playerWorkflow = (
+  action: Extract<NextClick, { kind: "player" }>,
+): WorkflowStep[] => [
+  {
+    label: `Steal from ${action.player}`,
+    resolve: () => findPlayerChoice(action.player),
+    settleMs: 180,
+  },
+  {
+    label: "Confirm victim",
+    resolve: () =>
+      findConfirmationControl(modalRoots()[0] ?? document),
+    settleMs: 240,
+  },
+];
+
+const cancelWorkflow = (): void => {
+  workflowGeneration += 1;
+  workflowSignature = "";
+  workflowAction = undefined;
+  workflowOptions = undefined;
+  workflowCurrentElement = undefined;
+};
+
+export const activeWorkflowAction = (
+  boardAction?: BoardAction,
+  robberVictimSelection = false,
+): NextClick | undefined => {
+  if (!workflowSignature || !workflowAction) return undefined;
+  const stillOwnsBoardPhase =
+    workflowAction.kind === "discard"
+      ? boardAction === "discard"
+      : workflowAction.kind === "player"
+        ? boardAction === "none" && robberVictimSelection
+        : workflowAction.kind === "trade-builder"
+          ? boardAction === "none" || tradePanelIsOpen()
+          : boardAction === "none";
+  if (stillOwnsBoardPhase) return workflowAction;
+  cancelWorkflow();
+  document.getElementById(ROOT_ID)?.remove();
+  return undefined;
+};
+
+const startWorkflow = (
+  action: NextClick,
+  steps: WorkflowStep[],
+  options: ActionGuideOptions,
+): void => {
+  if (
+    !steps.length ||
+    workflowSignature === action.signature ||
+    lastClickSignature === action.signature
+  ) {
+    return;
+  }
+  cancelWorkflow();
+  workflowSignature = action.signature;
+  workflowAction = action;
+  workflowOptions = options;
+  const generation = workflowGeneration;
+  const tradeTransaction =
+    action.kind === "trade-builder" ||
+    (action.kind === "trade" && action.verdict === "counter");
+
+  const fail = (reason: string): void => {
+    const activeOptions = workflowOptions ?? options;
+    activeOptions.onExecution?.({
+      succeeded: false,
+      signature: action.signature,
+      reason,
+    });
+    if (tradeTransaction && tradePanelIsOpen()) {
+      const close = findTradePanelControl();
+      if (close) {
+        later(() => {
+          close.click();
+          requestBoardRefresh();
+        }, 180);
+      }
+    }
+    cancelWorkflow();
+    document.getElementById(ROOT_ID)?.remove();
+    requestBoardRefresh();
+  };
+
+  const run = (index: number, attempts = 0): void => {
+    if (
+      generation !== workflowGeneration ||
+      workflowSignature !== action.signature
+    ) {
+      return;
+    }
+    const tradeFailure = tradeTransaction ? visibleTradeFailure() : undefined;
+    if (tradeFailure) {
+      fail(`Colonist rejected the trade workflow: ${tradeFailure}`);
+      return;
+    }
+    const step = steps[index];
+    if (!step) {
+      lastClickSignature = action.signature;
+      (workflowOptions ?? options).onExecution?.({
+        succeeded: true,
+        signature: action.signature,
+      });
+      cancelWorkflow();
+      document.getElementById(ROOT_ID)?.remove();
+      return;
+    }
+    if (step.ready?.()) {
+      later(() => run(index + 1), 90);
+      return;
+    }
+    const element = step.resolve();
+    if (!element) {
+      if (attempts < 30) {
+        later(() => run(index, attempts + 1), 180);
+      } else {
+        fail(`Workflow control not found: ${step.label}`);
+      }
+      return;
+    }
+    workflowCurrentElement = element;
+    const currentOptions = workflowOptions ?? options;
+    if (currentOptions.highlight) {
+      drawHighlight(
+        {
+          kind: "turn-control",
+          control: "confirm",
+          label: step.label,
+          signature: `${action.signature}|step|${index}`,
+          confidence: action.confidence,
+        },
+        element,
+      );
+    }
+    let advanced = false;
+    const advance = () => {
+      if (advanced) return;
+      advanced = true;
+      workflowCurrentElement = undefined;
+      requestBoardRefresh();
+      const verify = (verificationAttempts = 0): void => {
+        if (
+          generation !== workflowGeneration ||
+          workflowSignature !== action.signature
+        ) {
+          return;
+        }
+        const failure = tradeTransaction ? visibleTradeFailure() : undefined;
+        if (failure) {
+          fail(`Colonist rejected the trade workflow: ${failure}`);
+          return;
+        }
+        if (step.repeatUntilReady) {
+          later(
+            () => run(step.ready?.() ? index + 1 : index),
+            step.settleMs ?? 220,
+          );
+          return;
+        }
+        if (!step.complete || step.complete()) {
+          later(() => run(index + 1), step.settleMs ?? 220);
+          return;
+        }
+        if (verificationAttempts < 24) {
+          later(() => verify(verificationAttempts + 1), 120);
+          return;
+        }
+        fail(`Colonist did not commit workflow step: ${step.label}`);
+      };
+      verify();
+    };
+    element.addEventListener("click", advance, { once: true });
+    if (currentOptions.autonomous) {
+      later(() => {
+        if (
+          generation === workflowGeneration &&
+          workflowSignature === action.signature
+        ) {
+          if (
+            !validatedClick(
+              element,
+              index === 0 || !currentOptions.validateContinuation
+                ? currentOptions
+                : {
+                    ...currentOptions,
+                    validate: currentOptions.validateContinuation,
+                  },
+              `${action.signature}|step|${index}`,
+              false,
+            )
+          ) {
+            cancelWorkflow();
+            return;
+          }
+          // React can replace the clicked card/control while handling the same
+          // event. In that case a listener attached to the old node is not a
+          // reliable transaction clock even though Colonist accepted the
+          // click. Autopilot owns this click, so advance idempotently here too.
+          advance();
+        }
+      }, tradeTransaction ? 280 : 160);
+    }
+  };
+
+  run(0);
+};
+
+const pollForFollowup = (
+  action: Extract<NextClick, { kind: "resource" | "player" }>,
+  options: ActionGuideOptions,
+  onComplete?: () => void,
+  attempts = 0,
+  stillCurrent: () => boolean = () => true,
+): void => {
+  if (!stillCurrent()) return;
+  const element = resolveElement(action);
+  if (!element && attempts < 28) {
+    later(
+      () =>
+        pollForFollowup(
+          action,
+          options,
+          onComplete,
+          attempts + 1,
+          stillCurrent,
+        ),
+      140,
+    );
+    return;
+  }
+  if (!element) return;
+  const activeOptions = currentGuideOptions ?? options;
+  if (activeOptions.highlight) drawHighlight(action, element);
+  if (activeOptions.autonomous) {
+    later(() => {
+      if (validatedClick(element, activeOptions, action.signature)) {
+        requestBoardRefresh();
+        onComplete?.();
+      }
+    }, 180);
+  } else if (onComplete) {
+    element.addEventListener("click", onComplete, { once: true });
+  }
+};
+
+const pollForConfirmation = (
+  label: string,
+  options: ActionGuideOptions,
+  onComplete?: () => void,
+  attempts = 0,
+  stillCurrent: () => boolean = () => true,
+): void => {
+  if (!stillCurrent()) return;
+  const root = modalRoots()[0];
+  const element =
+    findConfirmationControl(root ?? document) ??
+    (
+      root
+        ? [
+            ...root.querySelectorAll<HTMLElement>(
+              "button:not([disabled]), [role='button']:not([aria-disabled='true'])",
+            ),
+          ].filter(visible).at(-1)
+        : undefined
+    );
+  if (!element && attempts < 35) {
+    later(
+      () =>
+        pollForConfirmation(
+          label,
+          options,
+          onComplete,
+          attempts + 1,
+          stillCurrent,
+        ),
+      140,
+    );
+    return;
+  }
+  if (!element) return;
+  const action: NextClick = {
+    kind: "turn-control",
+    control: "confirm",
+    label,
+    signature: `followup-confirm|${label}`,
+    confidence: 1,
+  };
+  const activeOptions = currentGuideOptions ?? options;
+  if (activeOptions.highlight) drawHighlight(action, element);
+  if (activeOptions.autonomous) {
+    later(() => {
+      if (validatedClick(element, activeOptions, action.signature)) {
+        requestBoardRefresh();
+        onComplete?.();
+      }
+    }, 160);
+  } else if (onComplete) {
+    element.addEventListener("click", onComplete, { once: true });
+  }
+};
+
+const installFollowupGuide = (
+  action: NextClick,
+  element: HTMLElement | undefined,
+  options: ActionGuideOptions,
+): void => {
+  if (action.kind === "board") {
+    boardFollowupCleanup?.();
+    if (action.followupPlayer) {
+      activeBoardFollowupSignature = action.signature;
+    }
+    const handler = (event: PointerEvent) => {
+      if (
+        event.button !== 0 ||
+        Math.hypot(
+          event.clientX - action.point.x,
+          event.clientY - action.point.y,
+        ) > 44
+      ) {
+        return;
+      }
+      document.removeEventListener("pointerdown", handler, true);
+      boardFollowupCleanup = undefined;
+      executeBoardAction(action);
+      if (action.followupPlayer) {
+        const stillCurrent = () =>
+          activeBoardFollowupSignature === action.signature;
+        later(
+          () =>
+            pollForFollowup(
+              {
+                kind: "player",
+                player: action.followupPlayer!,
+                label: `Steal from ${action.followupPlayer}`,
+                signature: `robber-player|${action.followupPlayer}`,
+                confidence: 0.94,
+              },
+              options,
+              () =>
+                pollForConfirmation(
+                  "Confirm player",
+                  options,
+                  undefined,
+                  0,
+                  stillCurrent,
+                ),
+              0,
+              stillCurrent,
+            ),
+          180,
+        );
+      }
+    };
+    document.addEventListener("pointerdown", handler, true);
+    const cleanup = () => {
+      document.removeEventListener("pointerdown", handler, true);
+      if (boardFollowupCleanup === cleanup) boardFollowupCleanup = undefined;
+    };
+    boardFollowupCleanup = cleanup;
+    return;
+  }
+};
+
+const requiresClosedTradePanel = (action: NextClick): boolean =>
+  action.kind !== "trade-builder" &&
+  !(action.kind === "trade" && action.verdict === "counter");
+
+const renderTradePanelPreflight = (
+  action: NextClick,
+  options: ActionGuideOptions,
+): boolean => {
+  if (!tradePanelIsOpen() || !requiresClosedTradePanel(action)) return false;
+  const close = findTradePanelControl();
+  if (!close) return false;
+  const signature = `close-trade-panel|${action.signature}`;
+  if (options.highlight) {
+    drawHighlight(
+      {
+        kind: "turn-control",
+        control: "confirm",
+        label: `Close trade panel, then ${action.label.toLowerCase()}`,
+        signature,
+        confidence: 1,
+      },
+      close,
+    );
+  }
+  const finish = () => {
+    tradePreflightSignature = "";
+    requestBoardRefresh();
+  };
+  close.addEventListener("click", () => later(finish, 320), { once: true });
+  if (options.autonomous && tradePreflightSignature !== signature) {
+    tradePreflightSignature = signature;
+    later(() => {
+      if (
+        tradePreflightSignature === signature &&
+        tradePanelIsOpen()
+      ) {
+        close.click();
+      } else {
+        finish();
+      }
+    }, 280);
+  }
+  return true;
+};
+
+export const renderActionGuide = (
+  action: NextClick | undefined,
+  options: ActionGuideOptions,
+): void => {
+  const activatingAutopilot =
+    !currentGuideOptions?.autonomous && options.autonomous;
+  currentGuideOptions = options;
+  if (
+    activeBoardFollowupSignature &&
+    (
+      action?.kind !== "board" ||
+      action.signature !== activeBoardFollowupSignature
+    )
+  ) {
+    activeBoardFollowupSignature = "";
+  }
+  if (activatingAutopilot) lastClickSignature = "";
+  if (!action) {
+    lastClickSignature = "";
+    cancelWorkflow();
+    boardFollowupCleanup?.();
+    document.getElementById(ROOT_ID)?.remove();
+    return;
+  }
+  if (workflowSignature === action.signature) {
+    workflowOptions = options;
+    if (activatingAutopilot && workflowCurrentElement) {
+      const element = workflowCurrentElement;
+      later(
+        () =>
+          validatedClick(
+            element,
+            workflowOptions ?? options,
+            action.signature,
+            false,
+          ),
+        80,
+      );
+    }
+    return;
+  }
+  if (workflowSignature && workflowSignature !== action.signature) {
+    cancelWorkflow();
+  }
+  if (renderTradePanelPreflight(action, options)) {
+    return;
+  }
+  if (action.kind === "discard") {
+    startWorkflow(action, discardWorkflow(action), options);
+    return;
+  }
+  if (action.kind === "development") {
+    startWorkflow(action, developmentWorkflow(action), options);
+    return;
+  }
+  if (action.kind === "player") {
+    startWorkflow(action, playerWorkflow(action), options);
+    return;
+  }
+  if (action.kind === "trade-builder") {
+    startWorkflow(action, tradeWorkflow(action), options);
+    return;
+  }
+  if (
+    action.kind === "trade" &&
+    action.verdict === "counter" &&
+    action.counterGive &&
+    action.counterReceive
+  ) {
+    startWorkflow(action, counterWorkflow(action), options);
+    return;
+  }
+  if (action.kind !== "board" || !action.followupPlayer) {
+    boardFollowupCleanup?.();
+  }
+  const element = resolveElement(action);
+  if (options.highlight) drawHighlight(action, element);
+  else document.getElementById(ROOT_ID)?.remove();
+  installFollowupGuide(action, element, options);
+  maybeAutoclick(action, element, options);
+};
+
+export const destroyActionGuide = (): void => {
+  document.getElementById(ROOT_ID)?.remove();
+  lastClickSignature = "";
+  cancelWorkflow();
+  currentGuideOptions = undefined;
+  tradePreflightSignature = "";
+  for (const timer of followupTimers) window.clearTimeout(timer);
+  followupTimers.clear();
+  boardCommandAttempts.clear();
+  activeBoardFollowupSignature = "";
+  boardFollowupCleanup?.();
+};

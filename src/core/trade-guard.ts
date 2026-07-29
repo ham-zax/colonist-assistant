@@ -1,0 +1,142 @@
+import type {
+  DeepSearchAction,
+  DeepSearchResult,
+} from "./engine";
+import type { ActiveTradeOffer } from "./placement";
+import {
+  RESOURCE_ORDER,
+  hasResources,
+  type ResourceVector,
+} from "./resources";
+import type { TrackerState } from "./types";
+
+export const tradeOfferKey = (
+  give: ResourceVector,
+  receive: ResourceVector,
+): string =>
+  `${RESOURCE_ORDER.map((resource) => give[resource]).join(",")}>${RESOURCE_ORDER.map((resource) => receive[resource]).join(",")}`;
+
+const tupleResources = (
+  tuple: [number, number, number, number, number],
+): ResourceVector => ({
+  lumber: tuple[0],
+  brick: tuple[1],
+  wool: tuple[2],
+  grain: tuple[3],
+  ore: tuple[4],
+});
+
+export const canAnyOpponentFulfillTrade = (
+  state: TrackerState | undefined,
+  player: string | undefined,
+  receive: ResourceVector,
+  recipients?: string[],
+): boolean => {
+  if (!state?.worlds.length || !player) return true;
+  const candidates =
+    recipients?.length
+      ? recipients.filter((candidate) => candidate !== player)
+      : state.playerOrder.filter((candidate) => candidate !== player);
+  if (!candidates.length) return false;
+  return state.worlds.some((world) =>
+    candidates.some((candidate) => {
+      const hand = world.hands[candidate];
+      return Boolean(hand && hasResources(hand, receive));
+    }),
+  );
+};
+
+export const selectUsableDeepAction = (
+  search: DeepSearchResult | undefined,
+  state: TrackerState | undefined,
+  player: string | undefined,
+  attemptedTradeOffers: ReadonlySet<string>,
+): DeepSearchAction | undefined => {
+  const chosen = search?.chosen;
+  if (!search || !chosen) return chosen;
+  const usable = (action: DeepSearchAction): boolean => {
+    if (
+      action.kind !== "offer-trade" ||
+      !action.cards ||
+      !action.receiveCards
+    ) {
+      return true;
+    }
+    const give = tupleResources(action.cards);
+    const receive = tupleResources(action.receiveCards);
+    return (
+      !attemptedTradeOffers.has(tradeOfferKey(give, receive)) &&
+      canAnyOpponentFulfillTrade(
+        state,
+        player,
+        receive,
+        action.recipients,
+      )
+    );
+  };
+  if (usable(chosen)) return chosen;
+  const root = Math.max(0, state?.playerOrder.indexOf(player ?? "") ?? 0);
+  return [...search.actions]
+    .filter(
+      ({ action }) =>
+        !["respond-trade", "counter-trade", "confirm-trade"].includes(
+          action.kind,
+        ) && usable(action),
+    )
+    .sort(
+      (left, right) =>
+        right.visits - left.visits ||
+        (right.value[root] ?? 0) - (left.value[root] ?? 0),
+    )[0]?.action;
+};
+
+export const outgoingTradeDisposition = (
+  responsesComplete: boolean | undefined,
+  firstSeenAt: number,
+  now: number,
+  timeoutMs = 18_000,
+): "wait" | "cancel" =>
+  responsesComplete || now - firstSeenAt >= timeoutMs
+    ? "cancel"
+    : "wait";
+
+/**
+ * A counteroffer has one intended counterparty. Once that player accepts,
+ * waiting for another strategic search can only add latency and risks losing
+ * an already-agreed transaction. Ordinary broadcast offers still wait for
+ * their response window when more partners may answer.
+ */
+export const shouldConfirmAcceptedTradeImmediately = (
+  trade: Pick<
+    ActiveTradeOffer,
+    | "counterOffer"
+    | "acceptedPlayers"
+    | "pendingPlayers"
+    | "responsesComplete"
+  >,
+): boolean =>
+  trade.acceptedPlayers?.length === 1 &&
+  (
+    trade.counterOffer ||
+    trade.responsesComplete ||
+    !trade.pendingPlayers?.length
+  );
+
+export const tradeMemoryScopeChanged = (
+  previous:
+    | { gameKey?: string; currentPlayer?: string; isMyTurn?: boolean }
+    | undefined,
+  next:
+    | { gameKey?: string; currentPlayer?: string; isMyTurn?: boolean }
+    | undefined,
+): boolean =>
+  Boolean(
+    previous?.gameKey &&
+      next?.gameKey &&
+      previous.gameKey !== next.gameKey,
+  ) ||
+  Boolean(
+    previous?.currentPlayer &&
+      next?.currentPlayer &&
+      previous.currentPlayer !== next.currentPlayer,
+  );

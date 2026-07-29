@@ -1,0 +1,163 @@
+import { describe, expect, it } from "vitest";
+
+import type {
+  DeepSearchAction,
+  DeepSearchResult,
+} from "../src/core/engine";
+import { emptyResources } from "../src/core/resources";
+import {
+  outgoingTradeDisposition,
+  selectUsableDeepAction,
+  shouldConfirmAcceptedTradeImmediately,
+  tradeMemoryScopeChanged,
+  tradeOfferKey,
+} from "../src/core/trade-guard";
+import {
+  createTrackerState,
+  reduceTracker,
+} from "../src/core/tracker";
+
+const searchResult = (
+  chosen: DeepSearchAction,
+  alternative: DeepSearchAction,
+): DeepSearchResult => ({
+  engineRevision: "test",
+  algorithm: "maxn",
+  chosen,
+  rootValue: [0.25, 0.25],
+  tacticalWinProbability: 0,
+  tacticalLowerBound: 0,
+  tacticalProven: false,
+  exactDecision: false,
+  exactWorlds: 0,
+  tacticalLine: [],
+  actions: [
+    {
+      action: chosen,
+      visits: 100,
+      availability: 1,
+      availabilityWeight: 1,
+      legalWeight: 1,
+      prior: 0.8,
+      value: [0.6, 0.4],
+      lowerConfidenceValue: [0.5, 0.3],
+    },
+    {
+      action: alternative,
+      visits: 60,
+      availability: 1,
+      availabilityWeight: 1,
+      legalWeight: 1,
+      prior: 0.2,
+      value: [0.5, 0.5],
+      lowerConfidenceValue: [0.4, 0.4],
+    },
+  ],
+  iterations: 100,
+  nodes: 200,
+  deepestDecisionDepth: 3,
+  rollouts: 100,
+  particles: 1,
+  effectiveParticleCount: 1,
+  elapsedMs: 10,
+  seed: 1,
+});
+
+const stateWithBotOre = (ore: number) => {
+  let state = createTrackerState();
+  state = reduceTracker(state, { type: "discover", player: "You" });
+  state = reduceTracker(state, { type: "discover", player: "Bot" });
+  const own = emptyResources();
+  own.brick = 1;
+  const bot = emptyResources();
+  bot.ore = ore;
+  state.worlds = [{ hands: { You: own, Bot: bot }, weight: 1 }];
+  return state;
+};
+
+describe("live trade guard", () => {
+  const offer: DeepSearchAction = {
+    kind: "offer-trade",
+    cards: [0, 1, 0, 0, 0],
+    receiveCards: [0, 0, 0, 0, 1],
+    recipients: ["Bot"],
+  };
+  const endTurn: DeepSearchAction = { kind: "end-turn" };
+
+  it("skips an offer that no modeled recipient can fulfill", () => {
+    const selected = selectUsableDeepAction(
+      searchResult(offer, endTurn),
+      stateWithBotOre(0),
+      "You",
+      new Set(),
+    );
+
+    expect(selected).toEqual(endTurn);
+  });
+
+  it("does not repeat an identical rejected offer in the same turn", () => {
+    const give = emptyResources();
+    give.brick = 1;
+    const receive = emptyResources();
+    receive.ore = 1;
+    const selected = selectUsableDeepAction(
+      searchResult(offer, endTurn),
+      stateWithBotOre(2),
+      "You",
+      new Set([tradeOfferKey(give, receive)]),
+    );
+
+    expect(selected).toEqual(endTurn);
+  });
+
+  it("keeps a fresh offer when a recipient can fulfill it", () => {
+    const selected = selectUsableDeepAction(
+      searchResult(offer, endTurn),
+      stateWithBotOre(2),
+      "You",
+      new Set(),
+    );
+
+    expect(selected).toEqual(offer);
+  });
+
+  it("closes rejected offers immediately and unanswered offers after the watchdog", () => {
+    expect(outgoingTradeDisposition(true, 1_000, 1_001)).toBe("cancel");
+    expect(outgoingTradeDisposition(false, 1_000, 18_999)).toBe("wait");
+    expect(outgoingTradeDisposition(false, 1_000, 19_000)).toBe("cancel");
+  });
+
+  it("confirms an accepted counteroffer without waiting for another search", () => {
+    expect(
+      shouldConfirmAcceptedTradeImmediately({
+        counterOffer: true,
+        acceptedPlayers: ["Bot"],
+        pendingPlayers: ["Other bot"],
+        responsesComplete: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldConfirmAcceptedTradeImmediately({
+        counterOffer: false,
+        acceptedPlayers: ["Bot"],
+        pendingPlayers: ["Other bot"],
+        responsesComplete: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps rejection memory through transient trade UI turn flags", () => {
+    expect(
+      tradeMemoryScopeChanged(
+        { gameKey: "g", currentPlayer: "You", isMyTurn: true },
+        { gameKey: "g", currentPlayer: "You", isMyTurn: false },
+      ),
+    ).toBe(false);
+    expect(
+      tradeMemoryScopeChanged(
+        { gameKey: "g", currentPlayer: "You", isMyTurn: false },
+        { gameKey: "g", currentPlayer: "Bot", isMyTurn: false },
+      ),
+    ).toBe(true);
+  });
+});

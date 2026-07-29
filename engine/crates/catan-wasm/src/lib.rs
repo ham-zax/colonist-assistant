@@ -1,0 +1,781 @@
+//! Narrow structured-clone WebAssembly boundary.
+//!
+//! JavaScript validates the Colonist DOM and sends one compact snapshot.
+//! Search performs no callback into JavaScript and returns one small report.
+
+use std::cell::RefCell;
+
+use colonist_catan_core::{
+    Action, Board, Building, Edge, GameState, Phase, PlayerState, Port, Resource, TradeOffer,
+    Vertex,
+};
+use colonist_catan_search::{
+    ActionStats, BeliefParticle, ENGINE_REVISION, ExactActionFamily, Mcts, SearchConfig,
+    SearchMode, SearchReport, SearchStatistics, TacticalResult, exact_family_for_action,
+    learned_model_version, learned_trade_model_version, search_weighted_belief_maxn_bounded,
+    search_weighted_belief_paranoid_bounded, solve_belief_current_turn, solve_exact_belief,
+};
+use serde::{Deserialize, Serialize};
+use wasm_bindgen::prelude::*;
+
+thread_local! {
+    static PERSISTENT_SEARCH: RefCell<Vec<Mcts>> = const { RefCell::new(Vec::new()) };
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HexInput {
+    resource: i8,
+    number: u8,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VertexInput {
+    adjacent_hexes: Vec<u8>,
+    adjacent_vertices: Vec<u8>,
+    adjacent_edges: Vec<u8>,
+    port: i8,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EdgeInput {
+    vertices: [u8; 2],
+    adjacent_hexes: Vec<u8>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BoardInput {
+    hexes: Vec<HexInput>,
+    vertices: Vec<VertexInput>,
+    edges: Vec<EdgeInput>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlayerInput {
+    resources: [u8; 5],
+    development: [u8; 5],
+    bought_development: [u8; 5],
+    public_victory_points: u8,
+    played_knights: u8,
+    roads_left: u8,
+    settlements_left: u8,
+    cities_left: u8,
+    has_longest_road: bool,
+    has_largest_army: bool,
+    played_development_this_turn: bool,
+    policy_profile: Option<[u8; 5]>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorldInput {
+    weight: Option<f32>,
+    hands: Vec<[u8; 5]>,
+    development: Option<Vec<[u8; 5]>>,
+    development_deck: Option<[u8; 5]>,
+    bank: Option<[u8; 5]>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TradeInput {
+    creator: u8,
+    recipients: u8,
+    give: [u8; 5],
+    receive: [u8; 5],
+    accepted: u8,
+    rejected: u8,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StateInput {
+    board: BoardInput,
+    players: Vec<PlayerInput>,
+    worlds: Vec<WorldInput>,
+    buildings: Vec<i8>,
+    roads: Vec<i8>,
+    bank: [u8; 5],
+    bank_visible: Option<bool>,
+    development_deck: [u8; 5],
+    played_development: [u8; 5],
+    robber_hex: u8,
+    current_player: u8,
+    phase: String,
+    phase_parameter: Option<u8>,
+    turn: u16,
+    last_roll: u8,
+    victory_target: u8,
+    setup_step: u8,
+    discard_remaining: [u8; 4],
+    discard_cursor: u8,
+    robber_return_phase: String,
+    trade: Option<TradeInput>,
+    trade_cursor: u8,
+    domestic_trade_used: bool,
+    longest_road_holder: Option<u8>,
+    largest_army_holder: Option<u8>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Request {
+    state: StateInput,
+    iterations: Option<u32>,
+    max_nodes: Option<usize>,
+    rollout_actions: Option<u16>,
+    tactical_depth: Option<u8>,
+    tactical_nodes: Option<u32>,
+    seed: Option<u64>,
+    mode: Option<String>,
+    depth: Option<u8>,
+    branch_cap: Option<usize>,
+    ponder: Option<bool>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ActionOutput {
+    kind: &'static str,
+    first: Option<u8>,
+    second: Option<u8>,
+    player: Option<u8>,
+    resource: Option<u8>,
+    other_resource: Option<u8>,
+    cards: Option<[u8; 5]>,
+    receive_cards: Option<[u8; 5]>,
+    accept: Option<bool>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ActionStatisticsOutput {
+    action: ActionOutput,
+    visits: u32,
+    availability: u32,
+    availability_weight: f32,
+    legal_weight: f32,
+    prior: f32,
+    value: [f32; 4],
+    lower_confidence_value: [f32; 4],
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Response {
+    engine_revision: &'static str,
+    learned_model_version: &'static str,
+    trade_model_version: &'static str,
+    algorithm: &'static str,
+    chosen: Option<ActionOutput>,
+    root_value: [f32; 4],
+    tactical_win_probability: f32,
+    tactical_lower_bound: f32,
+    tactical_proven: bool,
+    tactical_line: Vec<ActionOutput>,
+    exact_decision: bool,
+    exact_worlds: usize,
+    actions: Vec<ActionStatisticsOutput>,
+    iterations: u32,
+    nodes: usize,
+    deepest_decision_depth: u16,
+    rollouts: u32,
+    particles: usize,
+    effective_particle_count: f32,
+}
+
+fn resource(value: i8) -> Result<Option<Resource>, JsValue> {
+    Ok(match value {
+        -1 => None,
+        0 => Some(Resource::Lumber),
+        1 => Some(Resource::Brick),
+        2 => Some(Resource::Wool),
+        3 => Some(Resource::Grain),
+        4 => Some(Resource::Ore),
+        _ => return Err(JsValue::from_str("invalid resource code")),
+    })
+}
+
+fn port(value: i8) -> Result<Option<Port>, JsValue> {
+    Ok(match value {
+        -1 => None,
+        5 => Some(Port::Generic),
+        0..=4 => Some(Port::Resource(
+            resource(value)?.expect("resource port code is exact"),
+        )),
+        _ => return Err(JsValue::from_str("invalid port code")),
+    })
+}
+
+fn phase(value: &str, parameter: Option<u8>) -> Result<Phase, JsValue> {
+    Ok(match value {
+        "setup-settlement" => Phase::SetupSettlement,
+        "setup-road" => Phase::SetupRoad {
+            settlement: parameter.ok_or_else(|| JsValue::from_str("setup road needs anchor"))?,
+        },
+        "pre-roll" => Phase::PreRoll,
+        "roll-chance" => Phase::RollChance,
+        "discard" => Phase::Discard,
+        "move-robber" => Phase::MoveRobber,
+        "resolve-steal" => Phase::ResolveSteal {
+            victim: parameter.ok_or_else(|| JsValue::from_str("steal needs victim"))?,
+        },
+        "main" => Phase::Main,
+        "development-chance" => Phase::DevelopmentChance,
+        "trade-responses" => Phase::TradeResponses,
+        "finished" => Phase::Finished,
+        _ => return Err(JsValue::from_str("invalid phase")),
+    })
+}
+
+fn player(input: PlayerInput) -> PlayerState {
+    PlayerState {
+        resources: input.resources,
+        development: input.development,
+        bought_development: input.bought_development,
+        public_victory_points: input.public_victory_points,
+        played_knights: input.played_knights,
+        roads_left: input.roads_left,
+        settlements_left: input.settlements_left,
+        cities_left: input.cities_left,
+        has_longest_road: input.has_longest_road,
+        has_largest_army: input.has_largest_army,
+        played_development_this_turn: input.played_development_this_turn,
+        policy_profile: input.policy_profile.unwrap_or([51; 5]),
+    }
+}
+
+fn game_states(input: StateInput) -> Result<Vec<BeliefParticle>, JsValue> {
+    let num_players = input.players.len() as u8;
+    let board = Board {
+        num_players,
+        hexes: input
+            .board
+            .hexes
+            .into_iter()
+            .enumerate()
+            .map(|(index, hex)| {
+                Ok(colonist_catan_core::Hex {
+                    resource: resource(hex.resource)?,
+                    number: hex.number,
+                    coord: (index as i8, 0),
+                })
+            })
+            .collect::<Result<Vec<_>, JsValue>>()?,
+        vertices: input
+            .board
+            .vertices
+            .into_iter()
+            .map(|vertex| {
+                Ok(Vertex {
+                    adjacent_hexes: vertex.adjacent_hexes,
+                    adjacent_vertices: vertex.adjacent_vertices,
+                    adjacent_edges: vertex.adjacent_edges,
+                    port: port(vertex.port)?,
+                })
+            })
+            .collect::<Result<Vec<_>, JsValue>>()?,
+        edges: input
+            .board
+            .edges
+            .into_iter()
+            .map(|edge| Edge {
+                vertices: edge.vertices,
+                adjacent_hexes: edge.adjacent_hexes,
+            })
+            .collect(),
+    };
+    let buildings = input
+        .buildings
+        .into_iter()
+        .map(|piece| {
+            if piece < 0 {
+                None
+            } else {
+                let owner = piece as u8 / 2;
+                Some(if (piece as u8).is_multiple_of(2) {
+                    Building::Settlement(owner)
+                } else {
+                    Building::City(owner)
+                })
+            }
+        })
+        .collect::<Vec<_>>();
+    let roads = input
+        .roads
+        .into_iter()
+        .map(|owner| (owner >= 0).then_some(owner as u8))
+        .collect::<Vec<_>>();
+    let players = input.players.into_iter().map(player).collect::<Vec<_>>();
+    let game_phase = phase(&input.phase, input.phase_parameter)?;
+    let robber_return_phase = phase(&input.robber_return_phase, None)?;
+    let trade = input.trade.map(|trade| TradeOffer {
+        creator: trade.creator,
+        recipients: trade.recipients,
+        give: trade.give,
+        receive: trade.receive,
+        accepted: trade.accepted,
+        rejected: trade.rejected,
+    });
+    let worlds = if input.worlds.is_empty() {
+        vec![WorldInput {
+            weight: Some(1.0),
+            hands: players.iter().map(|state| state.resources).collect(),
+            development: None,
+            development_deck: None,
+            bank: None,
+        }]
+    } else {
+        input.worlds
+    };
+    let mut result = Vec::with_capacity(worlds.len());
+    for world in worlds {
+        if world.hands.len() != players.len()
+            || world
+                .development
+                .as_ref()
+                .is_some_and(|cards| cards.len() != players.len())
+        {
+            return Err(JsValue::from_str("world player count mismatch"));
+        }
+        let mut world_players = players.clone();
+        for (state, hand) in world_players.iter_mut().zip(world.hands) {
+            state.resources = hand;
+        }
+        if let Some(development) = world.development {
+            for (state, cards) in world_players.iter_mut().zip(development) {
+                state.development = cards;
+            }
+        }
+        result.push(BeliefParticle {
+            weight: world.weight.unwrap_or(1.0).max(0.0),
+            state: GameState {
+                board: board.clone().into(),
+                players: world_players,
+                buildings: buildings.clone(),
+                roads: roads.clone(),
+                bank: world.bank.unwrap_or(input.bank),
+                bank_is_public: input.bank_visible.unwrap_or(true),
+                development_deck: world.development_deck.unwrap_or(input.development_deck),
+                played_development: input.played_development,
+                robber_hex: input.robber_hex,
+                current_player: input.current_player,
+                phase: game_phase,
+                turn: input.turn,
+                last_roll: input.last_roll,
+                victory_target: input.victory_target,
+                setup_step: input.setup_step,
+                discard_remaining: input.discard_remaining,
+                discard_cursor: input.discard_cursor,
+                robber_return_phase,
+                free_roads: 0,
+                domestic_trade_used: input.domestic_trade_used,
+                domestic_trade_count: u8::from(input.domestic_trade_used),
+                last_rejected_trade: None,
+                trade,
+                trade_cursor: input.trade_cursor,
+                trade_negotiation_round: 0,
+                longest_road_holder: input.longest_road_holder,
+                largest_army_holder: input.largest_army_holder,
+            },
+        });
+    }
+    Ok(result)
+}
+
+fn action(action: Action) -> ActionOutput {
+    let mut output = ActionOutput {
+        kind: "unknown",
+        first: None,
+        second: None,
+        player: None,
+        resource: None,
+        other_resource: None,
+        cards: None,
+        receive_cards: None,
+        accept: None,
+    };
+    match action {
+        Action::PlaceSettlement { vertex } => {
+            output.kind = "place-settlement";
+            output.first = Some(vertex);
+        }
+        Action::PlaceRoad { edge } => {
+            output.kind = "place-road";
+            output.first = Some(edge);
+        }
+        Action::Roll => output.kind = "roll",
+        Action::ResolveRoll { value } => {
+            output.kind = "resolve-roll";
+            output.first = Some(value);
+        }
+        Action::Discard { cards } => {
+            output.kind = "discard";
+            output.cards = Some(cards);
+        }
+        Action::MoveRobber { hex, victim } => {
+            output.kind = "move-robber";
+            output.first = Some(hex);
+            output.player = victim;
+        }
+        Action::ResolveSteal { victim, resource } => {
+            output.kind = "resolve-steal";
+            output.player = Some(victim);
+            output.resource = Some(resource as u8);
+        }
+        Action::BuildRoad { edge } => {
+            output.kind = "build-road";
+            output.first = Some(edge);
+        }
+        Action::BuildSettlement { vertex } => {
+            output.kind = "build-settlement";
+            output.first = Some(vertex);
+        }
+        Action::BuildCity { vertex } => {
+            output.kind = "build-city";
+            output.first = Some(vertex);
+        }
+        Action::BuyDevelopment => output.kind = "buy-development",
+        Action::ResolveDevelopment { card } => {
+            output.kind = "resolve-development";
+            output.resource = Some(card as u8);
+        }
+        Action::PlayKnight { hex, victim } => {
+            output.kind = "play-knight";
+            output.first = Some(hex);
+            output.player = victim;
+        }
+        Action::PlayRoadBuilding { first, second } => {
+            output.kind = "play-road-building";
+            output.first = Some(first);
+            output.second = second;
+        }
+        Action::PlayYearOfPlenty { first, second } => {
+            output.kind = "play-year-of-plenty";
+            output.resource = Some(first as u8);
+            output.other_resource = Some(second as u8);
+        }
+        Action::PlayMonopoly { resource } => {
+            output.kind = "play-monopoly";
+            output.resource = Some(resource as u8);
+        }
+        Action::MaritimeTrade {
+            give,
+            receive,
+            ratio,
+        } => {
+            output.kind = "maritime-trade";
+            output.first = Some(ratio);
+            output.resource = Some(give as u8);
+            output.other_resource = Some(receive as u8);
+        }
+        Action::OfferTrade {
+            recipients,
+            give,
+            receive,
+        } => {
+            output.kind = "offer-trade";
+            output.first = Some(recipients);
+            output.cards = Some(give);
+            output.receive_cards = Some(receive);
+        }
+        Action::RespondTrade { accept } => {
+            output.kind = "respond-trade";
+            output.accept = Some(accept);
+        }
+        Action::CounterTrade { give, receive } => {
+            output.kind = "counter-trade";
+            output.cards = Some(give);
+            output.receive_cards = Some(receive);
+        }
+        Action::ConfirmTrade { partner } => {
+            output.kind = "confirm-trade";
+            output.player = Some(partner);
+        }
+        Action::CancelTrade => output.kind = "cancel-trade",
+        Action::EndTurn => output.kind = "end-turn",
+    }
+    output
+}
+
+fn response(report: SearchReport, particles: usize, algorithm: &'static str) -> Response {
+    Response {
+        engine_revision: ENGINE_REVISION,
+        learned_model_version: learned_model_version(),
+        trade_model_version: learned_trade_model_version(),
+        algorithm,
+        chosen: report.chosen.map(action),
+        root_value: report.root_value,
+        tactical_win_probability: report.tactical.win_probability,
+        tactical_lower_bound: report.tactical.lower_bound,
+        tactical_proven: report.tactical.proven,
+        tactical_line: report
+            .tactical
+            .principal_line
+            .into_iter()
+            .map(action)
+            .collect(),
+        exact_decision: report.exact.applicable,
+        exact_worlds: report.exact.worlds,
+        actions: report
+            .actions
+            .into_iter()
+            .map(|statistics| ActionStatisticsOutput {
+                action: action(statistics.action),
+                visits: statistics.visits,
+                availability: statistics.availability,
+                availability_weight: statistics.availability_weight,
+                legal_weight: statistics.legal_weight,
+                prior: statistics.prior,
+                value: statistics.value,
+                lower_confidence_value: statistics.lower_confidence_value,
+            })
+            .collect(),
+        iterations: report.statistics.iterations,
+        nodes: report.statistics.nodes,
+        deepest_decision_depth: report.statistics.deepest_decision_depth,
+        rollouts: report.statistics.rollouts,
+        particles,
+        effective_particle_count: report.statistics.effective_particle_count,
+    }
+}
+
+fn effective_particle_count(particles: &[BeliefParticle]) -> f32 {
+    let total = particles
+        .iter()
+        .map(|particle| particle.weight.max(0.0))
+        .sum::<f32>()
+        .max(f32::EPSILON);
+    let squared = particles
+        .iter()
+        .map(|particle| {
+            let weight = particle.weight.max(0.0) / total;
+            weight * weight
+        })
+        .sum::<f32>();
+    1.0 / squared.max(f32::EPSILON)
+}
+
+/// Mandatory protocol decisions are compact exact families. Returning them
+/// before any long-range search keeps discard, robber/victim, and trade
+/// response latency independent of the strategic simulation budget.
+fn exact_mandatory_report(particles: &[BeliefParticle]) -> Option<SearchReport> {
+    let exact = solve_exact_belief(particles, ExactActionFamily::Mandatory);
+    if !exact.applicable {
+        return None;
+    }
+    let chosen = exact.chosen.clone();
+    let root_value = exact
+        .actions
+        .iter()
+        .find(|candidate| Some(&candidate.action) == chosen.as_ref())
+        .map(|candidate| candidate.value)
+        .unwrap_or([0.0; 4]);
+    let actions = exact
+        .actions
+        .iter()
+        .map(|candidate| ActionStats {
+            action: candidate.action.clone(),
+            visits: particles.len() as u32,
+            availability: (candidate.legal_weight * particles.len() as f32).round() as u32,
+            availability_weight: candidate.legal_weight,
+            legal_weight: candidate.legal_weight,
+            prior: 0.0,
+            value: candidate.value,
+            lower_confidence_value: candidate.lower_bound,
+        })
+        .collect();
+    Some(SearchReport {
+        chosen,
+        root_value,
+        actions,
+        tactical: TacticalResult {
+            win_probability: 0.0,
+            lower_bound: 0.0,
+            principal_line: Vec::new(),
+            nodes: 0,
+            proven: false,
+        },
+        exact,
+        statistics: SearchStatistics {
+            iterations: 0,
+            nodes: 0,
+            deepest_decision_depth: 0,
+            rollouts: 0,
+            effective_particle_count: effective_particle_count(particles),
+        },
+    })
+}
+
+#[wasm_bindgen]
+pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
+    let request: Request = serde_wasm_bindgen::from_value(request)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let particles = game_states(request.state)?;
+    let mode = request.mode.as_deref().unwrap_or("maxn");
+    let algorithm = match mode {
+        "uct" => "uct",
+        "puct" => "puct",
+        "alpha-beta" => "alpha-beta",
+        _ => "maxn",
+    };
+    if !request.ponder.unwrap_or(false)
+        && let Some(report) = exact_mandatory_report(&particles)
+    {
+        return serde_wasm_bindgen::to_value(&response(report, particles.len(), algorithm))
+            .map_err(|error| JsValue::from_str(&error.to_string()));
+    }
+    let config = SearchConfig {
+        iterations: request.iterations.unwrap_or(2_400).clamp(16, 50_000),
+        max_nodes: request.max_nodes.unwrap_or(60_000).clamp(1_000, 250_000),
+        rollout_actions: request.rollout_actions.unwrap_or(260).clamp(24, 800),
+        tactical_depth: request.tactical_depth.unwrap_or(18).clamp(4, 32),
+        tactical_nodes: request.tactical_nodes.unwrap_or(12_000).clamp(100, 100_000),
+        seed: request.seed.unwrap_or(0x0043_4154_414e),
+        mode: if mode == "uct" {
+            SearchMode::Uct
+        } else {
+            SearchMode::Puct
+        },
+        ..SearchConfig::default()
+    };
+    let report = if mode == "maxn" || mode == "alpha-beta" {
+        let depth = request.depth.unwrap_or(3).clamp(1, 6);
+        let branch_cap = request.branch_cap.unwrap_or(12).clamp(2, 32);
+        let maximum_nodes = request.max_nodes.unwrap_or(48_000).clamp(1_000, 250_000) as u32;
+        let depth_report = if mode == "alpha-beta" {
+            search_weighted_belief_paranoid_bounded(&particles, depth, branch_cap, maximum_nodes)
+        } else {
+            search_weighted_belief_maxn_bounded(&particles, depth, branch_cap, maximum_nodes)
+        }
+        .map_err(|error| JsValue::from_str(&format!("{error:?}")))?;
+        let tactical_particles = particles
+            .iter()
+            .map(|particle| (&particle.state, particle.weight))
+            .collect::<Vec<_>>();
+        let tactical = solve_belief_current_turn(
+            &tactical_particles,
+            request.tactical_depth.unwrap_or(18).clamp(4, 32),
+            request.tactical_nodes.unwrap_or(12_000).clamp(100, 100_000),
+        );
+        let mut exact = solve_exact_belief(&particles, ExactActionFamily::Mandatory);
+        let mut chosen = if exact.applicable {
+            exact.chosen.clone()
+        } else if tactical.proven {
+            tactical.principal_line.first().cloned()
+        } else {
+            depth_report.chosen
+        };
+        if !exact.applicable
+            && !tactical.proven
+            && let Some(family) = chosen.as_ref().and_then(exact_family_for_action)
+        {
+            exact = solve_exact_belief(&particles, family);
+            chosen = exact.chosen.clone().or(chosen);
+        }
+        SearchReport {
+            chosen,
+            root_value: depth_report.value,
+            actions: depth_report
+                .actions
+                .into_iter()
+                .map(|candidate| ActionStats {
+                    action: candidate.action,
+                    visits: particles.len() as u32,
+                    availability: (candidate.legal_weight * particles.len() as f32).round() as u32,
+                    availability_weight: candidate.legal_weight,
+                    legal_weight: candidate.legal_weight,
+                    prior: 0.0,
+                    value: candidate.value,
+                    lower_confidence_value: candidate.lower_confidence_value,
+                })
+                .collect(),
+            tactical,
+            exact,
+            statistics: SearchStatistics {
+                iterations: particles.len() as u32,
+                nodes: depth_report.nodes as usize,
+                deepest_decision_depth: depth_report.depth as u16,
+                rollouts: 0,
+                effective_particle_count: effective_particle_count(&particles),
+            },
+        }
+    } else {
+        let mut groups = Vec::<(u64, Vec<BeliefParticle>)>::new();
+        for particle in &particles {
+            let identity = particle.state.observation_hash(particle.state.actor());
+            if let Some((_, members)) = groups
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == identity)
+            {
+                members.push(particle.clone());
+            } else {
+                groups.push((identity, vec![particle.clone()]));
+            }
+        }
+        let ponder = request.ponder.unwrap_or(false);
+        if !ponder && groups.len() > 1 {
+            return Err(JsValue::from_str(
+                "root observation mismatch outside pondering mode",
+            ));
+        }
+        PERSISTENT_SEARCH.with(|slot| {
+            let mut forest = slot.borrow_mut();
+            let group_count = groups.len().max(1) as u32;
+            let mut selected: Option<(f32, SearchReport)> = None;
+            for (identity, group) in groups {
+                let group_weight = group
+                    .iter()
+                    .map(|particle| particle.weight.max(0.0))
+                    .sum::<f32>();
+                let mut group_config = config.clone();
+                if ponder {
+                    group_config.iterations = (group_config.iterations / group_count).max(16);
+                    group_config.max_nodes =
+                        (group_config.max_nodes / group_count as usize).max(1_000);
+                    group_config.tactical_nodes =
+                        (group_config.tactical_nodes / group_count).max(100);
+                }
+                let search_index = forest
+                    .iter()
+                    .position(|search| search.contains_identity(identity))
+                    .unwrap_or_else(|| {
+                        if forest.len() >= 12 {
+                            forest.remove(0);
+                        }
+                        forest.push(Mcts::new(group_config.clone(), &group[0].state));
+                        forest.len() - 1
+                    });
+                let search = &mut forest[search_index];
+                search.reconfigure(group_config);
+                let report = if group.len() == 1 {
+                    search.search(&group[0].state)
+                } else {
+                    search
+                        .search_weighted_belief(&group)
+                        .map_err(|error| JsValue::from_str(&format!("{error:?}")))?
+                };
+                if selected
+                    .as_ref()
+                    .is_none_or(|(weight, _)| group_weight > *weight)
+                {
+                    selected = Some((group_weight, report));
+                }
+            }
+            selected
+                .map(|(_, report)| report)
+                .ok_or_else(|| JsValue::from_str("pondering produced no search group"))
+        })?
+    };
+    serde_wasm_bindgen::to_value(&response(report, particles.len(), algorithm))
+        .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+#[wasm_bindgen]
+pub fn engine_version() -> String {
+    ENGINE_REVISION.to_string()
+}

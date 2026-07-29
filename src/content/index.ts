@@ -1,0 +1,111 @@
+import {
+  installPublicBoardBridge,
+  readPublicBoardSnapshot,
+} from "./board";
+import { findLogRoot } from "./dom";
+import { AssistantOverlay } from "./overlay";
+import { GameSession } from "./session";
+import {
+  readSettings,
+  RESET_NONCE_KEY,
+  SETTINGS_KEY,
+  type AssistantSettings,
+} from "./settings";
+
+const boot = async (): Promise<void> => {
+  if (document.getElementById("colonist-assistant-root")) return;
+  let settings = await readSettings();
+  let session: GameSession | undefined;
+  let currentRoot: HTMLElement | undefined;
+  let currentGameKey: string | undefined;
+  let currentMyPlayer: string | undefined;
+  const initialBoard = readPublicBoardSnapshot();
+  currentGameKey = initialBoard?.gameKey;
+  currentMyPlayer = initialBoard?.myPlayer;
+
+  const overlay = new AssistantOverlay(settings, {
+    reset: () => session?.reset(),
+  });
+  overlay.setSettings(settings);
+  overlay.updateBoard(initialBoard);
+  const removeBoardBridge = installPublicBoardBridge((snapshot) => {
+    if (snapshot?.gameKey) {
+      currentGameKey = snapshot.gameKey;
+      session?.setGameKey(snapshot.gameKey);
+    }
+    if (snapshot?.myPlayer) {
+      currentMyPlayer = snapshot.myPlayer;
+      session?.setMyPlayer(snapshot.myPlayer);
+    }
+    overlay.updateBoard(snapshot ?? readPublicBoardSnapshot());
+  });
+
+  const attach = async (): Promise<void> => {
+    const hasLiveGameSurface = Boolean(
+      document.querySelector(
+        "#game-canvas, script[type='application/json'][data-colonist-public-board], [data-hex-id]",
+      ),
+    );
+    const root = hasLiveGameSurface ? findLogRoot() : undefined;
+    if (!settings.enabled) {
+      session?.stop();
+      session = undefined;
+      currentRoot = undefined;
+      overlay.update(undefined);
+      overlay.updateBoard(undefined);
+      return;
+    }
+    if (!hasLiveGameSurface) {
+      session?.stop();
+      session = undefined;
+      currentRoot = undefined;
+      currentGameKey = undefined;
+      currentMyPlayer = undefined;
+      overlay.update(undefined);
+      overlay.updateBoard(undefined);
+      return;
+    }
+    if (root === currentRoot) return;
+    session?.stop();
+    session = undefined;
+    currentRoot = root;
+    overlay.update(undefined);
+    if (!root) return;
+    const next = new GameSession(
+      root,
+      (updated) => overlay.update(updated),
+      currentGameKey,
+    );
+    session = next;
+    await next.start();
+    next.setMyPlayer(currentMyPlayer);
+  };
+
+  await attach();
+  const poll = window.setInterval(() => void attach(), 900);
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "sync" && changes[SETTINGS_KEY]?.newValue) {
+      settings = {
+        ...settings,
+        ...(changes[SETTINGS_KEY].newValue as Partial<AssistantSettings>),
+      };
+      overlay.setSettings(settings);
+      void attach();
+    }
+    if (area === "sync" && changes[RESET_NONCE_KEY]) session?.reset();
+  });
+
+  window.addEventListener(
+    "pagehide",
+    () => {
+      window.clearInterval(poll);
+      removeBoardBridge();
+      session?.stop();
+      overlay.destroy();
+    },
+    { once: true },
+  );
+};
+
+void boot();

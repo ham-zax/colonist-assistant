@@ -1,0 +1,17 @@
+dist/
+release/
+node_modules/
+engine/target/
+benchmark-results/
+training-data/
+__pycache__/
+coverage/
+.cache/
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+.vscode/
+*.sync-conflict-*
+*.log

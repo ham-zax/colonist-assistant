@@ -1,0 +1,961 @@
+// @vitest-environment jsdom
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import {
+  activeWorkflowAction,
+  destroyActionGuide,
+  renderActionGuide,
+  visibleTurnControl,
+} from "../src/content/action-guide";
+import { emptyResources } from "../src/core/resources";
+
+const rect = {
+  x: 20,
+  y: 20,
+  left: 20,
+  top: 20,
+  right: 100,
+  bottom: 60,
+  width: 80,
+  height: 40,
+  toJSON: () => ({}),
+};
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.stubGlobal("chrome", {
+    runtime: {
+      getURL: (path: string) => `chrome-extension://fixture/${path}`,
+    },
+  });
+  vi.stubGlobal(
+    "getComputedStyle",
+    () =>
+      ({
+        display: "block",
+        visibility: "visible",
+        opacity: "1",
+      }) as CSSStyleDeclaration,
+  );
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(
+    rect as DOMRect,
+  );
+  Object.defineProperty(window, "innerWidth", {
+    configurable: true,
+    value: 1200,
+  });
+  Object.defineProperty(window, "innerHeight", {
+    configurable: true,
+    value: 800,
+  });
+});
+
+afterEach(() => {
+  destroyActionGuide();
+  document.body.replaceChildren();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
+
+describe("action guide autopilot", () => {
+  it("clicks a recommended action without a private-room gate", async () => {
+    const roll = document.createElement("button");
+    roll.textContent = "Roll dice";
+    const clicked = vi.fn();
+    roll.addEventListener("click", clicked);
+    document.body.append(roll);
+
+    renderActionGuide(
+      {
+        kind: "turn-control",
+        control: "roll",
+        label: "Roll dice",
+        signature: "roll",
+        confidence: 1,
+      },
+      { highlight: true, autonomous: true },
+    );
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect(clicked).toHaveBeenCalledOnce();
+  });
+
+  it("clicks an active dice face and never mistakes pass-turn for roll", async () => {
+    const rollGroup = document.createElement("div");
+    rollGroup.id = "roll-dice-button";
+    const leftDie = document.createElement("div");
+    leftDie.className = "diceWrapper-fixture";
+    const rightDie = document.createElement("div");
+    rightDie.className = "diceWrapper-fixture";
+    rollGroup.append(leftDie, rightDie);
+    const pass = document.createElement("button");
+    pass.id = "action-button-pass-turn";
+    const dieClicks = vi.fn();
+    const passClicks = vi.fn();
+    leftDie.addEventListener("click", dieClicks);
+    pass.addEventListener("click", passClicks);
+    document.body.append(rollGroup, pass);
+
+    expect(visibleTurnControl()).toBe("roll");
+    renderActionGuide(
+      {
+        kind: "turn-control",
+        control: "roll",
+        label: "Roll dice",
+        signature: "exact-roll",
+        confidence: 1,
+      },
+      { highlight: true, autonomous: true },
+    );
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect(dieClicks).toHaveBeenCalledOnce();
+    expect(passClicks).not.toHaveBeenCalled();
+  });
+
+  it("treats Colonist's mounted inactive dice as already rolled", async () => {
+    const rollGroup = document.createElement("div");
+    rollGroup.id = "roll-dice-button";
+    for (const value of ["five", "three"]) {
+      const die = document.createElement("div");
+      die.className = "diceWrapper-fixture";
+      const image = document.createElement("img");
+      image.className = "dice-fixture inactive-fixture";
+      image.alt = value;
+      die.append(image);
+      rollGroup.append(die);
+    }
+    const pass = document.createElement("button");
+    pass.id = "action-button-pass-turn";
+    pass.textContent = "End turn";
+    const passClicks = vi.fn();
+    pass.addEventListener("click", passClicks);
+    document.body.append(rollGroup, pass);
+
+    expect(visibleTurnControl()).toBe("end");
+    renderActionGuide(
+      {
+        kind: "turn-control",
+        control: "end",
+        label: "End turn",
+        signature: "end-after-roll",
+        confidence: 1,
+      },
+      { highlight: true, autonomous: true },
+    );
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect(passClicks).toHaveBeenCalledOnce();
+  });
+
+  it("clicks the exact inner road control instead of its multi-build wrapper", async () => {
+    const wrapper = document.createElement("div");
+    wrapper.className = "roadButton-fixture";
+    const road = document.createElement("div");
+    road.className = "root-fixture actionButton-fixture";
+    const roadImage = document.createElement("img");
+    roadImage.src = "https://cdn.colonist.io/dist/assets/road_red.fixture.svg";
+    road.append(roadImage);
+    const settlement = document.createElement("div");
+    settlement.className = "root-fixture actionButton-fixture";
+    const settlementImage = document.createElement("img");
+    settlementImage.src =
+      "https://cdn.colonist.io/dist/assets/settlement_red.fixture.svg";
+    settlement.append(settlementImage);
+    wrapper.append(road, settlement);
+    const roadClicks = vi.fn();
+    const settlementClicks = vi.fn();
+    road.addEventListener("click", roadClicks);
+    settlement.addEventListener("click", settlementClicks);
+    document.body.append(wrapper);
+
+    renderActionGuide(
+      {
+        kind: "build",
+        build: "road",
+        label: "Build road",
+        signature: "exact-road-control",
+        confidence: 1,
+      },
+      { highlight: true, autonomous: true },
+    );
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect(roadClicks).toHaveBeenCalledOnce();
+    expect(settlementClicks).not.toHaveBeenCalled();
+  });
+
+  it("confirms a development card after opening Colonist's action panel", async () => {
+    const card = document.createElement("div");
+    card.className = "cardContainer-fixture";
+    card.innerHTML = '<img src="card_knight.fixture.svg">';
+    const cardClicks = vi.fn();
+    const confirmClicks = vi.fn();
+    card.addEventListener("click", () => {
+      cardClicks();
+      const modal = document.createElement("div");
+      modal.className = "actionBox-fixture";
+      const confirm = document.createElement("div");
+      confirm.className = "confirmButton-fixture";
+      confirm.innerHTML = '<img src="icon_check.fixture.svg">';
+      confirm.addEventListener("click", confirmClicks);
+      modal.append(confirm);
+      document.body.append(modal);
+    });
+    document.body.append(card);
+
+    renderActionGuide(
+      {
+        kind: "development",
+        card: "knight",
+        label: "Play knight",
+        signature: "play-knight",
+        confidence: 1,
+      },
+      { highlight: true, autonomous: true },
+    );
+    await vi.advanceTimersByTimeAsync(1_200);
+
+    expect(cardClicks).toHaveBeenCalledOnce();
+    expect(confirmClicks).toHaveBeenCalledOnce();
+  });
+
+  it("validates a development workflow after the card leaves the playable inventory", async () => {
+    let firstClickLegal = true;
+    const card = document.createElement("div");
+    card.className = "cardContainer-fixture";
+    card.innerHTML = '<img src="card_yearofplenty.fixture.svg">';
+    const resourceClicks = vi.fn();
+    const confirmClicks = vi.fn();
+    card.addEventListener("click", () => {
+      firstClickLegal = false;
+      const modal = document.createElement("div");
+      modal.className = "actionBox-fixture";
+      const confirm = document.createElement("div");
+      confirm.className = "confirmButton-fixture";
+      confirm.innerHTML = '<img src="icon_check.fixture.svg">';
+      confirm.addEventListener("click", confirmClicks);
+      const resource = document.createElement("button");
+      resource.innerHTML = '<img src="card_brick.svg">';
+      resource.addEventListener("click", resourceClicks);
+      modal.append(confirm, resource);
+      document.body.append(modal);
+    });
+    document.body.append(card);
+
+    renderActionGuide(
+      {
+        kind: "development",
+        card: "year-of-plenty",
+        label: "Play year of plenty",
+        signature: "play-yop",
+        confidence: 1,
+        followupResources: ["brick", "brick"],
+      },
+      {
+        highlight: true,
+        autonomous: true,
+        validate: () => firstClickLegal,
+        validateContinuation: () => true,
+      },
+    );
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(confirmClicks).toHaveBeenCalled();
+    expect(resourceClicks).toHaveBeenCalledTimes(2);
+  });
+
+  it("sends a validated board command for canvas autopilot", async () => {
+    const messages: unknown[] = [];
+    window.addEventListener("message", (event) => {
+      if (event.data?.source === "colonist-assistant-content") {
+        messages.push(event.data);
+      }
+    });
+
+    renderActionGuide(
+      {
+        kind: "board",
+        boardAction: "settlement",
+        targetId: "v:1,2,0",
+        point: { x: 240, y: 180 },
+        label: "Place settlement here",
+        signature: "board-settlement",
+        confidence: 1,
+      },
+      { highlight: true, autonomous: true },
+    );
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(messages).toContainEqual({
+      source: "colonist-assistant-content",
+      type: "execute-board-action",
+      action: "settlement",
+      targetId: "v:1,2,0",
+      signature: "board-settlement",
+    });
+    renderActionGuide(undefined, { highlight: true, autonomous: true });
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(messages).toHaveLength(1);
+  });
+
+  it("cancels a stale robber-victim follow-up after the board phase advances", async () => {
+    const playerModal = document.createElement("div");
+    playerModal.className = "selectPlayer-fixture";
+    const rival = document.createElement("button");
+    rival.textContent = "Rival";
+    const clicked = vi.fn();
+    rival.addEventListener("click", clicked);
+    playerModal.append(rival);
+
+    renderActionGuide(
+      {
+        kind: "board",
+        boardAction: "robber",
+        targetId: "h:3,2",
+        point: { x: 300, y: 240 },
+        label: "Move robber here",
+        signature: "robber-followup",
+        confidence: 1,
+        followupPlayer: "Rival",
+      },
+      { highlight: true, autonomous: true },
+    );
+    await vi.advanceTimersByTimeAsync(60);
+    renderActionGuide(undefined, { highlight: true, autonomous: true });
+    document.body.append(playerModal);
+    await vi.advanceTimersByTimeAsync(6_000);
+
+    expect(clicked).not.toHaveBeenCalled();
+  });
+
+  it("releases the victim workflow as soon as Colonist closes the picker", async () => {
+    const playerModal = document.createElement("div");
+    playerModal.className = "selectPlayer-fixture";
+    const rival = document.createElement("button");
+    rival.textContent = "Rival";
+    playerModal.append(rival);
+    document.body.append(playerModal);
+
+    renderActionGuide(
+      {
+        kind: "player",
+        player: "Rival",
+        label: "Steal from Rival",
+        signature: "victim-workflow",
+        confidence: 1,
+      },
+      { highlight: true, autonomous: false },
+    );
+
+    expect(activeWorkflowAction("none", true)?.kind).toBe("player");
+    expect(activeWorkflowAction("none", false)).toBeUndefined();
+  });
+
+  it.each([
+    ["decline", 1],
+    ["accept", 2],
+  ] as const)(
+    "clicks the current Colonist %s trade control",
+    async (verdict, expectedIndex) => {
+      const wrapper = document.createElement("div");
+      wrapper.className = "gameTradeOffersWrapper-fixture";
+      const offer = document.createElement("div");
+      offer.className = "tradeContainer-fixture";
+      const clicks = [vi.fn(), vi.fn(), vi.fn()];
+      for (const [index, clicked] of clicks.entries()) {
+        const button = document.createElement("div");
+        button.className = "tradeButton-fixture";
+        button.addEventListener("click", clicked);
+        offer.append(button);
+      }
+      wrapper.append(offer);
+      document.body.append(wrapper);
+
+      renderActionGuide(
+        {
+          kind: "trade",
+          offerIndex: 0,
+          verdict,
+          label: `${verdict} trade`,
+          signature: `trade-${verdict}`,
+          confidence: 1,
+        },
+        { highlight: true, autonomous: true },
+      );
+      await vi.advanceTimersByTimeAsync(800);
+
+      clicks.forEach((clicked, index) => {
+        if (index === expectedIndex) expect(clicked).toHaveBeenCalledOnce();
+        else expect(clicked).not.toHaveBeenCalled();
+      });
+    },
+  );
+
+  it("executes the enabled accepted-player check instead of an inert response", async () => {
+    const wrapper = document.createElement("div");
+    wrapper.className = "gameTradeOffersWrapper-fixture";
+    const offer = document.createElement("div");
+    offer.className = "tradeContainer-fixture";
+    const clicks = [vi.fn(), vi.fn(), vi.fn(), vi.fn()];
+    for (const [index, clicked] of clicks.entries()) {
+      const button = document.createElement("div");
+      button.className = "tradeButton-fixture";
+      const foreground = document.createElement("div");
+      if (index < 2) foreground.className = "foregroundDisabled-fixture";
+      const icon = document.createElement("img");
+      icon.src =
+        index === 2
+          ? "https://cdn.colonist.io/dist/assets/icon_check.fixture.svg"
+          : "https://cdn.colonist.io/dist/assets/icon_x.fixture.svg";
+      foreground.append(icon);
+      button.append(foreground);
+      button.addEventListener("click", clicked);
+      offer.append(button);
+    }
+    wrapper.append(offer);
+    document.body.append(wrapper);
+
+    renderActionGuide(
+      {
+        kind: "trade-partner",
+        offerIndex: 0,
+        acceptedIndex: 0,
+        player: "Ajax",
+        label: "Trade with Ajax",
+        signature: "execute-accepted-trade",
+        confidence: 1,
+      },
+      { highlight: true, autonomous: true },
+    );
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect(clicks[2]).toHaveBeenCalledOnce();
+    expect(clicks[0]).not.toHaveBeenCalled();
+    expect(clicks[1]).not.toHaveBeenCalled();
+    expect(clicks[3]).not.toHaveBeenCalled();
+  });
+
+  it("cancels an unanswered outgoing offer through its exact offer control", async () => {
+    const wrapper = document.createElement("div");
+    wrapper.className = "gameTradeOffersWrapper-fixture";
+    const offer = document.createElement("div");
+    offer.className = "tradeContainer-fixture";
+    const cancel = document.createElement("button");
+    cancel.className = "tradeButton-fixture";
+    cancel.textContent = "Cancel offer";
+    const cancelClick = vi.fn();
+    cancel.addEventListener("click", cancelClick);
+    offer.append(cancel);
+    wrapper.append(offer);
+    document.body.append(wrapper);
+
+    renderActionGuide(
+      {
+        kind: "trade-cancel",
+        offerIndex: 0,
+        label: "Cancel unanswered trade",
+        signature: "cancel-outgoing",
+        confidence: 1,
+      },
+      { highlight: true, autonomous: true },
+    );
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect(cancelClick).toHaveBeenCalledOnce();
+  });
+
+  it("opens and completes a recommended counteroffer", async () => {
+    const wrapper = document.createElement("div");
+    wrapper.className = "gameTradeOffersWrapper-fixture";
+    const offer = document.createElement("div");
+    offer.className = "tradeContainer-fixture";
+    const counter = document.createElement("button");
+    counter.className = "tradeButton-fixture";
+    const decline = document.createElement("button");
+    decline.className = "tradeButton-fixture";
+    const accept = document.createElement("button");
+    accept.className = "tradeButton-fixture";
+    const clicks: string[] = [];
+    counter.addEventListener("click", () => {
+      clicks.push("counter");
+      const inventory = document.createElement("div");
+      inventory.id = "player-card-inventory";
+      inventory.innerHTML =
+        '<button class="card"><img src="card_brick.svg"></button>';
+      const offeredProposal = document.createElement("div");
+      offeredProposal.className = "proposalOfferedHalfContainer-fixture";
+      const wantedProposal = document.createElement("div");
+      wantedProposal.className = "proposalWantedHalfContainer-fixture";
+      inventory.querySelector("button")?.addEventListener("click", () => {
+        clicks.push("give-brick");
+        offeredProposal.innerHTML =
+          '<button data-card-enum="2"><img src="card_brick.svg"></button>';
+      });
+      const wanted = document.createElement("div");
+      wanted.className = "wantedCardSelectorContainer-fixture";
+      wanted.innerHTML =
+        '<button class="card"><img src="card_lumber.svg"></button>';
+      wanted.querySelector("button")?.addEventListener("click", () => {
+        clicks.push("get-lumber");
+        wantedProposal.innerHTML =
+          '<button data-card-enum="1"><img src="card_lumber.svg"></button>';
+      });
+      const send = document.createElement("button");
+      send.id = "action-button-trade-players";
+      send.addEventListener("click", () => {
+        clicks.push("send");
+        inventory.remove();
+        wanted.remove();
+        offeredProposal.remove();
+        wantedProposal.remove();
+        send.remove();
+      });
+      document.body.append(
+        inventory,
+        wanted,
+        offeredProposal,
+        wantedProposal,
+        send,
+      );
+    });
+    offer.append(counter, decline, accept);
+    wrapper.append(offer);
+    document.body.append(wrapper);
+    const give = emptyResources();
+    give.brick = 1;
+    const receive = emptyResources();
+    receive.lumber = 1;
+
+    renderActionGuide(
+      {
+        kind: "trade",
+        offerIndex: 0,
+        verdict: "counter",
+        counterGive: give,
+        counterReceive: receive,
+        label: "Counter trade",
+        signature: "trade-counter",
+        confidence: 0.8,
+      },
+      { highlight: true, autonomous: true },
+    );
+    await vi.advanceTimersByTimeAsync(3_500);
+
+    expect(clicks).toEqual([
+      "counter",
+      "give-brick",
+      "get-lumber",
+      "send",
+    ]);
+  });
+
+  it("completes every click in an outgoing player trade", async () => {
+    const open = document.createElement("button");
+    open.id = "action-button-trade";
+    const clicks: string[] = [];
+    open.addEventListener("click", () => {
+      clicks.push("open");
+      const inventory = document.createElement("div");
+      inventory.id = "player-card-inventory";
+      inventory.innerHTML =
+        '<button class="card"><img src="card_brick.svg"></button>';
+      const offeredProposal = document.createElement("div");
+      offeredProposal.className = "proposalOfferedHalfContainer-fixture";
+      const wantedProposal = document.createElement("div");
+      wantedProposal.className = "proposalWantedHalfContainer-fixture";
+      inventory.querySelector("button")?.addEventListener("click", () => {
+        clicks.push("give-brick");
+        offeredProposal.innerHTML =
+          '<button data-card-enum="2"><img src="card_brick.svg"></button>';
+      });
+      const wanted = document.createElement("div");
+      wanted.className = "wantedCardSelectorContainer-fixture";
+      wanted.innerHTML =
+        '<button class="card"><img src="card_lumber.svg"></button>';
+      wanted.querySelector("button")?.addEventListener("click", () => {
+        clicks.push("get-lumber");
+        wantedProposal.innerHTML =
+          '<button data-card-enum="1"><img src="card_lumber.svg"></button>';
+      });
+      const send = document.createElement("button");
+      send.id = "action-button-trade-players";
+      send.addEventListener("click", () => {
+        clicks.push("send");
+        inventory.remove();
+        wanted.remove();
+        offeredProposal.remove();
+        wantedProposal.remove();
+        send.remove();
+      });
+      document.body.append(
+        inventory,
+        wanted,
+        offeredProposal,
+        wantedProposal,
+        send,
+      );
+    });
+    document.body.append(open);
+    const give = emptyResources();
+    give.brick = 1;
+    const receive = emptyResources();
+    receive.lumber = 1;
+
+    const action = {
+      kind: "trade-builder" as const,
+      mode: "player" as const,
+      give,
+      receive,
+      label: "Make trade",
+      signature: "trade",
+      confidence: 0.7,
+    };
+    renderActionGuide(action, {
+      highlight: true,
+      autonomous: false,
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(clicks).toEqual([]);
+
+    renderActionGuide(action, {
+      highlight: true,
+      autonomous: true,
+    });
+    await vi.advanceTimersByTimeAsync(3_500);
+
+    expect(clicks).toEqual([
+      "open",
+      "give-brick",
+      "get-lumber",
+      "send",
+    ]);
+  });
+
+  it("aborts, closes, and reports a player trade rejected by Colonist", async () => {
+    const open = document.createElement("button");
+    open.id = "action-button-trade";
+    const sendClick = vi.fn();
+    const executions = vi.fn();
+    const closePanel = () => {
+      document.querySelector("#player-card-inventory")?.remove();
+      document
+        .querySelector("[class*='wantedCardSelectorContainer-']")
+        ?.remove();
+      document
+        .querySelector("[class*='proposalOfferedHalfContainer-']")
+        ?.remove();
+      document
+        .querySelector("[class*='proposalWantedHalfContainer-']")
+        ?.remove();
+      document.querySelector("#action-button-trade-players")?.remove();
+    };
+    open.addEventListener("click", () => {
+      if (document.querySelector("#player-card-inventory")) {
+        closePanel();
+        return;
+      }
+      const inventory = document.createElement("div");
+      inventory.id = "player-card-inventory";
+      inventory.innerHTML =
+        '<button><img src="card_brick.svg"></button>';
+      const wanted = document.createElement("div");
+      wanted.className = "wantedCardSelectorContainer-fixture";
+      wanted.innerHTML =
+        '<button><img src="card_lumber.svg"></button>';
+      const offeredProposal = document.createElement("div");
+      offeredProposal.className = "proposalOfferedHalfContainer-fixture";
+      const wantedProposal = document.createElement("div");
+      wantedProposal.className = "proposalWantedHalfContainer-fixture";
+      inventory.querySelector("button")?.addEventListener("click", () => {
+        offeredProposal.innerHTML =
+          '<button data-card-enum="2"><img src="card_brick.svg"></button>';
+      });
+      wanted.querySelector("button")?.addEventListener("click", () => {
+        wantedProposal.innerHTML =
+          '<button data-card-enum="1"><img src="card_lumber.svg"></button>';
+        const alert = document.createElement("div");
+        alert.setAttribute("role", "alert");
+        alert.textContent = "No one has wanted resource";
+        document.body.append(alert);
+      });
+      const send = document.createElement("button");
+      send.id = "action-button-trade-players";
+      send.addEventListener("click", sendClick);
+      document.body.append(
+        inventory,
+        wanted,
+        offeredProposal,
+        wantedProposal,
+        send,
+      );
+    });
+    document.body.append(open);
+    const give = emptyResources();
+    give.brick = 1;
+    const receive = emptyResources();
+    receive.lumber = 1;
+
+    renderActionGuide(
+      {
+        kind: "trade-builder",
+        mode: "player",
+        give,
+        receive,
+        label: "Make trade",
+        signature: "rejected-trade",
+        confidence: 0.8,
+      },
+      {
+        highlight: true,
+        autonomous: true,
+        onExecution: executions,
+      },
+    );
+    await vi.advanceTimersByTimeAsync(4_000);
+
+    expect(sendClick).not.toHaveBeenCalled();
+    expect(executions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        succeeded: false,
+        signature: "rejected-trade",
+        reason: expect.stringContaining("No one has wanted resource"),
+      }),
+    );
+    expect(document.querySelector("#player-card-inventory")).toBeNull();
+  });
+
+  it("closes a stale trade panel before playing a development card", async () => {
+    const trade = document.createElement("button");
+    trade.id = "action-button-trade";
+    const inventory = document.createElement("div");
+    inventory.id = "player-card-inventory";
+    const wanted = document.createElement("div");
+    wanted.className = "wantedCardSelectorContainer-fixture";
+    const proposal = document.createElement("div");
+    proposal.className = "proposalWantedHalfContainer-fixture";
+    const submit = document.createElement("button");
+    submit.id = "action-button-trade-players";
+    const closeClick = vi.fn();
+    trade.addEventListener("click", () => {
+      closeClick();
+      inventory.remove();
+      wanted.remove();
+      proposal.remove();
+      submit.remove();
+    });
+    const card = document.createElement("button");
+    card.className = "cardContainer-fixture";
+    card.innerHTML = '<img src="card_knight.svg">';
+    const cardClick = vi.fn();
+    const confirmClick = vi.fn();
+    card.addEventListener("click", () => {
+      cardClick();
+      const modal = document.createElement("div");
+      modal.className = "actionBox-fixture";
+      const confirm = document.createElement("button");
+      confirm.className = "confirmButton-fixture";
+      confirm.addEventListener("click", confirmClick);
+      modal.append(confirm);
+      document.body.append(modal);
+    });
+    document.body.append(trade, inventory, wanted, proposal, submit, card);
+    const action = {
+      kind: "development" as const,
+      card: "knight" as const,
+      label: "Play knight",
+      signature: "close-then-knight",
+      confidence: 1,
+    };
+    const options = { highlight: true, autonomous: true };
+
+    renderActionGuide(action, options);
+    await vi.advanceTimersByTimeAsync(700);
+    expect(closeClick).toHaveBeenCalledOnce();
+    expect(cardClick).not.toHaveBeenCalled();
+
+    renderActionGuide(action, options);
+    await vi.advanceTimersByTimeAsync(1_400);
+    expect(cardClick).toHaveBeenCalledOnce();
+    expect(confirmClick).toHaveBeenCalledOnce();
+  });
+
+  it("does not mistake Colonist's persistent hand selectors for an open trade panel", async () => {
+    const trade = document.createElement("button");
+    trade.id = "action-button-trade";
+    const tradeClick = vi.fn();
+    trade.addEventListener("click", tradeClick);
+    const inventory = document.createElement("div");
+    inventory.id = "player-card-inventory";
+    const wanted = document.createElement("div");
+    wanted.className = "wantedCardSelectorContainer-fixture";
+    const card = document.createElement("button");
+    card.className = "cardContainer-fixture";
+    card.innerHTML = '<img src="card_knight.svg">';
+    const cardClick = vi.fn();
+    card.addEventListener("click", () => {
+      cardClick();
+      const modal = document.createElement("div");
+      modal.className = "actionBox-fixture";
+      const confirm = document.createElement("button");
+      confirm.className = "confirmButton-fixture";
+      modal.append(confirm);
+      document.body.append(modal);
+    });
+    document.body.append(trade, inventory, wanted, card);
+
+    renderActionGuide(
+      {
+        kind: "development",
+        card: "knight",
+        label: "Play knight",
+        signature: "persistent-hand-knight",
+        confidence: 1,
+      },
+      { highlight: true, autonomous: true },
+    );
+    await vi.advanceTimersByTimeAsync(1_200);
+
+    expect(cardClick).toHaveBeenCalledOnce();
+    expect(tradeClick).not.toHaveBeenCalled();
+  });
+
+  it("cancels a multi-click trade as soon as its state validation expires", async () => {
+    let valid = true;
+    const open = document.createElement("button");
+    open.id = "action-button-trade";
+    const resourceClick = vi.fn();
+    const sendClick = vi.fn();
+    open.addEventListener("click", () => {
+      valid = false;
+      const inventory = document.createElement("div");
+      inventory.id = "player-card-inventory";
+      const brick = document.createElement("button");
+      brick.className = "card";
+      brick.innerHTML = '<img src="card_brick.svg">';
+      brick.addEventListener("click", resourceClick);
+      inventory.append(brick);
+      const wanted = document.createElement("div");
+      wanted.className = "wantedCardSelectorContainer-fixture";
+      wanted.innerHTML =
+        '<button class="card"><img src="card_lumber.svg"></button>';
+      const send = document.createElement("button");
+      send.id = "action-button-trade-players";
+      send.addEventListener("click", sendClick);
+      document.body.append(inventory, wanted, send);
+    });
+    document.body.append(open);
+    const give = emptyResources();
+    give.brick = 1;
+    const receive = emptyResources();
+    receive.lumber = 1;
+
+    renderActionGuide(
+      {
+        kind: "trade-builder",
+        mode: "player",
+        give,
+        receive,
+        label: "Make trade",
+        signature: "stale-trade",
+        confidence: 0.9,
+      },
+      {
+        highlight: true,
+        autonomous: true,
+        validate: () => valid,
+      },
+    );
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(resourceClick).not.toHaveBeenCalled();
+    expect(sendClick).not.toHaveBeenCalled();
+  });
+
+  it("selects the complete discard plan and confirms it", async () => {
+    const modal = document.createElement("div");
+    modal.className = "actionBox-fixture";
+    modal.append("Selecciona cartas");
+    const inventory = document.createElement("div");
+    inventory.id = "player-card-inventory";
+    const brick = document.createElement("button");
+    brick.className = "card";
+    brick.innerHTML = '<img src="card_brick.svg">';
+    inventory.append(brick);
+    const confirm = document.createElement("div");
+    confirm.className = "confirmButton-fixture";
+    confirm.innerHTML = '<img src="icon_check.fixture.svg">';
+    const brickClicks = vi.fn();
+    const confirmClicks = vi.fn();
+    brick.addEventListener("click", () => {
+      brickClicks();
+      if (!modal.querySelector("[data-card-enum='2']")) {
+        const selected = document.createElement("button");
+        selected.dataset.cardEnum = "2";
+        selected.innerHTML = '<img src="card_brick.svg">';
+        modal.prepend(selected);
+      }
+    });
+    confirm.addEventListener("click", confirmClicks);
+    modal.append(confirm);
+    document.body.append(modal, inventory);
+    const cards = emptyResources();
+    cards.brick = 2;
+
+    renderActionGuide(
+      {
+        kind: "discard",
+        cards,
+        label: "Discard 2 cards",
+        signature: "discard",
+        confidence: 1,
+      },
+      { highlight: true, autonomous: true },
+    );
+    await vi.advanceTimersByTimeAsync(1_600);
+
+    expect(brickClicks).toHaveBeenCalledTimes(2);
+    expect(confirmClicks).toHaveBeenCalledOnce();
+
+    // The board bridge can briefly retain the completed mandatory phase while
+    // Colonist commits the transaction. Re-rendering that identical snapshot
+    // must not start a second discard workflow against the reduced hand.
+    renderActionGuide(
+      {
+        kind: "discard",
+        cards,
+        label: "Discard 2 cards",
+        signature: "discard",
+        confidence: 1,
+      },
+      { highlight: true, autonomous: true },
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(brickClicks).toHaveBeenCalledTimes(2);
+    expect(confirmClicks).toHaveBeenCalledOnce();
+  });
+
+  it("releases a mandatory workflow as soon as Colonist advances phases", () => {
+    const cards = emptyResources();
+    cards.grain = 3;
+    renderActionGuide(
+      {
+        kind: "discard",
+        cards,
+        label: "Discard 3 cards",
+        signature: "discard-phase",
+        confidence: 1,
+      },
+      { highlight: true, autonomous: true },
+    );
+
+    expect(activeWorkflowAction("discard")?.kind).toBe("discard");
+    expect(activeWorkflowAction("none")).toBeUndefined();
+    expect(
+      document.getElementById("colonist-assistant-action-guide"),
+    ).toBeNull();
+  });
+});

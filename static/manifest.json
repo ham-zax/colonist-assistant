@@ -1,0 +1,59 @@
+{
+  "manifest_version": 3,
+  "name": "Colonist Assistant",
+  "short_name": "Colonist Assistant",
+  "description": "Local-only card tracking and live board-aware advice for friendly Colonist games.",
+  "version": "0.7.7",
+  "permissions": [
+    "storage"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "host_permissions": [
+    "https://colonist.io/*"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "assets/fonts/ArchivoNarrow-Variable.ttf",
+        "colonist_search_bg.wasm",
+        "page-bridge.js"
+      ],
+      "matches": [
+        "https://colonist.io/*"
+      ]
+    }
+  ],
+  "action": {
+    "default_title": "Colonist Assistant",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "assets/icons/icon-16.png",
+      "32": "assets/icons/icon-32.png",
+      "48": "assets/icons/icon-48.png",
+      "128": "assets/icons/icon-128.png"
+    }
+  },
+  "icons": {
+    "16": "assets/icons/icon-16.png",
+    "32": "assets/icons/icon-32.png",
+    "48": "assets/icons/icon-48.png",
+    "128": "assets/icons/icon-128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://colonist.io/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

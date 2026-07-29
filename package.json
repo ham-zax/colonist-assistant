@@ -1,0 +1,31 @@
+{
+  "name": "colonist-assistant",
+  "version": "0.7.7",
+  "private": true,
+  "type": "module",
+  "description": "Explainable, board-aware guidance for friendly Colonist games.",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "benchmark:colonist": "node scripts/benchmark-colonist.mjs",
+    "benchmark:catanatron": "python3 scripts/benchmark-catanatron.py",
+    "benchmark:local": "node scripts/benchmark-local.mjs",
+    "train:model": "python3 scripts/train-strategic-model.py",
+    "train:trade": "python3 scripts/train-trade-model.py",
+    "train:expert": "node scripts/run-expert-iteration.mjs",
+    "replay:decisions": "node scripts/replay-decisions.mjs",
+    "verify:rust": "node scripts/verify-rust.mjs",
+    "verify": "npm run check && npm run test && npm run verify:rust && npm run build"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.1.4",
+    "@types/jsdom": "^28.0.3",
+    "esbuild": "^0.25.8",
+    "jsdom": "^26.1.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}

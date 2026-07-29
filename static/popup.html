@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Colonist Assistant</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <!--
+    THESIS: A compact instrument controls the live assistant without becoming a miniature dashboard.
+    OWN-WORLD: Matte midnight field, mineral-white type, sulfur signals, ruled settings, and tabular status data.
+    STORY: Confirm the assistant is live, then return to the board.
+    FIRST VIEWPORT: Product identity, one live readout, one switch, and two plain actions.
+    FORM: The table-side scorebug reduced to its essential toolbar controls.
+    -->
+    <header class="topbar">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+        <path d="M16 2.8 27.4 9.4v13.2L16 29.2 4.6 22.6V9.4L16 2.8Z" fill="none" stroke="currentColor" stroke-width="1.7"/>
+        <path d="M10 18.8 16 8l6 10.8M12.2 15h7.6M9.1 22.1h13.8" fill="none" stroke="currentColor" stroke-width="1.8"/>
+        <circle cx="16" cy="8" r="1.8" fill="currentColor"/>
+      </svg>
+      <div>
+        <h1>Colonist Assistant</h1>
+        <p>Public evidence · explainable advice</p>
+      </div>
+    </header>
+
+    <main>
+      <section id="status" class="status" aria-live="polite">
+        <strong>Waiting for a game</strong>
+        <span>Open Colonist and start a friendly match.</span>
+      </section>
+
+      <section class="settings" aria-label="Assistant settings">
+        <div class="section-label">ASSISTANT</div>
+        <label>
+          <span><b>Show on Colonist</b><small>Display your live advice and board marker</small></span>
+          <input type="checkbox" data-setting="enabled" />
+          <i></i>
+        </label>
+        <label>
+          <span><b>Highlight next click</b><small>Circle the recommended Colonist control or card</small></span>
+          <input type="checkbox" data-setting="highlightNextAction" />
+          <i></i>
+        </label>
+        <label>
+          <span><b>Autopilot</b><small>Play every high-confidence step automatically in the current match</small></span>
+          <input type="checkbox" data-setting="autonomousPrivateGames" />
+          <i></i>
+        </label>
+        <div class="select-row">
+          <span><b>Decision engine</b><small>Choose how strategic actions and win odds are evaluated</small></span>
+          <select id="engine" aria-label="Decision engine">
+            <option value="deep-search">Deep MaxN ★</option>
+            <option value="deep-alpha-beta">AlphaBeta</option>
+            <option value="deep-puct">Belief PUCT 🧪</option>
+            <option value="hybrid">Hybrid</option>
+            <option value="race-eta">Race ETA</option>
+            <option value="vector-mcts">Vector rollouts</option>
+          </select>
+        </div>
+      </section>
+
+      <div class="actions">
+        <a href="https://colonist.io/" target="_blank" rel="noreferrer">Open Colonist ↗</a>
+        <button id="reset">Reset session</button>
+      </div>
+    </main>
+
+    <footer>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.5 2.8 8.1 7 10 4.2-1.9 7-5.5 7-10V6l-7-3Z"/><path d="m9 12 2 2 4-4"/></svg>
+      <span>Local-only. No analytics, ads, accounts, or runtime network requests.</span>
+      <b id="version" aria-label="Installed extension version"></b>
+    </footer>
+    <script src="popup.js"></script>
+  </body>
+</html>

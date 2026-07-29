@@ -1,0 +1,316 @@
+import { parseLogSnapshot } from "../core/parser";
+import { createTrackerState, reduceTracker, replayEvents } from "../core/tracker";
+import type { StoredEvent, TrackerState } from "../core/types";
+import {
+  detectLanguage,
+  findMessageElements,
+  hashString,
+  snapshotMessage,
+  stableMessageId,
+} from "./dom";
+
+interface StoredSession {
+  schema: 3;
+  id: string;
+  page: string;
+  gameKey?: string;
+  startedAt: number;
+  updatedAt: number;
+  events: StoredEvent[];
+  seenIds: string[];
+  partialHistory: boolean;
+  unmatchedCount: number;
+}
+
+export interface SessionSummary {
+  active: boolean;
+  sessionId: string;
+  playerCount: number;
+  eventCount: number;
+  possibilities: number;
+  partialHistory: boolean;
+  updatedAt: number;
+}
+
+const ACTIVE_SESSION_KEY = "colonistAssistantActiveSession";
+const LATEST_SUMMARY_KEY = "colonistAssistantLatestSummary";
+const SESSION_PREFIX = "colonistAssistantSession:";
+const MAX_STORED_EVENTS = 1600;
+const MAX_SEEN_IDS = 2600;
+
+const pageIdentity = (): string => `${location.origin}${location.pathname}${location.search}`;
+
+const canonicalPlayer = (
+  player: string,
+  myPlayer?: string,
+): string => (myPlayer && player === "You" ? myPlayer : player);
+
+export const canonicalizeEvent = (
+  event: StoredEvent,
+  myPlayer?: string,
+): StoredEvent => {
+  if (!myPlayer || myPlayer === "You") return event;
+  if (event.type === "transfer" || event.type === "unknown-transfer") {
+    return {
+      ...event,
+      from: canonicalPlayer(event.from, myPlayer),
+      to: canonicalPlayer(event.to, myPlayer),
+    };
+  }
+  if (event.type === "trade") {
+    return {
+      ...event,
+      player: canonicalPlayer(event.player, myPlayer),
+      ...(event.acceptingPlayer
+        ? {
+            acceptingPlayer: canonicalPlayer(
+              event.acceptingPlayer,
+              myPlayer,
+            ),
+          }
+        : {}),
+    };
+  }
+  return {
+    ...event,
+    player: canonicalPlayer(event.player, myPlayer),
+  };
+};
+
+const deriveId = (): string => {
+  const pathGameId = location.pathname.match(/\/game\/([^/?#]+)/)?.[1];
+  const queryGameId = new URLSearchParams(location.search).get("gameId");
+  return pathGameId || queryGameId || hashString(pageIdentity());
+};
+
+export class GameSession {
+  readonly id: string;
+  state: TrackerState = createTrackerState();
+  events: StoredEvent[] = [];
+  partialHistory = false;
+  unmatchedCount = 0;
+  startedAt = Date.now();
+  gameKey?: string;
+
+  private readonly root: HTMLElement;
+  private readonly seenIds = new Set<string>();
+  private readonly seenElements = new WeakSet<Element>();
+  private observer?: MutationObserver;
+  private saveTimer?: number;
+  private syntheticSequence = 0;
+  private disposed = false;
+  private myPlayer?: string;
+
+  constructor(
+    root: HTMLElement,
+    private readonly onUpdate: (session: GameSession) => void,
+    gameKey?: string,
+  ) {
+    this.root = root;
+    this.id = deriveId();
+    this.gameKey = gameKey;
+  }
+
+  async start(): Promise<void> {
+    await this.restore();
+    this.scan();
+    this.observer = new MutationObserver(() => this.scan());
+    this.observer.observe(this.root, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["data-index", "src", "style"],
+    });
+    this.onUpdate(this);
+  }
+
+  stop(): void {
+    this.disposed = true;
+    this.observer?.disconnect();
+    if (this.saveTimer) window.clearTimeout(this.saveTimer);
+    void this.save();
+  }
+
+  reset(rescan = true): void {
+    this.state = createTrackerState();
+    this.events = [];
+    this.partialHistory = false;
+    this.unmatchedCount = 0;
+    this.seenIds.clear();
+    this.syntheticSequence = 0;
+    if (rescan) this.scan(true);
+    this.queueSave();
+    this.onUpdate(this);
+  }
+
+  setGameKey(gameKey: string): void {
+    if (!gameKey || gameKey === this.gameKey) return;
+    const hadGameKey = Boolean(this.gameKey);
+    this.gameKey = gameKey;
+    if (hadGameKey) {
+      // Do not immediately re-ingest the previous game's still-mounted log.
+      // Colonist can publish the new game identity a frame before replacing it.
+      this.reset(false);
+      return;
+    }
+    this.queueSave();
+  }
+
+  setMyPlayer(myPlayer?: string): void {
+    const normalized = myPlayer?.trim();
+    if (
+      !normalized ||
+      normalized === "You" ||
+      normalized === this.myPlayer
+    ) {
+      return;
+    }
+    this.myPlayer = normalized;
+    const canonical = this.events.map((event) =>
+      canonicalizeEvent(event, normalized),
+    );
+    const changed = canonical.some(
+      (event, index) => event !== this.events[index],
+    );
+    if (!changed) return;
+    this.events = canonical;
+    this.state = replayEvents(this.events);
+    this.queueSave();
+    this.onUpdate(this);
+  }
+
+  private scan(force = false): void {
+    if (this.disposed) return;
+    const language = detectLanguage();
+    const elements = findMessageElements(this.root);
+    const occurrence = new Map<string, number>();
+    const candidates: Array<{ element: Element; id: string; index: number }> = [];
+
+    for (const element of elements) {
+      const snapshot = snapshotMessage(element, language);
+      if (!snapshot) continue;
+      let id = stableMessageId(snapshot);
+      if (snapshot.index === undefined) {
+        const base = hashString(`${snapshot.serialText}|${snapshot.visibleText}`);
+        const ordinal = occurrence.get(base) ?? 0;
+        occurrence.set(base, ordinal + 1);
+        id = `message:${base}:${ordinal}`;
+      }
+      if (!force && this.seenElements.has(element)) continue;
+      candidates.push({ element, id, index: snapshot.index ?? this.syntheticSequence++ });
+    }
+
+    candidates.sort((left, right) => left.index - right.index);
+    const currentFirstIds = candidates
+      .filter((candidate) => candidate.element.getAttribute("data-index") === "0")
+      .map((candidate) => candidate.id);
+    if (
+      this.events.length &&
+      currentFirstIds.length &&
+      currentFirstIds.every((id) => !this.seenIds.has(id))
+    ) {
+      this.state = createTrackerState();
+      this.events = [];
+      this.partialHistory = false;
+      this.unmatchedCount = 0;
+      this.startedAt = Date.now();
+      this.seenIds.clear();
+    }
+    if (
+      !this.events.length &&
+      candidates.length &&
+      candidates[0]!.index > 0 &&
+      candidates.some((candidate) => candidate.element.hasAttribute("data-index"))
+    ) {
+      this.partialHistory = true;
+    }
+
+    let changed = false;
+    for (const candidate of candidates) {
+      this.seenElements.add(candidate.element);
+      if (this.seenIds.has(candidate.id)) continue;
+      this.seenIds.add(candidate.id);
+      const snapshot = snapshotMessage(candidate.element, language);
+      if (!snapshot) continue;
+      const parsed = parseLogSnapshot(snapshot);
+      if (!parsed) {
+        this.unmatchedCount += 1;
+        changed = true;
+        continue;
+      }
+      const stored = canonicalizeEvent({
+        ...parsed.event,
+        id: candidate.id,
+        ...(snapshot.index !== undefined ? { index: snapshot.index } : {}),
+        timestamp: Date.now(),
+        raw: snapshot.serialText,
+      } as StoredEvent, this.myPlayer);
+      this.events.push(stored);
+      this.state = reduceTracker(this.state, stored, stored);
+      changed = true;
+    }
+
+    if (changed) {
+      if (this.events.length > MAX_STORED_EVENTS) {
+        this.events = this.events.slice(-MAX_STORED_EVENTS);
+        this.state = replayEvents(this.events);
+        this.partialHistory = true;
+      }
+      this.queueSave();
+      this.onUpdate(this);
+    }
+  }
+
+  private async restore(): Promise<void> {
+    const key = `${SESSION_PREFIX}${this.id}`;
+    const result = await chrome.storage.local.get(key);
+    const stored = result[key] as StoredSession | undefined;
+    if (!stored || stored.schema !== 3 || stored.page !== pageIdentity()) return;
+    if (this.gameKey && stored.gameKey && this.gameKey !== stored.gameKey) return;
+    this.gameKey ??= stored.gameKey;
+    this.startedAt = stored.startedAt;
+    this.events = stored.events;
+    this.partialHistory = stored.partialHistory;
+    this.unmatchedCount = stored.unmatchedCount;
+    this.state = replayEvents(stored.events);
+    for (const id of stored.seenIds) this.seenIds.add(id);
+  }
+
+  private queueSave(): void {
+    if (this.saveTimer) window.clearTimeout(this.saveTimer);
+    this.saveTimer = window.setTimeout(() => void this.save(), 180);
+  }
+
+  private async save(): Promise<void> {
+    if (!this.id) return;
+    const now = Date.now();
+    const record: StoredSession = {
+      schema: 3,
+      id: this.id,
+      page: pageIdentity(),
+      ...(this.gameKey ? { gameKey: this.gameKey } : {}),
+      startedAt: this.startedAt,
+      updatedAt: now,
+      events: this.events,
+      seenIds: [...this.seenIds].slice(-MAX_SEEN_IDS),
+      partialHistory: this.partialHistory,
+      unmatchedCount: this.unmatchedCount,
+    };
+    const summary: SessionSummary = {
+      active: true,
+      sessionId: this.id,
+      playerCount: this.state.playerOrder.length,
+      eventCount: this.state.eventCount,
+      possibilities: this.state.worlds.length,
+      partialHistory: this.partialHistory || Boolean(this.state.warnings.length),
+      updatedAt: now,
+    };
+    await chrome.storage.local.set({
+      [`${SESSION_PREFIX}${this.id}`]: record,
+      [ACTIVE_SESSION_KEY]: this.id,
+      [LATEST_SUMMARY_KEY]: summary,
+    });
+  }
+}
+
+export const latestSummaryKey = LATEST_SUMMARY_KEY;
