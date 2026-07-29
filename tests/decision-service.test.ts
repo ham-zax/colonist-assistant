@@ -4,6 +4,7 @@ import type { DecisionAnalysis } from "../src/core/engine";
 import type { BoardSnapshot } from "../src/core/placement";
 import type { TrackerState } from "../src/core/types";
 import { DecisionWorkerClient } from "../src/content/decision-worker";
+import { EXTENSION_CONTEXT_RELOAD_MESSAGE } from "../src/content/extension-context";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -143,9 +144,23 @@ describe("decision service client", () => {
     );
 
     await vi.waitFor(() =>
-      expect(failure).toHaveBeenCalledWith("Extension context invalidated"),
+      expect(failure).toHaveBeenCalledWith(
+        EXTENSION_CONTEXT_RELOAD_MESSAGE,
+      ),
     );
     expect(callback).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledOnce();
+
+    expect(
+      client.request(
+        "position-after-context-loss",
+        {} as TrackerState,
+        {} as BoardSnapshot,
+        "You",
+        "deep-search",
+        callback,
+      ),
+    ).toBe(false);
     expect(sendMessage).toHaveBeenCalledOnce();
     client.destroy();
   });

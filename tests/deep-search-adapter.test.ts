@@ -399,6 +399,81 @@ describe("deep-search state adapter", () => {
     expect(response.rollouts).toBe(0);
   });
 
+  it("returns a universally forced end turn without strategic search", async () => {
+    const bytes = await readFile(
+      new URL(
+        "../src/generated/wasm/colonist_search_bg.wasm",
+        import.meta.url,
+      ),
+    );
+    await initWasm({ module_or_path: bytes });
+    const idleHand = resources(0, 0, 1, 0, 0);
+    const idleState: TrackerState = {
+      ...state,
+      worlds: state.worlds.map((world) => ({
+        ...world,
+        hands: {
+          ...world.hands,
+          You: idleHand,
+        },
+      })),
+    };
+    const idleBoard: BoardSnapshot = {
+      ...board,
+      ownHand: idleHand,
+      domesticTradeUsed: true,
+      ownDevelopmentCards: {
+        cards: {
+          knight: 0,
+          monopoly: 0,
+          "road-building": 0,
+          "year-of-plenty": 0,
+          "victory-point": 1,
+        },
+        playable: {
+          knight: 0,
+          monopoly: 0,
+          "road-building": 0,
+          "year-of-plenty": 0,
+          "victory-point": 0,
+        },
+        boughtThisTurn: {
+          knight: 0,
+          monopoly: 0,
+          "road-building": 0,
+          "year-of-plenty": 0,
+          "victory-point": 0,
+        },
+        hasPlayedThisTurn: true,
+      },
+      players: {
+        ...board.players,
+        You: {
+          ...board.players!.You!,
+          handSize: 1,
+          developmentCards: 1,
+        },
+      },
+    };
+    const built = buildDeepSearchRequest(
+      idleState,
+      idleBoard,
+      "You",
+    );
+    built.request.mode = "maxn";
+    built.request.maxNodes = 250_000;
+    built.request.tacticalNodes = 100_000;
+    const started = performance.now();
+    const response = analyzeWasm(built.request);
+    const elapsed = performance.now() - started;
+
+    expect(response.exactDecision).toBe(true);
+    expect(response.chosen?.kind).toBe("end-turn");
+    expect(response.nodes).toBe(0);
+    expect(response.iterations).toBe(0);
+    expect(elapsed).toBeLessThan(100);
+  });
+
   it("finishes a live-sized PUCT request within the interactive budget", async () => {
     const bytes = await readFile(
       new URL(

@@ -18,7 +18,10 @@ import {
   DecisionTraceRecorder,
   type DecisionActionSource,
 } from "../core/decision-trace";
-import { shouldFastTrackRoll } from "../core/forced-action";
+import {
+  shouldFastTrackEndTurn,
+  shouldFastTrackRoll,
+} from "../core/forced-action";
 import {
   NUMBER_PIPS,
   scoreCityPlacements,
@@ -75,12 +78,16 @@ import type { TrackerState } from "../core/types";
 import { WinPredictionStabilizer } from "../core/win-prediction";
 import type { GameSession } from "./session";
 import {
-  POSITION_KEY,
+  readPosition,
   saveSettings,
   type AssistantSettings,
   type OverlayPosition,
   savePosition,
 } from "./settings";
+import {
+  EXTENSION_CONTEXT_RELOAD_MESSAGE,
+  isExtensionContextInvalidatedError,
+} from "./extension-context";
 import { OVERLAY_STYLES } from "./styles";
 import {
   destroyTradeVerdicts,
@@ -272,6 +279,7 @@ export class AssistantOverlay {
   private decisionRuntime?: DecisionRuntime;
   private decisionRuntimeDetail = "Connecting to the packaged search engine.";
   private decisionRuntimeError = "";
+  private decisionContextInvalidated = false;
   private domesticTradeAttempt?: { gameKey?: string };
   private readonly attemptedTradeOffers = new Set<string>();
   private readonly failedTradeActions = new Set<string>();
@@ -316,11 +324,14 @@ export class AssistantOverlay {
       if (status.runtime === "background-wasm") {
         this.decisionRuntime = status.runtime;
         this.decisionRuntimeError = "";
+        this.decisionContextInvalidated = false;
         this.decisionRuntimeDetail =
           `${status.detail}${status.initializationMs !== undefined ? ` in ${Math.max(1, Math.round(status.initializationMs))} ms` : ""}.`;
       } else {
         this.decisionRuntime = undefined;
         this.decisionRuntimeError = status.detail;
+        this.decisionContextInvalidated =
+          status.detail === EXTENSION_CONTEXT_RELOAD_MESSAGE;
       }
       this.render();
     });
@@ -524,8 +535,7 @@ export class AssistantOverlay {
   }
 
   private async restorePosition(): Promise<void> {
-    const result = await chrome.storage.local.get(POSITION_KEY);
-    this.position = (result[POSITION_KEY] as OverlayPosition | undefined) ?? {};
+    this.position = await readPosition();
     if (this.position.left !== undefined && this.position.top !== undefined) {
       this.place(this.position.left, this.position.top);
     }
@@ -1252,6 +1262,13 @@ export class AssistantOverlay {
     const observedRuntime =
       this.decisionAnalysis?.runtime ?? this.decisionRuntime;
     if (this.decisionRuntimeError) {
+      if (this.decisionContextInvalidated) {
+        return {
+          label: "Reload tab",
+          detail: EXTENSION_CONTEXT_RELOAD_MESSAGE,
+          state: "error",
+        };
+      }
       return {
         label: "WASM error",
         detail: `${this.decisionRuntimeError} The selected engine will retry on the next board update; reload the extension and this Colonist tab if it persists. No other algorithm was substituted.`,
@@ -1473,7 +1490,11 @@ export class AssistantOverlay {
       this.decisionSlowKey = "";
       return;
     }
-    if (shouldFastTrackRoll(board, visibleTurnControl())) {
+    const visibleControl = visibleTurnControl();
+    if (
+      shouldFastTrackRoll(board, visibleControl) ||
+      shouldFastTrackEndTurn(board, visibleControl)
+    ) {
       this.decisionAnalysis = undefined;
       this.decisionKey = "";
       this.decisionPendingKey = "";
@@ -1508,6 +1529,7 @@ export class AssistantOverlay {
         this.decisionPendingKey = "";
         this.decisionSlowKey = "";
         this.decisionRuntimeError = "";
+        this.decisionContextInvalidated = false;
         this.decisionAnalysis = analysis;
         this.decisionTraces.complete(key, analysis);
         if (analysis.runtime) {
@@ -1544,12 +1566,18 @@ export class AssistantOverlay {
         this.decisionPendingKey = key;
         this.decisionSlowKey = "";
         this.decisionAnalysis = undefined;
-        this.decisionRuntimeError = detail;
-        this.decisionRuntimeDetail = detail;
+        this.decisionContextInvalidated =
+          detail === EXTENSION_CONTEXT_RELOAD_MESSAGE ||
+          isExtensionContextInvalidatedError(detail);
+        const displayedDetail = this.decisionContextInvalidated
+          ? EXTENSION_CONTEXT_RELOAD_MESSAGE
+          : detail;
+        this.decisionRuntimeError = displayedDetail;
+        this.decisionRuntimeDetail = displayedDetail;
         console.error("[Colonist Assistant] Selected decision engine failed", {
           key,
           engine: this.settings.engine,
-          detail,
+          detail: displayedDetail,
           policy: "selected-engine-only",
           fallbackStarted: false,
         });
@@ -1560,6 +1588,7 @@ export class AssistantOverlay {
       this.decisionPendingKey = key;
       this.decisionSlowKey = "";
       this.decisionRuntimeError = "";
+      this.decisionContextInvalidated = false;
     }
   }
 
@@ -2203,6 +2232,16 @@ export class AssistantOverlay {
         control: "roll",
         label: "Roll dice",
         signature: `${signatureBase}|forced-roll`,
+        confidence: 1,
+      };
+    }
+
+    if (shouldFastTrackEndTurn(board, visibleTurnControl())) {
+      return {
+        kind: "turn-control",
+        control: "end",
+        label: "End turn",
+        signature: `${signatureBase}|forced-end`,
         confidence: 1,
       };
     }

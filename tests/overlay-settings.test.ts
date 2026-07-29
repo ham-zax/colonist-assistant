@@ -4,19 +4,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AssistantOverlay } from "../src/content/overlay";
 import { DEFAULT_SETTINGS } from "../src/content/settings";
+import { createTrackerState, reduceTracker } from "../src/core/tracker";
+import type { GameSession } from "../src/content/session";
+
+let sendMessage = vi.fn();
 
 beforeEach(() => {
+  sendMessage = vi.fn((message: { id: number }) =>
+    Promise.resolve({
+      id: message.id,
+      runtime: "background-wasm",
+      engineRevision: "test-engine",
+      initializationMs: 1,
+    }),
+  );
   vi.stubGlobal("chrome", {
     runtime: {
       getURL: (path: string) => `chrome-extension://fixture/${path}`,
-      getManifest: () => ({ version: "0.7.10" }),
-      sendMessage: (message: { id: number }) =>
-        Promise.resolve({
-          id: message.id,
-          runtime: "background-wasm",
-          engineRevision: "test-engine",
-          initializationMs: 1,
-        }),
+      getManifest: () => ({ version: "0.7.11" }),
+      sendMessage,
     },
     storage: {
       local: {
@@ -28,6 +34,26 @@ beforeEach(() => {
       },
     },
   });
+  vi.stubGlobal(
+    "getComputedStyle",
+    () =>
+      ({
+        display: "block",
+        visibility: "visible",
+        opacity: "1",
+      }) as CSSStyleDeclaration,
+  );
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+    x: 20,
+    y: 20,
+    left: 20,
+    top: 20,
+    right: 100,
+    bottom: 60,
+    width: 80,
+    height: 40,
+    toJSON: () => ({}),
+  } as DOMRect);
 });
 
 afterEach(() => {
@@ -79,6 +105,65 @@ describe("overlay settings interaction", () => {
         "select[data-setting='engine']",
       )?.value,
     ).toBe("deep-alpha-beta");
+    overlay.destroy();
+  });
+
+  it("ends a proven idle turn without sending a WASM decision request", async () => {
+    const endTurn = document.createElement("button");
+    endTurn.id = "action-button-pass-turn";
+    endTurn.textContent = "End turn";
+    document.body.append(endTurn);
+    const tracker = reduceTracker(createTrackerState(), {
+      type: "discover",
+      player: "rodrgds",
+    });
+    const overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS },
+      { reset: vi.fn() },
+    );
+    overlay.update({ state: tracker } as GameSession);
+    overlay.updateBoard({
+      hexes: [],
+      vertices: [],
+      edges: [],
+      gameKey: "idle-turn",
+      myPlayer: "rodrgds",
+      currentPlayer: "rodrgds",
+      isMyTurn: true,
+      action: "none",
+      hasRolled: true,
+      domesticTradeUsed: true,
+      ownHand: {
+        lumber: 0,
+        brick: 0,
+        wool: 1,
+        grain: 0,
+        ore: 0,
+      },
+      players: {
+        rodrgds: {
+          handSize: 1,
+          tradeRatios: {
+            lumber: 3,
+            brick: 3,
+            wool: 3,
+            grain: 3,
+            ore: 3,
+          },
+          cardDiscardLimit: 7,
+          visiblePoints: 3,
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(sendMessage).toHaveBeenCalledOnce();
+    const shadow = document
+      .querySelector<HTMLDivElement>("#colonist-assistant-root")!
+      .shadowRoot!;
+    expect(shadow.textContent).toContain("End your turn");
+    expect(shadow.textContent).not.toContain("Calculating the next action");
     overlay.destroy();
   });
 });

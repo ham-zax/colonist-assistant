@@ -8,6 +8,7 @@ import {
   snapshotMessage,
   stableMessageId,
 } from "./dom";
+import { isExtensionContextInvalidatedError } from "./extension-context";
 
 interface StoredSession {
   schema: 3;
@@ -263,7 +264,13 @@ export class GameSession {
 
   private async restore(): Promise<void> {
     const key = `${SESSION_PREFIX}${this.id}`;
-    const result = await chrome.storage.local.get(key);
+    let result: Record<string, unknown>;
+    try {
+      result = await chrome.storage.local.get(key);
+    } catch (error) {
+      if (isExtensionContextInvalidatedError(error)) return;
+      throw error;
+    }
     const stored = result[key] as StoredSession | undefined;
     if (!stored || stored.schema !== 3 || stored.page !== pageIdentity()) return;
     if (this.gameKey && stored.gameKey && this.gameKey !== stored.gameKey) return;
@@ -305,11 +312,15 @@ export class GameSession {
       partialHistory: this.partialHistory || Boolean(this.state.warnings.length),
       updatedAt: now,
     };
-    await chrome.storage.local.set({
-      [`${SESSION_PREFIX}${this.id}`]: record,
-      [ACTIVE_SESSION_KEY]: this.id,
-      [LATEST_SUMMARY_KEY]: summary,
-    });
+    try {
+      await chrome.storage.local.set({
+        [`${SESSION_PREFIX}${this.id}`]: record,
+        [ACTIVE_SESSION_KEY]: this.id,
+        [LATEST_SUMMARY_KEY]: summary,
+      });
+    } catch (error) {
+      if (!isExtensionContextInvalidatedError(error)) throw error;
+    }
   }
 }
 

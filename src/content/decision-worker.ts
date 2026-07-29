@@ -13,6 +13,10 @@ import {
   type DecisionStatusMessageResponse,
 } from "../worker/protocol";
 import type { DecisionRequest } from "../worker/analyze";
+import {
+  EXTENSION_CONTEXT_RELOAD_MESSAGE,
+  isExtensionContextInvalidatedError,
+} from "./extension-context";
 
 const SLOW_DECISION_MS = 5_000;
 
@@ -41,6 +45,7 @@ export class DecisionWorkerClient {
   private desiredKey = "";
   private readiness?: Promise<DecisionStatusMessageResponse>;
   private destroyed = false;
+  private contextInvalidated = false;
 
   warm(callback: (status: DecisionServiceStatus) => void): void {
     this.readiness ??= this.queryStatus();
@@ -61,11 +66,16 @@ export class DecisionWorkerClient {
         });
       })
       .catch((error: unknown) => {
+        if (isExtensionContextInvalidatedError(error)) {
+          this.contextInvalidated = true;
+        }
         this.readiness = undefined;
         callback({
           runtime: "engine-error",
           detail:
-            error instanceof Error
+            this.contextInvalidated
+              ? EXTENSION_CONTEXT_RELOAD_MESSAGE
+              : error instanceof Error
               ? error.message
               : "The background WASM service did not respond",
         });
@@ -84,6 +94,7 @@ export class DecisionWorkerClient {
   ): boolean {
     if (
       this.destroyed ||
+      this.contextInvalidated ||
       engine === "race-eta" ||
       (
         this.active?.key === key &&
@@ -226,17 +237,28 @@ export class DecisionWorkerClient {
           },
         };
       }
+      const detail =
+        response?.error ??
+        "Decision service returned no response";
+      if (isExtensionContextInvalidatedError(detail)) {
+        this.contextInvalidated = true;
+      }
       return {
         id: message.id,
-        error:
-          response?.error ??
-          "Decision service returned no response",
+        error: this.contextInvalidated
+          ? EXTENSION_CONTEXT_RELOAD_MESSAGE
+          : detail,
       };
     } catch (error) {
+      if (isExtensionContextInvalidatedError(error)) {
+        this.contextInvalidated = true;
+      }
       return {
         id: message.id,
         error:
-          error instanceof Error
+          this.contextInvalidated
+            ? EXTENSION_CONTEXT_RELOAD_MESSAGE
+            : error instanceof Error
             ? error.message
             : "The extension background service did not respond",
       };
