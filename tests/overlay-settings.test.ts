@@ -9,7 +9,7 @@ beforeEach(() => {
   vi.stubGlobal("chrome", {
     runtime: {
       getURL: (path: string) => `chrome-extension://fixture/${path}`,
-      getManifest: () => ({ version: "0.7.9" }),
+      getManifest: () => ({ version: "0.7.10" }),
       sendMessage: (message: { id: number }) =>
         Promise.resolve({
           id: message.id,

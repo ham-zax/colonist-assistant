@@ -484,6 +484,7 @@ export class AssistantOverlay {
       this.clearOutgoingTradeWatchdogs();
       destroyTradeVerdicts();
       destroyActionGuide();
+      destroyWinOdds();
     }
     this.render();
   }
@@ -860,7 +861,11 @@ export class AssistantOverlay {
         </div>
       </section>`;
     this.scheduleTradeVerdicts(state);
-    renderWinOdds(displayedWinAnalysis, state);
+    if (this.settings.enabled && !this.board?.gameOver) {
+      renderWinOdds(displayedWinAnalysis, state);
+    } else {
+      destroyWinOdds();
+    }
     const nextSignature = next?.signature ?? "";
     this.actionGuideSignature = nextSignature;
     if (next && this.decisionKey) {
