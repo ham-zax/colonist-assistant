@@ -7,8 +7,8 @@ Colonist observations
   → weighted hidden-state filter
   → exact mandatory/current-turn solver
   → whole-turn plan generator
-  → shared information-set PUCT
-  → calibrated value, policy, opponent, and trade models
+  → belief-aggregated multiplayer MaxN
+  → learned value, policy, opponent, and trade models
   → state-validated executor
 ```
 
@@ -59,25 +59,23 @@ Roads are valued by reachable settlement sites, arrival races, ports, blocking
 value, Longest Road probability, and cut risk. A road without a useful
 destination, block, trophy line, or hand-safety purpose has little value.
 
-## Shared information-set PUCT
+## Strategic search
 
-The production engine is vector-valued PUCT over a shared observation-keyed
-tree. Each simulation samples one weighted hidden world. Values are backed up
-as a four-player win-race vector; the acting player's component selects at that
-node. Opponent priors use only that actor's observation and policy profile, not
-third-party hidden cards.
+The production engine is deterministic multiplayer MaxN aggregated over
+weighted hidden worlds. It searches complete turn plans with a bounded global
+node budget and backs up a win-race value vector. At each simulated player
+node, that player's component selects the continuation.
 
-Progressive widening introduces expensive trade and placement candidates as a
-node receives visits. Action-class quotas prevent settlements, expansion
-roads, cities, hand-safety conversions, trades, trophies, or end turn from
-being silently removed by one global cutoff. Root actions are evaluated over
-the full posterior, including rejection or illegality branches.
+Action-class quotas prevent settlements, expansion roads, cities, hand-safety
+conversions, trades, trophies, or end turn from being silently removed by one
+global cutoff. Root actions are evaluated over the full posterior, including
+rejection or illegality branches.
 
-The worker keeps its tree across observations, reroots after real actions, and
-can ponder during opponents' turns. Search is reproducible from the canonical
-observation hash, configuration, stable ordering, and deterministic random
-streams. MaxN, paranoid alpha-beta, UCT, and heuristic policies remain
-selectable benchmarks.
+Belief PUCT remains available as an experimental shared information-set search
+with weighted particle sampling, progressive widening, and tree reuse.
+Paranoid AlphaBeta is a selectable defensive peer. Search is reproducible from
+the canonical observation hash, configuration, stable ordering, and
+deterministic random streams.
 
 ## Race-to-win value
 
@@ -92,9 +90,9 @@ The value function combines:
 - probability of acquiring and retaining Longest Road and Largest Army;
 - robber denial, ports, piece inventory, and opponent threat.
 
-Displayed model shares are labelled `MODEL`; they are not presented as
-empirical win probabilities unless the learned checkpoint passes held-out
-calibration gates.
+Displayed shares are labelled `WIN` but remain stabilized model estimates, not
+empirical guarantees. The UI regularizes early extremes and rate-limits changes
+that are not accompanied by material public progress.
 
 ## Trading
 

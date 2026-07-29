@@ -29,7 +29,7 @@ is complete. JSON and Markdown reports are written at the output path.
 This is the end-to-end test: current Colonist DOM, public-state extraction,
 background WASM, decision translation, and actual autopilot clicks. Each game
 uses an isolated browser profile. The harness selects `Play vs. Bots`, verifies
-the exact map text `Base`, enables Belief PUCT/autopilot through extension
+the exact map text `Base`, enables Deep MaxN/autopilot through extension
 storage, and parses the final Colonist score table.
 
 ```bash
