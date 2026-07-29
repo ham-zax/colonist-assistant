@@ -96,6 +96,7 @@ import {
 } from "./action-guide";
 import { destroyWinOdds, renderWinOdds } from "./win-odds";
 import { DecisionWorkerClient } from "./decision-worker";
+import { InteractionRenderGate } from "./render-gate";
 
 type ViewName = "advice" | "cards" | "settings";
 
@@ -261,6 +262,7 @@ export class AssistantOverlay {
   private activeSpatial?: ReturnType<AssistantOverlay["spatialRecommendation"]>;
   private tradeRenderFrame?: number;
   private readonly decisionWorker = new DecisionWorkerClient();
+  private readonly renderGate = new InteractionRenderGate();
   private readonly decisionTraces = new DecisionTraceRecorder();
   private readonly winPredictions = new WinPredictionStabilizer();
   private decisionAnalysis?: DecisionAnalysis;
@@ -530,6 +532,33 @@ export class AssistantOverlay {
   }
 
   private installHandlers(): void {
+    this.shadow.addEventListener("pointerdown", (rawEvent) => {
+      const target = rawEvent.target;
+      if (
+        target instanceof HTMLSelectElement &&
+        target.dataset.setting === "engine"
+      ) {
+        this.renderGate.hold("engine-select");
+      }
+    });
+    this.shadow.addEventListener("focusin", (rawEvent) => {
+      const target = rawEvent.target;
+      if (
+        target instanceof HTMLSelectElement &&
+        target.dataset.setting === "engine"
+      ) {
+        this.renderGate.hold("engine-select");
+      }
+    });
+    this.shadow.addEventListener("focusout", (rawEvent) => {
+      const target = rawEvent.target;
+      if (
+        target instanceof HTMLSelectElement &&
+        target.dataset.setting === "engine"
+      ) {
+        this.renderGate.release("engine-select");
+      }
+    });
     this.shadow.addEventListener("click", (rawEvent) => {
       const target = (rawEvent.target as Element).closest<HTMLElement>("[data-action]");
       if (!target) return;
@@ -552,6 +581,7 @@ export class AssistantOverlay {
         target instanceof HTMLSelectElement &&
         target.dataset.setting === "engine"
       ) {
+        this.renderGate.release("engine-select");
         this.applySettings({
           ...this.settings,
           engine: target.value as DecisionEngine,
@@ -740,6 +770,7 @@ export class AssistantOverlay {
   }
 
   private render(): void {
+    if (!this.renderGate.tryRender()) return;
     const mount = this.shadow.querySelector("#mount");
     if (!mount) return;
     const state = this.reconciledState();
