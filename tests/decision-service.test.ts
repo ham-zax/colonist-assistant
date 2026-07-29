@@ -88,6 +88,46 @@ describe("decision service client", () => {
     client.destroy();
   });
 
+  it("does not block a position on the independent warm-up status request", async () => {
+    const analysis: DecisionAnalysis = {
+      engine: "deep-search",
+      players: [],
+      actionScores: {
+        road: 0,
+        settlement: 0,
+        city: 0,
+        development: 0,
+      },
+      simulations: 1,
+      model: "warm-independent",
+    };
+    const sendMessage = vi.fn(
+      (message: { id: number; type: string }) => {
+        if (message.type === "colonist-assistant:decision-status") {
+          return new Promise(() => undefined);
+        }
+        return Promise.resolve({ id: message.id, analysis });
+      },
+    );
+    vi.stubGlobal("chrome", { runtime: { sendMessage } });
+    const callback = vi.fn();
+    const client = new DecisionWorkerClient();
+
+    client.warm(vi.fn());
+    client.request(
+      "position-during-warmup",
+      {} as TrackerState,
+      {} as BoardSnapshot,
+      "You",
+      "deep-search",
+      callback,
+    );
+
+    await vi.waitFor(() => expect(callback).toHaveBeenCalledOnce());
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    client.destroy();
+  });
+
   it("labels the local model when the background service is unavailable", async () => {
     const sendMessage = vi.fn(async () => {
       throw new Error("Extension context invalidated");

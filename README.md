@@ -58,7 +58,8 @@ settings screen shows the installed build number and active decision engine.
 
 `Background WASM` means the packaged Rust engine is authoritative. The red
 `Local fallback` state is reserved for a service-worker/WASM initialization
-failure, an invalid live snapshot, or the explicit 12-second watchdog. A
+failure, an invalid live snapshot, or the explicit 1.25-second interactive
+watchdog. A
 fallback is labelled in the UI and decision trace; it is never silently
 presented as a completed PUCT result.
 

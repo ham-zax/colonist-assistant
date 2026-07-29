@@ -17,7 +17,7 @@ import {
 import type { DecisionRequest } from "../worker/analyze";
 
 const STATUS_TIMEOUT_MS = 5_000;
-const ANALYSIS_TIMEOUT_MS = 12_000;
+const ANALYSIS_TIMEOUT_MS = 1_250;
 
 export interface DecisionServiceStatus {
   runtime: "background-wasm" | "local-fallback";
@@ -172,13 +172,10 @@ export class DecisionWorkerClient {
     message: DecisionMessage,
   ): Promise<DecisionMessageResponse> {
     try {
-      if (this.readiness) {
-        await this.readiness.catch(() => undefined);
-      }
       const response = await this.withTimeout(
         chrome.runtime.sendMessage<DecisionMessageResponse>(message),
         ANALYSIS_TIMEOUT_MS,
-        "Deep search exceeded the 12-second response limit",
+        "Deep search exceeded the 1.25-second interactive limit",
       );
       if (response?.id === message.id && response.analysis) {
         return {
