@@ -4,7 +4,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AssistantOverlay } from "../src/content/overlay";
 import { DEFAULT_SETTINGS } from "../src/content/settings";
-import { createTrackerState, reduceTracker } from "../src/core/tracker";
+import {
+  createTrackerState,
+  getPlayerEstimate,
+  reduceTracker,
+} from "../src/core/tracker";
 import type { GameSession } from "../src/content/session";
 import { emptyResources } from "../src/core/resources";
 
@@ -64,6 +68,87 @@ afterEach(() => {
 });
 
 describe("overlay settings interaction", () => {
+  it("uses a public-log-confirmed post-build hand until Colonist's hand snapshot catches up", () => {
+    let tracker = reduceTracker(createTrackerState(), {
+      type: "discover",
+      player: "rodrgds",
+    });
+    tracker = reduceTracker(tracker, {
+      type: "gain",
+      player: "rodrgds",
+      cards: {
+        lumber: 0,
+        brick: 0,
+        wool: 0,
+        grain: 2,
+        ore: 3,
+      },
+      reason: "other",
+    });
+    const overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS },
+      { reset: vi.fn() },
+    );
+    const before = {
+      lumber: 0,
+      brick: 0,
+      wool: 0,
+      grain: 2,
+      ore: 3,
+    };
+    const after = emptyResources();
+    const internals = overlay as unknown as {
+      session: { state: typeof tracker };
+      board: Parameters<AssistantOverlay["updateBoard"]>[0];
+      confirmedPlacementSpend: {
+        gameKey: string;
+        player: string;
+        before: typeof before;
+        after: typeof after;
+        expiresAt: number;
+      };
+      reconciledState: () => typeof tracker;
+    };
+    internals.session = { state: tracker };
+    internals.board = {
+      hexes: [],
+      vertices: [],
+      edges: [],
+      gameKey: "city-spend-sync",
+      myPlayer: "rodrgds",
+      currentPlayer: "rodrgds",
+      isMyTurn: true,
+      action: "none",
+      ownHand: before,
+      players: {
+        rodrgds: {
+          handSize: 5,
+          visiblePoints: 4,
+          tradeRatios: {
+            lumber: 4,
+            brick: 4,
+            wool: 4,
+            grain: 4,
+            ore: 4,
+          },
+          cardDiscardLimit: 7,
+        },
+      },
+    };
+    internals.confirmedPlacementSpend = {
+      gameKey: "city-spend-sync",
+      player: "rodrgds",
+      before,
+      after,
+      expiresAt: Date.now() + 5_000,
+    };
+
+    expect(
+      getPlayerEstimate(internals.reconciledState(), "rodrgds").average,
+    ).toEqual(after);
+    overlay.destroy();
+  });
+
   it("does not click a stale dice control during robber placement", () => {
     const roll = document.createElement("button");
     roll.id = "roll-dice-button";

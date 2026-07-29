@@ -432,10 +432,132 @@ describe("action guide autopilot", () => {
       action: "settlement",
       targetId: "v:1,2,0",
       signature: "board-settlement",
+      attempt: 1,
     });
     renderActionGuide(undefined, { highlight: true, autonomous: true });
     await vi.advanceTimersByTimeAsync(2_000);
     expect(messages).toHaveLength(1);
+  });
+
+  it("releases a board placement after bounded validated commit retries", async () => {
+    const attempts: number[] = [];
+    const executions = vi.fn();
+    window.addEventListener("message", (event) => {
+      if (
+        event.data?.source === "colonist-assistant-content" &&
+        event.data?.type === "execute-board-action"
+      ) {
+        attempts.push(event.data.attempt);
+      }
+    });
+
+    renderActionGuide(
+      {
+        kind: "board",
+        boardAction: "settlement",
+        targetId: "v:2,-1,0",
+        point: { x: 320, y: 220 },
+        label: "Place settlement here",
+        signature: "ignored-board-settlement",
+        confidence: 1,
+      },
+      {
+        highlight: true,
+        autonomous: true,
+        validate: () => true,
+        onExecution: executions,
+      },
+    );
+    await vi.advanceTimersByTimeAsync(7_200);
+
+    expect(attempts).toEqual([1, 2, 3, 4, 5]);
+    expect(executions).toHaveBeenCalledWith({
+      succeeded: false,
+      signature: "ignored-board-settlement",
+      reason:
+        "Colonist did not commit board placement after bounded validated retries",
+    });
+  });
+
+  it("keeps a legal board placement retry alive while the overlay renders pending", async () => {
+    const attempts: number[] = [];
+    const executions = vi.fn();
+    window.addEventListener("message", (event) => {
+      if (
+        event.data?.source === "colonist-assistant-content" &&
+        event.data?.type === "execute-board-action"
+      ) {
+        attempts.push(event.data.attempt);
+      }
+    });
+    const action = {
+      kind: "board" as const,
+      boardAction: "road" as const,
+      targetId: "e:0,-1,0",
+      point: { x: 340, y: 350 },
+      label: "Build this road",
+      signature: "ignored-board-road-rerender",
+      confidence: 1,
+    };
+    const options = {
+      highlight: true,
+      autonomous: true,
+      validate: () => true,
+      validateBoardContinuation: () => true,
+      onExecution: executions,
+    };
+
+    renderActionGuide(action, options);
+    renderActionGuide(undefined, {
+      ...options,
+      validate: () => false,
+    });
+    await vi.advanceTimersByTimeAsync(7_200);
+
+    expect(attempts).toEqual([1, 2, 3, 4, 5]);
+    expect(executions).toHaveBeenCalledWith({
+      succeeded: false,
+      signature: "ignored-board-road-rerender",
+      reason:
+        "Colonist did not commit board placement after bounded validated retries",
+    });
+  });
+
+  it("stops board retries once the placement phase advances", async () => {
+    const attempts: number[] = [];
+    let placementStillLegal = true;
+    window.addEventListener("message", (event) => {
+      if (
+        event.data?.source === "colonist-assistant-content" &&
+        event.data?.type === "execute-board-action"
+      ) {
+        attempts.push(event.data.attempt);
+      }
+    });
+    const action = {
+      kind: "board" as const,
+      boardAction: "city" as const,
+      targetId: "v:0,1,1",
+      point: { x: 400, y: 300 },
+      label: "Build this city",
+      signature: "committed-board-city",
+      confidence: 1,
+    };
+
+    renderActionGuide(action, {
+      highlight: true,
+      autonomous: true,
+      validate: () => placementStillLegal,
+      validateBoardContinuation: () => placementStillLegal,
+    });
+    placementStillLegal = false;
+    renderActionGuide(undefined, {
+      highlight: true,
+      autonomous: true,
+    });
+    await vi.advanceTimersByTimeAsync(3_000);
+
+    expect(attempts).toEqual([1]);
   });
 
   it("cancels a stale robber-victim follow-up after the board phase advances", async () => {
@@ -788,6 +910,93 @@ describe("action guide autopilot", () => {
     });
     expect(laterRenderExecution).not.toHaveBeenCalled();
     expect(postSendRefreshes).toBeGreaterThanOrEqual(2);
+  });
+
+  it("retries an idempotent trade-panel control when Colonist drops the first click", async () => {
+    const open = document.createElement("button");
+    open.id = "action-button-trade";
+    let openAttempts = 0;
+    const clicks: string[] = [];
+    open.addEventListener("click", () => {
+      openAttempts += 1;
+      if (openAttempts === 1) return;
+      clicks.push("open");
+      const inventory = document.createElement("div");
+      inventory.id = "player-card-inventory";
+      inventory.innerHTML =
+        '<button class="card"><img src="card_brick.svg"></button>';
+      const offeredProposal = document.createElement("div");
+      offeredProposal.className = "proposalOfferedHalfContainer-fixture";
+      const wantedProposal = document.createElement("div");
+      wantedProposal.className = "proposalWantedHalfContainer-fixture";
+      inventory.querySelector("button")?.addEventListener("click", () => {
+        clicks.push("give-brick");
+        offeredProposal.innerHTML =
+          '<button data-card-enum="2"><img src="card_brick.svg"></button>';
+      });
+      const wanted = document.createElement("div");
+      wanted.className = "wantedCardSelectorContainer-fixture";
+      wanted.innerHTML =
+        '<button class="card"><img src="card_lumber.svg"></button>';
+      wanted.querySelector("button")?.addEventListener("click", () => {
+        clicks.push("get-lumber");
+        wantedProposal.innerHTML =
+          '<button data-card-enum="1"><img src="card_lumber.svg"></button>';
+      });
+      const send = document.createElement("button");
+      send.id = "action-button-trade-players";
+      send.addEventListener("click", () => {
+        clicks.push("send");
+        inventory.remove();
+        wanted.remove();
+        offeredProposal.remove();
+        wantedProposal.remove();
+        send.remove();
+      });
+      document.body.append(
+        inventory,
+        wanted,
+        offeredProposal,
+        wantedProposal,
+        send,
+      );
+    });
+    document.body.append(open);
+    const give = emptyResources();
+    give.brick = 1;
+    const receive = emptyResources();
+    receive.lumber = 1;
+    const executions = vi.fn();
+
+    renderActionGuide(
+      {
+        kind: "trade-builder",
+        mode: "player",
+        give,
+        receive,
+        label: "Make trade",
+        signature: "dropped-open-click",
+        confidence: 0.9,
+      },
+      {
+        highlight: true,
+        autonomous: true,
+        onExecution: executions,
+      },
+    );
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(openAttempts).toBe(2);
+    expect(clicks).toEqual([
+      "open",
+      "give-brick",
+      "get-lumber",
+      "send",
+    ]);
+    expect(executions).toHaveBeenCalledWith({
+      succeeded: true,
+      signature: "dropped-open-click",
+    });
   });
 
   it("aborts, closes, and reports a player trade rejected by Colonist", async () => {

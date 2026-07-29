@@ -107,6 +107,10 @@ export interface ActionGuideOptions {
   highlight: boolean;
   autonomous: boolean;
   validate?: () => boolean;
+  /// Board placement commands can remain legal while the overlay temporarily
+  /// renders a pending-search state. Keep their bounded commit retries tied to
+  /// the live board phase and legal target, not to the current overlay card.
+  validateBoardContinuation?: () => boolean;
   /// Multi-click workflows legitimately change the original action's phase
   /// after their first click (for example, confirming Year of Plenty before
   /// choosing two resources). The owner must validate that the transaction,
@@ -135,6 +139,15 @@ let currentGuideAction: NextClick | undefined;
 let activeBoardFollowupSignature = "";
 let tradePreflightSignature = "";
 const boardCommandAttempts = new Map<string, number>();
+let activeBoardCommand:
+  | {
+      action: Extract<NextClick, { kind: "board" }>;
+      options: ActionGuideOptions;
+      attempt: number;
+      generation: number;
+    }
+  | undefined;
+let boardCommandGeneration = 0;
 const controlResolutionAttempts = new Map<string, number>();
 const buildControlCommitAttempts = new Map<string, number>();
 const reportedMissingControls = new Set<string>();
@@ -784,6 +797,7 @@ const drawHighlight = (
 
 const executeBoardAction = (
   action: Extract<NextClick, { kind: "board" }>,
+  attempt: number,
 ): void => {
   window.postMessage(
     {
@@ -792,6 +806,7 @@ const executeBoardAction = (
       action: action.boardAction,
       targetId: action.targetId,
       signature: action.signature,
+      attempt,
     },
     window.location.origin,
   );
@@ -801,6 +816,70 @@ const requestBoardRefresh = (): void => {
   window.dispatchEvent(
     new CustomEvent("colonist-assistant-board-refresh"),
   );
+};
+
+const clearBoardCommand = (signature?: string): void => {
+  if (
+    signature &&
+    activeBoardCommand?.action.signature !== signature
+  ) {
+    return;
+  }
+  const activeSignature = activeBoardCommand?.action.signature;
+  activeBoardCommand = undefined;
+  boardCommandGeneration += 1;
+  if (activeSignature) boardCommandAttempts.delete(activeSignature);
+  if (!signature || lastClickSignature === signature) {
+    lastClickSignature = "";
+  }
+};
+
+const boardCommandStillLegal = (
+  command: NonNullable<typeof activeBoardCommand>,
+): boolean => {
+  const validate =
+    command.options.validateBoardContinuation ??
+    command.options.validate;
+  return validate ? validate() : true;
+};
+
+const scheduleBoardCommandRetry = (
+  command: NonNullable<typeof activeBoardCommand>,
+): void => {
+  later(() => {
+    if (
+      activeBoardCommand?.generation !== command.generation ||
+      activeBoardCommand.action.signature !== command.action.signature
+    ) {
+      return;
+    }
+    if (
+      !command.options.autonomous ||
+      !boardCommandStillLegal(command)
+    ) {
+      // The phase or legal target changed, which normally means Colonist
+      // committed the placement. Either way, this transaction must not click
+      // through the changed state.
+      clearBoardCommand(command.action.signature);
+      return;
+    }
+    if (command.attempt >= 5) {
+      const { action, options } = command;
+      clearBoardCommand(action.signature);
+      options.onExecution?.({
+        succeeded: false,
+        signature: action.signature,
+        reason:
+          "Colonist did not commit board placement after bounded validated retries",
+      });
+      requestBoardRefresh();
+      return;
+    }
+    command.attempt += 1;
+    boardCommandAttempts.set(command.action.signature, command.attempt);
+    executeBoardAction(command.action, command.attempt);
+    scheduleBoardCommandRetry(command);
+  }, 1_400);
 };
 
 const validatedClick = (
@@ -850,14 +929,21 @@ const maybeAutoclick = (
       });
       return;
     }
-    executeBoardAction(action);
+    const generation = ++boardCommandGeneration;
+    const command = {
+      action,
+      options,
+      attempt: 1,
+      generation,
+    };
+    activeBoardCommand = command;
+    boardCommandAttempts.set(action.signature, 1);
+    executeBoardAction(action, 1);
     options.onExecution?.({
       succeeded: true,
       signature: action.signature,
     });
-    const attempt = (boardCommandAttempts.get(action.signature) ?? 0) + 1;
-    boardCommandAttempts.set(action.signature, attempt);
-    if (action.followupPlayer && attempt === 1) {
+    if (action.followupPlayer) {
       activeBoardFollowupSignature = action.signature;
       const stillCurrent = () =>
         activeBoardFollowupSignature === action.signature;
@@ -886,17 +972,7 @@ const maybeAutoclick = (
         220,
       );
     }
-    if (attempt < 5) {
-      later(() => {
-        if (
-          currentGuideOptions?.autonomous &&
-          lastClickSignature === action.signature
-        ) {
-          lastClickSignature = "";
-          maybeAutoclick(action, undefined, currentGuideOptions);
-        }
-      }, 1_400);
-    }
+    scheduleBoardCommandRetry(command);
   } else {
     if (element) {
       controlResolutionAttempts.delete(action.signature);
@@ -1004,6 +1080,11 @@ interface WorkflowStep {
   ready?: () => boolean;
   /** Verify that Colonist committed the click before advancing. */
   complete?: () => boolean;
+  /**
+   * Re-resolve and re-click an idempotent control when Colonist swallows the
+   * first click while replacing its React action bar.
+   */
+  retryOnIncomplete?: boolean;
   /** Re-run this step until `ready` is true (used to clear stale drafts). */
   repeatUntilReady?: boolean;
   settleMs?: number;
@@ -1164,6 +1245,7 @@ const closeTradePanelStep = (label: string): WorkflowStep => ({
   resolve: findTradePanelControl,
   ready: () => !tradePanelIsOpen(),
   complete: () => !tradePanelIsOpen(),
+  retryOnIncomplete: true,
   settleMs: 320,
 });
 
@@ -1186,6 +1268,7 @@ const tradeWorkflow = (
     resolve: findTradePanelControl,
     ready: tradePanelIsOpen,
     complete: tradePanelIsOpen,
+    retryOnIncomplete: true,
     settleMs: 320,
   },
   clearTradeDraftStep(),
@@ -1219,6 +1302,7 @@ const counterWorkflow = (
         findTradeControl(action.offerIndex, "counter"),
       ready: tradePanelIsOpen,
       complete: tradePanelIsOpen,
+      retryOnIncomplete: true,
       settleMs: 340,
     },
     clearTradeDraftStep(),
@@ -1463,7 +1547,10 @@ const startWorkflow = (
       advanced = true;
       workflowCurrentElement = undefined;
       requestBoardRefresh();
-      const verify = (verificationAttempts = 0): void => {
+      const verify = (
+        verificationAttempts = 0,
+        recommitAttempts = 0,
+      ): void => {
         if (
           generation !== workflowGeneration ||
           workflowSignature !== action.signature
@@ -1488,8 +1575,47 @@ const startWorkflow = (
           later(() => run(index + 1), step.settleMs ?? 220);
           return;
         }
+        if (
+          step.retryOnIncomplete &&
+          verificationAttempts > 0 &&
+          verificationAttempts % 8 === 0 &&
+          recommitAttempts < 2
+        ) {
+          const retryOptions = workflowOptions ?? options;
+          const validateRetry =
+            index === 0 || !retryOptions.validateContinuation
+              ? retryOptions.validate
+              : retryOptions.validateContinuation;
+          if (validateRetry && !validateRetry()) {
+            fail(
+              "State signature or legal target set changed before workflow retry",
+            );
+            return;
+          }
+          const fresh = step.resolve();
+          if (fresh) {
+            fresh.click();
+            requestBoardRefresh();
+            later(
+              () =>
+                verify(
+                  verificationAttempts + 1,
+                  recommitAttempts + 1,
+                ),
+              180,
+            );
+            return;
+          }
+        }
         if (verificationAttempts < 24) {
-          later(() => verify(verificationAttempts + 1), 120);
+          later(
+            () =>
+              verify(
+                verificationAttempts + 1,
+                recommitAttempts,
+              ),
+            120,
+          );
           return;
         }
         fail(`Colonist did not commit workflow step: ${step.label}`);
@@ -1648,7 +1774,7 @@ const installFollowupGuide = (
       }
       document.removeEventListener("pointerdown", handler, true);
       boardFollowupCleanup = undefined;
-      executeBoardAction(action);
+      executeBoardAction(action, 1);
       if (action.followupPlayer) {
         const stillCurrent = () =>
           activeBoardFollowupSignature === action.signature;
@@ -1752,7 +1878,13 @@ export const renderActionGuide = (
   }
   if (activatingAutopilot) lastClickSignature = "";
   if (!action) {
-    lastClickSignature = "";
+    if (
+      !activeBoardCommand ||
+      !activeBoardCommand.options.validateBoardContinuation ||
+      !boardCommandStillLegal(activeBoardCommand)
+    ) {
+      clearBoardCommand();
+    }
     cancelWorkflow();
     boardFollowupCleanup?.();
     document.getElementById(ROOT_ID)?.remove();
@@ -1833,6 +1965,8 @@ export const destroyActionGuide = (): void => {
   for (const timer of followupTimers) window.clearTimeout(timer);
   followupTimers.clear();
   boardCommandAttempts.clear();
+  activeBoardCommand = undefined;
+  boardCommandGeneration += 1;
   controlResolutionAttempts.clear();
   buildControlCommitAttempts.clear();
   reportedMissingControls.clear();

@@ -1148,6 +1148,7 @@ import { openingRoadEdgeIds } from "../core/placement";
             action?: "road" | "settlement" | "city" | "robber";
             targetId?: string;
             signature?: string;
+            attempt?: number;
           }
         | undefined;
       if (
@@ -1213,15 +1214,41 @@ import { openingRoadEdgeIds } from "../core/placement";
       }
       if (!Number.isInteger(index) || index < 0) return;
       try {
+        const retryWithSelectionBypass =
+          Number.isInteger(detail.attempt) &&
+          Number(detail.attempt) >= 3 &&
+          !snapshot.initialPlacement;
         if (detail.action === "settlement") {
           if (snapshot.initialPlacement) {
             socket.selectedInitialPlacementIndex?.(index);
           }
-          socket.confirmBuildSettlement(index);
+          if (
+            retryWithSelectionBypass &&
+            typeof socket.confirmBuildSettlementSkippingSelection ===
+              "function"
+          ) {
+            socket.confirmBuildSettlementSkippingSelection(index);
+          } else {
+            socket.confirmBuildSettlement(index);
+          }
         } else if (detail.action === "city") {
-          socket.confirmBuildCity(index);
+          if (
+            retryWithSelectionBypass &&
+            typeof socket.confirmBuildCitySkippingSelection === "function"
+          ) {
+            socket.confirmBuildCitySkippingSelection(index);
+          } else {
+            socket.confirmBuildCity(index);
+          }
         } else if (detail.action === "road") {
-          socket.confirmBuildRoad(index);
+          if (
+            retryWithSelectionBypass &&
+            typeof socket.confirmBuildRoadSkippingSelection === "function"
+          ) {
+            socket.confirmBuildRoadSkippingSelection(index);
+          } else {
+            socket.confirmBuildRoad(index);
+          }
         } else {
           socket.selectedTile(index);
         }

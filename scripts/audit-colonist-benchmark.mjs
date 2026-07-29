@@ -22,6 +22,59 @@ const cardTotal = (vector = {}) =>
     0,
   );
 
+const canAfford = (hand = {}, cost = {}) =>
+  resourceOrder.every(
+    (resource) =>
+      Number(hand[resource] ?? 0) >= Number(cost[resource] ?? 0),
+  );
+
+const remainingPieces = (trace, piece, supply) => {
+  const player =
+    trace.replayState?.players?.[
+      trace.rootPlayer ?? trace.replayBoard?.myPlayer
+    ];
+  const built = Number(player?.builds?.[piece]);
+  return Number.isFinite(built) ? Math.max(0, supply - built) : undefined;
+};
+
+const hasDeterministicHandReduction = (trace) => {
+  const board = trace.replayBoard;
+  const hand = board?.ownHand;
+  if (!board || !hand) return false;
+  if (
+    (remainingPieces(trace, "road", 15) ?? 0) > 0 &&
+    board.buildableRoadIds?.length > 0 &&
+    canAfford(hand, { lumber: 1, brick: 1 })
+  ) {
+    return true;
+  }
+  if (
+    (remainingPieces(trace, "settlement", 5) ?? 0) > 0 &&
+    board.buildableSettlementIds?.length > 0 &&
+    canAfford(hand, { lumber: 1, brick: 1, wool: 1, grain: 1 })
+  ) {
+    return true;
+  }
+  if (
+    (remainingPieces(trace, "city", 4) ?? 0) > 0 &&
+    board.buildableCityIds?.length > 0 &&
+    canAfford(hand, { grain: 2, ore: 3 })
+  ) {
+    return true;
+  }
+  const ratios =
+    board.players?.[board.myPlayer]?.tradeRatios;
+  return resourceOrder.some((given) => {
+    const ratio = Number(ratios?.[given] ?? 4);
+    if (ratio <= 1 || Number(hand[given] ?? 0) < ratio) return false;
+    return resourceOrder.some(
+      (received) =>
+        received !== given &&
+        (!board.bankVisible || Number(board.bank?.[received] ?? 0) > 0),
+    );
+  });
+};
+
 const impossibleFromVisibleBank = (board, requested) => {
   if (!board?.bankVisible || !board.bank || !board.ownHand) return false;
   const supply = Object.keys(board.players ?? {}).length > 4 ? 24 : 19;
@@ -73,6 +126,7 @@ const auditTrace = (traces) => {
   const staleRolls = [];
   const postGameActions = [];
   const riskyEndTurns = [];
+  const forcedRiskyEndTurns = [];
   const robberOnCurrentHex = [];
   for (const trace of final) {
     const action = trace.finalAction;
@@ -91,7 +145,11 @@ const auditTrace = (traces) => {
       action.control === "end" &&
       cardTotal(board?.ownHand) > 7
     ) {
-      riskyEndTurns.push(trace.stateHash);
+      if (hasDeterministicHandReduction(trace)) {
+        riskyEndTurns.push(trace.stateHash);
+      } else {
+        forcedRiskyEndTurns.push(trace.stateHash);
+      }
     }
     if (
       trace.deepChosenAction?.kind === "move-robber" &&
@@ -154,6 +212,7 @@ const auditTrace = (traces) => {
     staleRolls: staleRolls.length,
     robberOnCurrentHex: robberOnCurrentHex.length,
     riskyEndTurns: riskyEndTurns.length,
+    forcedRiskyEndTurns: forcedRiskyEndTurns.length,
     postGameActions: postGameActions.length,
   };
 };
@@ -230,6 +289,11 @@ const aggregate = {
   ),
   riskyEndTurns: games.reduce(
     (total, game) => total + (game.traceAudit?.riskyEndTurns ?? 0),
+    0,
+  ),
+  forcedRiskyEndTurns: games.reduce(
+    (total, game) =>
+      total + (game.traceAudit?.forcedRiskyEndTurns ?? 0),
     0,
   ),
   postGameActions: games.reduce(

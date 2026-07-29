@@ -41,6 +41,7 @@ import {
   RESOURCE_ORDER,
   cloneResources,
   emptyResources,
+  hasResources,
   resourceTotal,
   type BuildKind,
   type Resource,
@@ -261,9 +262,17 @@ export class AssistantOverlay {
     point: BoardPoint;
   };
   private pendingPlacement?: PendingBoardPlacement;
+  private pendingPlacementHandBefore?: ResourceVector;
   private confirmedPlacement?: {
     pending: PendingBoardPlacement;
     player: string;
+    expiresAt: number;
+  };
+  private confirmedPlacementSpend?: {
+    gameKey?: string;
+    player: string;
+    before: ResourceVector;
+    after: ResourceVector;
     expiresAt: number;
   };
   private pendingPlacementTimer?: number;
@@ -411,6 +420,28 @@ export class AssistantOverlay {
         );
       }
     }
+    if (this.confirmedPlacementSpend && nextBoard) {
+      const guard = this.confirmedPlacementSpend;
+      const observedHand = nextBoard.ownHand;
+      const observedHandAdvanced = Boolean(
+        observedHand &&
+        RESOURCE_ORDER.some(
+          (resource) => observedHand[resource] !== guard.before[resource],
+        ),
+      );
+      if (
+        Date.now() >= guard.expiresAt ||
+        (
+          guard.gameKey &&
+          nextBoard.gameKey &&
+          guard.gameKey !== nextBoard.gameKey
+        ) ||
+        nextBoard.gameOver ||
+        observedHandAdvanced
+      ) {
+        this.confirmedPlacementSpend = undefined;
+      }
+    }
     if (
       this.roadPlan &&
       nextBoard?.gameKey &&
@@ -436,6 +467,7 @@ export class AssistantOverlay {
       this.decisionWorker.reset();
       this.winPredictions.reset();
       this.confirmedPlacement = undefined;
+      this.confirmedPlacementSpend = undefined;
       this.robberVictimPlan = undefined;
       this.attemptedTradeOffers.clear();
       this.failedTradeActions.clear();
@@ -478,6 +510,7 @@ export class AssistantOverlay {
       placementHasAdvanced(this.pendingPlacement, nextBoard)
     ) {
       this.clearPendingPlacement();
+      this.confirmedPlacementSpend = undefined;
     }
     this.board = nextBoard;
     if (nextBoard?.gameOver) {
@@ -524,6 +557,7 @@ export class AssistantOverlay {
     this.decisionWorker.destroy();
     this.clearOutgoingTradeWatchdogs();
     this.clearPendingPlacement();
+    this.confirmedPlacementSpend = undefined;
     document.removeEventListener("pointerup", this.handleBoardPointer, true);
     this.host.remove();
   }
@@ -695,6 +729,9 @@ export class AssistantOverlay {
       gameKey: board.gameKey,
       startedAt: Date.now(),
     };
+    this.pendingPlacementHandBefore = board.ownHand
+      ? cloneResources(board.ownHand)
+      : undefined;
     this.activeSpatial = undefined;
     this.pendingPlacementTimer = window.setTimeout(() => {
       this.pendingPlacement = undefined;
@@ -709,6 +746,7 @@ export class AssistantOverlay {
 
   private clearPendingPlacement(): void {
     this.pendingPlacement = undefined;
+    this.pendingPlacementHandBefore = undefined;
     if (this.pendingPlacementTimer !== undefined) {
       window.clearTimeout(this.pendingPlacementTimer);
       this.pendingPlacementTimer = undefined;
@@ -729,6 +767,9 @@ export class AssistantOverlay {
       gameKey: board.gameKey,
       startedAt: Date.now(),
     };
+    this.pendingPlacementHandBefore = board.ownHand
+      ? cloneResources(board.ownHand)
+      : undefined;
     this.activeSpatial = undefined;
     this.pendingPlacementTimer = window.setTimeout(() => {
       this.pendingPlacement = undefined;
@@ -801,6 +842,27 @@ export class AssistantOverlay {
       player,
       expiresAt: Date.now() + PLACEMENT_SYNC_TIMEOUT_MS,
     };
+    const before = this.pendingPlacementHandBefore;
+    const cost =
+      pending.action === "road" ||
+      pending.action === "settlement" ||
+      pending.action === "city"
+        ? BUILD_COSTS[pending.action]
+        : undefined;
+    if (before && cost && hasResources(before, cost)) {
+      const after = cloneResources(before);
+      const resourceCost = cost as Partial<ResourceVector>;
+      for (const resource of RESOURCE_ORDER) {
+        after[resource] -= resourceCost[resource] ?? 0;
+      }
+      this.confirmedPlacementSpend = {
+        gameKey: board.gameKey,
+        player,
+        before,
+        after,
+        expiresAt: Date.now() + PLACEMENT_SYNC_TIMEOUT_MS,
+      };
+    }
     this.board = applyConfirmedPlacement(pending, board, player);
     this.clearPendingPlacement();
     this.decisionAnalysis = undefined;
@@ -932,6 +994,10 @@ export class AssistantOverlay {
         Boolean(next && nextSignature) &&
         this.actionGuideSignature === nextSignature &&
         Boolean(next && this.nextClickStillLegal(next)),
+      validateBoardContinuation: () =>
+        next?.kind === "board"
+          ? this.nextClickStillLegal(next)
+          : false,
       validateContinuation: () =>
         Boolean(next && nextSignature) &&
         this.actionGuideSignature === nextSignature &&
@@ -972,6 +1038,13 @@ export class AssistantOverlay {
           next?.kind === "build" &&
           next.build !== "development"
         ) {
+          this.decisionAnalysis = undefined;
+          this.decisionKey = "";
+          this.decisionPendingKey = "";
+          this.decisionWorker.reset();
+          this.render();
+        }
+        if (!succeeded && next?.kind === "board") {
           this.decisionAnalysis = undefined;
           this.decisionKey = "";
           this.decisionPendingKey = "";
@@ -1731,7 +1804,13 @@ export class AssistantOverlay {
     const resources = reconcilePublicResourceEvidence(state, {
       exactHands:
         board.myPlayer && board.ownHand
-          ? { [board.myPlayer]: board.ownHand }
+          ? {
+              [board.myPlayer]:
+                this.confirmedPlacementSpend?.player === board.myPlayer &&
+                this.confirmedPlacementSpend.gameKey === board.gameKey
+                  ? this.confirmedPlacementSpend.after
+                  : board.ownHand,
+            }
           : undefined,
       handSizes: board.players
         ? Object.fromEntries(
