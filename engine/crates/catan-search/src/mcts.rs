@@ -11,6 +11,16 @@ use crate::tactical::{TacticalResult, solve_belief_current_turn, solve_current_t
 
 const NONE: u32 = u32::MAX;
 
+fn empty_tactical_result() -> TacticalResult {
+    TacticalResult {
+        win_probability: 0.0,
+        lower_bound: 0.0,
+        principal_line: Vec::new(),
+        nodes: 0,
+        proven: false,
+    }
+}
+
 fn information_identity(state: &GameState) -> u64 {
     match state.node_kind() {
         NodeKind::Decision { actor } => state.observation_hash(actor),
@@ -119,6 +129,39 @@ pub enum BeliefError {
 pub struct BeliefParticle {
     pub state: GameState,
     pub weight: f32,
+}
+
+fn robust_root_score(candidate: &ActionStats, actor: usize) -> f32 {
+    candidate.value[actor] * 0.72 + candidate.lower_confidence_value[actor] * 0.28
+        - (1.0 - candidate.legal_weight).max(0.0) * 0.12
+}
+
+pub fn safer_end_turn_alternative(
+    state: &GameState,
+    actor: usize,
+    actions: &[ActionStats],
+) -> Option<Action> {
+    let held = state.players.get(actor)?.resource_total();
+    if held <= 7 {
+        return None;
+    }
+    let end_score = actions
+        .iter()
+        .find(|candidate| candidate.action == Action::EndTurn)
+        .map(|candidate| robust_root_score(candidate, actor))?;
+    let alternative = actions.iter().find(|candidate| {
+        if candidate.action == Action::EndTurn {
+            return false;
+        }
+        let mut next = state.clone();
+        next.apply(&candidate.action).is_ok() && next.players[actor].resource_total() < held
+    })?;
+    // A tiny noisy search edge is not enough to justify exposing half a
+    // nine- or ten-card hand to the next orbit. Preserve EndTurn only when its
+    // modeled advantage is material; the tolerance grows with overflow.
+    let safety_tolerance = 0.015 + held.saturating_sub(7) as f32 * 0.01;
+    (robust_root_score(alternative, actor) + safety_tolerance >= end_score)
+        .then(|| alternative.action.clone())
 }
 
 #[derive(Default)]
@@ -349,17 +392,26 @@ impl Mcts {
             self.reset(state);
         }
         self.statistics = SearchStatistics::default();
-        let tactical = solve_current_turn(
-            state,
-            self.config.tactical_depth,
-            self.config.tactical_nodes,
-        );
         let exact = solve_exact_belief(
             &[BeliefParticle {
                 state: state.clone(),
                 weight: 1.0,
             }],
             ExactActionFamily::Mandatory,
+        );
+        if exact.applicable {
+            // Discard, robber, and trade-response prompts have one compact,
+            // authoritative exact family. Do not spend the interactive budget
+            // on an unrelated tactical tree and MCTS after that decision is
+            // already known.
+            self.reset(state);
+            self.statistics = SearchStatistics::default();
+            return self.finish_report(state, empty_tactical_result(), exact, None);
+        }
+        let tactical = solve_current_turn(
+            state,
+            self.config.tactical_depth,
+            self.config.tactical_nodes,
         );
         self.prepare_root_priors(state);
         for _ in 0..self.config.iterations {
@@ -415,6 +467,15 @@ impl Mcts {
         if observation != self.root_hash && !self.reuse_identity(observation) {
             self.reset_identity(observation);
         }
+        let exact = solve_exact_belief(particles, ExactActionFamily::Mandatory);
+        if exact.applicable {
+            // The response family already evaluates every legal action over
+            // the full weighted posterior. Resetting here also prevents stale
+            // strategic children from a reused tree leaking into diagnostics.
+            self.reset_identity(observation);
+            self.statistics = SearchStatistics::default();
+            return Ok(self.finish_report(first, empty_tactical_result(), exact, Some(particles)));
+        }
         let tactical_particles = particles
             .iter()
             .map(|particle| (&particle.state, particle.weight))
@@ -424,7 +485,6 @@ impl Mcts {
             self.config.tactical_depth,
             self.config.tactical_nodes,
         );
-        let exact = solve_exact_belief(particles, ExactActionFamily::Mandatory);
         self.prepare_root_priors(first);
         let total_weight = particles
             .iter()
@@ -635,13 +695,9 @@ impl Mcts {
                 }
             })
             .collect::<Vec<_>>();
-        let robust_root_score = |candidate: &ActionStats| {
-            candidate.value[actor] * 0.72 + candidate.lower_confidence_value[actor] * 0.28
-                - (1.0 - candidate.legal_weight).max(0.0) * 0.12
-        };
         actions.sort_by(|a, b| {
-            robust_root_score(b)
-                .total_cmp(&robust_root_score(a))
+            robust_root_score(b, actor)
+                .total_cmp(&robust_root_score(a, actor))
                 .then_with(|| b.visits.cmp(&a.visits))
                 .then_with(|| b.prior.total_cmp(&a.prior))
         });
@@ -653,6 +709,11 @@ impl Mcts {
         } else {
             actions.first().map(|stats| stats.action.clone())
         };
+        if chosen == Some(Action::EndTurn)
+            && let Some(safer) = safer_end_turn_alternative(state, actor, &actions)
+        {
+            chosen = Some(safer);
+        }
         if !exact.applicable
             && !tactical.proven
             && let Some(family) = chosen.as_ref().and_then(exact_family_for_action)
@@ -912,7 +973,7 @@ impl Mcts {
 mod tests {
     use colonist_catan_core::{Action, GameState, NodeKind, Phase, SplitMix64};
 
-    use super::{Mcts, SearchConfig, progressive_width};
+    use super::{ActionStats, Mcts, SearchConfig, progressive_width, safer_end_turn_alternative};
 
     #[test]
     fn progressive_widening_follows_k_times_visits_to_alpha() {
@@ -925,6 +986,19 @@ mod tests {
         assert_eq!(progressive_width(&config, 25), 10);
         assert_eq!(progressive_width(&config, 100), 20);
         assert_eq!(progressive_width(&config, 10_000), 200);
+    }
+
+    fn root_stats(action: Action, value: f32) -> ActionStats {
+        ActionStats {
+            action,
+            visits: 20,
+            availability: 20,
+            availability_weight: 1.0,
+            legal_weight: 1.0,
+            prior: 0.5,
+            value: [value; 4],
+            lower_confidence_value: [value; 4],
+        }
     }
 
     fn advance_setup_and_roll(state: &mut GameState, rng: &mut SplitMix64) {
@@ -984,6 +1058,39 @@ mod tests {
         );
         assert_eq!(first_report.statistics.iterations, 120);
         assert!(first_report.statistics.nodes > 1);
+    }
+
+    #[test]
+    fn close_end_turn_ties_prefer_reducing_an_unsafe_hand() {
+        let mut state = GameState::standard(71, 4);
+        let mut rng = SplitMix64::new(72);
+        advance_setup_and_roll(&mut state, &mut rng);
+        let actor = state.actor() as usize;
+        state.players[actor].resources = [0, 0, 4, 3, 2];
+        let actions = vec![
+            root_stats(Action::EndTurn, 0.5325),
+            root_stats(Action::BuyDevelopment, 0.5306),
+        ];
+
+        assert_eq!(
+            safer_end_turn_alternative(&state, actor, &actions),
+            Some(Action::BuyDevelopment),
+        );
+    }
+
+    #[test]
+    fn materially_better_end_turn_is_not_replaced_by_hand_cleanup() {
+        let mut state = GameState::standard(73, 4);
+        let mut rng = SplitMix64::new(74);
+        advance_setup_and_roll(&mut state, &mut rng);
+        let actor = state.actor() as usize;
+        state.players[actor].resources = [0, 0, 4, 3, 2];
+        let actions = vec![
+            root_stats(Action::EndTurn, 0.60),
+            root_stats(Action::BuyDevelopment, 0.50),
+        ];
+
+        assert_eq!(safer_end_turn_alternative(&state, actor, &actions), None);
     }
 
     #[test]

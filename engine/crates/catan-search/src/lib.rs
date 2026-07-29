@@ -32,7 +32,7 @@ pub use features::{
 };
 pub use mcts::{
     ActionStats, BeliefError, BeliefParticle, Mcts, SearchConfig, SearchMode, SearchReport,
-    SearchStatistics,
+    SearchStatistics, safer_end_turn_alternative,
 };
 pub use model::{
     learned_action_logit, learned_action_logits, learned_model_ready, learned_model_version,

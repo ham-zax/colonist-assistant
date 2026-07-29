@@ -13,7 +13,7 @@ use colonist_catan_search::{
     ActionStats, BeliefParticle, ENGINE_REVISION, ExactActionFamily, ExactActionValue,
     ExactDecisionResult, Mcts, SearchConfig, SearchMode, SearchReport, SearchStatistics,
     TacticalResult, evaluate, exact_family_for_action, learned_model_version,
-    learned_trade_model_version, search_weighted_belief_maxn_bounded,
+    learned_trade_model_version, safer_end_turn_alternative, search_weighted_belief_maxn_bounded,
     search_weighted_belief_paranoid_bounded, solve_belief_current_turn, solve_exact_belief,
 };
 use serde::{Deserialize, Serialize};
@@ -723,6 +723,20 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
             request.tactical_depth.unwrap_or(18).clamp(4, 32),
             request.tactical_nodes.unwrap_or(12_000).clamp(100, 100_000),
         );
+        let actions = depth_report
+            .actions
+            .into_iter()
+            .map(|candidate| ActionStats {
+                action: candidate.action,
+                visits: particles.len() as u32,
+                availability: (candidate.legal_weight * particles.len() as f32).round() as u32,
+                availability_weight: candidate.legal_weight,
+                legal_weight: candidate.legal_weight,
+                prior: 0.0,
+                value: candidate.value,
+                lower_confidence_value: candidate.lower_confidence_value,
+            })
+            .collect::<Vec<_>>();
         let mut exact = solve_exact_belief(&particles, ExactActionFamily::Mandatory);
         let mut chosen = if exact.applicable {
             exact.chosen.clone()
@@ -731,6 +745,15 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
         } else {
             depth_report.chosen
         };
+        if chosen == Some(Action::EndTurn)
+            && let Some(safer) = safer_end_turn_alternative(
+                &particles[0].state,
+                particles[0].state.actor() as usize,
+                &actions,
+            )
+        {
+            chosen = Some(safer);
+        }
         if !exact.applicable
             && !tactical.proven
             && let Some(family) = chosen.as_ref().and_then(exact_family_for_action)
@@ -741,20 +764,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
         SearchReport {
             chosen,
             root_value: depth_report.value,
-            actions: depth_report
-                .actions
-                .into_iter()
-                .map(|candidate| ActionStats {
-                    action: candidate.action,
-                    visits: particles.len() as u32,
-                    availability: (candidate.legal_weight * particles.len() as f32).round() as u32,
-                    availability_weight: candidate.legal_weight,
-                    legal_weight: candidate.legal_weight,
-                    prior: 0.0,
-                    value: candidate.value,
-                    lower_confidence_value: candidate.lower_confidence_value,
-                })
-                .collect(),
+            actions,
             tactical,
             exact,
             statistics: SearchStatistics {

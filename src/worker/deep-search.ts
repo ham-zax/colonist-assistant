@@ -37,6 +37,7 @@ const DEVELOPMENT_ORDER = [
 ] as const;
 const DEVELOPMENT_TOTAL = [14, 5, 2, 2, 2] as const;
 const MAX_PARTICLES = 96;
+const MAX_INTERACTIVE_PARTICLES = 32;
 
 let wasmReady: Promise<void> | undefined;
 
@@ -817,7 +818,41 @@ export const buildDeepSearchRequest = (
     if (existing) existing.weight += world.weight;
     else mergedWorlds.set(key, world);
   }
-  const worlds = [...mergedWorlds.values()];
+  let worlds = [...mergedWorlds.values()];
+  if (worlds.length > MAX_INTERACTIVE_PARTICLES) {
+    // Preserve the weighted posterior without sending dozens of near-duplicate
+    // development-card determinizations through every interactive WASM call.
+    // Deterministic systematic resampling covers the complete cumulative mass
+    // (rather than taking the first N worlds) and merges repeated selections.
+    const totalWeight = worlds.reduce(
+      (sum, world) => sum + Math.max(0, world.weight),
+      0,
+    );
+    const quantum = totalWeight / MAX_INTERACTIVE_PARTICLES;
+    const selected = new Map<number, (typeof worlds)[number]>();
+    let cursor = 0;
+    let cumulative = Math.max(0, worlds[0]?.weight ?? 0);
+    for (let sample = 0; sample < MAX_INTERACTIVE_PARTICLES; sample += 1) {
+      const target = (sample + 0.5) * quantum;
+      while (
+        cursor < worlds.length - 1 &&
+        cumulative + Number.EPSILON < target
+      ) {
+        cursor += 1;
+        cumulative += Math.max(0, worlds[cursor]?.weight ?? 0);
+      }
+      const existing = selected.get(cursor);
+      if (existing) {
+        existing.weight += quantum;
+      } else {
+        selected.set(cursor, {
+          ...worlds[cursor]!,
+          weight: quantum,
+        });
+      }
+    }
+    worlds = [...selected.values()];
+  }
   const baseWorld = worlds[0]!;
   const buildings = board.vertices.map((vertex) => {
     if (!vertex.building) return -1;
@@ -941,10 +976,10 @@ export const buildDeepSearchRequest = (
       // native arena/training pipeline; exact mandatory and tactical solvers
       // still run ahead of this bounded strategic search.
       iterations: players.length >= 3 ? 112 : 128,
-      maxNodes: 8_000,
+      maxNodes: 2_000,
       rolloutActions: players.length >= 3 ? 72 : 84,
       tacticalDepth: 14,
-      tacticalNodes: 2_000,
+      tacticalNodes: 560,
       seed,
       mode: "maxn",
       depth: 3,
@@ -968,19 +1003,27 @@ export const analyzeDeepSearch = async (
     rootPlayer,
   );
   request.mode = algorithm;
-  request.depth = Math.min(6, Math.max(3, players.length + 1));
+  if (algorithm === "maxn" || algorithm === "alpha-beta") {
+    // One depth unit is a completed turn, not a UI click. A player-count
+    // horizon therefore covers one complete table rotation. The previous
+    // `players + 1` setting spent roughly twice the interactive latency for
+    // almost identical live choices.
+    request.depth = Math.min(4, Math.max(2, players.length));
+    request.maxNodes = 2_000;
+    request.tacticalNodes = 560;
+  }
   request.branchCap = 12;
   if (request.state.phase === "trade-responses") {
     request.iterations = 48;
-    request.maxNodes = 3_000;
+    request.maxNodes = 2_000;
     request.rolloutActions = 48;
-    request.tacticalNodes = 900;
+    request.tacticalNodes = 560;
   } else if (!board.isMyTurn) {
     request.ponder = true;
     request.iterations = 64;
-    request.maxNodes = 4_000;
+    request.maxNodes = 2_000;
     request.rolloutActions = 56;
-    request.tacticalNodes = 600;
+    request.tacticalNodes = 480;
   }
   const startedAt = performance.now();
   const response = analyzeWasm(request) as WasmSearchResponse;

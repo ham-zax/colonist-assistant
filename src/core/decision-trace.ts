@@ -104,6 +104,10 @@ export class DecisionTraceRecorder {
       replayState,
       replayBoard,
     });
+    // Persist starts as well as completions. If the selected engine transport
+    // or executor stalls, the live benchmark must retain the exact pending
+    // state instead of losing the most important trace when Chromium closes.
+    this.schedulePersist();
   }
 
   complete(stateHash: string, analysis: DecisionAnalysis): void {

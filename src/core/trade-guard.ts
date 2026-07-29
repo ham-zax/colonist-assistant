@@ -87,7 +87,10 @@ export const selectUsableDeepAction = (
   if (!search || !chosen) return chosen;
   const usable = (action: DeepSearchAction): boolean => {
     if (
-      action.kind !== "offer-trade" ||
+      (
+        action.kind !== "offer-trade" &&
+        action.kind !== "counter-trade"
+      ) ||
       !action.cards ||
       !action.receiveCards
     ) {
@@ -95,25 +98,46 @@ export const selectUsableDeepAction = (
     }
     const give = tupleResources(action.cards);
     const receive = tupleResources(action.receiveCards);
+    const counterparty =
+      action.kind === "counter-trade"
+        ? board?.activeTrades?.find(
+            (trade) =>
+              trade.incoming &&
+              (!trade.myResponse || trade.myResponse === "pending"),
+          )?.creator
+        : undefined;
     return (
       !attemptedTradeOffers.has(tradeOfferKey(give, receive)) &&
       canAnyOpponentFulfillTrade(
         state,
         player,
         receive,
-        action.recipients,
+        counterparty ? [counterparty] : action.recipients,
         board,
       )
     );
   };
   if (usable(chosen)) return chosen;
   const root = Math.max(0, state?.playerOrder.indexOf(player ?? "") ?? 0);
+  const invalidCounter = chosen.kind === "counter-trade";
   return [...search.actions]
     .filter(
-      ({ action }) =>
-        !["respond-trade", "counter-trade", "confirm-trade"].includes(
-          action.kind,
-        ) && usable(action),
+      ({ action }) => {
+        if (invalidCounter) {
+          return (
+            (
+              action.kind === "respond-trade" ||
+              action.kind === "counter-trade"
+            ) &&
+            usable(action)
+          );
+        }
+        return (
+          !["respond-trade", "counter-trade", "confirm-trade"].includes(
+            action.kind,
+          ) && usable(action)
+        );
+      },
     )
     .sort(
       (left, right) =>
@@ -131,6 +155,24 @@ export const outgoingTradeDisposition = (
   responsesComplete || now - firstSeenAt >= timeoutMs
     ? "cancel"
     : "wait";
+
+/**
+ * Colonist can keep the original incoming offer in the DOM after we have
+ * accepted, declined, or converted it into an outgoing counteroffer. Treating
+ * that stale panel as unanswered launches duplicate searches and can replay
+ * the response workflow. The executor-owned completion set is therefore part
+ * of the protocol state, not merely presentation bookkeeping.
+ */
+export const unansweredIncomingTrades = (
+  trades: readonly ActiveTradeOffer[] | undefined,
+  completedTradeIds: ReadonlySet<string>,
+): ActiveTradeOffer[] =>
+  (trades ?? []).filter(
+    (trade) =>
+      trade.incoming &&
+      !completedTradeIds.has(trade.id) &&
+      (!trade.myResponse || trade.myResponse === "pending"),
+  );
 
 /**
  * A counteroffer has one intended counterparty. Once that player accepts,

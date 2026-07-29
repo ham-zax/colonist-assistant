@@ -187,6 +187,143 @@ describe("action guide autopilot", () => {
     expect(settlementClicks).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["road", "action-button-build-road"],
+    ["settlement", "action-button-build-settlement"],
+  ] as const)(
+    "uses Colonist's exact %s control even when the current asset has no legacy filename",
+    async (build, id) => {
+      const control = document.createElement("div");
+      control.id = id;
+      control.className = "currentActionControl-fixture";
+      control.innerHTML = '<img src="https://cdn.colonist.io/current-piece.svg">';
+      const clicked = vi.fn();
+      control.addEventListener("click", clicked);
+      document.body.append(control);
+
+      renderActionGuide(
+        {
+          kind: "build",
+          build,
+          label: `Build ${build}`,
+          signature: `current-${build}-control`,
+          confidence: 1,
+        },
+        { highlight: true, autonomous: true },
+      );
+      await vi.advanceTimersByTimeAsync(800);
+
+      expect(clicked).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("recovers when a recommended control mounts after the first render", async () => {
+    const action = {
+      kind: "build" as const,
+      build: "road" as const,
+      label: "Build road",
+      signature: "late-road-control",
+      confidence: 1,
+    };
+    const onExecution = vi.fn();
+
+    renderActionGuide(action, {
+      highlight: true,
+      autonomous: true,
+      onExecution,
+    });
+    await vi.advanceTimersByTimeAsync(200);
+
+    const control = document.createElement("div");
+    control.id = "action-button-build-road";
+    const clicked = vi.fn();
+    control.addEventListener("click", clicked);
+    document.body.append(control);
+    renderActionGuide(action, {
+      highlight: true,
+      autonomous: true,
+      onExecution,
+    });
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect(clicked).toHaveBeenCalledOnce();
+    expect(onExecution).toHaveBeenCalledWith({
+      succeeded: true,
+      signature: "late-road-control",
+    });
+    expect(onExecution).not.toHaveBeenCalledWith(
+      expect.objectContaining({ succeeded: false }),
+    );
+  });
+
+  it("retries an ignored build-mode click while the same action remains current", async () => {
+    const control = document.createElement("div");
+    control.id = "action-button-build-road";
+    const clicked = vi.fn();
+    control.addEventListener("click", clicked);
+    document.body.append(control);
+    const action = {
+      kind: "build" as const,
+      build: "road" as const,
+      label: "Build road",
+      signature: "ignored-road-click",
+      confidence: 1,
+    };
+
+    renderActionGuide(action, {
+      highlight: true,
+      autonomous: true,
+      validate: () => true,
+    });
+    await vi.advanceTimersByTimeAsync(1_850);
+
+    expect(clicked).toHaveBeenCalledTimes(3);
+    renderActionGuide(undefined, { highlight: true, autonomous: true });
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(clicked).toHaveBeenCalledTimes(3);
+  });
+
+  it("releases an ignored build action after bounded retries so a fresh plan can retry", async () => {
+    const control = document.createElement("div");
+    control.id = "action-button-build-road";
+    const clicked = vi.fn();
+    control.addEventListener("click", clicked);
+    document.body.append(control);
+    const action = {
+      kind: "build" as const,
+      build: "road" as const,
+      label: "Build road",
+      signature: "ignored-road-recovery",
+      confidence: 1,
+    };
+    const onExecution = vi.fn();
+    const options = {
+      highlight: true,
+      autonomous: true,
+      validate: () => true,
+      onExecution,
+    };
+
+    renderActionGuide(action, options);
+    await vi.advanceTimersByTimeAsync(5_400);
+
+    expect(clicked).toHaveBeenCalledTimes(5);
+    expect(onExecution).toHaveBeenCalledWith({
+      succeeded: false,
+      signature: "ignored-road-recovery",
+      reason:
+        "Colonist did not enter placement mode after bounded build-control retries",
+    });
+
+    // The failure callback causes the authoritative decision layer to replan.
+    // Rendering that fresh result must not remain blocked behind the old
+    // action signature or its exhausted retry counter.
+    renderActionGuide(action, options);
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect(clicked).toHaveBeenCalledTimes(6);
+  });
+
   it("confirms a development card after opening Colonist's action panel", async () => {
     const card = document.createElement("div");
     card.className = "cardContainer-fixture";
@@ -613,9 +750,21 @@ describe("action guide autopilot", () => {
       signature: "trade",
       confidence: 0.7,
     };
+    const originatingExecution = vi.fn();
+    const laterRenderExecution = vi.fn();
+    let postSendRefreshes = 0;
+    window.addEventListener("colonist-assistant-board-refresh", () => {
+      if (
+        clicks.includes("send") &&
+        !document.querySelector("#action-button-trade-players")
+      ) {
+        postSendRefreshes += 1;
+      }
+    });
     renderActionGuide(action, {
       highlight: true,
       autonomous: false,
+      onExecution: originatingExecution,
     });
     await vi.advanceTimersByTimeAsync(50);
     expect(clicks).toEqual([]);
@@ -623,6 +772,7 @@ describe("action guide autopilot", () => {
     renderActionGuide(action, {
       highlight: true,
       autonomous: true,
+      onExecution: laterRenderExecution,
     });
     await vi.advanceTimersByTimeAsync(3_500);
 
@@ -632,6 +782,12 @@ describe("action guide autopilot", () => {
       "get-lumber",
       "send",
     ]);
+    expect(originatingExecution).toHaveBeenCalledWith({
+      succeeded: true,
+      signature: "trade",
+    });
+    expect(laterRenderExecution).not.toHaveBeenCalled();
+    expect(postSendRefreshes).toBeGreaterThanOrEqual(2);
   });
 
   it("aborts, closes, and reports a player trade rejected by Colonist", async () => {

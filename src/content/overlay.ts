@@ -66,6 +66,7 @@ import {
   shouldConfirmAcceptedTradeImmediately,
   tradeMemoryScopeChanged,
   tradeOfferKey,
+  unansweredIncomingTrades,
 } from "../core/trade-guard";
 import type { TradeVerdict } from "../core/trades";
 import type {
@@ -736,6 +737,51 @@ export class AssistantOverlay {
     }, PLACEMENT_SYNC_TIMEOUT_MS);
   }
 
+  private rememberBuildPlacement(
+    next: Extract<NextClick, { kind: "build" }>,
+    spatial: ReturnType<AssistantOverlay["spatialRecommendation"]> | undefined,
+  ): void {
+    const placementAction =
+      next.build === "road" ||
+      next.build === "settlement" ||
+      next.build === "city"
+        ? next.build
+        : undefined;
+    if (!placementAction) return;
+    const deep = this.decisionAnalysis?.deepSearch?.chosen;
+    const deepKind = {
+      road: "build-road",
+      settlement: "build-settlement",
+      city: "build-city",
+    }[placementAction];
+    const targetId =
+      (
+        this.decisionAnalysis?.runtime === "background-wasm" &&
+        deep?.kind === deepKind
+      )
+        ? deep.targetId
+        : spatial?.proactive && spatial.action === placementAction
+          ? spatial.recommendation.id
+          : undefined;
+    if (!targetId) return;
+    const source =
+      placementAction === "road"
+        ? this.board?.edges.find((edge) => edge.id === targetId)
+        : this.board?.vertices.find((vertex) => vertex.id === targetId);
+    if (!source?.screen) return;
+    // A build action and its parameter click are one selected-engine
+    // transaction. Preserve the target returned by the completed WASM search
+    // before opening Colonist's placement modal; otherwise the modal can
+    // trigger a redundant search and leave autopilot waiting if background
+    // timer/message delivery is throttled.
+    this.queuedPlacement = {
+      gameKey: this.board?.gameKey,
+      action: placementAction,
+      targetId,
+      point: source.screen,
+    };
+  }
+
   private confirmPendingPlacementFromLog(): void {
     const pending = this.pendingPlacement;
     const state = this.session?.state;
@@ -877,14 +923,8 @@ export class AssistantOverlay {
       destroyWinOdds();
     }
     const nextSignature = next?.signature ?? "";
+    const traceKey = this.decisionKey;
     this.actionGuideSignature = nextSignature;
-    if (next && this.decisionKey) {
-      this.decisionTraces.final(
-        this.decisionKey,
-        next,
-        this.decisionSource(next, Boolean(workflow)),
-      );
-    }
     renderActionGuide(next, {
       highlight: this.settings.highlightNextAction,
       autonomous: this.settings.autonomousPrivateGames,
@@ -897,48 +937,41 @@ export class AssistantOverlay {
         this.actionGuideSignature === nextSignature &&
         Boolean(next && this.workflowContinuationStillLegal(next)),
       onExecution: ({ succeeded, reason }) => {
+        if (next && traceKey) {
+          this.decisionTraces.final(
+            traceKey,
+            next,
+            this.decisionSource(next, Boolean(workflow)),
+          );
+        }
         if (next?.kind === "trade-builder" && next.mode === "player") {
           this.rememberDomesticTradeAttempt(next);
         }
-        if (succeeded && next?.kind === "build" && spatial?.proactive) {
-          const placementAction =
-            next.build === "road" ||
-            next.build === "settlement" ||
-            next.build === "city"
-              ? next.build
-              : undefined;
-          const source =
-            placementAction === "road"
-              ? this.board?.edges.find(
-                  (edge) => edge.id === spatial.recommendation.id,
-                )
-              : this.board?.vertices.find(
-                  (vertex) => vertex.id === spatial.recommendation.id,
-                );
-          if (
-            placementAction &&
-            spatial.action === placementAction &&
-            source?.screen
-          ) {
-            this.queuedPlacement = {
-              gameKey: this.board?.gameKey,
-              action: placementAction,
-              targetId: spatial.recommendation.id,
-              point: source.screen,
-            };
-          }
+        if (succeeded && next?.kind === "build") {
+          this.rememberBuildPlacement(next, spatial);
         }
         if (succeeded && next?.kind === "board") {
           this.registerPendingPlacement(next);
         }
-        if (this.decisionKey) {
+        if (traceKey) {
           this.decisionTraces.execution(
-            this.decisionKey,
+            traceKey,
             succeeded,
             reason,
           );
         }
         if (!succeeded && next?.kind === "trade-builder") {
+          this.decisionAnalysis = undefined;
+          this.decisionKey = "";
+          this.decisionPendingKey = "";
+          this.decisionWorker.reset();
+          this.render();
+        }
+        if (
+          !succeeded &&
+          next?.kind === "build" &&
+          next.build !== "development"
+        ) {
           this.decisionAnalysis = undefined;
           this.decisionKey = "";
           this.decisionPendingKey = "";
@@ -1136,6 +1169,23 @@ export class AssistantOverlay {
       return this.decisionAnalysis?.deepSearch?.tacticalProven
         ? "tactical"
         : "deep";
+    }
+    if (
+      next.kind === "board" &&
+      (
+        (
+          this.queuedPlacement?.gameKey === this.board?.gameKey &&
+          this.queuedPlacement?.action === next.boardAction &&
+          this.queuedPlacement?.targetId === next.targetId
+        ) ||
+        (
+          next.boardAction === "road" &&
+          this.freeRoadPlan?.gameKey === this.board?.gameKey &&
+          this.freeRoadPlan?.edgeIds[0] === next.targetId
+        )
+      )
+    ) {
+      return "deep";
     }
     if (next.kind === "turn-control" && next.control === "end") {
       return "end-turn-fallback";
@@ -1346,10 +1396,9 @@ export class AssistantOverlay {
         renderTradeVerdicts([], new Map());
         return;
       }
-      const pendingIncoming = activeTrades.filter(
-        (trade) =>
-          trade.incoming &&
-          (!trade.myResponse || trade.myResponse === "pending"),
+      const pendingIncoming = unansweredIncomingTrades(
+        activeTrades,
+        this.completedIncomingTradeIds,
       );
       if (
         this.decisionPendingKey &&
@@ -1360,7 +1409,7 @@ export class AssistantOverlay {
         renderTradeVerdicts(activeTrades, new Map());
         return;
       }
-      const deepAction = this.decisionAnalysis?.deepSearch?.chosen;
+      const deepAction = this.preferredDeepAction(state, player);
       const verdicts = new Map(
         pendingIncoming
           .map((trade) => {
@@ -1469,16 +1518,21 @@ export class AssistantOverlay {
     player: string | undefined,
   ): void {
     const board = this.board;
-    const hasPendingIncomingTrade = board?.activeTrades?.some(
-      (trade) =>
-        trade.incoming &&
-        (!trade.myResponse || trade.myResponse === "pending"),
+    const hasPendingIncomingTrade = Boolean(
+      unansweredIncomingTrades(
+        board?.activeTrades,
+        this.completedIncomingTradeIds,
+      ).length,
+    );
+    const hasOutgoingTradeProtocol = Boolean(
+      board?.activeTrades?.some((trade) => !trade.incoming),
     );
     if (
       !state ||
       !player ||
       !board ||
       board.gameOver ||
+      hasOutgoingTradeProtocol ||
       (
         !board.isMyTurn &&
         !hasPendingIncomingTrade &&
@@ -1488,6 +1542,53 @@ export class AssistantOverlay {
     ) {
       this.decisionPendingKey = "";
       this.decisionSlowKey = "";
+      if (
+        hasOutgoingTradeProtocol &&
+        (
+          this.decisionPendingKey ||
+          this.decisionKey ||
+          this.decisionAnalysis
+        )
+      ) {
+        // An outgoing offer is a Colonist protocol wait/confirm/cancel state,
+        // not a strategic position. Invalidate any now-stale queued request so
+        // it cannot repaint the completed incoming offer when it returns.
+        this.decisionAnalysis = undefined;
+        this.decisionKey = "";
+        this.decisionWorker.reset();
+      }
+      return;
+    }
+    const retainedPlacementTarget =
+      (
+        (
+          board.action === "road" ||
+          board.action === "settlement" ||
+          board.action === "city"
+        ) &&
+        this.queuedPlacement?.gameKey === board.gameKey &&
+        this.queuedPlacement?.action === board.action
+      )
+        ? this.queuedPlacement.targetId
+        : board.action === "road" &&
+            this.freeRoadPlan?.gameKey === board.gameKey
+          ? this.freeRoadPlan?.edgeIds[0]
+          : undefined;
+    if (
+      retainedPlacementTarget &&
+      this.decisionAnalysis?.runtime === "background-wasm"
+    ) {
+      const key = this.decisionSignature(state, board, player);
+      if (key !== this.decisionKey) {
+        this.decisionKey = key;
+        this.decisionPendingKey = "";
+        this.decisionSlowKey = "";
+        this.decisionRuntimeError = "";
+        this.decisionTraces.begin(key, state, board);
+        // This is the parameterized continuation of the already-completed
+        // deep build/development action, not a fresh strategic position.
+        this.decisionTraces.complete(key, this.decisionAnalysis);
+      }
       return;
     }
     const visibleControl = visibleTurnControl();
@@ -1596,10 +1697,11 @@ export class AssistantOverlay {
     state: TrackerState,
     player: string,
   ): CoachReport | undefined {
-    const hasPendingIncomingTrade = this.board?.activeTrades?.some(
-      (trade) =>
-        trade.incoming &&
-        (!trade.myResponse || trade.myResponse === "pending"),
+    const hasPendingIncomingTrade = Boolean(
+      unansweredIncomingTrades(
+        this.board?.activeTrades,
+        this.completedIncomingTradeIds,
+      ).length,
     );
     const prepared =
       (this.board?.isMyTurn || hasPendingIncomingTrade) &&
@@ -2035,7 +2137,7 @@ export class AssistantOverlay {
         ) {
           continue;
         }
-        const deepAction = this.decisionAnalysis?.deepSearch?.chosen;
+        const deepAction = this.preferredDeepAction(state, report.player);
         const deepVerdict =
           deepAction?.kind === "respond-trade"
             ? deepAction.accept
@@ -2420,7 +2522,11 @@ export class AssistantOverlay {
     }
 
     const turnControl = board.isMyTurn ? visibleTurnControl() : undefined;
-    if (turnControl === "roll") {
+    // Colonist keeps the dice control mounted while modal board protocols
+    // such as robber placement are active. If the target coordinate is
+    // temporarily unavailable, wait for the next board snapshot instead of
+    // clicking a stale roll control and skipping the mandatory action.
+    if (turnControl === "roll" && (board.action ?? "none") === "none") {
       return {
         kind: "turn-control",
         control: "roll",
@@ -2454,7 +2560,10 @@ export class AssistantOverlay {
         confidence: 0.86,
       };
     }
-    if (turnControl === "end") {
+    // Colonist can leave the end-turn control visible while a mandatory
+    // robber, discard, or placement prompt is still active. Never let that
+    // stale control outrank the protocol action.
+    if (turnControl === "end" && (board.action ?? "none") === "none") {
       return {
         kind: "turn-control",
         control: "end",
@@ -2540,11 +2649,10 @@ export class AssistantOverlay {
       const mandatory = Boolean(
         this.board?.action === "discard" ||
         this.board?.action === "robber" ||
-        this.board?.activeTrades?.some(
-          (trade) =>
-            trade.incoming &&
-            (!trade.myResponse || trade.myResponse === "pending"),
-        ),
+        unansweredIncomingTrades(
+          this.board?.activeTrades,
+          this.completedIncomingTradeIds,
+        ).length,
       );
       return `<section class="decision pending-decision" aria-live="polite">
         <div class="decision-meta"><span>${mandatory ? "EXACT DECISION" : this.board?.isMyTurn ? "PLANNING THIS TURN" : "PONDERING"}</span><span>STATE LOCKED</span></div>
@@ -2555,6 +2663,20 @@ export class AssistantOverlay {
         <p class="why">${mandatory ? "Autopilot is paused for this state until the exact mandatory solver returns" : "No fallback click can override the authoritative search for this board signature"}.</p>
         <div class="board-confirm pending"><i></i><span>${mandatory ? "A result should appear immediately after board synchronization" : "The best complete turn plan will replace this state"}</span></div>
       </section>`;
+    }
+    const pendingOutgoing = this.board?.activeTrades?.find(
+      (trade) =>
+        !trade.incoming &&
+        !trade.acceptedPlayers?.length &&
+        !trade.responsesComplete &&
+        outgoingTradeDisposition(
+          false,
+          this.outgoingTradeSeenAt.get(trade.id) ?? Date.now(),
+          Date.now(),
+        ) === "wait",
+    );
+    if (!next && pendingOutgoing) {
+      return this.renderOutgoingTradeWait(pendingOutgoing);
     }
     if (
       spatial &&
@@ -2687,6 +2809,21 @@ export class AssistantOverlay {
       </div>
       <p class="why">This offer has no useful live response. Closing it releases Colonist's trade state; the same bundle stays blocked for this turn.</p>
       <div class="board-confirm"><i></i><span>The offer's cancel control is highlighted</span></div>
+    </section>`;
+  }
+
+  private renderOutgoingTradeWait(
+    trade: NonNullable<BoardSnapshot["activeTrades"]>[number],
+  ): string {
+    const pending = trade.pendingPlayers?.length ?? 0;
+    return `<section class="decision trade-decision" aria-live="polite">
+      <div class="decision-meta"><span>OUTGOING TRADE</span><span>WAITING</span></div>
+      <div class="decision-command">
+        <span class="command-art">${this.pieceArt("development")}</span>
+        <h1>Waiting for ${pending === 1 ? "1 response" : `${pending || "the remaining"} responses`}</h1>
+      </div>
+      <p class="why">The counteroffer was sent successfully. No duplicate search or click will run while Colonist collects the replies.</p>
+      <div class="board-confirm pending"><i></i><span>An acceptance will be confirmed immediately; a rejected or unanswered offer will close automatically</span></div>
     </section>`;
   }
 
@@ -2987,7 +3124,9 @@ export class AssistantOverlay {
           keep,
           score: deepSearch.tacticalWinProbability,
           reasons: [
-            `Deep Search compared this discard inside ${deepSearch.rollouts.toLocaleString()} continuation rollouts`,
+            deepSearch.exactDecision
+              ? `The exact solver compared every legal discard across ${deepSearch.particles.toLocaleString()} weighted belief ${deepSearch.particles === 1 ? "world" : "worlds"}`
+              : `Deep Search compared this discard inside ${deepSearch.rollouts.toLocaleString()} continuation rollouts`,
             "It preserves the strongest legal conversion and win-race branches",
           ],
         };

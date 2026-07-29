@@ -199,7 +199,7 @@ describe("deep-search state adapter", () => {
     expect(request.state.players[0].resources).toEqual([1, 1, 1, 1, 0]);
     expect(request.state.players[0].development).toEqual([1, 0, 0, 0, 0]);
     expect(request.state.worlds.length).toBeGreaterThan(2);
-    expect(request.state.worlds.length).toBeLessThanOrEqual(96);
+    expect(request.state.worlds.length).toBeLessThanOrEqual(32);
     expect(
       request.state.worlds.reduce(
         (sum: number, world: any) => sum + world.weight,
@@ -251,7 +251,7 @@ describe("deep-search state adapter", () => {
     ).request as any;
 
     expect(request.state.worlds.length).toBeGreaterThanOrEqual(24);
-    expect(request.state.worlds.length).toBeLessThanOrEqual(96);
+    expect(request.state.worlds.length).toBeLessThanOrEqual(32);
     expect(
       request.state.worlds.every(
         (world: any) =>
@@ -397,6 +397,55 @@ describe("deep-search state adapter", () => {
     )).toBe(4);
     expect(response.iterations).toBe(0);
     expect(response.rollouts).toBe(0);
+  });
+
+  it("answers incoming trades through the exact family without running strategic search", async () => {
+    const bytes = await readFile(
+      new URL(
+        "../src/generated/wasm/colonist_search_bg.wasm",
+        import.meta.url,
+      ),
+    );
+    await initWasm({ module_or_path: bytes });
+    const incomingBoard: BoardSnapshot = {
+      ...board,
+      isMyTurn: false,
+      currentPlayer: "Rival",
+      activeTrades: [
+        {
+          id: "incoming-fast-path",
+          creator: "Rival",
+          tradeExecutor: "Rival",
+          // Board offers are normalized to the user's perspective.
+          give: resources(0, 1, 0, 0, 0),
+          receive: resources(1, 0, 0, 0, 0),
+          incoming: true,
+          counterOffer: false,
+          canAccept: true,
+          acceptedPlayers: [],
+          pendingPlayers: ["You"],
+          rejectedPlayers: [],
+          responsesComplete: false,
+          myResponse: "pending",
+        },
+      ],
+    };
+    const built = buildDeepSearchRequest(state, incomingBoard, "You");
+    built.request.mode = "puct";
+    built.request.iterations = 50_000;
+    built.request.maxNodes = 250_000;
+    const started = performance.now();
+    const response = analyzeWasm(built.request);
+    const elapsed = performance.now() - started;
+
+    expect(response.exactDecision).toBe(true);
+    expect(["respond-trade", "counter-trade"]).toContain(
+      response.chosen?.kind,
+    );
+    expect(response.nodes).toBe(0);
+    expect(response.iterations).toBe(0);
+    expect(response.rollouts).toBe(0);
+    expect(elapsed).toBeLessThan(1_000);
   });
 
   it("returns a universally forced end turn without strategic search", async () => {

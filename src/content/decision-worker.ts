@@ -19,6 +19,9 @@ import {
 } from "./extension-context";
 
 const SLOW_DECISION_MS = 5_000;
+const TRANSPORT_RECOVERY_MS = 6_500;
+const TRANSPORT_RECOVERY_ERROR =
+  "Selected WASM request transport exceeded the recovery window";
 
 export interface DecisionServiceStatus {
   runtime: "background-wasm" | "engine-error";
@@ -34,6 +37,7 @@ interface PendingDecision extends DecisionRequest {
   callback: (analysis: DecisionAnalysis) => void;
   slowCallback?: (elapsedMs: number) => void;
   failureCallback?: (detail: string) => void;
+  transportAttempts: number;
 }
 
 export class DecisionWorkerClient {
@@ -120,6 +124,7 @@ export class DecisionWorkerClient {
       callback,
       ...(slowCallback ? { slowCallback } : {}),
       ...(failureCallback ? { failureCallback } : {}),
+      transportAttempts: 0,
     };
     this.desiredKey = key;
     this.pump();
@@ -161,7 +166,21 @@ export class DecisionWorkerClient {
       });
       if (!stale) request.slowCallback?.(elapsedMs);
     }, SLOW_DECISION_MS);
-    void this.send(message)
+    let recoveryTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
+    const response = Promise.race([
+      this.send(message),
+      new Promise<DecisionMessageResponse>((resolve) => {
+        recoveryTimer = globalThis.setTimeout(
+          () =>
+            resolve({
+              id: request.id,
+              error: TRANSPORT_RECOVERY_ERROR,
+            }),
+          TRANSPORT_RECOVERY_MS,
+        );
+      }),
+    ]);
+    void response
       .then((response) => {
         const finishedAt = performance.now();
         const totalMs = finishedAt - request.enqueuedAt;
@@ -201,6 +220,32 @@ export class DecisionWorkerClient {
           request.generation !== this.generation ||
           request.key !== this.desiredKey ||
           response.id !== request.id;
+        if (
+          !stale &&
+          response.error === TRANSPORT_RECOVERY_ERROR
+        ) {
+          // A valid live WASM search is bounded well below this window. A
+          // message that never settles is a lost/suspended extension-service
+          // transport, not permission to switch algorithms. Re-issue the same
+          // selected-engine request with a fresh message id and generation.
+          // The old result is ignored if it eventually arrives.
+          console.warn("[Colonist Assistant] Retrying selected WASM request", {
+            key: request.key,
+            engine: request.engine,
+            attempt: request.transportAttempts + 2,
+            elapsedMs: Math.round(totalMs),
+            policy: "selected-engine-only",
+            fallbackStarted: false,
+          });
+          this.queued = {
+            ...request,
+            id: this.nextId++,
+            generation: this.generation,
+            enqueuedAt: performance.now(),
+            transportAttempts: request.transportAttempts + 1,
+          };
+          return;
+        }
         if (stale) {
           return;
         }
@@ -215,6 +260,9 @@ export class DecisionWorkerClient {
       })
       .finally(() => {
         globalThis.clearTimeout(slowTimer);
+        if (recoveryTimer !== undefined) {
+          globalThis.clearTimeout(recoveryTimer);
+        }
         if (this.active?.id === request.id) this.active = undefined;
         this.pump();
       });

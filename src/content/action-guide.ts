@@ -131,9 +131,13 @@ let workflowGeneration = 0;
 let workflowOptions: ActionGuideOptions | undefined;
 let workflowCurrentElement: HTMLElement | undefined;
 let currentGuideOptions: ActionGuideOptions | undefined;
+let currentGuideAction: NextClick | undefined;
 let activeBoardFollowupSignature = "";
 let tradePreflightSignature = "";
 const boardCommandAttempts = new Map<string, number>();
+const controlResolutionAttempts = new Map<string, number>();
+const buildControlCommitAttempts = new Map<string, number>();
+const reportedMissingControls = new Set<string>();
 
 const normalized = (value: string): string =>
   value.toLowerCase().replace(/\s+/gu, " ").trim();
@@ -308,10 +312,12 @@ const activeColonistControl = (
     ? element
     : element.querySelector<HTMLElement>(
         "[class*='actionButton-'], [class*='tradeButton-']",
-      );
+      ) ?? element;
   if (
     !control ||
     !visible(control) ||
+    control.matches("[disabled], [aria-disabled='true']") ||
+    normalized(control.className).includes("disabled") ||
     control.querySelector("[class*='foregroundDisabled-']")
   ) {
     return undefined;
@@ -652,8 +658,12 @@ const resolveElement = (action: NextClick): HTMLElement | undefined => {
               "#action-button-buy-dev-card",
             )
           : action.build === "road"
-            ? findPieceBuildControl("road")
-            : findPieceBuildControl("settlement");
+            ? document.querySelector<HTMLElement>(
+                "#action-button-build-road",
+              ) ?? findPieceBuildControl("road")
+            : document.querySelector<HTMLElement>(
+                "#action-button-build-settlement",
+              ) ?? findPieceBuildControl("settlement");
     return (
       activeColonistControl(exact ?? undefined) ??
       findControl(buildTokens[action.build])
@@ -830,8 +840,8 @@ const maybeAutoclick = (
   if (action.signature === lastClickSignature) {
     return;
   }
-  lastClickSignature = action.signature;
   if (action.kind === "board") {
+    lastClickSignature = action.signature;
     if (options.validate && !options.validate()) {
       options.onExecution?.({
         succeeded: false,
@@ -888,14 +898,93 @@ const maybeAutoclick = (
       }, 1_400);
     }
   } else {
-    if (element && validatedClick(element, options, action.signature)) {
+    if (element) {
+      controlResolutionAttempts.delete(action.signature);
+      reportedMissingControls.delete(action.signature);
+      lastClickSignature = action.signature;
+    }
+    const buildCommitAttempt =
+      action.kind === "build" && action.build !== "development"
+        ? buildControlCommitAttempts.get(action.signature) ?? 0
+        : 0;
+    if (
+      element &&
+      validatedClick(
+        element,
+        options,
+        action.signature,
+        buildCommitAttempt === 0,
+      )
+    ) {
       requestBoardRefresh();
+      if (action.kind === "build" && action.build !== "development") {
+        const attempt = buildCommitAttempt + 1;
+        buildControlCommitAttempts.set(action.signature, attempt);
+        // Opening a road/settlement/city placement mode is idempotent, but
+        // Colonist can ignore a click while React replaces the active action
+        // bar. Re-resolve and retry only while the exact recommendation and
+        // validation state are still current. Development purchases are
+        // intentionally excluded because repeating one could buy two cards.
+        later(() => {
+          const activeOptions = currentGuideOptions;
+          if (
+            !activeOptions?.autonomous ||
+            currentGuideAction?.signature !== action.signature ||
+            lastClickSignature !== action.signature ||
+            (activeOptions.validate && !activeOptions.validate())
+          ) {
+            buildControlCommitAttempts.delete(action.signature);
+            return;
+          }
+          const fresh = resolveElement(action);
+          if (!fresh) {
+            requestBoardRefresh();
+            return;
+          }
+          if (attempt >= 5) {
+            if (!reportedMissingControls.has(action.signature)) {
+              reportedMissingControls.add(action.signature);
+              activeOptions.onExecution?.({
+                succeeded: false,
+                signature: action.signature,
+                reason:
+                  "Colonist did not enter placement mode after bounded build-control retries",
+              });
+            }
+            // Do not leave an ignored React control permanently latched.
+            // Releasing the signature lets the refreshed board re-resolve a
+            // newly mounted control and, if necessary, execute a fresh deep
+            // decision rather than waiting forever behind the stale element.
+            buildControlCommitAttempts.delete(action.signature);
+            lastClickSignature = "";
+            requestBoardRefresh();
+            return;
+          }
+          lastClickSignature = "";
+          maybeAutoclick(action, fresh, activeOptions);
+        }, 900);
+      }
     } else if (!element) {
-      options.onExecution?.({
-        succeeded: false,
-        signature: action.signature,
-        reason: "Recommended Colonist control was not present",
-      });
+      const attempt =
+        (controlResolutionAttempts.get(action.signature) ?? 0) + 1;
+      controlResolutionAttempts.set(action.signature, attempt);
+      if (attempt <= 6) {
+        later(() => {
+          if (
+            currentGuideOptions?.autonomous &&
+            lastClickSignature !== action.signature
+          ) {
+            requestBoardRefresh();
+          }
+        }, 180 + attempt * 80);
+      } else if (!reportedMissingControls.has(action.signature)) {
+        reportedMissingControls.add(action.signature);
+        options.onExecution?.({
+          succeeded: false,
+          signature: action.signature,
+          reason: "Recommended Colonist control was not present after bounded retries",
+        });
+      }
     }
   }
 };
@@ -1327,13 +1416,18 @@ const startWorkflow = (
     }
     const step = steps[index];
     if (!step) {
+      const completedOptions = workflowOptions ?? options;
       lastClickSignature = action.signature;
-      (workflowOptions ?? options).onExecution?.({
+      completedOptions.onExecution?.({
         succeeded: true,
         signature: action.signature,
       });
       cancelWorkflow();
       document.getElementById(ROOT_ID)?.remove();
+      // The final panel close does not reliably mutate the observed board.
+      // Force a fresh snapshot so the next selected-engine action starts
+      // immediately instead of waiting for an unrelated game animation.
+      requestBoardRefresh();
       return;
     }
     if (step.ready?.()) {
@@ -1646,6 +1740,7 @@ export const renderActionGuide = (
   const activatingAutopilot =
     !currentGuideOptions?.autonomous && options.autonomous;
   currentGuideOptions = options;
+  currentGuideAction = action;
   if (
     activeBoardFollowupSignature &&
     (
@@ -1664,7 +1759,14 @@ export const renderActionGuide = (
     return;
   }
   if (workflowSignature === action.signature) {
-    workflowOptions = options;
+    // Colonist can publish a new hand snapshot before the transaction panel
+    // finishes closing. Refresh validation and settings, but attribute the
+    // workflow result to the trace which actually started it.
+    workflowOptions = {
+      ...options,
+      onExecution:
+        workflowOptions?.onExecution ?? options.onExecution,
+    };
     if (activatingAutopilot && workflowCurrentElement) {
       const element = workflowCurrentElement;
       later(
@@ -1726,10 +1828,14 @@ export const destroyActionGuide = (): void => {
   lastClickSignature = "";
   cancelWorkflow();
   currentGuideOptions = undefined;
+  currentGuideAction = undefined;
   tradePreflightSignature = "";
   for (const timer of followupTimers) window.clearTimeout(timer);
   followupTimers.clear();
   boardCommandAttempts.clear();
+  controlResolutionAttempts.clear();
+  buildControlCommitAttempts.clear();
+  reportedMissingControls.clear();
   activeBoardFollowupSignature = "";
   boardFollowupCleanup?.();
 };
