@@ -11,6 +11,7 @@ import WebSocket from "ws";
 const ROOT = resolve(import.meta.dirname, "..");
 const DIST = resolve(ROOT, "dist");
 const SETTINGS_KEY = "colonistAssistantSettings";
+const DECISION_TRACES_KEY = "colonist-assistant-decision-traces-v1";
 const DIFFICULTIES = new Set(["Easy", "Medium", "Hard"]);
 
 const delay = (milliseconds) =>
@@ -23,6 +24,7 @@ function readOptions(argv) {
     jobs: 1,
     staggerSeconds: 12,
     timeoutMinutes: 15,
+    stallSeconds: 60,
     headed: true,
     chromium:
       process.env.CHROMIUM_PATH ?? "/run/current-system/sw/bin/chromium",
@@ -50,6 +52,10 @@ function readOptions(argv) {
         break;
       case "--timeout-minutes":
         options.timeoutMinutes = Number(value);
+        index += 1;
+        break;
+      case "--stall-seconds":
+        options.stallSeconds = Number(value);
         index += 1;
         break;
       case "--stagger-seconds":
@@ -82,6 +88,7 @@ function readOptions(argv) {
   --jobs N                        Parallel Chromium profiles (default 1, max 4)
   --stagger-seconds N             Delay between parallel profile launches
   --timeout-minutes N             Per-game timeout
+  --stall-seconds N               Fail after no autonomous click progress
   --chromium PATH                 Chromium/Chrome executable
   --output PATH                   Output path without extension
   --headless                      Experimental; fresh profiles may be rejected
@@ -107,9 +114,13 @@ not counted as losses.
     !Number.isFinite(options.staggerSeconds) ||
     options.staggerSeconds < 0 ||
     !Number.isFinite(options.timeoutMinutes) ||
-    options.timeoutMinutes <= 0
+    options.timeoutMinutes <= 0 ||
+    !Number.isFinite(options.stallSeconds) ||
+    options.stallSeconds < 15
   ) {
-    throw new Error("Invalid difficulty, game count, job count, or timeout.");
+    throw new Error(
+      "Invalid difficulty, game count, job count, timeout, or stall threshold.",
+    );
   }
   return options;
 }
@@ -310,10 +321,18 @@ function scrapeExpression() {
       if (own) rank = 1 + finalScores.filter((player) => player.score > own.score).length;
     }
     if (!rank && /Victory/i.test(endgameHeading ?? "")) rank = 1;
-    const benchmark = window.__caBenchmark ?? { clicks: [] };
+    const benchmark = window.__caBenchmark ?? { clicks: [], totalClicks: 0 };
     const assistantRoot = document.querySelector("#colonist-assistant-root");
     const assistantText =
       assistantRoot?.shadowRoot?.textContent?.replace(/\\s+/g, " ").trim() ?? "";
+    const actionGuide = Boolean(
+      document.querySelector("#colonist-assistant-action-guide"),
+    );
+    const ownTurn = /(?:^|\\n)\\s*Your Turn\\s*(?:\\n|$)/i.test(text);
+    const pendingProtocol =
+      /(?:^|\\n)\\s*(?:Answer Trade|Discard Cards?|Select (?:a )?(?:Player|Resource)|Move (?:the )?Robber|Place (?:a )?(?:Road|Settlement|City))\\s*(?:\\n|$)/i.test(
+        text,
+      );
     return {
       url: location.href,
       title: document.title,
@@ -329,14 +348,15 @@ function scrapeExpression() {
               ? "connecting"
               : "unknown",
       assistantText: assistantText.slice(0, 900),
-      actionGuide: Boolean(document.querySelector("#colonist-assistant-action-guide")),
+      actionGuide,
+      actionable: actionGuide || ownTurn || pendingProtocol,
       rank,
       endgameHeading,
       finalScores,
       myName,
       gameTime: text.match(/Time:\\s*([^\\n-]+)\\s*-\\s*Turns:\\s*(\\d+)/i)?.slice(1),
       winnerText: text.match(/[^\\n]{0,80}won the game[^\\n]{0,80}/i)?.[0],
-      clicks: benchmark.clicks?.length ?? 0,
+      clicks: benchmark.totalClicks ?? benchmark.clicks?.length ?? 0,
       lastClick: benchmark.clicks?.at(-1),
       textTail: text.slice(-3000),
     };
@@ -349,6 +369,216 @@ async function saveScreenshot(client, path) {
     captureBeyondViewport: false,
   });
   await writeFile(path, Buffer.from(screenshot.data, "base64"));
+}
+
+function remoteValue(argument) {
+  if (Object.hasOwn(argument ?? {}, "value")) return argument.value;
+  if (argument?.unserializableValue) return argument.unserializableValue;
+  if (argument?.preview?.properties) {
+    return Object.fromEntries(
+      argument.preview.properties.map((property) => [
+        property.name,
+        property.value ?? property.type,
+      ]),
+    );
+  }
+  return argument?.description ?? argument?.type;
+}
+
+function relevantConsoleEvents(...clients) {
+  return clients
+    .filter(Boolean)
+    .flatMap((client) => client.events)
+    .flatMap((event) => {
+      if (event.method === "Runtime.exceptionThrown") {
+        const details = event.params?.exceptionDetails;
+        return [{
+          type: "exception",
+          at: details?.timestamp,
+          text:
+            details?.exception?.description ??
+            details?.text ??
+            "Unspecified page exception",
+        }];
+      }
+      if (event.method !== "Runtime.consoleAPICalled") return [];
+      const values = (event.params?.args ?? []).map(remoteValue);
+      const text = values
+        .map((value) =>
+          typeof value === "string" ? value : JSON.stringify(value),
+        )
+        .join(" ");
+      if (!/Colonist Assistant/i.test(text)) return [];
+      return [{
+        type: event.params?.type ?? "log",
+        at: event.params?.timestamp,
+        text,
+        values,
+      }];
+    });
+}
+
+function percentile(sorted, fraction) {
+  if (!sorted.length) return undefined;
+  return sorted[
+    Math.min(
+      sorted.length - 1,
+      Math.floor((sorted.length - 1) * fraction),
+    )
+  ];
+}
+
+function summarizeDecisionTraces(traces) {
+  const latencies = traces
+    .map((trace) => trace.deepLatencyMs)
+    .filter(Number.isFinite)
+    .sort((left, right) => left - right);
+  const sources = {};
+  const runtimes = {};
+  const failures = [];
+  let executedBeforeDeep = 0;
+  for (const trace of traces) {
+    const source = trace.finalActionSource ?? "missing";
+    sources[source] = (sources[source] ?? 0) + 1;
+    const runtime = trace.runtime ?? "missing";
+    runtimes[runtime] = (runtimes[runtime] ?? 0) + 1;
+    if (trace.executedBeforeDeepResult) executedBeforeDeep += 1;
+    if (trace.executionSucceeded === false) {
+      failures.push({
+        stateHash: trace.stateHash,
+        turn: trace.turn,
+        phase: trace.phase,
+        reason: trace.executionFailureReason ?? "execution-failed",
+      });
+    }
+  }
+  return {
+    traces: traces.length,
+    sources,
+    runtimes,
+    executedBeforeDeep,
+    executionFailures: failures,
+    slowDecisions: latencies.filter((latency) => latency >= 1_000).length,
+    overFiveSeconds: latencies.filter((latency) => latency >= 5_000).length,
+    latencyMs: {
+      p50: percentile(latencies, 0.5),
+      p95: percentile(latencies, 0.95),
+      maximum: latencies.at(-1),
+    },
+  };
+}
+
+function summarizeDecisionService(events) {
+  const samples = events
+    .filter(
+      (event) =>
+        event.type !== "exception" &&
+        event.values?.[0] === "[Colonist Assistant] Slow decision" &&
+        event.values?.[1] &&
+        event.values[1].stale !== true &&
+        event.values[1].stale !== "true",
+    )
+    .map((event) => event.values[1])
+    .filter((sample) => Number.isFinite(Number(sample.serviceMs)));
+  const serviceMs = samples
+    .map((sample) => Number(sample.serviceMs))
+    .sort((left, right) => left - right);
+  const queueWaitMs = samples
+    .map((sample) => Number(sample.queueWaitMs))
+    .filter(Number.isFinite)
+    .sort((left, right) => left - right);
+  const overFiveSeconds = serviceMs.filter(
+    (latency) => latency >= 5_000,
+  );
+  return {
+    loggedOverOneSecond: serviceMs.length,
+    overFiveSeconds: overFiveSeconds.length,
+    serviceMs: {
+      p50: percentile(serviceMs, 0.5),
+      p95: percentile(serviceMs, 0.95),
+      maximum: serviceMs.at(-1),
+    },
+    queueWaitMs: {
+      p50: percentile(queueWaitMs, 0.5),
+      p95: percentile(queueWaitMs, 0.95),
+      maximum: queueWaitMs.at(-1),
+    },
+    slowest: [...samples]
+      .sort(
+        (left, right) =>
+          Number(right.serviceMs) - Number(left.serviceMs),
+      )
+      .slice(0, 10)
+      .map((sample) => ({
+        serviceMs: Number(sample.serviceMs),
+        queueWaitMs: Number(sample.queueWaitMs),
+        wasmSearchMs:
+          sample.wasmSearchMs === undefined
+            ? undefined
+            : Number(sample.wasmSearchMs),
+        selectedAction: sample.selectedAction,
+        phase: sample.phase,
+        turn: Number(sample.turn),
+        particles: Number(sample.particles),
+        nodes: Number(sample.nodes),
+      })),
+  };
+}
+
+async function readDecisionTraces(worker) {
+  return (
+    (await evaluate(
+      worker,
+      `(async () => {
+        const result = await chrome.storage.local.get(
+          ${JSON.stringify(DECISION_TRACES_KEY)}
+        );
+        return result[${JSON.stringify(DECISION_TRACES_KEY)}] ?? [];
+      })()`,
+    )) ?? []
+  );
+}
+
+function mergeDecisionTraces(archive, traces) {
+  for (const trace of traces) {
+    if (!trace?.stateHash) continue;
+    archive.set(trace.stateHash, trace);
+  }
+}
+
+async function collectDiagnostics(
+  page,
+  worker,
+  task,
+  options,
+  archivedTraces = new Map(),
+) {
+  let traces = [...archivedTraces.values()];
+  let traceError;
+  try {
+    mergeDecisionTraces(archivedTraces, await readDecisionTraces(worker));
+    traces = [...archivedTraces.values()];
+  } catch (error) {
+    traceError = error instanceof Error ? error.message : String(error);
+  }
+  let tracePath;
+  if (traces.length) {
+    const directory = `${options.output}-traces`;
+    await mkdir(directory, { recursive: true });
+    tracePath = resolve(
+      directory,
+      `${task.difficulty.toLowerCase()}-${task.game}.json`,
+    );
+    await writeFile(tracePath, `${JSON.stringify({ traces }, null, 2)}\n`);
+  }
+  const assistantConsole = relevantConsoleEvents(page, worker);
+  return {
+    tracePath,
+    traceError,
+    decisionSummary: summarizeDecisionTraces(traces),
+    decisionServiceSummary: summarizeDecisionService(assistantConsole),
+    assistantConsole: assistantConsole.slice(-200),
+  };
 }
 
 async function runGame(task, options) {
@@ -368,6 +598,12 @@ async function runGame(task, options) {
     `--disable-extensions-except=${DIST}`,
     `--load-extension=${DIST}`,
     "--window-size=1280,900",
+    // Parallel headful windows are often occluded. Chromium otherwise
+    // coalesces their recovery and action timers to roughly one minute,
+    // manufacturing deadlocks that do not occur in an active player's tab.
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
     "--disable-features=Translate,OptimizationHints",
     "about:blank",
   ];
@@ -386,6 +622,7 @@ async function runGame(task, options) {
   let phase = "launch";
   let lastState;
   let artifact;
+  const archivedTraces = new Map();
   try {
     let targets = await waitForTargets(port);
     const pageTarget = targets.find((target) => target.type === "page");
@@ -404,9 +641,11 @@ async function runGame(task, options) {
       throw new Error("The unpacked extension did not expose its page and worker.");
     }
     page = new CdpClient(pageTarget.webSocketDebuggerUrl);
+    worker = new CdpClient(workerTarget.webSocketDebuggerUrl);
     await Promise.all([
       page.command("Page.enable"),
       page.command("Runtime.enable"),
+      worker.command("Runtime.enable"),
     ]);
 
     phase = "configure-extension";
@@ -438,10 +677,14 @@ async function runGame(task, options) {
     if (!settings?.autonomousPrivateGames || settings.engine !== "deep-search") {
       throw new Error("Autopilot settings did not persist.");
     }
+    await evaluate(
+      worker,
+      `chrome.storage.local.remove(${JSON.stringify(DECISION_TRACES_KEY)})`,
+    );
 
     await page.command("Page.addScriptToEvaluateOnNewDocument", {
       source: `(() => {
-        window.__caBenchmark = { clicks: [] };
+        window.__caBenchmark = { clicks: [], totalClicks: 0 };
         addEventListener("click", (event) => {
           const target = event.target;
           const label =
@@ -455,6 +698,7 @@ async function runGame(task, options) {
             label: String(label).trim().slice(0, 120),
             trusted: event.isTrusted
           });
+          window.__caBenchmark.totalClicks += 1;
           if (window.__caBenchmark.clicks.length > 500) {
             window.__caBenchmark.clicks.shift();
           }
@@ -644,14 +888,49 @@ async function runGame(task, options) {
     await evaluate(
       page,
       `(() => {
-        if (window.__caBenchmark) window.__caBenchmark.clicks = [];
+        if (window.__caBenchmark) {
+          window.__caBenchmark.clicks = [];
+          window.__caBenchmark.totalClicks = 0;
+        }
         return true;
       })()`,
     );
     const deadline = Date.now() + options.timeoutMinutes * 60_000;
+    let lastProgressAt = Date.now();
+    let lastClickCount = 0;
+    let lastTraceArchiveAt = 0;
     while (Date.now() < deadline) {
       lastState = await evaluate(page, scrapeExpression());
+      if (Date.now() - lastTraceArchiveAt >= 8_000) {
+        try {
+          mergeDecisionTraces(
+            archivedTraces,
+            await readDecisionTraces(worker),
+          );
+        } catch {
+          // Final collection will report a persistent storage/read failure.
+        }
+        lastTraceArchiveAt = Date.now();
+      }
+      if (lastState.clicks !== lastClickCount) {
+        lastClickCount = lastState.clicks;
+        lastProgressAt = Date.now();
+      }
+      // Three negotiating bots can legitimately spend longer than the click
+      // watchdog between this seat's actions. Only count silence while the
+      // live UI is visibly waiting for our turn or a mandatory response.
+      if (!lastState.actionable) {
+        lastProgressAt = Date.now();
+      }
       if (lastState.rank) {
+        await delay(300);
+        const diagnostics = await collectDiagnostics(
+          page,
+          worker,
+          task,
+          options,
+          archivedTraces,
+        );
         return {
           status: "completed",
           difficulty: task.difficulty,
@@ -666,13 +945,37 @@ async function runGame(task, options) {
           winnerText: lastState.winnerText,
           finalScores: lastState.finalScores,
           gameTime: lastState.gameTime,
+          ...diagnostics,
         };
+      }
+      if (Date.now() - lastProgressAt >= options.stallSeconds * 1_000) {
+        throw new Error(
+          `No autonomous click progress for ${options.stallSeconds} seconds.`,
+        );
       }
       await delay(1_000);
     }
     throw new Error(`Game exceeded ${options.timeoutMinutes} minutes.`);
   } catch (error) {
     phase = `failed:${phase}`;
+    let diagnostics = {
+      decisionSummary: summarizeDecisionTraces([]),
+      decisionServiceSummary: summarizeDecisionService([]),
+      assistantConsole: [],
+    };
+    if (page && worker) {
+      try {
+        diagnostics = await collectDiagnostics(
+          page,
+          worker,
+          task,
+          options,
+          archivedTraces,
+        );
+      } catch {
+        // Preserve the original failure; diagnostics are best-effort.
+      }
+    }
     if (page) {
       try {
         await mkdir(`${options.output}-artifacts`, { recursive: true });
@@ -695,6 +998,7 @@ async function runGame(task, options) {
       lastState,
       artifact,
       chromiumStderrTail: stderr.slice(-30),
+      ...diagnostics,
     };
   } finally {
     page?.close();
@@ -726,7 +1030,7 @@ Generated: ${report.generatedAt}
 
 Each completed game ran in an isolated Chromium profile against three
 Colonist.io bots. The harness verified the exact \`Base\` map before starting,
-enabled Belief PUCT and autopilot through extension storage, and waited for
+enabled Deep MaxN and autopilot through extension storage, and waited for
 Colonist's final rank. Infrastructure failures and timeouts are excluded from
 the win-rate denominator and listed in the JSON report.
 
@@ -747,6 +1051,15 @@ async function workerLoop(queue, results, options) {
     );
     const result = await runGame(task, options);
     results.push(result);
+    const gameDirectory = `${options.output}-games`;
+    await mkdir(gameDirectory, { recursive: true });
+    await writeFile(
+      resolve(
+        gameDirectory,
+        `${task.difficulty.toLowerCase()}-${task.game}.json`,
+      ),
+      `${JSON.stringify(result, null, 2)}\n`,
+    );
     console.error(
       result.status === "completed"
         ? `  completed: rank ${result.rank}, ${result.won ? "WIN" : "loss"}, ${Math.round(result.durationMs / 1000)}s`
@@ -816,6 +1129,7 @@ const report = {
     jobs: options.jobs,
     staggerSeconds: options.staggerSeconds,
     timeoutMinutes: options.timeoutMinutes,
+    stallSeconds: options.stallSeconds,
     headless: !options.headed,
     exactMap: "Base",
     players: 4,

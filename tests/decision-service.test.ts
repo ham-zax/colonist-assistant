@@ -231,6 +231,72 @@ describe("decision service client", () => {
     client.destroy();
   });
 
+  it("reissues a lost background transport with the same selected engine", async () => {
+    vi.useFakeTimers();
+    const analysis: DecisionAnalysis = {
+      engine: "deep-search",
+      players: [],
+      actionScores: {
+        road: 0,
+        settlement: 0,
+        city: 0,
+        development: 0,
+      },
+      simulations: 1,
+      model: "retried-wasm-result",
+    };
+    const sendMessage = vi.fn((message: { id: number }) => {
+      if (sendMessage.mock.calls.length === 1) {
+        return new Promise(() => undefined);
+      }
+      return Promise.resolve({ id: message.id, analysis });
+    });
+    vi.stubGlobal("chrome", { runtime: { sendMessage } });
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const callback = vi.fn();
+    const failure = vi.fn();
+    const client = new DecisionWorkerClient();
+
+    client.request(
+      "lost-transport-position",
+      {} as TrackerState,
+      {} as BoardSnapshot,
+      "You",
+      "deep-search",
+      callback,
+      undefined,
+      failure,
+    );
+    await vi.advanceTimersByTimeAsync(6_500);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(sendMessage.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({
+        engine: "deep-search",
+        id: 2,
+      }),
+    );
+    expect(callback).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "retried-wasm-result",
+        runtime: "background-rollout",
+      }),
+    );
+    expect(failure).not.toHaveBeenCalled();
+    expect(warning).toHaveBeenCalledWith(
+      "[Colonist Assistant] Retrying selected WASM request",
+      expect.objectContaining({
+        engine: "deep-search",
+        attempt: 2,
+        policy: "selected-engine-only",
+        fallbackStarted: false,
+      }),
+    );
+    client.destroy();
+  });
+
   it("ignores a stale deep result after a newer position is requested", async () => {
     const resolvers: Array<
       (value: {

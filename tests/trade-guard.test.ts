@@ -12,6 +12,7 @@ import {
   shouldConfirmAcceptedTradeImmediately,
   tradeMemoryScopeChanged,
   tradeOfferKey,
+  unansweredIncomingTrades,
 } from "../src/core/trade-guard";
 import {
   createTrackerState,
@@ -162,6 +163,122 @@ describe("live trade guard", () => {
     expect(selected).toEqual(endTurn);
   });
 
+  it("replaces an impossible counteroffer using exact bank evidence", () => {
+    const counter: DeepSearchAction = {
+      kind: "counter-trade",
+      cards: [0, 0, 0, 0, 1],
+      receiveCards: [0, 1, 0, 0, 0],
+    };
+    const decline: DeepSearchAction = {
+      kind: "respond-trade",
+      accept: false,
+    };
+    const noBrick = emptyResources();
+    noBrick.brick = 19;
+    const board: BoardSnapshot = {
+      hexes: [],
+      vertices: [],
+      edges: [],
+      myPlayer: "You",
+      ownHand: emptyResources(),
+      bank: noBrick,
+      bankVisible: true,
+      players: {
+        You: {
+          handSize: 1,
+          tradeRatios: emptyResources(),
+          cardDiscardLimit: 7,
+        },
+        Bot: {
+          handSize: 3,
+          tradeRatios: emptyResources(),
+          cardDiscardLimit: 7,
+        },
+      },
+      activeTrades: [
+        {
+          id: "incoming",
+          creator: "Bot",
+          tradeExecutor: "Bot",
+          give: emptyResources(),
+          receive: emptyResources(),
+          incoming: true,
+          counterOffer: false,
+          canAccept: true,
+          myResponse: "pending",
+        },
+      ],
+    };
+
+    expect(
+      selectUsableDeepAction(
+        searchResult(counter, decline),
+        stateWithBotOre(2),
+        "You",
+        new Set(),
+        board,
+      ),
+    ).toEqual(decline);
+  });
+
+  it("does not repeat an identical counteroffer in the same turn", () => {
+    const counter: DeepSearchAction = {
+      kind: "counter-trade",
+      cards: [0, 1, 0, 0, 0],
+      receiveCards: [0, 0, 0, 0, 1],
+    };
+    const decline: DeepSearchAction = {
+      kind: "respond-trade",
+      accept: false,
+    };
+    const give = emptyResources();
+    give.brick = 1;
+    const receive = emptyResources();
+    receive.ore = 1;
+    const board: BoardSnapshot = {
+      hexes: [],
+      vertices: [],
+      edges: [],
+      myPlayer: "You",
+      ownHand: give,
+      players: {
+        You: {
+          handSize: 1,
+          tradeRatios: emptyResources(),
+          cardDiscardLimit: 7,
+        },
+        Bot: {
+          handSize: 2,
+          tradeRatios: emptyResources(),
+          cardDiscardLimit: 7,
+        },
+      },
+      activeTrades: [
+        {
+          id: "incoming-again",
+          creator: "Bot",
+          tradeExecutor: "Bot",
+          give: emptyResources(),
+          receive: emptyResources(),
+          incoming: true,
+          counterOffer: false,
+          canAccept: true,
+          myResponse: "pending",
+        },
+      ],
+    };
+
+    expect(
+      selectUsableDeepAction(
+        searchResult(counter, decline),
+        stateWithBotOre(2),
+        "You",
+        new Set([tradeOfferKey(give, receive)]),
+        board,
+      ),
+    ).toEqual(decline);
+  });
+
   it("closes rejected offers immediately and unanswered offers after the watchdog", () => {
     expect(outgoingTradeDisposition(true, 1_000, 1_001)).toBe("cancel");
     expect(outgoingTradeDisposition(false, 1_000, 18_999)).toBe("wait");
@@ -200,5 +317,26 @@ describe("live trade guard", () => {
         { gameKey: "g", currentPlayer: "Bot", isMyTurn: false },
       ),
     ).toBe(true);
+  });
+
+  it("does not re-analyse an incoming offer after its response workflow completed", () => {
+    const incoming = {
+      id: "incoming-1",
+      creator: "Bot",
+      tradeExecutor: "Bot",
+      give: emptyResources(),
+      receive: emptyResources(),
+      incoming: true,
+      counterOffer: false,
+      canAccept: true,
+      myResponse: "pending" as const,
+    };
+
+    expect(unansweredIncomingTrades([incoming], new Set())).toEqual([
+      incoming,
+    ]);
+    expect(
+      unansweredIncomingTrades([incoming], new Set(["incoming-1"])),
+    ).toEqual([]);
   });
 });

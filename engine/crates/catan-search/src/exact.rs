@@ -227,20 +227,31 @@ fn family_score(
     ) && next.current_player as usize == actor
         && matches!(next.phase, Phase::PreRoll | Phase::Main)
     {
-        return plan_current_turn(
-            &next,
-            TurnPlanConfig {
-                maximum_actions: 10,
-                maximum_nodes: 180,
-                branch_cap: 12,
-                root_cap: 20,
-            },
-        )
-        .first()
-        .map_or_else(
-            || crate::eval::strategic_utility(&next, actor as u8),
-            |plan| plan.value,
-        );
+        // These compact parameter families are already reached *after* the
+        // bounded strategic search selected the card. Re-running a complete
+        // turn planner for every resource pair, every belief particle, and
+        // every Monopoly resource turned a 15-way Year of Plenty choice into
+        // a 45-second synchronous tail in live WASM.
+        //
+        // The race evaluator already prices contextual hand deficits,
+        // immediate build tempo, discard risk, expansion options, and trophy
+        // swings. Use that endpoint value here, just as Road Building does.
+        // We still enumerate every legal parameter and average its resulting
+        // value over the full weighted belief; only the redundant nested turn
+        // search is removed.
+        let endpoint = crate::eval::strategic_utility(&next, actor as u8);
+        if family == ExactActionFamily::Monopoly {
+            // A Monopoly hand is immediately spendable in the same turn.
+            // The static endpoint's nonlinear seven-risk otherwise treats a
+            // large steal as if the player had already ended the turn and can
+            // perversely prefer stealing zero cards. Preserve the belief-
+            // weighted quantity signal without reintroducing a nested planner.
+            let gained = next.players[actor]
+                .resource_total()
+                .saturating_sub(state.players[actor].resource_total());
+            return endpoint + gained as f32 * 1.4;
+        }
+        return endpoint;
     }
     evaluate(&next)[actor]
 }
@@ -264,15 +275,25 @@ pub fn solve_exact_belief(
     // counteroffer requesting a card the sender may or may not hold, or Year
     // of Plenty with a non-public bank). Build the observable candidate union
     // across the posterior and score every candidate over the full mass.
-    let mut candidates = particles
+    // Road Building can expose hundreds of parameter pairs. Recomputing the
+    // complete legal-action set once per candidate and particle made a single
+    // exact development-card decision take multiple seconds in WASM. Cache
+    // each world's legal family once and reuse it for both the candidate union
+    // and legality weighting.
+    let legal_by_particle = particles
         .iter()
-        .flat_map(|particle| {
+        .map(|particle| {
             particle
                 .state
                 .legal_actions()
                 .into_iter()
-                .filter(move |action| matches_family(&particle.state, action, family))
+                .filter(|action| matches_family(&particle.state, action, family))
+                .collect::<Vec<_>>()
         })
+        .collect::<Vec<_>>();
+    let mut candidates = legal_by_particle
+        .iter()
+        .flat_map(|actions| actions.iter().cloned())
         .collect::<Vec<_>>();
     candidates.sort_by_key(|action| format!("{action:?}"));
     candidates.dedup();
@@ -292,12 +313,12 @@ pub fn solve_exact_belief(
         let mut legal_mass = 0.0;
         let mut decision_score = 0.0;
         let mut lower_score = f32::INFINITY;
-        for particle in particles {
+        for (particle_index, particle) in particles.iter().enumerate() {
             let weight = particle.weight.max(0.0) / total_weight;
             if weight <= 1e-8 {
                 continue;
             }
-            let legal = particle.state.legal_actions().contains(&action);
+            let legal = legal_by_particle[particle_index].contains(&action);
             let value = if legal {
                 legal_mass += weight;
                 action_value(&particle.state, &action)
@@ -305,7 +326,17 @@ pub fn solve_exact_belief(
                 evaluate(&particle.state)
             };
             let score = if legal {
-                family_score(&particle.state, &action, family, actor)
+                // For a pending response, action_value has already resolved
+                // the bounded response/confirmation tail. Calling
+                // family_score used to traverse the same negotiation tree a
+                // second time for every counteroffer in every particle.
+                if family == ExactActionFamily::Mandatory
+                    && !matches!(action, Action::ConfirmTrade { .. } | Action::CancelTrade)
+                {
+                    value[actor]
+                } else {
+                    family_score(&particle.state, &action, family, actor)
+                }
             } else {
                 evaluate(&particle.state)[actor]
             };

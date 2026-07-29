@@ -49,6 +49,14 @@ describe("forced action fast lane", () => {
     expect(shouldFastTrackRoll(position, "roll")).toBe(false);
   });
 
+  it("never fast-tracks a stale dice control over a mandatory board action", () => {
+    for (const action of ["robber", "road", "settlement", "city"] as const) {
+      const position = board();
+      position.action = action;
+      expect(shouldFastTrackRoll(position, "roll")).toBe(false);
+    }
+  });
+
   it("ends immediately when the roll is done and no conversion remains", () => {
     const position = board();
     position.hasRolled = true;
