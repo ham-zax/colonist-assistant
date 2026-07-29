@@ -4,6 +4,7 @@ import type {
   DeepSearchAction,
   DeepSearchResult,
 } from "../src/core/engine";
+import type { BoardSnapshot } from "../src/core/placement";
 import { emptyResources } from "../src/core/resources";
 import {
   outgoingTradeDisposition,
@@ -119,6 +120,46 @@ describe("live trade guard", () => {
     );
 
     expect(selected).toEqual(offer);
+  });
+
+  it("trusts an exact bank count over a contradictory hidden-hand particle", () => {
+    const bank = {
+      lumber: 19,
+      brick: 19,
+      wool: 19,
+      grain: 19,
+      ore: 19,
+    };
+    const board: BoardSnapshot = {
+      hexes: [],
+      vertices: [],
+      edges: [],
+      myPlayer: "You",
+      ownHand: emptyResources(),
+      bank,
+      bankVisible: true,
+      players: {
+        You: {
+          handSize: 1,
+          tradeRatios: emptyResources(),
+          cardDiscardLimit: 7,
+        },
+        Bot: {
+          handSize: 3,
+          tradeRatios: emptyResources(),
+          cardDiscardLimit: 7,
+        },
+      },
+    };
+    const selected = selectUsableDeepAction(
+      searchResult(offer, endTurn),
+      stateWithBotOre(2),
+      "You",
+      new Set(),
+      board,
+    );
+
+    expect(selected).toEqual(endTurn);
   });
 
   it("closes rejected offers immediately and unanswered offers after the watchdog", () => {

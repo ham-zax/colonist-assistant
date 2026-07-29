@@ -268,8 +268,10 @@ export class AssistantOverlay {
   private decisionAnalysis?: DecisionAnalysis;
   private decisionKey = "";
   private decisionPendingKey = "";
+  private decisionSlowKey = "";
   private decisionRuntime?: DecisionRuntime;
   private decisionRuntimeDetail = "Connecting to the packaged search engine.";
+  private decisionRuntimeError = "";
   private domesticTradeAttempt?: { gameKey?: string };
   private readonly attemptedTradeOffers = new Set<string>();
   private readonly failedTradeActions = new Set<string>();
@@ -311,11 +313,15 @@ export class AssistantOverlay {
 
   private warmDecisionEngine(): void {
     this.decisionWorker.warm((status) => {
-      this.decisionRuntime = status.runtime;
-      this.decisionRuntimeDetail =
-        status.runtime === "background-wasm"
-          ? `${status.detail}${status.initializationMs !== undefined ? ` in ${Math.max(1, Math.round(status.initializationMs))} ms` : ""}.`
-          : status.detail;
+      if (status.runtime === "background-wasm") {
+        this.decisionRuntime = status.runtime;
+        this.decisionRuntimeError = "";
+        this.decisionRuntimeDetail =
+          `${status.detail}${status.initializationMs !== undefined ? ` in ${Math.max(1, Math.round(status.initializationMs))} ms` : ""}.`;
+      } else {
+        this.decisionRuntime = undefined;
+        this.decisionRuntimeError = status.detail;
+      }
       this.render();
     });
   }
@@ -413,6 +419,8 @@ export class AssistantOverlay {
       this.queuedPlacement = undefined;
       this.decisionKey = "";
       this.decisionPendingKey = "";
+      this.decisionSlowKey = "";
+      this.decisionRuntimeError = "";
       this.decisionWorker.reset();
       this.winPredictions.reset();
       this.confirmedPlacement = undefined;
@@ -464,6 +472,8 @@ export class AssistantOverlay {
       this.decisionAnalysis = undefined;
       this.decisionKey = "";
       this.decisionPendingKey = "";
+      this.decisionSlowKey = "";
+      this.decisionRuntimeError = "";
       this.decisionWorker.reset();
       this.activeSpatial = undefined;
       this.roadPlan = undefined;
@@ -963,6 +973,7 @@ export class AssistantOverlay {
       state,
       player,
       this.attemptedTradeOffers,
+      this.board,
     );
   }
 
@@ -1111,9 +1122,6 @@ export class AssistantOverlay {
         ? "tactical"
         : "deep";
     }
-    if (this.decisionAnalysis?.runtime === "local-fallback") {
-      return "timeout-fallback";
-    }
     if (next.kind === "turn-control" && next.control === "end") {
       return "end-turn-fallback";
     }
@@ -1234,11 +1242,26 @@ export class AssistantOverlay {
   private runtimePresentation(): {
     label: string;
     detail: string;
-    state: "healthy" | "searching" | "fallback" | "connecting";
+    state: "healthy" | "searching" | "slow" | "error" | "connecting";
   } {
     const observedRuntime =
       this.decisionAnalysis?.runtime ?? this.decisionRuntime;
+    if (this.decisionRuntimeError) {
+      return {
+        label: "WASM error",
+        detail: `${this.decisionRuntimeError} The selected engine will retry on the next board update; reload the extension and this Colonist tab if it persists. No other algorithm was substituted.`,
+        state: "error",
+      };
+    }
     if (this.decisionPendingKey) {
+      if (this.decisionSlowKey === this.decisionPendingKey) {
+        return {
+          label: "WASM · 5s+",
+          detail:
+            `${ENGINE_LABELS[this.settings.engine]} is still evaluating this position. The selected engine remains active; no fallback or duplicate search was started.`,
+          state: "slow",
+        };
+      }
       return {
         label:
           observedRuntime === "background-wasm"
@@ -1268,16 +1291,6 @@ export class AssistantOverlay {
           ? `Last search completed in ${Math.max(1, Math.round(search.elapsedMs)).toLocaleString()} ms across ${search.nodes.toLocaleString()} bounded nodes.`
           : this.decisionRuntimeDetail,
         state: "healthy",
-      };
-    }
-    if (observedRuntime === "local-fallback") {
-      return {
-        label: "Local fallback",
-        detail:
-          this.decisionAnalysis?.runtimeReason ??
-          this.decisionRuntimeDetail ??
-          "The background service did not answer.",
-        state: "fallback",
       };
     }
     return {
@@ -1452,12 +1465,14 @@ export class AssistantOverlay {
       this.settings.engine === "race-eta"
     ) {
       this.decisionPendingKey = "";
+      this.decisionSlowKey = "";
       return;
     }
     if (shouldFastTrackRoll(board, visibleTurnControl())) {
       this.decisionAnalysis = undefined;
       this.decisionKey = "";
       this.decisionPendingKey = "";
+      this.decisionSlowKey = "";
       this.decisionWorker.reset();
       return;
     }
@@ -1466,11 +1481,13 @@ export class AssistantOverlay {
       this.decisionKey = key;
       this.decisionAnalysis = undefined;
       this.decisionPendingKey = key;
+      this.decisionSlowKey = "";
+      this.decisionRuntimeError = "";
       if (board.isMyTurn || hasPendingIncomingTrade) {
         this.decisionTraces.begin(key, state, board);
       }
     }
-    this.decisionWorker.request(
+    const requested = this.decisionWorker.request(
       key,
       state,
       {
@@ -1484,6 +1501,8 @@ export class AssistantOverlay {
       (analysis) => {
         if (this.decisionKey !== key) return;
         this.decisionPendingKey = "";
+        this.decisionSlowKey = "";
+        this.decisionRuntimeError = "";
         this.decisionAnalysis = analysis;
         this.decisionTraces.complete(key, analysis);
         if (analysis.runtime) {
@@ -1506,7 +1525,37 @@ export class AssistantOverlay {
         }
         this.render();
       },
+      () => {
+        if (this.decisionKey !== key || this.decisionPendingKey !== key) {
+          return;
+        }
+        this.decisionSlowKey = key;
+        this.render();
+      },
+      (detail) => {
+        if (this.decisionKey !== key) return;
+        // Keep authoritative-decision gates closed. A failed WASM request
+        // must never expose an executable coaching fallback.
+        this.decisionPendingKey = key;
+        this.decisionSlowKey = "";
+        this.decisionAnalysis = undefined;
+        this.decisionRuntimeError = detail;
+        this.decisionRuntimeDetail = detail;
+        console.error("[Colonist Assistant] Selected decision engine failed", {
+          key,
+          engine: this.settings.engine,
+          detail,
+          policy: "selected-engine-only",
+          fallbackStarted: false,
+        });
+        this.render();
+      },
     );
+    if (requested) {
+      this.decisionPendingKey = key;
+      this.decisionSlowKey = "";
+      this.decisionRuntimeError = "";
+    }
   }
 
   private coachReport(

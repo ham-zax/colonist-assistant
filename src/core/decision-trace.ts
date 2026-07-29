@@ -10,7 +10,6 @@ export type DecisionActionSource =
   | "road-plan"
   | "placement-heuristic"
   | "coach-goal"
-  | "timeout-fallback"
   | "end-turn-fallback"
   | "mandatory";
 
@@ -122,11 +121,9 @@ export class DecisionTraceRecorder {
       trace.deepRequestStartedAt === undefined
         ? undefined
         : finishedAt - trace.deepRequestStartedAt;
-    trace.deepTimedOut =
-      analysis.runtime === "local-fallback" &&
-      /timeout|exceeded|did not respond|unavailable/iu.test(
-        analysis.runtimeReason ?? "",
-      );
+    // Interactive deadlines are diagnostic-only. The selected engine is
+    // never replaced by a timeout policy.
+    trace.deepTimedOut = false;
     trace.engine = analysis.engine;
     trace.runtime = analysis.runtime;
     trace.learnedModelVersion =

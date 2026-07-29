@@ -676,10 +676,13 @@ describe("action guide autopilot", () => {
       wanted.querySelector("button")?.addEventListener("click", () => {
         wantedProposal.innerHTML =
           '<button data-card-enum="1"><img src="card_lumber.svg"></button>';
-        const alert = document.createElement("div");
-        alert.setAttribute("role", "alert");
-        alert.textContent = "No one has wanted resource";
-        document.body.append(alert);
+        const log = document.createElement("div");
+        log.id = "game-log-text";
+        const message = document.createElement("div");
+        message.dataset.index = "315";
+        message.textContent = "Players do not have enough resources";
+        log.append(message);
+        document.body.append(log);
       });
       const send = document.createElement("button");
       send.id = "action-button-trade-players";
@@ -721,7 +724,9 @@ describe("action guide autopilot", () => {
       expect.objectContaining({
         succeeded: false,
         signature: "rejected-trade",
-        reason: expect.stringContaining("No one has wanted resource"),
+        reason: expect.stringContaining(
+          "Players do not have enough resources",
+        ),
       }),
     );
     expect(document.querySelector("#player-card-inventory")).toBeNull();

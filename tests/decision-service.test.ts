@@ -3,11 +3,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DecisionAnalysis } from "../src/core/engine";
 import type { BoardSnapshot } from "../src/core/placement";
 import type { TrackerState } from "../src/core/types";
-import {
-  createTrackerState,
-  reduceTracker,
-} from "../src/core/tracker";
-import { emptyResources } from "../src/core/resources";
 import { DecisionWorkerClient } from "../src/content/decision-worker";
 
 afterEach(() => {
@@ -128,51 +123,96 @@ describe("decision service client", () => {
     client.destroy();
   });
 
-  it("labels the local model when the background service is unavailable", async () => {
+  it("reports a background failure without substituting another algorithm", async () => {
     const sendMessage = vi.fn(async () => {
       throw new Error("Extension context invalidated");
     });
     vi.stubGlobal("chrome", { runtime: { sendMessage } });
     const callback = vi.fn();
+    const failure = vi.fn();
     const client = new DecisionWorkerClient();
-    let state = createTrackerState();
-    state = reduceTracker(state, { type: "discover", player: "You" });
-    state = reduceTracker(state, { type: "discover", player: "Rival" });
-    const board: BoardSnapshot = {
-      hexes: [],
-      vertices: [],
-      edges: [],
-      myPlayer: "You",
-      players: {
-        You: {
-          handSize: 0,
-          tradeRatios: emptyResources(),
-          cardDiscardLimit: 7,
-        },
-        Rival: {
-          handSize: 0,
-          tradeRatios: emptyResources(),
-          cardDiscardLimit: 7,
-        },
-      },
-      isMyTurn: true,
-      action: "none",
-    };
     client.request(
-      "position-fallback",
-      state,
-      board,
+      "position-error",
+      {} as TrackerState,
+      {} as BoardSnapshot,
       "You",
       "deep-search",
       callback,
+      undefined,
+      failure,
     );
 
-    await vi.waitFor(() => expect(callback).toHaveBeenCalledOnce());
-    expect(callback.mock.calls[0]?.[0]).toMatchObject({
+    await vi.waitFor(() =>
+      expect(failure).toHaveBeenCalledWith("Extension context invalidated"),
+    );
+    expect(callback).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledOnce();
+    client.destroy();
+  });
+
+  it("keeps the selected request alive after five seconds", async () => {
+    vi.useFakeTimers();
+    const analysis: DecisionAnalysis = {
       engine: "deep-search",
-      runtime: "local-fallback",
-      runtimeReason: "Extension context invalidated",
-    });
+      players: [],
+      actionScores: {
+        road: 0,
+        settlement: 0,
+        city: 0,
+        development: 0,
+      },
+      simulations: 1,
+      model: "eventual-wasm-result",
+    };
+    const sendMessage = vi.fn(
+      (message: { id: number }) =>
+        new Promise<{ id: number; analysis: DecisionAnalysis }>((resolve) => {
+          globalThis.setTimeout(
+            () => resolve({ id: message.id, analysis }),
+            5_500,
+          );
+        }),
+    );
+    vi.stubGlobal("chrome", { runtime: { sendMessage } });
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const callback = vi.fn();
+    const slow = vi.fn();
+    const failure = vi.fn();
+    const client = new DecisionWorkerClient();
+
+    client.request(
+      "long-position",
+      {} as TrackerState,
+      {} as BoardSnapshot,
+      "You",
+      "deep-search",
+      callback,
+      slow,
+      failure,
+    );
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(slow).toHaveBeenCalledWith(5_000);
+    expect(callback).not.toHaveBeenCalled();
+    expect(failure).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledOnce();
+    expect(warning).toHaveBeenCalledWith(
+      "[Colonist Assistant] Decision still running",
+      expect.objectContaining({
+        engine: "deep-search",
+        policy: "selected-engine-only",
+        fallbackStarted: false,
+      }),
+    );
+
+    await vi.advanceTimersByTimeAsync(500);
+    expect(callback).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "eventual-wasm-result",
+        runtime: "background-rollout",
+      }),
+    );
+    expect(sendMessage).toHaveBeenCalledOnce();
     client.destroy();
   });
 
