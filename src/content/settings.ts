@@ -1,16 +1,16 @@
 import type { DecisionEngine } from "../core/engine";
 import { isExtensionContextInvalidatedError } from "./extension-context";
 
-export type AutopilotDelaySeconds = 1 | 3 | 5;
+export type AutopilotDelaySeconds = 0 | 1 | 3 | 5;
 
 export const AUTOPILOT_DELAY_OPTIONS: readonly AutopilotDelaySeconds[] = [
-  1, 3, 5,
+  0, 1, 3, 5,
 ];
 
 export const normalizeAutopilotDelaySeconds = (
   value: unknown,
 ): AutopilotDelaySeconds =>
-  value === 3 || value === 5 ? value : 1;
+  value === 0 || value === 3 || value === 5 ? value : 0;
 
 export interface AssistantSettings {
   enabled: boolean;
@@ -33,7 +33,7 @@ export const DEFAULT_SETTINGS: AssistantSettings = {
   engine: "deep-search",
   highlightNextAction: true,
   autonomousPrivateGames: false,
-  autopilotDelaySeconds: 1,
+  autopilotDelaySeconds: 0,
 };
 
 export const SETTINGS_KEY = "colonistAssistantSettings";

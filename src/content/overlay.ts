@@ -712,6 +712,35 @@ export class AssistantOverlay {
             Number(target.value),
           ),
         });
+        this.renderGate.release("autopilot-delay");
+      }
+    });
+
+    this.shadow.addEventListener("pointerdown", (event) => {
+      const target = event.composedPath?.()?.[0];
+      if (
+        target instanceof HTMLSelectElement &&
+        target.dataset.setting === "autopilotDelaySeconds"
+      ) {
+        this.renderGate.hold("autopilot-delay");
+      }
+    });
+    this.shadow.addEventListener("focusin", (event) => {
+      const target = event.composedPath?.()?.[0];
+      if (
+        target instanceof HTMLSelectElement &&
+        target.dataset.setting === "autopilotDelaySeconds"
+      ) {
+        this.renderGate.hold("autopilot-delay");
+      }
+    });
+    this.shadow.addEventListener("focusout", (event) => {
+      const target = event.composedPath?.()?.[0];
+      if (
+        target instanceof HTMLSelectElement &&
+        target.dataset.setting === "autopilotDelaySeconds"
+      ) {
+        this.renderGate.release("autopilot-delay");
       }
     });
 
@@ -3730,7 +3759,7 @@ export class AssistantOverlay {
         <select data-setting="autopilotDelaySeconds" aria-label="Autopilot delay">
           ${AUTOPILOT_DELAY_OPTIONS.map(
             (seconds) =>
-              `<option value="${seconds}"${this.settings.autopilotDelaySeconds === seconds ? " selected" : ""}>${seconds} second${seconds === 1 ? "" : "s"}</option>`,
+              `<option value="${seconds}"${this.settings.autopilotDelaySeconds === seconds ? " selected" : ""}>${seconds === 0 ? "None" : `${seconds} second${seconds === 1 ? "" : "s"}`}</option>`,
           ).join("")}
         </select>
       </label>

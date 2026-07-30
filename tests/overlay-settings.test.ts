@@ -78,7 +78,7 @@ describe("overlay settings interaction", () => {
     expect(autonomousExecutionAllowed(true)).toBe(true);
   });
 
-  it("exposes an autopilot delay select with 1, 3, and 5 second options", () => {
+  it("exposes an autopilot delay select with 0, 1, 3, and 5 second options", () => {
     const overlay = new AssistantOverlay(
       { ...DEFAULT_SETTINGS, autonomousPrivateGames: true },
       { reset: vi.fn() },
@@ -96,8 +96,8 @@ describe("overlay settings interaction", () => {
     expect(select).not.toBeNull();
     expect(
       [...(select?.options ?? [])].map((option) => option.value),
-    ).toEqual(["1", "3", "5"]);
-    expect(select?.value).toBe("1");
+    ).toEqual(["0", "1", "3", "5"]);
+    expect(select?.value).toBe("0");
     const autopilotLabel = shadow
       .querySelector<HTMLInputElement>(
         "input[data-setting='autonomousPrivateGames']",

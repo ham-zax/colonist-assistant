@@ -98,7 +98,7 @@ describe("assistant settings", () => {
     expect(set).toHaveBeenCalled();
   });
 
-  it("normalizes autopilot delay to 1, 3, or 5 seconds", async () => {
+  it("normalizes autopilot delay to 0, 1, 3, or 5 seconds", async () => {
     const set = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("chrome", {
       storage: {
@@ -117,14 +117,37 @@ describe("assistant settings", () => {
 
     const settings = await readSettings();
 
-    expect(settings.autopilotDelaySeconds).toBe(1);
+    expect(settings.autopilotDelaySeconds).toBe(0);
     expect(set).toHaveBeenCalledWith(
       expect.objectContaining({
         [SETTINGS_KEY]: expect.objectContaining({
-          autopilotDelaySeconds: 1,
+          autopilotDelaySeconds: 0,
         }),
       }),
     );
+  });
+
+  it("preserves a valid zero-second autopilot delay", async () => {
+    const set = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("chrome", {
+      storage: {
+        sync: {
+          get: vi.fn().mockResolvedValue({
+            [SETTINGS_KEY]: {
+              ...DEFAULT_SETTINGS,
+              autopilotDelaySeconds: 0,
+            },
+            colonistAssistantStrategistDefaultV1: true,
+          }),
+          set,
+        },
+      },
+    });
+
+    const settings = await readSettings();
+
+    expect(settings.autopilotDelaySeconds).toBe(0);
+    expect(set).not.toHaveBeenCalled();
   });
 
   it("preserves a valid three-second autopilot delay", async () => {
