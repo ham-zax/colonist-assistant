@@ -21,7 +21,7 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: taiki-e/install-action@v2
         with:
-          tool: wasm-pack
+          tool: wasm-pack,wasm-bindgen-cli@0.2.126
       - run: python scripts/apply-deep-maxn-v7-bootstrap.py
       - run: python scripts/apply-deep-maxn-v7-fix2.py
       - run: python scripts/apply-deep-maxn-v7-fix3.py
