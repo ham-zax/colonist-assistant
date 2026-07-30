@@ -26,7 +26,8 @@ jobs:
       - run: python scripts/apply-deep-maxn-v7-fix2.py
       - run: python scripts/apply-deep-maxn-v7-fix3.py
       - run: python scripts/apply-deep-maxn-v7-fix4.py
-      - run: rm -f scripts/apply-deep-maxn-v7-bootstrap.py scripts/apply-deep-maxn-v7-fix2.py scripts/apply-deep-maxn-v7-fix3.py scripts/apply-deep-maxn-v7-fix4.py .github/workflows/apply-deep-maxn-v7.yml
+      - run: python scripts/apply-deep-maxn-v7-fix5.py
+      - run: rm -f scripts/apply-deep-maxn-v7-bootstrap.py scripts/apply-deep-maxn-v7-fix2.py scripts/apply-deep-maxn-v7-fix3.py scripts/apply-deep-maxn-v7-fix4.py scripts/apply-deep-maxn-v7-fix5.py .github/workflows/apply-deep-maxn-v7.yml
       - run: cargo fmt --manifest-path engine/Cargo.toml --all
       - run: npm ci
       - run: npm run check
