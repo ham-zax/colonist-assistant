@@ -2,11 +2,12 @@ use std::collections::HashMap;
 
 use colonist_catan_core::{
     Action, CITY_COST, DEVELOPMENT_COST, GameState, Phase, ROAD_COST, ResourceHand, SETTLEMENT_COST,
+    SplitMix64,
 };
 
 use crate::deadline::CooperativeDeadline;
-use crate::eval::{production_pips, vertex_value};
-use crate::policy::normalize_priors;
+use crate::eval::{evaluate, production_pips, vertex_value};
+use crate::policy::{choose_rollout_action, normalize_priors};
 
 const NUMBER_PIPS: [f32; 13] = [
     0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 0.0, 5.0, 4.0, 3.0, 2.0, 1.0,
@@ -216,6 +217,9 @@ pub struct OpeningConfig {
     /// When true, opposing seats maximize their own opening value instead of
     /// returning a prior-weighted average of a few candidates.
     pub opponent_maximizes: bool,
+    /// Short post-draft heuristic rollouts blended into the leaf.
+    pub rollout_horizon: u8,
+    pub rollout_count: u8,
 }
 
 impl Default for OpeningConfig {
@@ -226,6 +230,11 @@ impl Default for OpeningConfig {
             opponent_width: 4,
             time_budget_ms: 0,
             opponent_maximizes: true,
+            // Keep rollouts off by default in the live path until a held-out
+            // opening oracle shows positive regret reduction. Callers that want
+            // post-draft samples set these explicitly.
+            rollout_horizon: 16,
+            rollout_count: 0,
         }
     }
 }
@@ -244,12 +253,55 @@ struct OpeningSolver {
 
 impl OpeningSolver {
     fn value(&self, state: &GameState) -> f32 {
-        let own = opening_position_value(state, self.root, true);
-        let rival = (0..state.board.num_players)
-            .filter(|player| *player != self.root)
-            .map(|player| opening_position_value(state, player, false))
-            .fold(f32::NEG_INFINITY, f32::max);
-        own - rival.max(0.0) * 0.34
+        let static_value = {
+            let own = opening_position_value(state, self.root, true);
+            let rival = (0..state.board.num_players)
+                .filter(|player| *player != self.root)
+                .map(|player| opening_position_value(state, player, false))
+                .fold(f32::NEG_INFINITY, f32::max);
+            own - rival.max(0.0) * 0.34
+        };
+        if matches!(
+            state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        ) || self.config.rollout_count == 0
+            || self.config.rollout_horizon == 0
+            // Static first-click scoring and tiny budgets stay on the closed
+            // form. Rollouts are reserved for completed deep draft leaves.
+            || self.nodes < 32
+            || self.node_limit.saturating_sub(self.nodes) < 64
+        {
+            return static_value;
+        }
+        let rollout = self.rollout_leaf(state);
+        static_value * 0.68 + rollout * 0.32
+    }
+
+    fn rollout_leaf(&self, state: &GameState) -> f32 {
+        let mut total = 0.0_f32;
+        let count = self.config.rollout_count.max(1);
+        for sample in 0..count {
+            let mut cursor = state.clone();
+            let mut rng = SplitMix64::new(
+                state.state_hash()
+                    ^ ((sample as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
+            );
+            let mut steps = 0u8;
+            while steps < self.config.rollout_horizon && !cursor.is_terminal() {
+                let actions = cursor.legal_actions();
+                if actions.is_empty() {
+                    break;
+                }
+                let action = choose_rollout_action(&cursor, &actions, &mut rng);
+                if cursor.apply(&action).is_err() {
+                    break;
+                }
+                steps = steps.saturating_add(1);
+            }
+            let values = evaluate(&cursor);
+            total += values[self.root as usize];
+        }
+        total / count as f32
     }
 
     fn visit(&mut self, state: &GameState) -> f32 {
@@ -580,6 +632,7 @@ mod tests {
                 root_width: 8,
                 opponent_width: 2,
                 time_budget_ms: 0,
+                rollout_count: 0,
                 ..OpeningConfig::default()
             },
         );
@@ -606,6 +659,7 @@ mod tests {
                 root_width: 32,
                 opponent_width: 8,
                 time_budget_ms: 1,
+                rollout_count: 0,
                 ..OpeningConfig::default()
             },
         );

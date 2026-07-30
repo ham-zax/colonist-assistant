@@ -1,13 +1,14 @@
 //! Shared observation-keyed belief search scaffolding.
 //!
-//! Production Deep MaxN still evaluates particles independently after the
-//! observer-consistent root. That admits strategy fusion deeper in the tree:
-//! opponents can pick different actions in worlds that look identical to them.
+//! Production Deep MaxN (`deep-maxn-v5`) still evaluates particles after an
+//! observer-consistent root, but deeper simulated opponents now select with an
+//! observation-safe public utility. That removes strategy fusion from opponent
+//! action choice: worlds that look identical to an opponent produce the same
+//! continuation policy.
 //!
-//! The experimental PUCT path already keys decision nodes by
-//! `observation_hash(actor)` and samples particles into one shared tree. This
-//! module provides the small helpers needed to evolve that architecture into
-//! the production engine without promoting the current slow PUCT unchanged.
+//! Exact safety checks still see the full posterior. Strategic MaxN searches a
+//! compact representative particle subset. The experimental PUCT tree remains
+//! available in the arena as a diagnostic path and is not the live authority.
 
 use colonist_catan_core::{Action, GameState};
 

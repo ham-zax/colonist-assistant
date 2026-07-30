@@ -1,6 +1,6 @@
 import { parseLogSnapshot } from "../core/parser";
 import { createTrackerState, reduceTracker, replayEvents } from "../core/tracker";
-import type { StoredEvent, TrackerState } from "../core/types";
+import type { StoredEvent, TrackerEvent, TrackerState } from "../core/types";
 import {
   ACTIVE_SESSION_STORAGE_KEY,
   clearCurrentGameStorage,
@@ -84,6 +84,39 @@ export const canonicalizeEvent = (
         : {}),
     };
   }
+  if (event.type === "trade-offered") {
+    return {
+      ...event,
+      player: canonicalPlayer(event.player, myPlayer),
+      recipients: event.recipients.map((player) =>
+        canonicalPlayer(player, myPlayer),
+      ),
+    };
+  }
+  if (
+    event.type === "trade-accepted" ||
+    event.type === "trade-rejected" ||
+    event.type === "trade-countered"
+  ) {
+    return {
+      ...event,
+      player: canonicalPlayer(event.player, myPlayer),
+      creator: canonicalPlayer(event.creator, myPlayer),
+    };
+  }
+  if (event.type === "trade-expired") {
+    return {
+      ...event,
+      player: canonicalPlayer(event.player, myPlayer),
+      ...(event.recipients
+        ? {
+            recipients: event.recipients.map((player) =>
+              canonicalPlayer(player, myPlayer),
+            ),
+          }
+        : {}),
+    };
+  }
   return {
     ...event,
     player: canonicalPlayer(event.player, myPlayer),
@@ -153,6 +186,42 @@ export class GameSession {
     this.observer?.disconnect();
     if (this.saveTimer) window.clearTimeout(this.saveTimer);
     void this.save();
+  }
+
+  /**
+   * Ingest durable tracker events that do not originate from the chat log
+   * (for example active-trade panel diffs). Deduplicates by synthetic id.
+   */
+  ingestEvents(events: TrackerEvent[], source = "board"): boolean {
+    if (this.disposed || !events.length) return false;
+    let changed = false;
+    for (const [index, event] of events.entries()) {
+      const id = `${source}:${event.type}:${this.events.length}:${index}:${JSON.stringify(event)}`;
+      if (this.seenIds.has(id)) continue;
+      this.seenIds.add(id);
+      const stored = canonicalizeEvent(
+        {
+          ...event,
+          id,
+          timestamp: Date.now(),
+          raw: source,
+        } as StoredEvent,
+        this.myPlayer,
+      );
+      this.events.push(stored);
+      this.state = reduceTracker(this.state, stored, stored);
+      changed = true;
+    }
+    if (changed) {
+      if (this.events.length > MAX_STORED_EVENTS) {
+        this.events = this.events.slice(-MAX_STORED_EVENTS);
+        this.state = replayEvents(this.events);
+        this.partialHistory = true;
+      }
+      this.queueSave();
+      this.onUpdate(this);
+    }
+    return changed;
   }
 
   reset(rescan = true): void {

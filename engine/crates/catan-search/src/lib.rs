@@ -65,7 +65,7 @@ pub use trade_safety::{
     DomesticTradeThreat, HARD_VETO_POSTERIOR, belief_domestic_trade_threat, domestic_trade_threat,
 };
 
-pub const ENGINE_REVISION: &str = "deep-maxn-v4";
+pub const ENGINE_REVISION: &str = "deep-maxn-v5";
 pub use depth::{
     BeliefDepthResult, DepthActionValue, DepthBeliefError, DepthSearchResult, search_belief_maxn,
     search_belief_maxn_bounded, search_belief_paranoid, search_belief_paranoid_bounded,

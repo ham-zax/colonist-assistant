@@ -246,6 +246,34 @@ fn production_enabled_win(state: &GameState, opponent: u8) -> Option<OpponentThr
     }
 }
 
+fn trade_enabled_win(state: &GameState, opponent: u8) -> Option<OpponentThreat> {
+    let target = state.victory_target;
+    let base = state.players[opponent as usize].victory_points();
+    if base.saturating_add(2) < target {
+        return None;
+    }
+    // Probe one-card gifts that complete a settlement or city recipe.
+    for resource in 0..5u8 {
+        let mut next = state.clone();
+        next.players[opponent as usize].resources[resource as usize] = next.players
+            [opponent as usize]
+            .resources[resource as usize]
+            .saturating_add(1);
+        if opponent_can_win_main_phase(&next, opponent).is_some() {
+            let settlements = settlement_sites(state, opponent);
+            let cities = city_sites(state, opponent);
+            return Some(OpponentThreat {
+                opponent,
+                kind: OpponentThreatKind::TradeEnabledWin,
+                blocking_vertices: settlements.into_iter().chain(cities).collect(),
+                blocking_edges: road_edges(state, opponent),
+                blocking_hexes: Vec::new(),
+            });
+        }
+    }
+    None
+}
+
 /// Detect high-priority opponent win threats from the protected player's view.
 pub fn detect_opponent_threats(state: &GameState, protected: u8) -> Vec<OpponentThreat> {
     let mut threats = Vec::new();
@@ -254,6 +282,10 @@ pub fn detect_opponent_threats(state: &GameState, protected: u8) -> Vec<Opponent
             continue;
         }
         if let Some(threat) = opponent_can_win_main_phase(state, opponent) {
+            threats.push(threat);
+            continue;
+        }
+        if let Some(threat) = trade_enabled_win(state, opponent) {
             threats.push(threat);
             continue;
         }
@@ -286,11 +318,15 @@ pub fn action_blocks_threat(state: &GameState, action: &Action, threat: &Opponen
                         | OpponentThreatKind::HiddenVictoryPointWin
                 )
         }
-        Action::OfferTrade { .. } | Action::RespondTrade { accept: true } => false,
+        Action::OfferTrade { .. } | Action::CounterTrade { .. } | Action::RespondTrade { accept: true } => {
+            false
+        }
         Action::RespondTrade { accept: false } | Action::CancelTrade => {
             matches!(
                 threat.kind,
-                OpponentThreatKind::TradeEnabledWin | OpponentThreatKind::ImmediateMainPhaseWin
+                OpponentThreatKind::TradeEnabledWin
+                    | OpponentThreatKind::ImmediateMainPhaseWin
+                    | OpponentThreatKind::HiddenVictoryPointWin
             )
         }
         Action::EndTurn => false,

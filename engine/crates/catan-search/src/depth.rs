@@ -98,6 +98,11 @@ struct Searcher {
     deepest_depth: u8,
     deadline: CooperativeDeadline,
     deadline_reached: bool,
+    /// When set, non-root actors select by an observation-safe public value
+    /// instead of private MaxN peeking. That keeps strategies identical across
+    /// worlds that share the actor's observation and removes strategy fusion
+    /// from deeper simulated decisions.
+    observation_safe_root: Option<u8>,
 }
 
 fn normalize_belief_root_priors(
@@ -210,6 +215,53 @@ impl Searcher {
                 ranked.truncate(self.branch_cap);
                 if ranked.is_empty() {
                     ranked = rank_with_class_quotas(state, &actions, actor, self.branch_cap);
+                }
+                let observation_safe = self
+                    .observation_safe_root
+                    .is_some_and(|root| root != actor);
+                // Observation-safe opponents evaluate a prior-weighted mixture
+                // over the top observation-ranked actions. The mixture depends
+                // only on the actor's observation, so indistinguishable worlds
+                // share one strategy while still covering more than a single
+                // greedy prior line.
+                if observation_safe {
+                    let mixture = ranked.iter().take(3.min(ranked.len())).collect::<Vec<_>>();
+                    let mass = mixture
+                        .iter()
+                        .map(|(_, prior)| prior.max(0.0))
+                        .sum::<f32>()
+                        .max(f32::EPSILON);
+                    let mut expected = [0.0_f32; 4];
+                    for (action, prior) in mixture {
+                        let weight = prior.max(0.0) / mass;
+                        if weight <= 0.0 {
+                            continue;
+                        }
+                        let mut next = state.clone();
+                        next.apply(action)
+                            .expect("ranked depth-search action must transition");
+                        let completed_turn = next.turn != state.turn
+                            || next.current_player != state.current_player;
+                        let mut child = self.visit(
+                            &next,
+                            depth + u8::from(completed_turn),
+                            if completed_turn {
+                                0
+                            } else {
+                                actions_in_turn.saturating_add(1)
+                            },
+                            alpha,
+                            beta,
+                        );
+                        if self.deadline_reached {
+                            return evaluate(state);
+                        }
+                        apply_action_friction(&mut child, state, action, actor);
+                        for player in 0..4 {
+                            expected[player] += child[player] * weight;
+                        }
+                    }
+                    return expected;
                 }
                 let mut best = [0.0; 4];
                 let maximize_root = match self.algorithm {
@@ -444,6 +496,7 @@ fn belief_search(
                 opponent_width: 4,
                 time_budget_ms,
                 opponent_maximizes: true,
+                ..OpeningConfig::default()
             },
         );
         let minimum = report
@@ -645,6 +698,7 @@ fn belief_search(
                 deepest_depth: 0,
                 deadline: deadline.clone(),
                 deadline_reached: false,
+                observation_safe_root: Some(observer),
             };
             let mut candidate_value = if row_deadline {
                 evaluate(&next)
@@ -768,6 +822,7 @@ pub fn search_maxn_bounded(
         deepest_depth: 0,
         deadline: CooperativeDeadline::start(0),
         deadline_reached: false,
+        observation_safe_root: None,
     }
     .root(state)
 }
@@ -799,6 +854,7 @@ pub fn search_paranoid_bounded(
         deepest_depth: 0,
         deadline: CooperativeDeadline::start(0),
         deadline_reached: false,
+        observation_safe_root: Some(root),
     }
     .root(state)
 }

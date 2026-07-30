@@ -23,11 +23,11 @@ replay tooling also exposes selected diagnostic budgets. Users cannot select
 them as live action authorities. The bundled learned policy and value heads are
 unpromoted and disabled.
 
-Production MaxN still searches determinized worlds after an observer-consistent
-root. Shared observation-keyed helpers now exist so the future production path
-can evolve the experimental PUCT tree without promoting its current throughput.
-Deep MaxN also orders simulated decisions from each actor's observation only,
-which removes one source of strategy fusion from candidate ranking.
+Production MaxN evaluates particles after an observer-consistent root. Deeper
+simulated opponents select with an observation-safe public utility so identical
+observations yield identical strategies. Shared observation-keyed helpers also
+exist for the eventual ISMCTS successor. Experimental belief PUCT remains a
+diagnostic arena policy and is not the live action authority.
 
 ## Beliefs
 
@@ -40,7 +40,9 @@ user's exact visible cards update the posterior.
 Durable tracker events include `trade-offered`, `trade-accepted`,
 `trade-rejected`, `trade-countered`, and `trade-expired` in addition to
 completed trades. Those events update hand feasibility, offer/reject propensity,
-and recipient-specific negotiation history.
+and recipient-specific negotiation history. Live Colonist active-trade panel
+diffs emit them; the public game log alone does not reliably surface offers,
+rejects, counters, or expirations.
 
 The filter reports effective sample size and uses deterministic stratified
 resampling with support-preserving rejuvenation. Representative search
@@ -132,16 +134,19 @@ the remaining uncertainty-sensitive tail. Strategic MaxN also searches about
 twelve representative particles rather than diluting 4,000 nodes across thirty-
 two near-duplicate worlds. Exact safety checks still use the fuller posterior.
 
-Within a simulated world, each acting player maximizes its own component of the
-race-value vector. Chance nodes use their rules-engine probabilities. Depth
-advances on completed turns, while a separate in-turn action bound prevents
-unbounded trade/build sequences. Simulated candidate ordering uses each actor's
-observation only.
+Within a simulated world, the protected root still maximizes its private
+race-value component. Opposing actors follow a prior-weighted mixture over the
+top observation-ranked actions rather than privately maximizing over hidden
+cards, so worlds that look identical to an opponent share one strategy while
+still covering more than a single greedy line. Chance nodes use their
+rules-engine probabilities. Depth advances on completed turns, while a separate
+in-turn action bound prevents unbounded trade/build sequences.
 
 The normal live request uses depth 4, branch cap 8, a 4,000-node limit, and a
 cooperative 350 ms strategic-search deadline. Setup uses a larger dedicated
-draft budget and deadline; trade responses and pondering use separate bounded
-node profiles.
+draft budget and deadline; optional post-draft rollouts remain off by default
+until held-out opening regret justifies enabling them. Trade responses and
+pondering use separate bounded node profiles.
 
 The browser and native search share the same wall-clock deadline. Search checks
 it between bounded slices and once more before returning. If time expires in
@@ -179,6 +184,8 @@ The value function combines:
 - context-dependent resource deficits;
 - nonlinear expected loss to a seven before the next spend;
 - expansion-site survival plus a top-three expansion portfolio;
+- settlement/city readiness tails (probability ready within 1–2 own turns);
+- phase-conditioned weights for production, expansion, liquidity, and trophies;
 - marginal development-card utility and play congestion;
 - probability of acquiring and retaining Longest Road and Largest Army;
 - robber denial, ports, piece inventory, and opponent threat.

@@ -401,6 +401,10 @@ fn choose_action(
         .then(|| search_belief_particles(state, config))
         .flatten();
     let depth_nodes = (config.iterations * 160).clamp(4_000, 80_000);
+    // Arena MaxN/AlphaBeta keep the validated depth-3 / branch-12 peer shape.
+    // Live Strategist separately uses branch cap 8 via the WASM request.
+    const MAXN_DEPTH: u8 = 3;
+    const MAXN_BRANCH: usize = 12;
     if engine == Engine::Puct
         && matches!(
             state.phase,
@@ -434,24 +438,37 @@ fn choose_action(
         Engine::Random => actions[rng.range(actions.len())].clone(),
         Engine::Weighted => choose_rollout_action(state, &actions, rng),
         Engine::MaxN => match search_particles.as_deref() {
-            Some(particles) => search_weighted_belief_maxn_bounded(particles, 3, 12, depth_nodes)
-                .expect("arena belief particles share one public observation")
-                .chosen
-                .unwrap_or_else(|| actions[0].clone()),
-            None => search_maxn_bounded(state, 3, 12, depth_nodes)
+            Some(particles) => {
+                search_weighted_belief_maxn_bounded(particles, MAXN_DEPTH, MAXN_BRANCH, depth_nodes)
+                    .expect("arena belief particles share one public observation")
+                    .chosen
+                    .unwrap_or_else(|| actions[0].clone())
+            }
+            None => search_maxn_bounded(state, MAXN_DEPTH, MAXN_BRANCH, depth_nodes)
                 .chosen
                 .unwrap_or_else(|| actions[0].clone()),
         },
         Engine::AlphaBeta => match search_particles.as_deref() {
             Some(particles) => {
-                search_weighted_belief_paranoid_bounded(particles, 3, 12, depth_nodes)
-                    .expect("arena belief particles share one public observation")
-                    .chosen
-                    .unwrap_or_else(|| actions[0].clone())
-            }
-            None => search_paranoid_bounded(state, state.actor(), 3, 12, depth_nodes)
+                search_weighted_belief_paranoid_bounded(
+                    particles,
+                    MAXN_DEPTH,
+                    MAXN_BRANCH,
+                    depth_nodes,
+                )
+                .expect("arena belief particles share one public observation")
                 .chosen
-                .unwrap_or_else(|| actions[0].clone()),
+                .unwrap_or_else(|| actions[0].clone())
+            }
+            None => search_paranoid_bounded(
+                state,
+                state.actor(),
+                MAXN_DEPTH,
+                MAXN_BRANCH,
+                depth_nodes,
+            )
+            .chosen
+            .unwrap_or_else(|| actions[0].clone()),
         },
         Engine::Uct | Engine::Puct => {
             let actor = state.actor() as usize;
