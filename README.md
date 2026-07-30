@@ -16,6 +16,11 @@ This project is not affiliated with, endorsed by, or sponsored by Colonist or
 CATAN Studio. Use it only in games where every participant has agreed to
 assistant use, and review the platform rules before playing.
 
+## Install
+
+Install from the
+[Chrome Web Store](https://chromewebstore.google.com/detail/colonist-assistant/giljoabonkhaolnpnbfpahenndegloin).
+
 ## What it does
 
 - Tracks exact public gains, spends, trades, and known transfers.
