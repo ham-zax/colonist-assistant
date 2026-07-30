@@ -69,11 +69,10 @@ pattern = re.compile(
     r"        assert_eq!\(selected\.len\(\), STRATEGIC_PARTICLE_TARGET\);\n"
     r"        let groups = group_particles_by_observation\(&selected, state\.actor\(\)\);"
 )
-replacement = '''        let expected_mass = particles.iter().map(|particle| particle.weight).sum::<f32>();
-        let selected = select_strategic_particles(&particles, STRATEGIC_PARTICLE_TARGET);
+replacement = '''        let selected = select_strategic_particles(&particles, STRATEGIC_PARTICLE_TARGET);
         assert_eq!(selected.len(), 1, "identical worlds should coalesce");
         let selected_mass = selected.iter().map(|particle| particle.weight).sum::<f32>();
-        assert!((selected_mass - expected_mass).abs() < 1e-6);
+        assert!((selected_mass - 1.0).abs() < 1e-6);
         let groups = group_particles_by_observation(&selected, state.actor());'''
 source, count = pattern.subn(replacement, source)
 if count != 1:
