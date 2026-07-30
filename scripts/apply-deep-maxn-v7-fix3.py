@@ -1,36 +1,9 @@
 from pathlib import Path
+import re
 
 path = Path("engine/crates/catan-search/src/depth.rs")
 source = path.read_text()
-old = '''    #[test]
-    fn configured_strategic_particle_limit_is_applied() {
-        let state = GameState::standard(151, 3);
-        let particles = (0..16)
-            .map(|index| {
-                let mut world = state.clone();
-                world.players[1].resources[index % 5] = (index % 4) as u8;
-                BeliefParticle {
-                    state: world,
-                    weight: 1.0,
-                }
-            })
-            .collect::<Vec<_>>();
-        let report = super::search_weighted_belief_maxn_with_config(
-            &particles,
-            super::BeliefDepthConfig {
-                maximum_depth: 1,
-                branch_cap: 4,
-                maximum_nodes: 500,
-                time_budget_ms: 0,
-                strategic_particle_limit: 4,
-            },
-        )
-        .unwrap();
-        assert_eq!(report.posterior_particles, 16);
-        assert!(report.particles <= 4);
-    }
-'''
-new = '''    #[test]
+replacement = '''    #[test]
     fn configured_strategic_particle_limit_is_applied() {
         let mut state = GameState::standard(151, 3);
         while matches!(
@@ -78,24 +51,31 @@ new = '''    #[test]
         assert_eq!(report.posterior_particles, 16);
         assert_eq!(report.particles, 2);
     }
+
 '''
-if source.count(old) != 1:
-    raise SystemExit("configured particle test block not found")
-path.write_text(source.replace(old, new))
+pattern = re.compile(
+    r"    #\[test\]\n    fn configured_strategic_particle_limit_is_applied\(\) \{.*?\n    \}\n\n(?=    #\[test\]\n    fn public_opening_is_identical_across_information_modes)",
+    re.S,
+)
+source, count = pattern.subn(replacement, source)
+if count != 1:
+    raise SystemExit(f"configured particle test block count: {count}")
+path.write_text(source)
 
 path = Path("engine/crates/catan-search/src/shared.rs")
 source = path.read_text()
-old = '''        let selected = select_strategic_particles(&particles, STRATEGIC_PARTICLE_TARGET);
-        assert_eq!(selected.len(), STRATEGIC_PARTICLE_TARGET);
-        let groups = group_particles_by_observation(&selected, state.actor());
-'''
-new = '''        let expected_mass = particles.iter().map(|particle| particle.weight).sum::<f32>();
+pattern = re.compile(
+    r"        let selected = select_strategic_particles\(&particles, STRATEGIC_PARTICLE_TARGET\);\n"
+    r"        assert_eq!\(selected\.len\(\), STRATEGIC_PARTICLE_TARGET\);\n"
+    r"        let groups = group_particles_by_observation\(&selected, state\.actor\(\)\);"
+)
+replacement = '''        let expected_mass = particles.iter().map(|particle| particle.weight).sum::<f32>();
         let selected = select_strategic_particles(&particles, STRATEGIC_PARTICLE_TARGET);
         assert_eq!(selected.len(), 1, "identical worlds should coalesce");
         let selected_mass = selected.iter().map(|particle| particle.weight).sum::<f32>();
         assert!((selected_mass - expected_mass).abs() < 1e-6);
-        let groups = group_particles_by_observation(&selected, state.actor());
-'''
-if source.count(old) != 1:
-    raise SystemExit("mass-shape assertion block not found")
-path.write_text(source.replace(old, new))
+        let groups = group_particles_by_observation(&selected, state.actor());'''
+source, count = pattern.subn(replacement, source)
+if count != 1:
+    raise SystemExit(f"mass-shape assertion block count: {count}")
+path.write_text(source)
