@@ -485,11 +485,15 @@ pub fn solve_opening(state: &GameState, root: u8, config: OpeningConfig) -> Open
                 .saturating_add(per_root_budget)
                 .min(solver.config.maximum_nodes);
             if solver.nodes < solver.config.maximum_nodes {
+                let completed_before = solver.completed_setups;
                 let deep = solver.visit(&next);
                 if solver.deadline_reached {
-                    // Preserve any completed deep value for this candidate;
-                    // do not rewrite the whole root row to the static leaf.
-                    if deep.is_finite() && solver.completed_setups > 0 {
+                    // Preserve a deep value only when THIS candidate completed
+                    // at least one draft leaf. A global completed_setups counter
+                    // would incorrectly keep partial values after earlier
+                    // candidates finished.
+                    let candidate_completed = solver.completed_setups > completed_before;
+                    if deep.is_finite() && candidate_completed {
                         deep
                     } else {
                         static_value

@@ -476,9 +476,8 @@ pub(crate) fn rank_with_class_quotas(
     cap: usize,
 ) -> Vec<(Action, f32)> {
     let ranked = normalize_priors(state, actions, actor);
-    let mut selected = order_scored_with_state_quotas(state, actor, ranked);
-    selected.truncate(cap);
-    selected
+    let selected = order_scored_with_state_quotas(state, actor, ranked);
+    truncate_root_preserving_end_turn(selected, cap)
 }
 
 fn push_unique(selected: &mut Vec<(Action, f32)>, candidate: &(Action, f32)) {
@@ -706,6 +705,9 @@ pub(crate) fn order_scored_with_state_quotas(
         push_unique(&mut selected, safety);
     }
 
+    // Reserve EndTurn after spatial/material lines so truncation and adaptive
+    // budgets cannot drop the only legal "do nothing" action. Exact tactical
+    // proofs may still omit it when another action wins immediately.
     if let Some(end_turn) = ranked
         .iter()
         .find(|(action, _)| matches!(action, Action::EndTurn))
@@ -717,6 +719,33 @@ pub(crate) fn order_scored_with_state_quotas(
         push_unique(&mut selected, &candidate);
     }
     selected
+}
+
+/// Truncate a ranked root while always retaining legal `EndTurn` when present.
+pub(crate) fn truncate_root_preserving_end_turn(
+    ranked: Vec<(Action, f32)>,
+    branch_cap: usize,
+) -> Vec<(Action, f32)> {
+    if ranked.len() <= branch_cap {
+        return ranked;
+    }
+    let end_turn = ranked
+        .iter()
+        .find(|(action, _)| matches!(action, Action::EndTurn))
+        .cloned();
+    let mut truncated = ranked.into_iter().take(branch_cap).collect::<Vec<_>>();
+    if let Some(end_turn) = end_turn {
+        if !truncated
+            .iter()
+            .any(|(action, _)| matches!(action, Action::EndTurn))
+        {
+            if truncated.len() == branch_cap {
+                truncated.pop();
+            }
+            truncated.push(end_turn);
+        }
+    }
+    truncated
 }
 
 /// Splits a node budget across root actions: ~70% on the leading group, ~20%
@@ -784,7 +813,7 @@ mod tests {
     use super::{
         action_prior, allocate_root_node_budgets, normalize_observed_priors, normalize_priors,
         order_scored_with_state_quotas, policy_family, rank_with_class_quotas,
-        trade_acceptance_probability,
+        trade_acceptance_probability, truncate_root_preserving_end_turn,
     };
 
     #[test]
@@ -827,6 +856,48 @@ mod tests {
                 "{action:?} received {actual}, expected structured-only {expected}"
             );
         }
+    }
+
+    #[test]
+    fn saturated_root_preserves_end_turn_at_live_width() {
+        // Construct an explicit saturated candidate list: two settlements, two
+        // cities, three roads, trades, maritime, development, and EndTurn.
+        // Truncation to eight must still keep EndTurn.
+        let ranked = vec![
+            (Action::BuildSettlement { vertex: 1 }, 0.20),
+            (Action::BuildSettlement { vertex: 2 }, 0.19),
+            (Action::BuildCity { vertex: 3 }, 0.18),
+            (Action::BuildCity { vertex: 4 }, 0.17),
+            (Action::BuildRoad { edge: 5 }, 0.16),
+            (Action::BuildRoad { edge: 6 }, 0.15),
+            (Action::BuildRoad { edge: 7 }, 0.14),
+            (
+                Action::OfferTrade {
+                    recipients: 0b10,
+                    give: [1, 0, 0, 0, 0],
+                    receive: [0, 0, 0, 1, 0],
+                },
+                0.13,
+            ),
+            (
+                Action::MaritimeTrade {
+                    give: colonist_catan_core::Resource::Lumber,
+                    receive: colonist_catan_core::Resource::Grain,
+                    ratio: 4,
+                },
+                0.12,
+            ),
+            (Action::BuyDevelopment, 0.11),
+            (Action::EndTurn, 0.05),
+        ];
+        let truncated = truncate_root_preserving_end_turn(ranked, 8);
+        assert_eq!(truncated.len(), 8);
+        assert!(
+            truncated
+                .iter()
+                .any(|(action, _)| matches!(action, Action::EndTurn)),
+            "EndTurn must survive an eight-wide saturated root"
+        );
     }
 
     #[test]

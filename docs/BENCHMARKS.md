@@ -266,7 +266,9 @@ held-out strength result yet. A promotion-quality comparison should freeze the
 source revision and untouched seed list, use hundreds of matched blocks in
 both three- and four-player games, rotate every seat, preserve a common
 information mode, and report terminal games, cutoffs, confidence intervals,
-rank, victory points, behavioral metrics, and latency. Native results must
-remain separate from live Colonist reliability and from claims about human
-opponents. Experimental belief-PUCT smoke runs cannot satisfy this requirement
-or be relabelled as live Strategist evidence.
+rank, victory points, behavioral metrics, and latency. Arena checkpoints and
+JSON summaries now record `gitSha`, `engineRevision`, MaxN depth/branch/nodes,
+and strategic particle limits so background runs can be tied to an executable.
+Native results must remain separate from live Colonist reliability and from
+claims about human opponents. Experimental belief-PUCT smoke runs cannot
+satisfy this requirement or be relabelled as live Strategist evidence.

@@ -1,19 +1,23 @@
 //! Shared observation-keyed belief search scaffolding.
 //!
-//! Production Deep MaxN (`deep-maxn-v5`) still evaluates particles after an
-//! observer-consistent root, but deeper simulated opponents now select with an
-//! observation-safe public utility. That removes strategy fusion from opponent
-//! action choice: worlds that look identical to an opponent produce the same
-//! continuation policy.
+//! Production Deep MaxN still evaluates particles after an observer-consistent
+//! root. Observation-safe opponent mixtures and a shared observation-keyed tree
+//! remain experimental scaffolding and are not enabled by default.
 //!
 //! Exact safety checks still see the full posterior. Strategic MaxN searches a
-//! compact representative particle subset. The experimental PUCT tree remains
-//! available in the arena as a diagnostic path and is not the live authority.
+//! compact representative particle subset that preserves high-mass worlds and
+//! strategically distinct signatures (affordability, hidden VP, monopoly
+//! concentration). The experimental PUCT tree remains available in the arena as
+//! a diagnostic path and is not the live authority.
 
-use colonist_catan_core::{Action, GameState};
+use colonist_catan_core::{
+    Action, CITY_COST, DevCard, GameState, Resource, SETTLEMENT_COST,
+};
 
 use crate::mcts::BeliefParticle;
-use crate::policy::{normalize_observed_priors, order_scored_with_state_quotas};
+use crate::policy::{
+    normalize_observed_priors, order_scored_with_state_quotas, truncate_root_preserving_end_turn,
+};
 
 /// Representative particle count for ordinary strategic search. Exact safety
 /// checks still see the full posterior; strategic MaxN should not spend its
@@ -51,26 +55,57 @@ pub fn shared_root_candidates(
     cap: usize,
 ) -> Vec<(Action, f32)> {
     let ranked = normalize_observed_priors(state, actions, actor);
-    let mut ordered = order_scored_with_state_quotas(&state.observed_state(actor), actor, ranked);
-    ordered.truncate(cap.max(1));
-    ordered
+    let ordered = order_scored_with_state_quotas(&state.observed_state(actor), actor, ranked);
+    truncate_root_preserving_end_turn(ordered, cap.max(1))
 }
 
-/// Selects a compact, weight-stratified particle subset for strategic search
-/// while leaving the caller free to keep the full posterior for exact solvers.
-pub fn select_strategic_particles(
+fn hand_covers(hand: &[u8; 5], cost: &[u8; 5]) -> bool {
+    hand.iter()
+        .zip(cost.iter())
+        .all(|(have, need)| *have >= *need)
+}
+
+/// Compact strategic signature for preserving distinct belief tails.
+pub(crate) fn particle_signature(state: &GameState, observer: u8) -> u64 {
+    let mut signature = 0u64;
+    for (index, player) in state.players.iter().enumerate() {
+        if index as u8 == observer {
+            continue;
+        }
+        let shift = (index as u64) * 8;
+        let mut bits = 0u64;
+        if hand_covers(&player.resources, &SETTLEMENT_COST) {
+            bits |= 1;
+        }
+        if hand_covers(&player.resources, &CITY_COST) {
+            bits |= 1 << 1;
+        }
+        if player.development[DevCard::VictoryPoint.index()] > 0 {
+            bits |= 1 << 2;
+        }
+        if player.development[DevCard::Monopoly.index()] > 0 {
+            bits |= 1 << 3;
+        }
+        let ore = player.resources[Resource::Ore.index()];
+        let grain = player.resources[Resource::Grain.index()];
+        if ore >= 2 || grain >= 2 {
+            bits |= 1 << 4;
+        }
+        let hidden_vp = player.development[DevCard::VictoryPoint.index()];
+        let public_vp = player.victory_points().saturating_sub(hidden_vp);
+        if public_vp + 2 >= state.victory_target {
+            bits |= 1 << 5;
+        }
+        signature |= bits << shift;
+    }
+    signature
+}
+
+fn systematic_weight_sample(
     particles: &[BeliefParticle],
     limit: usize,
+    quantum: f32,
 ) -> Vec<BeliefParticle> {
-    if particles.len() <= limit || limit == 0 {
-        return particles.to_vec();
-    }
-    let total = particles
-        .iter()
-        .map(|particle| particle.weight.max(0.0))
-        .sum::<f32>()
-        .max(f32::EPSILON);
-    let quantum = total / limit as f32;
     let mut selected = Vec::with_capacity(limit);
     let mut cursor = quantum * 0.5;
     let mut accumulated = 0.0;
@@ -85,20 +120,91 @@ pub fn select_strategic_particles(
         }
         index += 1;
     }
-    if selected.is_empty() {
-        particles.iter().take(limit).cloned().collect()
-    } else {
-        selected
+    selected
+}
+
+/// Selects a compact particle subset for strategic search: reserve distinct
+/// strategic signatures, then fill remaining mass with systematic resampling.
+pub fn select_strategic_particles(
+    particles: &[BeliefParticle],
+    limit: usize,
+) -> Vec<BeliefParticle> {
+    if particles.len() <= limit || limit == 0 {
+        return particles.to_vec();
     }
+    let observer = particles
+        .first()
+        .map(|particle| particle.state.actor())
+        .unwrap_or(0);
+    let total = particles
+        .iter()
+        .map(|particle| particle.weight.max(0.0))
+        .sum::<f32>()
+        .max(f32::EPSILON);
+    let quantum = total / limit as f32;
+
+    let mut by_weight = particles.iter().collect::<Vec<_>>();
+    by_weight.sort_by(|left, right| {
+        right
+            .weight
+            .total_cmp(&left.weight)
+            .then_with(|| {
+                particle_signature(&left.state, observer)
+                    .cmp(&particle_signature(&right.state, observer))
+            })
+    });
+
+    let reserve_slots = (limit / 3).max(1).min(limit);
+    let mut reserved = Vec::<BeliefParticle>::with_capacity(reserve_slots);
+    let mut seen = Vec::<u64>::new();
+    for particle in &by_weight {
+        if reserved.len() >= reserve_slots {
+            break;
+        }
+        let signature = particle_signature(&particle.state, observer);
+        if seen.contains(&signature) {
+            continue;
+        }
+        seen.push(signature);
+        let mut reserved_particle = (*particle).clone();
+        reserved_particle.weight = quantum;
+        reserved.push(reserved_particle);
+    }
+
+    let mut selected = systematic_weight_sample(particles, limit, quantum);
+    if selected.is_empty() {
+        return particles.iter().take(limit).cloned().collect();
+    }
+
+    // Overlay reserved signatures onto the lowest-weight sampled slots so rare
+    // but decisive tails survive even when systematic sampling misses them.
+    for reserved_particle in reserved.into_iter().rev() {
+        let signature = particle_signature(&reserved_particle.state, observer);
+        if selected
+            .iter()
+            .any(|particle| particle_signature(&particle.state, observer) == signature)
+        {
+            continue;
+        }
+        if let Some(slot) = selected
+            .iter_mut()
+            .min_by(|left, right| left.weight.total_cmp(&right.weight))
+        {
+            *slot = reserved_particle;
+        }
+    }
+
+    selected.truncate(limit);
+    selected
 }
 
 #[cfg(test)]
 mod tests {
-    use colonist_catan_core::GameState;
+    use colonist_catan_core::{DevCard, GameState, SETTLEMENT_COST};
 
     use super::{
-        STRATEGIC_PARTICLE_TARGET, group_particles_by_observation, select_strategic_particles,
-        shared_root_candidates,
+        STRATEGIC_PARTICLE_TARGET, group_particles_by_observation, particle_signature,
+        select_strategic_particles, shared_root_candidates,
     };
     use crate::mcts::BeliefParticle;
 
@@ -119,5 +225,37 @@ mod tests {
         let shared = shared_root_candidates(&state, state.actor(), &legal, 8);
         assert!(!shared.is_empty());
         assert!(shared.len() <= 8);
+    }
+
+    #[test]
+    fn strategic_particle_subset_preserves_settlement_affordability_tail() {
+        let base = GameState::standard(91, 3);
+        let mut rich = base.clone();
+        rich.players[1].resources = SETTLEMENT_COST;
+        let mut poor = base.clone();
+        poor.players[1].resources = [0, 0, 0, 0, 0];
+        poor.players[1].development[DevCard::VictoryPoint.index()] = 1;
+
+        let mut particles = Vec::new();
+        for _ in 0..20 {
+            particles.push(BeliefParticle {
+                state: poor.clone(),
+                weight: 1.0,
+            });
+        }
+        particles.push(BeliefParticle {
+            state: rich.clone(),
+            weight: 0.05,
+        });
+
+        let selected = select_strategic_particles(&particles, 8);
+        let observer = base.actor();
+        let rich_signature = particle_signature(&rich, observer);
+        assert!(
+            selected
+                .iter()
+                .any(|particle| particle_signature(&particle.state, observer) == rich_signature),
+            "low-weight settlement-affordable worlds must survive selection"
+        );
     }
 }

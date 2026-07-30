@@ -62,6 +62,7 @@ export const createTrackerState = (): TrackerState => ({
   possibilitiesTruncated: false,
   warnings: [],
   recentEvents: [],
+  countedTradeBehaviour: {},
 });
 
 const cloneState = (state: TrackerState): TrackerState => ({
@@ -92,7 +93,19 @@ const cloneState = (state: TrackerState): TrackerState => ({
   warnings: [...state.warnings],
   recentEvents: [...state.recentEvents],
   currentTurn: { ...state.currentTurn },
+  countedTradeBehaviour: { ...(state.countedTradeBehaviour ?? {}) },
 });
+
+const resourceBundleKey = (cards: ResourceVector): string =>
+  RESOURCE_ORDER.map((resource) => `${resource}:${cards[resource] ?? 0}`).join(",");
+
+const markTradeBehaviour = (state: TrackerState, key: string): boolean => {
+  if (state.countedTradeBehaviour[key]) {
+    return false;
+  }
+  state.countedTradeBehaviour[key] = true;
+  return true;
+};
 
 const ensurePlayer = (
   state: TrackerState,
@@ -525,7 +538,14 @@ export const reduceTracker = (
       break;
     }
     case "trade-offered": {
-      state.players[event.player]!.opponentModel.offersMade += 1;
+      if (
+        markTradeBehaviour(
+          state,
+          `offer:${event.player}:${resourceBundleKey(event.give)}>${resourceBundleKey(event.receive)}`,
+        )
+      ) {
+        state.players[event.player]!.opponentModel.offersMade += 1;
+      }
       updatePolicyPosterior(state.players[event.player]!, {
         tradeFlexible: 1.18,
         tradeResistant: 0.94,
@@ -542,7 +562,14 @@ export const reduceTracker = (
       break;
     }
     case "trade-accepted": {
-      state.players[event.player]!.opponentModel.tradeAccepts += 1;
+      if (
+        markTradeBehaviour(
+          state,
+          `accept:${event.player}:${event.creator}:${resourceBundleKey(event.give)}>${resourceBundleKey(event.receive)}`,
+        )
+      ) {
+        state.players[event.player]!.opponentModel.tradeAccepts += 1;
+      }
       updatePolicyPosterior(state.players[event.player]!, {
         tradeFlexible: 1.35,
         tradeResistant: 0.82,
@@ -626,13 +653,29 @@ export const reduceTracker = (
       }
       markResources(state.players[event.player]!, event.given, "spent");
       markResources(state.players[event.player]!, event.received, "gained");
-      state.players[event.player]!.opponentModel.offersMade += 1;
+      // Panel negotiation events already recorded offer/accept behaviour.
+      // Only count here when the completed log is the first observation.
+      if (
+        markTradeBehaviour(
+          state,
+          `offer:${event.player}:${resourceBundleKey(event.given)}>${resourceBundleKey(event.received)}`,
+        )
+      ) {
+        state.players[event.player]!.opponentModel.offersMade += 1;
+      }
       updatePolicyPosterior(state.players[event.player]!, {
         tradeFlexible: 1.28,
         tradeResistant: 0.9,
       });
       if (event.acceptingPlayer) {
-        state.players[event.acceptingPlayer]!.opponentModel.tradeAccepts += 1;
+        if (
+          markTradeBehaviour(
+            state,
+            `accept:${event.acceptingPlayer}:${event.player}:${resourceBundleKey(event.given)}>${resourceBundleKey(event.received)}`,
+          )
+        ) {
+          state.players[event.acceptingPlayer]!.opponentModel.tradeAccepts += 1;
+        }
         updatePolicyPosterior(state.players[event.acceptingPlayer]!, {
           tradeFlexible: 1.35,
           tradeResistant: 0.82,

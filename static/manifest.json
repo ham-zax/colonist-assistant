@@ -3,7 +3,7 @@
   "name": "Colonist Assistant",
   "short_name": "Colonist Assistant",
   "description": "Local card tracking and board-aware advice for friendly Colonist games.",
-  "version": "0.9.0",
+  "version": "0.8.0",
   "permissions": [
     "storage"
   ],

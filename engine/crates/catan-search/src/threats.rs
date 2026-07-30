@@ -335,6 +335,11 @@ pub fn action_blocks_threat(state: &GameState, action: &Action, threat: &Opponen
 }
 
 /// Insert threat-blocking actions ahead of ordinary relevance quotas.
+/// Force coarse threat blockers into the front of a ranked root.
+///
+/// Disabled in production MaxN until the detector aggregates over the
+/// posterior and verifies post-apply that a candidate removes a real win.
+#[allow(dead_code)]
 pub fn force_threat_blocking_actions(
     state: &GameState,
     actor: u8,

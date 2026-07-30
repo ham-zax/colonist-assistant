@@ -6,9 +6,8 @@ Colonist Assistant uses one local decision pipeline:
 Colonist observations
   → weighted hidden-state filter
   → exact local mandatory and parameter solvers
-  → opponent immediate-win threat retention
-  → relevance-conditional root candidates
-  → adaptive node allocation over a compact particle subset
+  → relevance-conditional root candidates (EndTurn reserved)
+  → adaptive node allocation over a signature-aware particle subset
   → setup: public snake-order opening oracle
   → normal play: bounded weighted-belief Deep MaxN
   → structured evaluator + opponent/trade signals
@@ -23,11 +22,10 @@ replay tooling also exposes selected diagnostic budgets. Users cannot select
 them as live action authorities. The bundled learned policy and value heads are
 unpromoted and disabled.
 
-Production MaxN evaluates particles after an observer-consistent root. Deeper
-simulated opponents select with an observation-safe public utility so identical
-observations yield identical strategies. Shared observation-keyed helpers also
-exist for the eventual ISMCTS successor. Experimental belief PUCT remains a
-diagnostic arena policy and is not the live action authority.
+Production MaxN evaluates particles after an observer-consistent root.
+Observation-safe opponent mixtures and shared observation-keyed trees remain
+scaffolding and are off by default until ablated. Experimental belief PUCT
+remains a diagnostic arena policy and is not the live action authority.
 
 ## Beliefs
 
@@ -72,10 +70,10 @@ reported as tactically proven only when the bounded solver establishes the same
 observable first action across every materially weighted world without
 exhausting its proof limit.
 
-Opponent threat detection looks for immediate settlement/city conversion wins,
-Longest Road and Largest Army swings, hidden victory-point thresholds, and
-production-enabled wins. Blocking settlements, roads, and robber hexes are
-forced into the strategic root before ordinary relevance quotas apply.
+Opponent threat detection exists as a module, but **root threat forcing is
+disabled** until it aggregates over the posterior and verifies that a candidate
+actually removes a winning continuation. Heuristic first-particle forcing is
+not used in production MaxN.
 
 Robber actions are compound `(hex, victim)` choices. Their exact comparison
 uses opponent production denial, public race threat, the belief-weighted

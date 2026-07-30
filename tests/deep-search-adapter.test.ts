@@ -104,6 +104,7 @@ const state: TrackerState = {
   possibilitiesTruncated: false,
   warnings: [],
   recentEvents: [],
+  countedTradeBehaviour: {},
 };
 
 const board: BoardSnapshot = {

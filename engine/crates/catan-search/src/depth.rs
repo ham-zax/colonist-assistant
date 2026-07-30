@@ -9,10 +9,9 @@ use crate::opening::{OpeningConfig, solve_opening};
 use crate::planner::plan_adjusted_priors;
 use crate::policy::{
     allocate_root_node_budgets, normalize_observed_priors, normalize_priors,
-    order_scored_with_state_quotas, rank_with_class_quotas,
+    order_scored_with_state_quotas, rank_with_class_quotas, truncate_root_preserving_end_turn,
 };
 use crate::shared::{STRATEGIC_PARTICLE_TARGET, select_strategic_particles};
-use crate::threats::force_threat_blocking_actions;
 use crate::trade_safety::belief_domestic_trade_threat;
 
 // Convenience APIs must remain safe in UI/tests. Production callers that
@@ -98,10 +97,10 @@ struct Searcher {
     deepest_depth: u8,
     deadline: CooperativeDeadline,
     deadline_reached: bool,
-    /// When set, non-root actors select by an observation-safe public value
-    /// instead of private MaxN peeking. That keeps strategies identical across
-    /// worlds that share the actor's observation and removes strategy fusion
-    /// from deeper simulated decisions.
+    /// When true, non-root actors use a prior-weighted mixture of their top
+    /// observation-ranked actions. Disabled by default: the mixture fixes one
+    /// fusion source but dilutes strategic opponent MaxN under thin budgets.
+    /// Enable only behind arena ablation flags until held-out evidence exists.
     observation_safe_root: Option<u8>,
 }
 
@@ -212,7 +211,7 @@ impl Searcher {
                     actor,
                     observed_ranked,
                 );
-                ranked.truncate(self.branch_cap);
+                ranked = truncate_root_preserving_end_turn(ranked, self.branch_cap);
                 if ranked.is_empty() {
                     ranked = rank_with_class_quotas(state, &actions, actor, self.branch_cap);
                 }
@@ -356,9 +355,10 @@ impl Searcher {
             &mut ranked,
             (self.maximum_nodes / 5).clamp(1_000, 18_000),
         );
-        let mut ranked = order_scored_with_state_quotas(state, actor, ranked);
-        force_threat_blocking_actions(state, actor, &ranked.clone(), &mut ranked);
-        let mut ranked = ranked.into_iter().take(self.branch_cap).collect::<Vec<_>>();
+        let ranked = order_scored_with_state_quotas(state, actor, ranked);
+        // Threat forcing is disabled until it aggregates over the posterior and
+        // verifies that a candidate actually removes a winning continuation.
+        let ranked = truncate_root_preserving_end_turn(ranked, self.branch_cap);
         let safe_ranked = ranked
             .iter()
             .filter(|(action, _)| {
@@ -604,12 +604,10 @@ fn belief_search(
         .max(f32::EPSILON);
     let first_legal = first.legal_actions();
     let root_priors = normalize_belief_root_priors(particles, &first_legal, observer);
-    let prior_snapshot = root_priors.clone();
-    let mut root_scored = order_scored_with_state_quotas(first, observer, root_priors);
-    force_threat_blocking_actions(first, observer, &prior_snapshot, &mut root_scored);
-    let mut root_actions = root_scored
+    let root_scored = order_scored_with_state_quotas(first, observer, root_priors);
+    // Threat forcing disabled until posterior-aggregated and post-apply verified.
+    let mut root_actions = truncate_root_preserving_end_turn(root_scored, branch_cap)
         .into_iter()
-        .take(branch_cap)
         .map(|(action, _)| action)
         .collect::<Vec<_>>();
     // Monopoly's five resource parameters share one strategic family slot.
@@ -698,7 +696,8 @@ fn belief_search(
                 deepest_depth: 0,
                 deadline: deadline.clone(),
                 deadline_reached: false,
-                observation_safe_root: Some(observer),
+                // Observation-safe opponent mixtures stay off until ablated.
+                observation_safe_root: None,
             };
             let mut candidate_value = if row_deadline {
                 evaluate(&next)
@@ -854,7 +853,7 @@ pub fn search_paranoid_bounded(
         deepest_depth: 0,
         deadline: CooperativeDeadline::start(0),
         deadline_reached: false,
-        observation_safe_root: Some(root),
+        observation_safe_root: None,
     }
     .root(state)
 }

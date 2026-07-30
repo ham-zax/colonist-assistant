@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use colonist_catan_core::{Action, GameState, NodeKind, Phase, SplitMix64};
 use colonist_catan_search::{
-    BeliefParticle, Mcts, SearchConfig, SearchMode, SearchReport, action_prior,
+    BeliefParticle, ENGINE_REVISION, Mcts, SearchConfig, SearchMode, SearchReport, action_prior,
     choose_rollout_action, encode_action, encode_heterogeneous_graph, evaluate,
     expansion_option_value, pool_heterogeneous_graph, production_pips, search_maxn_bounded,
     search_paranoid_bounded, search_weighted_belief_maxn_bounded,
@@ -78,7 +78,12 @@ struct Config {
     expert_iterations: u32,
     expert_rollout_actions: u16,
     belief_particles: usize,
+    strategic_particle_limit: usize,
+    maxn_depth: u8,
+    maxn_branch: usize,
+    maxn_nodes: Option<u32>,
     perfect_information_search: bool,
+    git_sha: String,
 }
 
 impl Default for Config {
@@ -108,9 +113,26 @@ impl Default for Config {
             expert_iterations: 0,
             expert_rollout_actions: 0,
             belief_particles: 24,
+            strategic_particle_limit: 12,
+            maxn_depth: 3,
+            maxn_branch: 12,
+            maxn_nodes: None,
             perfect_information_search: false,
+            git_sha: detect_git_sha(),
         }
     }
+}
+
+fn detect_git_sha() -> String {
+    std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|sha| sha.trim().to_string())
+        .filter(|sha| !sha.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn parse_config() -> Config {
@@ -146,6 +168,24 @@ fn parse_config() -> Config {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(24)
                     .clamp(1, 256)
+            }
+            "--strategic-particles" => {
+                config.strategic_particle_limit = value
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(12)
+                    .clamp(1, 256)
+            }
+            "--maxn-depth" => {
+                config.maxn_depth = value.and_then(|v| v.parse().ok()).unwrap_or(3).clamp(1, 8)
+            }
+            "--maxn-branch" => {
+                config.maxn_branch = value
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(12)
+                    .clamp(1, 64)
+            }
+            "--maxn-nodes" => {
+                config.maxn_nodes = value.and_then(|v| v.parse().ok());
             }
             "--threads" => config.threads = value.and_then(|v| v.parse().ok()).unwrap_or(1).max(1),
             "--candidate" => {
@@ -194,7 +234,9 @@ fn parse_config() -> Config {
                      [--candidate random|weighted|maxn|alphabeta|uct|puct] [--baseline ...] \\
                      [--lineup puct,puct,maxn,maxn] \\
                      [--iterations N] [--rollout-actions N] [--max-turns N] \\
-                     [--belief-particles N] [--perfect-information] \\
+                     [--belief-particles N] [--strategic-particles N] \\
+                     [--maxn-depth N] [--maxn-branch N] [--maxn-nodes N] \\
+                     [--perfect-information] \\
                      [--checkpoint-output progress.jsonl] \\
                      [--expert-output samples.jsonl] [--trade-output trades.jsonl] \\
                      [--trajectory-output trajectory.jsonl] \\
@@ -204,7 +246,8 @@ fn parse_config() -> Config {
                      maxn (also deep) is the validated default; puct is experimental.\n\
                      strategist remains a compatibility alias for puct.\n\
                      Search engines use identical weighted beliefs unless --perfect-information\n\
-                     explicitly enables oracle access to hidden state."
+                     explicitly enables oracle access to hidden state.\n\
+                     Checkpoints record git SHA and ENGINE_REVISION for reproducibility."
                 );
                 std::process::exit(0);
             }
@@ -400,11 +443,13 @@ fn choose_action(
         .uses_search_information()
         .then(|| search_belief_particles(state, config))
         .flatten();
-    let depth_nodes = (config.iterations * 160).clamp(4_000, 80_000);
-    // Arena MaxN/AlphaBeta keep the validated depth-3 / branch-12 peer shape.
-    // Live Strategist separately uses branch cap 8 via the WASM request.
-    const MAXN_DEPTH: u8 = 3;
-    const MAXN_BRANCH: usize = 12;
+    let depth_nodes = config
+        .maxn_nodes
+        .unwrap_or_else(|| (config.iterations * 160).clamp(4_000, 80_000));
+    let maxn_depth = config.maxn_depth;
+    let maxn_branch = config.maxn_branch;
+    // Defaults remain the validated depth-3 / branch-12 peer shape. Live
+    // Strategist uses branch cap 8 via the WASM request; arena CLI can match it.
     if engine == Engine::Puct
         && matches!(
             state.phase,
@@ -439,12 +484,12 @@ fn choose_action(
         Engine::Weighted => choose_rollout_action(state, &actions, rng),
         Engine::MaxN => match search_particles.as_deref() {
             Some(particles) => {
-                search_weighted_belief_maxn_bounded(particles, MAXN_DEPTH, MAXN_BRANCH, depth_nodes)
+                search_weighted_belief_maxn_bounded(particles, maxn_depth, maxn_branch, depth_nodes)
                     .expect("arena belief particles share one public observation")
                     .chosen
                     .unwrap_or_else(|| actions[0].clone())
             }
-            None => search_maxn_bounded(state, MAXN_DEPTH, MAXN_BRANCH, depth_nodes)
+            None => search_maxn_bounded(state, maxn_depth, maxn_branch, depth_nodes)
                 .chosen
                 .unwrap_or_else(|| actions[0].clone()),
         },
@@ -452,8 +497,8 @@ fn choose_action(
             Some(particles) => {
                 search_weighted_belief_paranoid_bounded(
                     particles,
-                    MAXN_DEPTH,
-                    MAXN_BRANCH,
+                    maxn_depth,
+                    maxn_branch,
                     depth_nodes,
                 )
                 .expect("arena belief particles share one public observation")
@@ -463,8 +508,8 @@ fn choose_action(
             None => search_paranoid_bounded(
                 state,
                 state.actor(),
-                MAXN_DEPTH,
-                MAXN_BRANCH,
+                maxn_depth,
+                maxn_branch,
                 depth_nodes,
             )
             .chosen
@@ -809,6 +854,12 @@ struct ArenaCheckpoint {
     rollout_actions: u16,
     max_turns: u16,
     belief_particles: usize,
+    strategic_particle_limit: usize,
+    maxn_depth: u8,
+    maxn_branch: usize,
+    maxn_nodes: u32,
+    engine_revision: &'static str,
+    git_sha: String,
     information_mode: &'static str,
     perfect_information_search: bool,
     validate: bool,
@@ -907,6 +958,14 @@ impl PartialArenaMetrics {
             rollout_actions: config.rollout_actions,
             max_turns: config.max_turns,
             belief_particles: config.belief_particles,
+            strategic_particle_limit: config.strategic_particle_limit,
+            maxn_depth: config.maxn_depth,
+            maxn_branch: config.maxn_branch,
+            maxn_nodes: config
+                .maxn_nodes
+                .unwrap_or_else(|| (config.iterations * 160).clamp(4_000, 80_000)),
+            engine_revision: ENGINE_REVISION,
+            git_sha: config.git_sha.clone(),
             information_mode: information_mode(config),
             perfect_information_search: config.perfect_information_search,
             validate: config.validate,
@@ -1577,6 +1636,12 @@ fn main() {
                 "\"rolloutActions\":{},",
                 "\"maxTurns\":{},",
                 "\"beliefParticles\":{},",
+                "\"strategicParticleLimit\":{},",
+                "\"maxnDepth\":{},",
+                "\"maxnBranch\":{},",
+                "\"maxnNodes\":{},",
+                "\"engineRevision\":\"{}\",",
+                "\"gitSha\":\"{}\",",
                 "\"informationMode\":\"{}\",",
                 "\"perfectInformationSearch\":{},",
                 "\"threads\":{},",
@@ -1649,6 +1714,14 @@ fn main() {
             config.rollout_actions,
             config.max_turns,
             config.belief_particles,
+            config.strategic_particle_limit,
+            config.maxn_depth,
+            config.maxn_branch,
+            config
+                .maxn_nodes
+                .unwrap_or_else(|| (config.iterations * 160).clamp(4_000, 80_000)),
+            ENGINE_REVISION,
+            config.git_sha,
             information_mode(&config),
             config.perfect_information_search,
             config.threads,

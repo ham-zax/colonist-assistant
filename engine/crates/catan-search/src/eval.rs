@@ -592,7 +592,7 @@ fn expansion_option_value_with_routes_and_weights(
             };
         }
     }
-    best.portfolio_value = top[0] + top[1] * 0.55 + top[2] * 0.30;
+    best.portfolio_value = top[1] * 0.55 + top[2] * 0.30;
     best.option_count = option_count.min(3);
     best
 }
@@ -835,11 +835,12 @@ fn expected_build_tempo(state: &GameState, player: u8) -> f32 {
     let hand = &state.players[player as usize].resources;
     let production = production_pips(state, player);
     let ratios = state.trade_ratios(player);
-    let etas = BUILD_COSTS
+    BUILD_COSTS
         .iter()
-        .map(|cost| {
+        .enumerate()
+        .map(|(kind, cost)| {
             let missing = deficit(hand, cost);
-            missing
+            let eta = missing
                 .iter()
                 .enumerate()
                 .map(|(index, amount)| {
@@ -852,46 +853,10 @@ fn expected_build_tempo(state: &GameState, player: u8) -> f32 {
                                 + 0.75)
                     }
                 })
-                .sum::<f32>()
+                .sum::<f32>();
+            [0.32, 1.25, 1.18, 0.68][kind] / (1.0 + eta / 18.0)
         })
-        .collect::<Vec<_>>();
-    // Contested races care about the left tail: P(ready within 1–2 own turns)
-    // matters more than the mean ETA alone.
-    let settlement_tail = build_ready_probability(etas[1], 1.0) * 0.55
-        + build_ready_probability(etas[1], 2.0) * 0.35;
-    let city_tail = build_ready_probability(etas[2], 2.0) * 0.70
-        + build_ready_probability(etas[2], 3.0) * 0.30;
-    let mean_term = BUILD_COSTS
-        .iter()
-        .enumerate()
-        .map(|(kind, _)| [0.32, 1.25, 1.18, 0.68][kind] / (1.0 + etas[kind] / 18.0))
-        .fold(0.0, f32::max);
-    mean_term * 0.55 + settlement_tail * 0.85 + city_tail * 0.72
-}
-
-fn build_ready_probability(eta_own_turns: f32, horizon: f32) -> f32 {
-    if eta_own_turns <= 0.05 {
-        return 1.0;
-    }
-    // Soft survival curve: ready sooner ⇒ higher mass inside the horizon.
-    (1.0 - (-horizon / (eta_own_turns + 0.35)).exp()).clamp(0.0, 1.0)
-}
-
-fn game_phase_weights(state: &GameState, player: u8) -> (f32, f32, f32, f32) {
-    // (production, expansion, hand/liquidity, trophy)
-    let vp = state.players[player as usize].victory_points();
-    let target = state.victory_target.max(1);
-    let progress = vp as f32 / target as f32;
-    let turn = state.turn as f32;
-    if progress >= 0.75 || vp + 2 >= target {
-        (0.55, 0.45, 0.85, 1.35)
-    } else if progress >= 0.45 || turn >= 40.0 {
-        (0.90, 0.95, 1.05, 1.15)
-    } else if turn <= 18.0 {
-        (1.25, 1.20, 0.85, 0.70)
-    } else {
-        (1.05, 1.10, 1.0, 1.0)
-    }
+        .fold(0.0, f32::max)
 }
 
 /// Race-to-win utility used by search and exact tactical endpoint comparison.
@@ -944,22 +909,22 @@ fn strategic_utility_with_routes_and_knowledge(
         .victory_target
         .saturating_sub(player_state.victory_points()) as f32;
     let race_urgency = 1.0 + (4.0 - points_to_win).max(0.0) * 0.18;
-    let (production_w, expansion_w, hand_w, trophy_w) = game_phase_weights(state, player);
 
     victory * 7.4
-        + weighted_production * 0.17 * production_w
-        + distinct_numbers * 0.06 * production_w
-        + resource_diversity * 0.09 * production_w
-        + hand_value * 0.48 * hand_w
-        + expected_build_tempo(state, player) * 1.15 * expansion_w
-        + expansion.value * 0.32 * expansion_w
-        + expansion.portfolio_value * 0.22 * expansion_w
-        + (road.acquire * road.retain) * 3.2 * race_urgency * trophy_w
-        + (army.acquire * army.retain) * 3.2 * race_urgency * trophy_w
+        + weighted_production * 0.17
+        + distinct_numbers * 0.06
+        + resource_diversity * 0.09
+        + hand_value * 0.48
+        + expected_build_tempo(state, player) * 1.15
+        + expansion.value * 0.32
+        // Portfolio excludes the best site already counted in `expansion.value`.
+        + expansion.portfolio_value * 0.22
+        + (road.acquire * road.retain) * 3.2 * race_urgency
+        + (army.acquire * army.retain) * 3.2 * race_urgency
         + development_utility(state, player, expansion) * 0.72
-        + port_flexibility * 0.07 * hand_w
-        - expected_discard_loss(state, player) * 2.4 * hand_w
-        - speculative_road_penalty(state, player, road) * expansion_w
+        + port_flexibility * 0.07
+        - expected_discard_loss(state, player) * 2.4
+        - speculative_road_penalty(state, player, road)
 }
 
 fn strategic_utility_with_routes(state: &GameState, player: u8, route_maps: &[Vec<u8>]) -> f32 {
