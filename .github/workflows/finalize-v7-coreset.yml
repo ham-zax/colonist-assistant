@@ -3,6 +3,8 @@ name: Finalize v7 coreset
 on:
   push:
     branches: [agent/deep-maxn-v7]
+  pull_request:
+    branches: [cursor/strategist-architecture-upgrade-7f99]
 
 permissions:
   contents: write
