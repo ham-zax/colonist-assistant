@@ -475,9 +475,15 @@ export const reduceTracker = (
       ? [event.from, event.to]
       : event.type === "trade" && event.acceptingPlayer
         ? [event.player, event.acceptingPlayer]
-        : "player" in event
-          ? [event.player]
-          : [];
+        : event.type === "trade-accepted" ||
+            event.type === "trade-rejected" ||
+            event.type === "trade-countered"
+          ? [event.player, event.creator]
+          : event.type === "trade-offered"
+            ? [event.player, ...event.recipients]
+            : "player" in event
+              ? [event.player]
+              : [];
   for (const name of names) ensurePlayer(state, name);
   const actor =
     event.type === "transfer" || event.type === "unknown-transfer"
@@ -516,6 +522,77 @@ export const reduceTracker = (
       transfer(state, event.from, event.to, event.cards);
       markResources(state.players[event.from]!, event.cards, "spent");
       markResources(state.players[event.to]!, event.cards, "gained");
+      break;
+    }
+    case "trade-offered": {
+      state.players[event.player]!.opponentModel.offersMade += 1;
+      updatePolicyPosterior(state.players[event.player]!, {
+        tradeFlexible: 1.18,
+        tradeResistant: 0.94,
+      });
+      const offered = reweightTradeEvidence(state, [
+        {
+          id: `offer:${event.player}:${state.eventCount}`,
+          creator: event.player,
+          give: event.give,
+          receive: event.receive,
+        },
+      ]);
+      state.worlds = offered.worlds;
+      break;
+    }
+    case "trade-accepted": {
+      state.players[event.player]!.opponentModel.tradeAccepts += 1;
+      updatePolicyPosterior(state.players[event.player]!, {
+        tradeFlexible: 1.35,
+        tradeResistant: 0.82,
+      });
+      const accepted = reweightTradeEvidence(state, [
+        {
+          id: `accept:${event.player}:${state.eventCount}`,
+          creator: event.creator,
+          give: event.give,
+          receive: event.receive,
+          acceptedPlayers: [event.player],
+        },
+      ]);
+      state.worlds = accepted.worlds;
+      break;
+    }
+    case "trade-rejected": {
+      const rejected = reweightTradeEvidence(state, [
+        {
+          id: `reject:${event.player}:${state.eventCount}`,
+          creator: event.creator,
+          give: event.give,
+          receive: event.receive,
+          rejectedPlayers: [event.player],
+        },
+      ]);
+      state.worlds = rejected.worlds;
+      state.players = rejected.players;
+      break;
+    }
+    case "trade-countered": {
+      const countered = reweightTradeEvidence(state, [
+        {
+          id: `counter:${event.player}:${state.eventCount}`,
+          creator: event.creator,
+          give: event.give,
+          receive: event.receive,
+          counteringPlayers: [event.player],
+        },
+      ]);
+      state.worlds = countered.worlds;
+      state.players = countered.players;
+      break;
+    }
+    case "trade-expired": {
+      // Soft negative evidence only: the offer vanished without an explicit
+      // accept/reject. Do not invent a rejection against every recipient.
+      updatePolicyPosterior(state.players[event.player]!, {
+        tradeFlexible: 0.97,
+      });
       break;
     }
     case "trade": {

@@ -423,10 +423,11 @@ describe("deep-search state adapter", () => {
     expect(built.request.mode).toBe("maxn");
     expect(built.request.depth).toBe(4);
     expect(built.request.maxNodes).toBe(4_000);
+    expect(built.request.branchCap).toBe(8);
     expect(built.request.tacticalNodes).toBe(900);
     expect(built.request.timeBudgetMs).toBe(350);
     expect(response.algorithm).toBe("maxn");
-    expect(response.engineRevision).toBe("deep-maxn-v3");
+    expect(response.engineRevision).toBe("deep-maxn-v4");
     expect(response.chosen).toBeDefined();
     expect(response.actions.length).toBeGreaterThan(0);
     expect(response.particles).toBe(built.request.state.worlds.length);

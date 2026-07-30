@@ -37,7 +37,7 @@ const DEVELOPMENT_ORDER = [
 ] as const;
 const DEVELOPMENT_TOTAL = [14, 5, 2, 2, 2] as const;
 const MAX_PARTICLES = 96;
-const MAX_INTERACTIVE_PARTICLES = 32;
+const MAX_INTERACTIVE_PARTICLES = 24;
 
 let wasmReady: Promise<void> | undefined;
 
@@ -1011,9 +1011,10 @@ export const buildDeepSearchRequest = (
             ? basePlayers.findIndex((player) => player.hasLargestArmy)
             : undefined,
       },
-      // Keep live decisions interactive. Longer searches belong in the
-      // native arena/training pipeline; exact mandatory and tactical solvers
-      // still run ahead of this bounded strategic search.
+      // Keep live decisions interactive. Concentrate strategic nodes on a
+      // compact root and let the engine subsample representative belief
+      // particles. Exact mandatory/tactical solvers still see the fuller
+      // posterior sent in this request.
       iterations: players.length >= 3 ? 320 : 384,
       maxNodes: 4_000,
       rolloutActions: players.length >= 3 ? 96 : 108,
@@ -1023,7 +1024,7 @@ export const buildDeepSearchRequest = (
       seed,
       mode: "maxn",
       depth: 4,
-      branchCap: 16,
+      branchCap: 8,
       ponder: false,
     },
   };
@@ -1043,13 +1044,17 @@ export const analyzeDeepSearch = async (
   );
   request.mode = "maxn";
   if (board.initialPlacement) {
-    // Setup is a fully public sequential draft. Deep MaxN routes it to the
-    // dedicated snake-order settlement+road solver. The shared live bound was
-    // replayed across every setup state from a headed Hard-bot game.
-    request.maxNodes = 4_000;
+    // Setup is a fully public sequential draft. Spend a larger cumulative
+    // budget here than on an ordinary turn: setup occurs only a handful of
+    // times and dominates long-horizon outcomes.
+    request.maxNodes = 12_000;
+    request.timeBudgetMs = 1_200;
     request.depth = Math.min(4, Math.max(2, players.length));
+    request.branchCap = 12;
   }
-  request.branchCap = 16;
+  request.branchCap = board.initialPlacement
+    ? request.branchCap
+    : 8;
   if (request.state.phase === "trade-responses") {
     request.iterations = 64;
     request.maxNodes = 2_000;
@@ -1061,6 +1066,11 @@ export const analyzeDeepSearch = async (
     request.maxNodes = 3_000;
     request.rolloutActions = 64;
     request.tacticalNodes = 600;
+    // Background opening/pondering can keep accumulating while opponents act.
+    if (board.initialPlacement) {
+      request.maxNodes = 18_000;
+      request.timeBudgetMs = 2_500;
+    }
   }
   const startedAt = performance.now();
   const response = analyzeWasm(request) as WasmSearchResponse;

@@ -19,6 +19,9 @@ pub struct ExpansionOption {
     pub roads_required: u8,
     pub value: f32,
     pub survival_probability: f32,
+    /// Combined value of the best three surviving expansion options.
+    pub portfolio_value: f32,
+    pub option_count: u8,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -550,6 +553,8 @@ fn expansion_option_value_with_routes_and_weights(
         &owned_arrivals
     };
     let mut best = ExpansionOption::default();
+    let mut top = [0.0_f32; 3];
+    let mut option_count = 0u8;
     for (vertex, &distance) in distances
         .iter()
         .enumerate()
@@ -565,15 +570,30 @@ fn expansion_option_value_with_routes_and_weights(
         let site = vertex_value_with_weights(state, vertex as u8, resource_weights, player);
         let road_cost = distance as f32 * 1.45;
         let value = survival * (site + 5.4) / (1.0 + road_cost * 0.34);
+        option_count = option_count.saturating_add(1);
+        if value > top[0] {
+            top[2] = top[1];
+            top[1] = top[0];
+            top[0] = value;
+        } else if value > top[1] {
+            top[2] = top[1];
+            top[1] = value;
+        } else if value > top[2] {
+            top[2] = value;
+        }
         if value > best.value {
             best = ExpansionOption {
                 vertex: Some(vertex as u8),
                 roads_required: distance,
                 value,
                 survival_probability: survival,
+                portfolio_value: 0.0,
+                option_count: 0,
             };
         }
     }
+    best.portfolio_value = top[0] + top[1] * 0.55 + top[2] * 0.30;
+    best.option_count = option_count.min(3);
     best
 }
 
@@ -896,7 +916,8 @@ fn strategic_utility_with_routes_and_knowledge(
         + resource_diversity * 0.09
         + hand_value * 0.48
         + expected_build_tempo(state, player) * 1.15
-        + expansion.value * 0.48
+        + expansion.value * 0.32
+        + expansion.portfolio_value * 0.22
         + (road.acquire * road.retain) * 3.2 * race_urgency
         + (army.acquire * army.retain) * 3.2 * race_urgency
         + development_utility(state, player, expansion) * 0.72

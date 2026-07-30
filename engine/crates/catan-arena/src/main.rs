@@ -10,9 +10,9 @@ use colonist_catan_core::{Action, GameState, NodeKind, Phase, SplitMix64};
 use colonist_catan_search::{
     BeliefParticle, Mcts, SearchConfig, SearchMode, SearchReport, action_prior,
     choose_rollout_action, encode_action, encode_heterogeneous_graph, evaluate,
-    pool_heterogeneous_graph, search_maxn_bounded, search_paranoid_bounded,
-    search_weighted_belief_maxn_bounded, search_weighted_belief_paranoid_bounded,
-    strategic_utility, trade_acceptance_features,
+    expansion_option_value, pool_heterogeneous_graph, production_pips, search_maxn_bounded,
+    search_paranoid_bounded, search_weighted_belief_maxn_bounded,
+    search_weighted_belief_paranoid_bounded, strategic_utility, trade_acceptance_features,
 };
 use serde::Serialize;
 
@@ -73,6 +73,7 @@ struct Config {
     checkpoint_output: Option<String>,
     expert_output: Option<String>,
     trade_output: Option<String>,
+    trajectory_output: Option<String>,
     expert_stride: u32,
     expert_iterations: u32,
     expert_rollout_actions: u16,
@@ -102,6 +103,7 @@ impl Default for Config {
             checkpoint_output: None,
             expert_output: None,
             trade_output: None,
+            trajectory_output: None,
             expert_stride: 1,
             expert_iterations: 0,
             expert_rollout_actions: 0,
@@ -129,6 +131,7 @@ fn parse_config() -> Config {
             "--checkpoint-output" => config.checkpoint_output = value.map(str::to_string),
             "--expert-output" => config.expert_output = value.map(str::to_string),
             "--trade-output" => config.trade_output = value.map(str::to_string),
+            "--trajectory-output" => config.trajectory_output = value.map(str::to_string),
             "--expert-stride" => {
                 config.expert_stride = value.and_then(|v| v.parse().ok()).unwrap_or(1).max(1)
             }
@@ -194,6 +197,7 @@ fn parse_config() -> Config {
                      [--belief-particles N] [--perfect-information] \\
                      [--checkpoint-output progress.jsonl] \\
                      [--expert-output samples.jsonl] [--trade-output trades.jsonl] \\
+                     [--trajectory-output trajectory.jsonl] \\
                      [--expert-stride N] [--expert-iterations N] \\
                      [--expert-rollout-actions N] \\
                      [--threads N] [--validate] [--quiet] [--json]\n\
@@ -531,6 +535,109 @@ struct GameMetrics {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct TrajectorySample {
+    schema_version: u8,
+    board_seed: u64,
+    chance_seed: u64,
+    block: u32,
+    seat_rotation: u8,
+    turn: u16,
+    phase: String,
+    actor: u8,
+    engines: Vec<&'static str>,
+    public_victory_points: Vec<u8>,
+    actual_victory_points: Vec<u8>,
+    production_pips: Vec<f32>,
+    best_settlement_roads: Vec<u8>,
+    expansion_value: Vec<f32>,
+    settlements: Vec<u8>,
+    cities: Vec<u8>,
+    roads_built: Vec<u8>,
+    development_hand: Vec<u8>,
+    unplayed_action_cards: Vec<u8>,
+    played_knights: Vec<u8>,
+    longest_road_holder: Option<u8>,
+    largest_army_holder: Option<u8>,
+    offers: Vec<u32>,
+    accepts: Vec<u32>,
+    estimated_win_value: Vec<f32>,
+}
+
+fn capture_trajectory_sample(
+    state: &GameState,
+    board_seed: u64,
+    chance_seed: u64,
+    engines: &[Engine],
+    metrics: &GameMetrics,
+) -> TrajectorySample {
+    let players = state.board.num_players as usize;
+    let win_values = evaluate(state);
+    TrajectorySample {
+        schema_version: 1,
+        board_seed,
+        chance_seed,
+        block: 0,
+        seat_rotation: 0,
+        turn: state.turn,
+        phase: format!("{:?}", state.phase),
+        actor: state.actor(),
+        engines: engines.iter().map(|engine| engine.as_str()).collect(),
+        public_victory_points: state.players[..players]
+            .iter()
+            .map(|player| player.public_victory_points)
+            .collect(),
+        actual_victory_points: state.players[..players]
+            .iter()
+            .map(|player| player.victory_points())
+            .collect(),
+        production_pips: (0..players)
+            .map(|player| production_pips(state, player as u8).iter().sum())
+            .collect(),
+        best_settlement_roads: (0..players)
+            .map(|player| expansion_option_value(state, player as u8).roads_required)
+            .collect(),
+        expansion_value: (0..players)
+            .map(|player| expansion_option_value(state, player as u8).portfolio_value)
+            .collect(),
+        settlements: state.players[..players]
+            .iter()
+            .map(|player| 5u8.saturating_sub(player.settlements_left))
+            .collect(),
+        cities: state.players[..players]
+            .iter()
+            .map(|player| 4u8.saturating_sub(player.cities_left))
+            .collect(),
+        roads_built: state.players[..players]
+            .iter()
+            .map(|player| 15u8.saturating_sub(player.roads_left))
+            .collect(),
+        development_hand: state.players[..players]
+            .iter()
+            .map(|player| player.development.iter().copied().sum())
+            .collect(),
+        unplayed_action_cards: state.players[..players]
+            .iter()
+            .map(|player| {
+                player.development[0].saturating_sub(player.bought_development[0])
+                    + player.development[2].saturating_sub(player.bought_development[2])
+                    + player.development[3].saturating_sub(player.bought_development[3])
+                    + player.development[4].saturating_sub(player.bought_development[4])
+            })
+            .collect(),
+        played_knights: state.players[..players]
+            .iter()
+            .map(|player| player.played_knights)
+            .collect(),
+        longest_road_holder: state.longest_road_holder,
+        largest_army_holder: state.largest_army_holder,
+        offers: metrics.offers[..players].to_vec(),
+        accepts: metrics.accepts[..players].to_vec(),
+        estimated_win_value: win_values[..players].to_vec(),
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ExpertActionSample {
     key: String,
     features: Vec<f32>,
@@ -586,6 +693,7 @@ struct GameResult {
     metrics: GameMetrics,
     expert_samples: Vec<ExpertSample>,
     trade_samples: Vec<TradeSample>,
+    trajectory_samples: Vec<TrajectorySample>,
 }
 
 #[derive(Clone, Debug)]
@@ -869,6 +977,8 @@ fn play_game(board_seed: u64, chance_seed: u64, engines: &[Engine], config: &Con
     let mut calibration = Vec::<(u8, f32)>::new();
     let mut expert_samples = Vec::<ExpertSample>::new();
     let mut trade_samples = Vec::<TradeSample>::new();
+    let mut trajectory_samples = Vec::<TrajectorySample>::new();
+    let mut last_trajectory_turn = u16::MAX;
     let mut persistent_searches = (0..config.players)
         .map(|_| None)
         .collect::<Vec<Option<Mcts>>>();
@@ -876,6 +986,19 @@ fn play_game(board_seed: u64, chance_seed: u64, engines: &[Engine], config: &Con
         .map(|_| None)
         .collect::<Vec<Option<Mcts>>>();
     while !state.is_terminal() && state.turn <= config.max_turns {
+        if config.trajectory_output.is_some()
+            && state.turn != last_trajectory_turn
+            && matches!(state.phase, Phase::PreRoll | Phase::Main | Phase::SetupSettlement)
+        {
+            trajectory_samples.push(capture_trajectory_sample(
+                &state,
+                board_seed,
+                chance_seed,
+                engines,
+                &metrics,
+            ));
+            last_trajectory_turn = state.turn;
+        }
         let action = if state.node_kind() == NodeKind::Chance {
             state
                 .sample_chance(&mut chance_rng)
@@ -1111,6 +1234,7 @@ fn play_game(board_seed: u64, chance_seed: u64, engines: &[Engine], config: &Con
         metrics,
         expert_samples,
         trade_samples,
+        trajectory_samples,
     }
 }
 
@@ -1259,6 +1383,12 @@ fn main() {
         )
     });
     let mut trade_sample_count = 0u64;
+    let mut trajectory_writer = config.trajectory_output.as_ref().map(|path| {
+        BufWriter::new(File::create(path).unwrap_or_else(|error| {
+            panic!("failed to create trajectory data {path}: {error}")
+        }))
+    });
+    let mut trajectory_sample_count = 0u64;
     for result in results {
         if let Some(writer) = &mut expert_writer {
             for sample in &result.game.expert_samples {
@@ -1276,6 +1406,19 @@ fn main() {
                     .write_all(b"\n")
                     .expect("trade data must be writable");
                 trade_sample_count += 1;
+            }
+        }
+        if let Some(writer) = &mut trajectory_writer {
+            for sample in &result.game.trajectory_samples {
+                let mut annotated = sample.clone();
+                annotated.block = result.block;
+                annotated.seat_rotation = result.seat;
+                serde_json::to_writer(&mut *writer, &annotated)
+                    .expect("trajectory sample must serialize");
+                writer
+                    .write_all(b"\n")
+                    .expect("trajectory data must be writable");
+                trajectory_sample_count += 1;
             }
         }
         let winner_engine = result.engines[result.game.winner as usize];
@@ -1408,6 +1551,7 @@ fn main() {
                 "}},",
                 "\"expertSamples\":{},",
                 "\"tradeSamples\":{},",
+                "\"trajectorySamples\":{},",
                 "\"cutoffs\":{},",
                 "\"elapsedMs\":{},",
                 "\"gamesPerSecond\":{:.6},",
@@ -1479,6 +1623,7 @@ fn main() {
                 / candidate_metrics.calibration_count.max(1) as f64,
             expert_sample_count,
             trade_sample_count,
+            trajectory_sample_count,
             cutoffs,
             elapsed.as_millis(),
             games_per_second,
@@ -1634,6 +1779,7 @@ mod tests {
             metrics: GameMetrics::default(),
             expert_samples: Vec::new(),
             trade_samples: Vec::new(),
+            trajectory_samples: Vec::new(),
         };
         let mut partial = PartialArenaMetrics::new(config.blocks);
         let mut output = Vec::new();
@@ -1705,6 +1851,7 @@ mod tests {
                 metrics: GameMetrics::default(),
                 expert_samples: Vec::new(),
                 trade_samples: Vec::new(),
+                trajectory_samples: Vec::new(),
             },
         };
         let mut partial = PartialArenaMetrics::new(1);

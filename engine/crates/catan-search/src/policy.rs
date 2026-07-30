@@ -466,9 +466,9 @@ pub(crate) fn normalize_observed_priors(
     normalize_priors(&state.observed_state(actor), actions, actor)
 }
 
-/// Preserves at least one candidate from every relevant strategic class before
-/// filling the remaining budget by prior. This prevents a global cutoff from
-/// silently removing all expansion or settlement lines.
+/// Caps the ordered root with relevance-conditional spatial quotas rather than
+/// one unconditional slot per enum family. Spatial coverage matters more than
+/// proving every development-card family is represented.
 pub(crate) fn rank_with_class_quotas(
     state: &GameState,
     actions: &[Action],
@@ -487,56 +487,174 @@ fn push_unique(selected: &mut Vec<(Action, f32)>, candidate: &(Action, f32)) {
     }
 }
 
-/// Adds state-dependent strategic quotas that cannot be expressed by an
-/// action's enum variant alone. A road can be an expansion action, a trophy
-/// action, or both; likewise any conversion can be the critical hand-safety
-/// line above seven cards. These candidates are inserted before the remaining
-/// globally ranked actions so progressive widening cannot starve them.
+fn push_top_matching(
+    selected: &mut Vec<(Action, f32)>,
+    ranked: &[(Action, f32)],
+    limit: usize,
+    predicate: impl Fn(&Action) -> bool,
+) {
+    let mut kept = 0;
+    for candidate in ranked {
+        if kept >= limit {
+            break;
+        }
+        if predicate(&candidate.0) {
+            let before = selected.len();
+            push_unique(selected, candidate);
+            if selected.len() > before {
+                kept += 1;
+            }
+        }
+    }
+}
+
+fn road_endpoint(state: &GameState, action: &Action) -> Option<u8> {
+    let edge = match action {
+        Action::BuildRoad { edge } | Action::PlaceRoad { edge } => *edge,
+        _ => return None,
+    };
+    let actor = state.actor();
+    state.board.edges[edge as usize]
+        .vertices
+        .into_iter()
+        .find(|vertex| {
+            !state.board.vertices[*vertex as usize]
+                .adjacent_edges
+                .iter()
+                .any(|neighbor| state.roads[*neighbor as usize] == Some(actor))
+        })
+        .or_else(|| state.board.edges[edge as usize].vertices.first().copied())
+}
+
+fn domestic_trade_material(state: &GameState, actor: u8, action: &Action, prior: f32) -> bool {
+    let Action::OfferTrade {
+        recipients,
+        give,
+        receive,
+    } = action
+    else {
+        return matches!(action, Action::CounterTrade { .. }) && prior >= 0.01;
+    };
+    if prior < 0.008 {
+        return false;
+    }
+    let acceptance = public_offer_acceptance_probability(state, actor, *recipients, give, receive);
+    let received = receive.iter().sum::<u8>() as f32;
+    let given = give.iter().sum::<u8>() as f32;
+    acceptance * (received + 0.35) / (given + 0.35) >= 0.04
+}
+
+fn maritime_trade_material(state: &GameState, actor: u8, action: &Action, prior: f32) -> bool {
+    let Action::MaritimeTrade { give, receive, ratio } = action else {
+        return false;
+    };
+    if prior < 0.01 {
+        return false;
+    }
+    completes_build(state, *give, *receive, *ratio) > 0.0
+        || (state.players[actor as usize].resource_total() > 7 && prior >= 0.02)
+}
+
+fn development_action_relevant(state: &GameState, actor: u8, action: &Action, prior: f32) -> bool {
+    match action {
+        Action::BuyDevelopment => {
+            prior >= 0.02
+                && crate::eval::marginal_development_value(state, actor)
+                    >= 0.08
+        }
+        Action::PlayKnight { .. } => prior >= 0.015,
+        Action::PlayYearOfPlenty { .. } | Action::PlayMonopoly { .. } => prior >= 0.02,
+        Action::PlayRoadBuilding { .. } => prior >= 0.015,
+        _ => false,
+    }
+}
+
+/// Relevance-conditional root ordering.
+///
+/// Unconditional one-per-family quotas spent most of a 16-wide branch cap on
+/// categorical coverage and starved alternate settlements and roads. Prefer:
+/// two settlements, three route-distinct roads, two cities, material trades,
+/// one relevant development line, trophy/hand-safety when active, and end turn.
 pub(crate) fn order_scored_with_state_quotas(
     state: &GameState,
     actor: u8,
     ranked: Vec<(Action, f32)>,
 ) -> Vec<(Action, f32)> {
     let mut selected = Vec::<(Action, f32)>::new();
-    for class in [
-        ActionClass::Mandatory,
-        ActionClass::Settlement,
-        ActionClass::City,
-        ActionClass::ExpansionRoad,
-        ActionClass::Development,
-        ActionClass::DomesticTrade,
-        ActionClass::MaritimeTrade,
-        ActionClass::Trophy,
-        ActionClass::EndTurn,
-    ] {
-        if let Some(candidate) = ranked
-            .iter()
-            .find(|(action, _)| action_class(action) == class)
-        {
-            push_unique(&mut selected, candidate);
+
+    push_top_matching(&mut selected, &ranked, 4, |action| {
+        action_class(action) == ActionClass::Mandatory
+    });
+
+    push_top_matching(&mut selected, &ranked, 2, |action| {
+        matches!(
+            action,
+            Action::PlaceSettlement { .. } | Action::BuildSettlement { .. }
+        )
+    });
+
+    push_top_matching(&mut selected, &ranked, 2, |action| {
+        matches!(action, Action::BuildCity { .. })
+    });
+
+    // Prefer spatially distinct road endpoints over duplicate steps toward the
+    // same vertex. The difference between the best and second-best road is
+    // often larger than the gap between an average road and EndTurn.
+    let mut road_endpoints = Vec::<u8>::new();
+    for candidate in &ranked {
+        if road_endpoints.len() >= 3 {
+            break;
+        }
+        let Some(endpoint) = road_endpoint(state, &candidate.0) else {
+            continue;
+        };
+        if road_endpoints.contains(&endpoint) {
+            continue;
+        }
+        let before = selected.len();
+        push_unique(&mut selected, candidate);
+        if selected.len() > before {
+            road_endpoints.push(endpoint);
         }
     }
 
-    // "Development" is a strategic class, but each playable card is a
-    // materially different action family. Preserve one representative of
-    // every family so a broad Knight or Year of Plenty parameter set cannot
-    // crowd Monopoly out before MaxN gets to compare it.
-    for development_family in [
-        0_u8, // BuyDevelopment
-        1_u8, // PlayKnight
-        2_u8, // PlayYearOfPlenty
-        3_u8, // PlayMonopoly
-    ] {
-        if let Some(candidate) = ranked.iter().find(|(action, _)| {
-            matches!(
-                (development_family, action),
-                (0, Action::BuyDevelopment)
-                    | (1, Action::PlayKnight { .. })
-                    | (2, Action::PlayYearOfPlenty { .. })
-                    | (3, Action::PlayMonopoly { .. })
-            )
-        }) {
+    for candidate in ranked.iter().filter(|(action, prior)| {
+        matches!(action, Action::OfferTrade { .. } | Action::CounterTrade { .. })
+            && domestic_trade_material(state, actor, action, *prior)
+    }) {
+        if selected
+            .iter()
+            .filter(|(action, _)| {
+                matches!(action, Action::OfferTrade { .. } | Action::CounterTrade { .. })
+            })
+            .count()
+            >= 2
+        {
+            break;
+        }
+        push_unique(&mut selected, candidate);
+    }
+
+    if let Some(maritime) = ranked.iter().find(|(action, prior)| {
+        matches!(action, Action::MaritimeTrade { .. })
+            && maritime_trade_material(state, actor, action, *prior)
+    }) {
+        push_unique(&mut selected, maritime);
+    }
+
+    // Collapse low-value development families. Keep at most two representatives
+    // among buy/play lines that clear a relevance floor.
+    let mut development_kept = 0usize;
+    for candidate in &ranked {
+        if development_kept >= 2 {
+            break;
+        }
+        if development_action_relevant(state, actor, &candidate.0, candidate.1) {
+            let before = selected.len();
             push_unique(&mut selected, candidate);
+            if selected.len() > before {
+                development_kept += 1;
+            }
         }
     }
 
@@ -565,8 +683,6 @@ pub(crate) fn order_scored_with_state_quotas(
         })
         .map(|(candidate, _)| candidate)
     {
-        // Insert ahead of the generic tail but after one representative from
-        // every normal action family.
         push_unique(&mut selected, trophy);
     }
 
@@ -590,20 +706,83 @@ pub(crate) fn order_scored_with_state_quotas(
         push_unique(&mut selected, safety);
     }
 
+    if let Some(end_turn) = ranked
+        .iter()
+        .find(|(action, _)| matches!(action, Action::EndTurn))
+    {
+        push_unique(&mut selected, end_turn);
+    }
+
     for candidate in ranked {
         push_unique(&mut selected, &candidate);
     }
     selected
 }
 
+/// Splits a node budget across root actions: ~70% on the leading group, ~20%
+/// on challengers, and ~10% on the remaining uncertainty-sensitive tail.
+pub fn allocate_root_node_budgets(action_count: usize, total_nodes: u32) -> Vec<u32> {
+    if action_count == 0 {
+        return Vec::new();
+    }
+    let total = total_nodes.max(action_count as u32);
+    let leading = action_count.min(4);
+    let challengers = action_count.saturating_sub(leading).min(3);
+    let tail = action_count.saturating_sub(leading + challengers);
+    let mut budgets = vec![1u32; action_count];
+    let remaining = total.saturating_sub(action_count as u32);
+    let leading_share = (remaining as f32 * 0.70).round() as u32;
+    let challenger_share = (remaining as f32 * 0.20).round() as u32;
+    let mut assigned = 0u32;
+    if leading > 0 {
+        let each = leading_share / leading as u32;
+        let mut leftover = leading_share % leading as u32;
+        for budget in budgets.iter_mut().take(leading) {
+            *budget += each + u32::from(leftover > 0);
+            leftover = leftover.saturating_sub(1);
+        }
+        assigned = leading_share;
+    }
+    if challengers > 0 {
+        let each = challenger_share / challengers as u32;
+        let mut leftover = challenger_share % challengers as u32;
+        for budget in budgets.iter_mut().skip(leading).take(challengers) {
+            *budget += each + u32::from(leftover > 0);
+            leftover = leftover.saturating_sub(1);
+        }
+        assigned += challenger_share;
+    }
+    let tail_share = remaining.saturating_sub(assigned);
+    if tail > 0 && tail_share > 0 {
+        let each = tail_share / tail as u32;
+        let mut leftover = tail_share % tail as u32;
+        for budget in budgets
+            .iter_mut()
+            .skip(leading + challengers)
+            .take(tail)
+        {
+            *budget += each + u32::from(leftover > 0);
+            leftover = leftover.saturating_sub(1);
+        }
+    } else if remaining > assigned {
+        // No tail: fold leftover into the leading group so the budget is spent.
+        let leftover = remaining - assigned;
+        let each = leftover / leading.max(1) as u32;
+        let mut extra = leftover % leading.max(1) as u32;
+        for budget in budgets.iter_mut().take(leading) {
+            *budget += each + u32::from(extra > 0);
+            extra = extra.saturating_sub(1);
+        }
+    }
+    budgets
+}
+
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use colonist_catan_core::{Action, GameState, Phase};
 
     use super::{
-        action_class, action_prior, normalize_observed_priors, normalize_priors,
+        action_prior, allocate_root_node_budgets, normalize_observed_priors, normalize_priors,
         order_scored_with_state_quotas, policy_family, rank_with_class_quotas,
         trade_acceptance_probability,
     };
@@ -651,7 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn root_cap_preserves_every_relevant_action_class() {
+    fn root_cap_prefers_spatial_coverage_over_every_family() {
         let mut state = GameState::standard(211, 4);
         while matches!(
             state.phase,
@@ -664,17 +843,34 @@ mod tests {
         state.current_player = 0;
         state.players[0].resources = [5, 5, 4, 5, 5];
         let legal = state.legal_actions();
-        let expected = legal.iter().map(action_class).collect::<BTreeSet<_>>();
-        let ranked = rank_with_class_quotas(&state, &legal, 0, 16);
-        let actual = ranked
+        let ranked = rank_with_class_quotas(&state, &legal, 0, 8);
+        let settlements = ranked
             .iter()
-            .map(|(action, _)| action_class(action))
-            .collect::<BTreeSet<_>>();
-        assert!(expected.is_subset(&actual));
+            .filter(|(action, _)| matches!(action, Action::BuildSettlement { .. }))
+            .count();
+        let roads = ranked
+            .iter()
+            .filter(|(action, _)| matches!(action, Action::BuildRoad { .. }))
+            .count();
+        assert!(
+            settlements >= 1
+                || !legal
+                    .iter()
+                    .any(|action| matches!(action, Action::BuildSettlement { .. }))
+        );
+        assert!(
+            roads >= 1 || !legal.iter().any(|action| matches!(action, Action::BuildRoad { .. }))
+        );
+        assert!(
+            ranked
+                .iter()
+                .any(|(action, _)| matches!(action, Action::EndTurn))
+        );
+        assert!(ranked.len() <= 8);
     }
 
     #[test]
-    fn root_cap_preserves_each_playable_development_family() {
+    fn root_cap_keeps_relevant_playable_development_lines() {
         let mut state = GameState::standard(215, 4);
         while matches!(
             state.phase,
@@ -690,23 +886,37 @@ mod tests {
         state.players[0].development[3] = 1;
         state.players[0].development[4] = 1;
 
-        let ranked = rank_with_class_quotas(&state, &state.legal_actions(), 0, 12);
+        let ranked = rank_with_class_quotas(&state, &state.legal_actions(), 0, 10);
+        let development_lines = ranked
+            .iter()
+            .filter(|(action, _)| {
+                matches!(
+                    action,
+                    Action::PlayKnight { .. }
+                        | Action::PlayYearOfPlenty { .. }
+                        | Action::PlayMonopoly { .. }
+                        | Action::BuyDevelopment
+                )
+            })
+            .count();
+        assert!(
+            development_lines >= 1,
+            "at least one relevant development line must survive the relevance floor"
+        );
+        // Relevance quotas insert at most two development representatives
+        // early; additional high-prior parameters may still fill later slots.
+        assert!(ranked.len() <= 10);
+    }
 
-        assert!(
-            ranked
-                .iter()
-                .any(|(action, _)| matches!(action, Action::PlayKnight { .. }))
-        );
-        assert!(
-            ranked
-                .iter()
-                .any(|(action, _)| { matches!(action, Action::PlayYearOfPlenty { .. }) })
-        );
-        assert!(
-            ranked
-                .iter()
-                .any(|(action, _)| matches!(action, Action::PlayMonopoly { .. }))
-        );
+    #[test]
+    fn adaptive_root_budgets_concentrate_on_leading_actions() {
+        let budgets = allocate_root_node_budgets(8, 400);
+        assert_eq!(budgets.len(), 8);
+        assert_eq!(budgets.iter().sum::<u32>(), 400);
+        let leading = budgets[..4].iter().sum::<u32>();
+        let rest = budgets[4..].iter().sum::<u32>();
+        assert!(leading > rest);
+        assert!(budgets[0] >= budgets[7]);
     }
 
     #[test]

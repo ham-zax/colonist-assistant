@@ -93,46 +93,102 @@ fn opening_position_bonus(state: &GameState, player: u8, exact_hand: bool) -> f3
         - shared_hex_exposure * 0.38
 }
 
-/// Values where the two opening roads leave the player after one additional
-/// road. This keeps road direction inside the joint settlement solve without
-/// paying for the full mid-game route/race evaluator at every opening leaf.
+/// Values where the opening roads leave the player after one to three
+/// additional roads. Ranking the top sites gives a portfolio signal instead of
+/// only the single best fragile route.
 fn opening_road_reach(state: &GameState, player: u8) -> f32 {
-    let mut best_site = 0.0_f32;
-    for edge in state
+    let mut site_values = Vec::<f32>::new();
+    let mut frontier = state
         .board
         .edges
         .iter()
         .enumerate()
         .filter(|(edge, _)| state.roads[*edge] == Some(player))
         .flat_map(|(_, edge)| edge.vertices)
-    {
-        for next_edge in &state.board.vertices[edge as usize].adjacent_edges {
-            if state.roads[*next_edge as usize].is_some() {
-                continue;
+        .collect::<Vec<_>>();
+    frontier.sort_unstable();
+    frontier.dedup();
+    for depth in 1u8..=3 {
+        let mut next_frontier = Vec::new();
+        for vertex in &frontier {
+            for next_edge in &state.board.vertices[*vertex as usize].adjacent_edges {
+                if state.roads[*next_edge as usize].is_some() {
+                    continue;
+                }
+                let candidate = state.board.edges[*next_edge as usize]
+                    .vertices
+                    .into_iter()
+                    .find(|other| other != vertex)
+                    .unwrap_or(*vertex);
+                if state.buildings[candidate as usize].is_some()
+                    || state.board.vertices[candidate as usize]
+                        .adjacent_vertices
+                        .iter()
+                        .any(|neighbor| state.buildings[*neighbor as usize].is_some())
+                {
+                    continue;
+                }
+                let distance_penalty = 1.0 + (depth as f32 - 1.0) * 0.42;
+                site_values.push(vertex_value(state, candidate, player) / distance_penalty);
+                next_frontier.push(candidate);
             }
-            let candidate = state.board.edges[*next_edge as usize]
-                .vertices
-                .into_iter()
-                .find(|vertex| *vertex != edge)
-                .unwrap_or(edge);
-            if state.buildings[candidate as usize].is_some()
-                || state.board.vertices[candidate as usize]
-                    .adjacent_vertices
-                    .iter()
-                    .any(|neighbor| state.buildings[*neighbor as usize].is_some())
-            {
-                continue;
-            }
-            best_site = best_site.max(vertex_value(state, candidate, player));
+        }
+        next_frontier.sort_unstable();
+        next_frontier.dedup();
+        frontier = next_frontier;
+    }
+    site_values.sort_by(|left, right| right.total_cmp(left));
+    site_values.dedup_by(|left, right| (*left - *right).abs() < 1e-4);
+    let best = site_values.first().copied().unwrap_or(0.0);
+    let second = site_values.get(1).copied().unwrap_or(0.0);
+    let third = site_values.get(2).copied().unwrap_or(0.0);
+    best * 0.34 + second * 0.16 + third * 0.08
+}
+
+fn board_resource_scarcity(state: &GameState) -> [f32; 5] {
+    let mut pips = [0.0_f32; 5];
+    for hex in &state.board.hexes {
+        let Some(resource) = hex.resource else {
+            continue;
+        };
+        if (hex.number as usize) < NUMBER_PIPS.len() {
+            pips[resource.index()] += NUMBER_PIPS[hex.number as usize];
         }
     }
-    best_site * 0.34
+    let mean = pips.iter().sum::<f32>() / 5.0;
+    pips.map(|value| (mean - value).max(0.0))
+}
+
+fn opening_port_option_value(state: &GameState, player: u8) -> f32 {
+    state
+        .trade_ratios(player)
+        .iter()
+        .map(|ratio| (4 - *ratio) as f32)
+        .sum::<f32>()
+        * 0.11
+}
+
+fn opening_robber_concentration(state: &GameState, player: u8) -> f32 {
+    let production = production_pips(state, player);
+    let total = production.iter().sum::<f32>().max(0.01);
+    let peak = production.iter().copied().fold(0.0_f32, f32::max);
+    peak / total
 }
 
 fn opening_position_value(state: &GameState, player: u8, exact_hand: bool) -> f32 {
+    let production = production_pips(state, player);
+    let scarcity = board_resource_scarcity(state);
+    let scarcity_alignment = production
+        .iter()
+        .zip(scarcity)
+        .map(|(pips, scarce)| *pips * scarce * 0.012)
+        .sum::<f32>();
     state.players[player as usize].public_victory_points as f32 * 1.8
         + opening_position_bonus(state, player, exact_hand)
         + opening_road_reach(state, player)
+        + opening_port_option_value(state, player)
+        + scarcity_alignment
+        - opening_robber_concentration(state, player) * 0.22
 }
 
 #[derive(Clone, Debug)]
@@ -157,6 +213,9 @@ pub struct OpeningConfig {
     pub root_width: usize,
     pub opponent_width: usize,
     pub time_budget_ms: u32,
+    /// When true, opposing seats maximize their own opening value instead of
+    /// returning a prior-weighted average of a few candidates.
+    pub opponent_maximizes: bool,
 }
 
 impl Default for OpeningConfig {
@@ -164,8 +223,9 @@ impl Default for OpeningConfig {
         Self {
             maximum_nodes: 18_000,
             root_width: 12,
-            opponent_width: 3,
+            opponent_width: 4,
             time_budget_ms: 0,
+            opponent_maximizes: true,
         }
     }
 }
@@ -232,6 +292,36 @@ impl OpeningSolver {
                 }
             }
             best
+        } else if self.config.opponent_maximizes {
+            // Opponents greedily maximize their own setup-aware leaf features
+            // over a pruned candidate set, then the draft continues. This is
+            // closer to independent seat play than a prior-weighted mixture.
+            let mut best_action = None;
+            let mut best_opponent_score = f32::NEG_INFINITY;
+            for (action, _) in ranked.into_iter().take(self.config.opponent_width) {
+                if self.nodes >= self.node_limit {
+                    self.aborted = true;
+                    break;
+                }
+                let mut next = state.clone();
+                if next.apply(&action).is_ok() {
+                    let opponent_score = opening_position_value(&next, actor, false);
+                    if opponent_score > best_opponent_score {
+                        best_opponent_score = opponent_score;
+                        best_action = Some(action);
+                    }
+                }
+            }
+            if let Some(action) = best_action {
+                let mut next = state.clone();
+                if next.apply(&action).is_ok() {
+                    self.visit(&next)
+                } else {
+                    self.value(state)
+                }
+            } else {
+                self.value(state)
+            }
         } else {
             let candidates = ranked
                 .into_iter()
@@ -295,48 +385,76 @@ pub fn solve_opening(state: &GameState, root: u8, config: OpeningConfig) -> Open
         memo: HashMap::new(),
         deadline,
     };
-    // Every legal first click must be represented. `root_width` still bounds
-    // later own choices inside the snake draft, but it must never erase a
-    // low-prior root settlement or anchored road before any comparison.
-    let root_candidates = ranked;
-    let per_root_budget = (solver.config.maximum_nodes / root_candidates.len().max(1) as u32)
-        .max(1)
-        .min(solver.config.maximum_nodes);
+    // Score every legal first click with the setup leaf, then spend the deep
+    // draft budget preferentially on the strongest static candidates. A flat
+    // equal split across ~54 intersections left each root with too little
+    // snake-draft depth under the live deadline.
+    let mut static_actions = ranked
+        .iter()
+        .filter_map(|(action, prior)| {
+            let mut next = state.clone();
+            next.apply(action).ok()?;
+            Some((
+                action.clone(),
+                *prior,
+                solver.value(&next),
+            ))
+        })
+        .collect::<Vec<_>>();
+    static_actions.sort_by(|left, right| {
+        right
+            .2
+            .total_cmp(&left.2)
+            .then_with(|| right.1.total_cmp(&left.1))
+    });
+    let deep_count = static_actions
+        .len()
+        .min(solver.config.root_width.max(12));
+    let budgets = crate::policy::allocate_root_node_budgets(
+        deep_count,
+        solver.config.maximum_nodes,
+    );
     let mut actions = Vec::new();
-    for (action, _) in root_candidates {
-        solver.node_limit = solver
-            .nodes
-            .saturating_add(per_root_budget)
-            .min(solver.config.maximum_nodes);
+    for (index, (action, _, static_value)) in static_actions.into_iter().enumerate() {
         let mut next = state.clone();
         if next.apply(&action).is_err() {
             continue;
         }
-        let value = if solver.deadline.has_elapsed() {
-            solver.aborted = true;
-            solver.deadline_reached = true;
-            solver.value(&next)
-        } else if solver.nodes < solver.config.maximum_nodes {
-            solver.visit(&next)
+        let value = if index >= deep_count || solver.deadline.has_elapsed() {
+            if solver.deadline.has_elapsed() {
+                solver.aborted = true;
+                solver.deadline_reached = true;
+            }
+            static_value
         } else {
-            solver.aborted = true;
-            solver.value(&next)
+            let per_root_budget = budgets.get(index).copied().unwrap_or(1).max(1);
+            solver.node_limit = solver
+                .nodes
+                .saturating_add(per_root_budget)
+                .min(solver.config.maximum_nodes);
+            if solver.nodes < solver.config.maximum_nodes {
+                let deep = solver.visit(&next);
+                if solver.deadline_reached {
+                    // Preserve any completed deep value for this candidate;
+                    // do not rewrite the whole root row to the static leaf.
+                    if deep.is_finite() && solver.completed_setups > 0 {
+                        deep
+                    } else {
+                        static_value
+                    }
+                } else {
+                    deep
+                }
+            } else {
+                solver.aborted = true;
+                static_value
+            }
         };
         actions.push(OpeningActionValue { action, value });
     }
     if solver.deadline.has_elapsed() {
         solver.aborted = true;
         solver.deadline_reached = true;
-    }
-    if solver.deadline_reached {
-        // A wall-clock cutoff must not favor the root placements visited
-        // first. Reduce the entire draft row to the same setup-aware fallback.
-        for candidate in &mut actions {
-            let mut next = state.clone();
-            next.apply(&candidate.action)
-                .expect("opening root action was legal before deadline fallback");
-            candidate.value = solver.value(&next);
-        }
     }
     actions.sort_by(|left, right| right.value.total_cmp(&left.value));
     OpeningReport {
@@ -462,6 +580,7 @@ mod tests {
                 root_width: 8,
                 opponent_width: 2,
                 time_budget_ms: 0,
+                ..OpeningConfig::default()
             },
         );
         assert!(matches!(
@@ -487,6 +606,7 @@ mod tests {
                 root_width: 32,
                 opponent_width: 8,
                 time_budget_ms: 1,
+                ..OpeningConfig::default()
             },
         );
 

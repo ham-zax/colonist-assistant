@@ -17,6 +17,8 @@ synthetic observer-consistent weighted belief particles.
 with weighted-belief runs. `--validate` checks every transition and aborts on
 the first invariant failure. The final report includes terminal games, cutoffs,
 throughput, behavioral metrics, and a matched-block bootstrap interval.
+Optional `--trajectory-output` writes per-turn JSONL samples so early-game
+infrastructure and late tactical conversion can be compared across seats.
 
 The packaged live authority is branded Strategist and uses weighted-belief Deep
 MaxN. In the arena, `maxn` (also accepted as `deep`) is the closest comparison
@@ -184,7 +186,7 @@ adapter exists.
   `maxn`/`deep` results exercise the live search family. Native results are
   still not packaged end-to-end Strategist results.
 - The packaged cold-adapter regression must remain below one second. The normal
-  request uses depth 4, branch cap 16, at most 4,000 strategic nodes, and a
+  request uses depth 4, branch cap 8, at most 4,000 strategic nodes, and a
   cooperative 350 ms strategic-search deadline. Mandatory and exact tactical
   work is bounded separately, so this deadline is not a promise that every
   complete request takes 350 ms.

@@ -42,6 +42,48 @@ export type TrackerEvent =
       color?: string;
     }
   | {
+      type: "trade-offered";
+      player: string;
+      recipients: string[];
+      give: ResourceVector;
+      receive: ResourceVector;
+      color?: string;
+    }
+  | {
+      type: "trade-accepted";
+      player: string;
+      creator: string;
+      give: ResourceVector;
+      receive: ResourceVector;
+      color?: string;
+    }
+  | {
+      type: "trade-rejected";
+      player: string;
+      creator: string;
+      give: ResourceVector;
+      receive: ResourceVector;
+      color?: string;
+    }
+  | {
+      type: "trade-countered";
+      player: string;
+      creator: string;
+      give: ResourceVector;
+      receive: ResourceVector;
+      counterGive: ResourceVector;
+      counterReceive: ResourceVector;
+      color?: string;
+    }
+  | {
+      type: "trade-expired";
+      player: string;
+      recipients?: string[];
+      give: ResourceVector;
+      receive: ResourceVector;
+      color?: string;
+    }
+  | {
       type: "unknown-transfer";
       from: string;
       to: string;

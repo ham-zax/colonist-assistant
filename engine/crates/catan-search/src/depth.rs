@@ -7,7 +7,12 @@ use crate::mcts::BeliefParticle;
 use crate::opening::opening_adjusted_priors;
 use crate::opening::{OpeningConfig, solve_opening};
 use crate::planner::plan_adjusted_priors;
-use crate::policy::{normalize_priors, order_scored_with_state_quotas, rank_with_class_quotas};
+use crate::policy::{
+    allocate_root_node_budgets, normalize_observed_priors, normalize_priors,
+    order_scored_with_state_quotas, rank_with_class_quotas,
+};
+use crate::shared::{STRATEGIC_PARTICLE_TARGET, select_strategic_particles};
+use crate::threats::force_threat_blocking_actions;
 use crate::trade_safety::belief_domestic_trade_threat;
 
 // Convenience APIs must remain safe in UI/tests. Production callers that
@@ -192,7 +197,20 @@ impl Searcher {
                 expected
             }
             NodeKind::Decision { actor } => {
-                let ranked = rank_with_class_quotas(state, &actions, actor, self.branch_cap);
+                // Legality from the exact particle; candidate ordering from the
+                // acting player's observation only. Determinized MaxN still
+                // evaluates leaves with exact hands, but opponents no longer
+                // prioritize actions using third-party hidden identities.
+                let observed_ranked = normalize_observed_priors(state, &actions, actor);
+                let mut ranked = order_scored_with_state_quotas(
+                    &state.observed_state(actor),
+                    actor,
+                    observed_ranked,
+                );
+                ranked.truncate(self.branch_cap);
+                if ranked.is_empty() {
+                    ranked = rank_with_class_quotas(state, &actions, actor, self.branch_cap);
+                }
                 let mut best = [0.0; 4];
                 let maximize_root = match self.algorithm {
                     Algorithm::MaxN => true,
@@ -286,10 +304,9 @@ impl Searcher {
             &mut ranked,
             (self.maximum_nodes / 5).clamp(1_000, 18_000),
         );
-        let mut ranked = order_scored_with_state_quotas(state, actor, ranked)
-            .into_iter()
-            .take(self.branch_cap)
-            .collect::<Vec<_>>();
+        let mut ranked = order_scored_with_state_quotas(state, actor, ranked);
+        force_threat_blocking_actions(state, actor, &ranked.clone(), &mut ranked);
+        let mut ranked = ranked.into_iter().take(self.branch_cap).collect::<Vec<_>>();
         let safe_ranked = ranked
             .iter()
             .filter(|(action, _)| {
@@ -300,9 +317,7 @@ impl Searcher {
         if !safe_ranked.is_empty() {
             ranked = safe_ranked;
         }
-        let per_root_budget = (self.maximum_nodes / ranked.len().max(1) as u32)
-            .max(32)
-            .min(self.maximum_nodes);
+        let root_budgets = allocate_root_node_budgets(ranked.len(), self.maximum_nodes);
         let component = match self.algorithm {
             Algorithm::MaxN => actor as usize,
             Algorithm::Paranoid { root } => root as usize,
@@ -321,10 +336,11 @@ impl Searcher {
         };
         let mut alpha: f32 = 0.0;
         let mut beta: f32 = 1.0;
-        for (action, _) in ranked {
+        for (index, (action, _)) in ranked.into_iter().enumerate() {
             if self.nodes >= self.maximum_nodes {
                 break;
             }
+            let per_root_budget = root_budgets.get(index).copied().unwrap_or(32).max(32);
             self.node_limit = self
                 .nodes
                 .saturating_add(per_root_budget)
@@ -416,18 +432,18 @@ fn belief_search(
         first.phase,
         Phase::SetupSettlement | Phase::SetupRoad { .. }
     ) {
-        // Setup is fully board-driven and has a special snake-order horizon.
-        // Running ordinary turn-depth MaxN here used to stop around the middle
-        // of setup and, at the belief root, skipped the joint opening solver
-        // entirely. Evaluate the complete settlement/road pair directly.
+        // Setup is a public sequential snake draft. Particle aggregation is
+        // unnecessary here; evaluate the complete settlement/road horizon on
+        // the shared board geometry with the dedicated opening solver.
         let report = solve_opening(
             first,
             observer,
             OpeningConfig {
                 maximum_nodes: maximum_nodes.max(1),
-                root_width: 32,
-                opponent_width: 5,
+                root_width: 24,
+                opponent_width: 4,
                 time_budget_ms,
+                opponent_maximizes: true,
             },
         );
         let minimum = report
@@ -500,6 +516,16 @@ fn belief_search(
             deadline_reached: report.deadline_reached,
         });
     }
+    // Exact mandatory/tactical solvers in the WASM adapter see the full
+    // posterior. Strategic MaxN deliberately searches a compact representative
+    // subset so node budget is not diluted across near-duplicate worlds.
+    let strategic_storage;
+    let particles = if particles.len() > STRATEGIC_PARTICLE_TARGET {
+        strategic_storage = select_strategic_particles(particles, STRATEGIC_PARTICLE_TARGET);
+        strategic_storage.as_slice()
+    } else {
+        particles
+    };
     struct Aggregate {
         action: Action,
         value: [f32; 4],
@@ -525,7 +551,10 @@ fn belief_search(
         .max(f32::EPSILON);
     let first_legal = first.legal_actions();
     let root_priors = normalize_belief_root_priors(particles, &first_legal, observer);
-    let mut root_actions = order_scored_with_state_quotas(first, observer, root_priors)
+    let prior_snapshot = root_priors.clone();
+    let mut root_scored = order_scored_with_state_quotas(first, observer, root_priors);
+    force_threat_blocking_actions(first, observer, &prior_snapshot, &mut root_scored);
+    let mut root_actions = root_scored
         .into_iter()
         .take(branch_cap)
         .map(|(action, _)| action)
@@ -566,11 +595,13 @@ fn belief_search(
     if !safe_root_actions.is_empty() {
         root_actions = safe_root_actions;
     }
-    // Give every legal hidden world a fair slice. Previously each particle
-    // received an unbounded depth-3 tree, which made a normal four-player
-    // position grow into minutes of synchronous WASM work.
-    let nodes_per_action =
-        (maximum_nodes / particles.len().max(1) as u32 / root_actions.len().max(1) as u32).max(1);
+    // Concentrate nodes on the leading root actions instead of giving every
+    // particle/action pair the same tiny equal slice. Uniform fairness left
+    // live search with ~7 nodes/action at 32 particles × 16 actions.
+    let action_budgets = allocate_root_node_budgets(
+        root_actions.len(),
+        maximum_nodes / particles.len().max(1) as u32,
+    );
     for particle in particles {
         let weight = particle.weight.max(0.0) / total_weight;
         if weight <= 0.0 {
@@ -580,7 +611,7 @@ fn belief_search(
         let mut row = Vec::<RowEntry>::with_capacity(root_actions.len());
         let mut row_deadline = deadline.has_elapsed();
         deadline_reached |= row_deadline;
-        for action in &root_actions {
+        for (action_index, action) in root_actions.iter().enumerate() {
             let mut next = particle.state.clone();
             if next.apply(action).is_err() {
                 // An unavailable action retains the no-action baseline rather
@@ -594,9 +625,11 @@ fn belief_search(
             }
             let completed_turn = next.turn != particle.state.turn
                 || next.current_player != particle.state.current_player;
-            // Each root action gets the same local budget. Otherwise an early
-            // high-prior action can exhaust a particle's entire allocation and
-            // leave every later settlement/road/trade with a one-ply proxy.
+            let nodes_for_action = action_budgets
+                .get(action_index)
+                .copied()
+                .unwrap_or(1)
+                .max(1);
             let mut searcher = Searcher {
                 algorithm: if paranoid {
                     Algorithm::Paranoid { root: observer }
@@ -604,8 +637,8 @@ fn belief_search(
                     Algorithm::MaxN
                 },
                 maximum_depth,
-                maximum_nodes: nodes_per_action,
-                node_limit: nodes_per_action,
+                maximum_nodes: nodes_for_action,
+                node_limit: nodes_for_action,
                 branch_cap: branch_cap.max(1),
                 nodes: 0,
                 cutoffs: 0,
