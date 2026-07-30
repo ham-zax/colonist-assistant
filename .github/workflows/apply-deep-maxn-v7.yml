@@ -24,7 +24,8 @@ jobs:
           tool: wasm-pack
       - run: python scripts/apply-deep-maxn-v7-bootstrap.py
       - run: python scripts/apply-deep-maxn-v7-fix2.py
-      - run: rm -f scripts/apply-deep-maxn-v7-bootstrap.py scripts/apply-deep-maxn-v7-fix2.py .github/workflows/apply-deep-maxn-v7.yml
+      - run: python scripts/apply-deep-maxn-v7-fix3.py
+      - run: rm -f scripts/apply-deep-maxn-v7-bootstrap.py scripts/apply-deep-maxn-v7-fix2.py scripts/apply-deep-maxn-v7-fix3.py .github/workflows/apply-deep-maxn-v7.yml
       - run: cargo fmt --manifest-path engine/Cargo.toml --all
       - run: npm ci
       - run: npm run check
