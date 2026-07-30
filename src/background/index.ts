@@ -11,6 +11,18 @@ import {
   type DecisionStatusMessageResponse,
 } from "../worker/protocol";
 
+const errorDetail = (error: unknown, fallback: string): string => {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string" && error.trim()) return error;
+  try {
+    const serialized = JSON.stringify(error);
+    if (serialized && serialized !== "{}") return serialized;
+  } catch {
+    // Fall through to a stable message when the thrown value is cyclic.
+  }
+  return fallback;
+};
+
 const isDecisionMessage = (value: unknown): value is DecisionMessage => {
   if (!value || typeof value !== "object") return false;
   const message = value as Partial<DecisionMessage>;
@@ -47,10 +59,7 @@ chrome.runtime.onMessage.addListener(
         .catch((error: unknown) => {
           const response: DecisionStatusMessageResponse = {
             id: status.id,
-            error:
-              error instanceof Error
-                ? error.message
-                : "WASM initialization failed",
+            error: errorDetail(error, "WASM initialization failed"),
           };
           sendResponse(response);
         });
@@ -74,10 +83,7 @@ chrome.runtime.onMessage.addListener(
       .catch((error: unknown) => {
         const response: DecisionMessageResponse = {
           id: message.id,
-          error:
-            error instanceof Error
-              ? error.message
-              : "Decision analysis failed",
+          error: errorDetail(error, "Decision analysis failed"),
         };
         sendResponse(response);
       });

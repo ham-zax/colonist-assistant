@@ -199,6 +199,10 @@ function __wbg_get_imports() {
             const ret = getObject(arg0).next();
             return addHeapObject(ret);
         }, arguments); },
+        __wbg_now_86c0d4ba3fa605b8: function() {
+            const ret = Date.now();
+            return ret;
+        },
         __wbg_prototypesetcall_4770620bbe4688a0: function(arg0, arg1, arg2) {
             Uint8Array.prototype.set.call(getArrayU8FromWasm0(arg0, arg1), getObject(arg2));
         },

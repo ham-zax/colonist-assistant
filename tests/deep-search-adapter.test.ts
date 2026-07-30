@@ -9,27 +9,6 @@ import initWasm, {
   analyze as analyzeWasm,
 } from "../src/generated/wasm/colonist_search.js";
 
-const measureFastest = <T>(operation: () => T): {
-  value: T;
-  elapsedMs: number;
-} => {
-  const firstStartedAt = performance.now();
-  const firstValue = operation();
-  const firstElapsedMs = performance.now() - firstStartedAt;
-  const secondStartedAt = performance.now();
-  const secondValue = operation();
-  const secondElapsedMs = performance.now() - secondStartedAt;
-  const thirdStartedAt = performance.now();
-  const thirdValue = operation();
-  const thirdElapsedMs = performance.now() - thirdStartedAt;
-  if (thirdElapsedMs < firstElapsedMs && thirdElapsedMs < secondElapsedMs) {
-    return { value: thirdValue, elapsedMs: thirdElapsedMs };
-  }
-  return secondElapsedMs < firstElapsedMs
-    ? { value: secondValue, elapsedMs: secondElapsedMs }
-    : { value: firstValue, elapsedMs: firstElapsedMs };
-};
-
 const resources = (
   lumber: number,
   brick: number,
@@ -234,6 +213,15 @@ describe("deep-search state adapter", () => {
         ),
       ).size,
     ).toBeGreaterThan(1);
+    expect(
+      request.state.worlds.every(
+        (world: any) =>
+          world.boughtDevelopment[1].reduce(
+            (total: number, count: number) => total + count,
+            0,
+          ) === 0,
+      ),
+    ).toBe(true);
     expect(request.state.worlds[0].hands[0]).toEqual([1, 1, 1, 1, 0]);
     expect(request.state.bankVisible).toBe(false);
     expect(
@@ -251,6 +239,37 @@ describe("deep-search state adapter", () => {
       ),
     ).toBe(true);
     expect(request.state.phase).toBe("main");
+  });
+
+  it("keeps newly bought opponent development cards unplayable in every world", () => {
+    const justBoughtState: TrackerState = {
+      ...state,
+      currentTurn: { player: "Rival", sequence: 1 },
+    };
+    const request = buildDeepSearchRequest(
+      justBoughtState,
+      board,
+      "You",
+    ).request as any;
+
+    expect(
+      request.state.worlds.every(
+        (world: any) =>
+          world.boughtDevelopment[1].reduce(
+            (total: number, count: number) => total + count,
+            0,
+          ) === 1,
+      ),
+    ).toBe(true);
+    expect(
+      request.state.worlds.every(
+        (world: any) =>
+          world.boughtDevelopment[1].every(
+            (count: number, card: number) =>
+              count <= world.development[1][card],
+          ),
+      ),
+    ).toBe(true);
   });
 
   it("bootstraps hidden hands from public card counts before the log is ready", () => {
@@ -301,6 +320,54 @@ describe("deep-search state adapter", () => {
     expect(discard.state.discardRemaining).toEqual([2, 0, 0, 0]);
   });
 
+  it("anchors an opponent setup road to the acting player without making the root omniscient", () => {
+    const opponentRoad = buildDeepSearchRequest(
+      {
+        ...state,
+        currentTurn: { player: "Rival", sequence: 1 },
+      },
+      {
+        ...board,
+        initialPlacement: true,
+        isMyTurn: false,
+        currentPlayer: "Rival",
+        action: "road",
+      },
+      "You",
+    ).request as any;
+
+    expect(opponentRoad.state.currentPlayer).toBe(1);
+    expect(opponentRoad.state.phase).toBe("setup-road");
+    expect(opponentRoad.state.phaseParameter).toBe(2);
+  });
+
+  it("treats a setup-road prompt without the acting player's public anchor as a stale settlement transition", () => {
+    const withoutRivalAnchor: BoardSnapshot = {
+      ...board,
+      vertices: board.vertices.map((vertex) =>
+        vertex.building?.player === "Rival"
+          ? { ...vertex, building: undefined }
+          : vertex
+      ),
+      initialPlacement: true,
+      isMyTurn: false,
+      currentPlayer: "Rival",
+      action: "road",
+    };
+    const request = buildDeepSearchRequest(
+      {
+        ...state,
+        currentTurn: { player: "Rival", sequence: 1 },
+      },
+      withoutRivalAnchor,
+      "You",
+    ).request as any;
+
+    expect(request.state.currentPlayer).toBe(1);
+    expect(request.state.phase).toBe("setup-settlement");
+    expect(request.state.phaseParameter).toBeUndefined();
+  });
+
   it("moves on after an outgoing trade has received its responses", () => {
     const withRejectedTrade = buildDeepSearchRequest(
       state,
@@ -349,33 +416,65 @@ describe("deep-search state adapter", () => {
     );
     await initWasm({ module_or_path: bytes });
     const built = buildDeepSearchRequest(state, board, "You");
-    built.request.mode = "maxn";
-    // Use the faster of three full searches so host scheduling noise does not
-    // turn this engine-budget regression into a flaky wall-clock assertion.
-    const maxnMeasurement = measureFastest(() => analyzeWasm(built.request));
-    const response = maxnMeasurement.value;
+    const started = performance.now();
+    const response = analyzeWasm(built.request);
+    const elapsed = performance.now() - started;
 
+    expect(built.request.mode).toBe("maxn");
+    expect(built.request.depth).toBe(4);
+    expect(built.request.maxNodes).toBe(4_000);
+    expect(built.request.tacticalNodes).toBe(900);
+    expect(built.request.timeBudgetMs).toBe(350);
     expect(response.algorithm).toBe("maxn");
-    expect(response.engineRevision).toBe("belief-puct-v3");
+    expect(response.engineRevision).toBe("deep-maxn-v3");
     expect(response.chosen).toBeDefined();
     expect(response.actions.length).toBeGreaterThan(0);
     expect(response.particles).toBe(built.request.state.worlds.length);
-    expect(response.deepestDecisionDepth).toBe(3);
     expect(response.nodes).toBeLessThanOrEqual(built.request.maxNodes);
-    expect(maxnMeasurement.elapsedMs).toBeLessThan(1_000);
+    expect(typeof response.deadlineReached).toBe("boolean");
+    // This is deliberately the cold packaged boundary, not fastest-of-three.
+    expect(elapsed).toBeLessThan(1_000);
+  }, 20_000);
 
-    built.request.mode = "alpha-beta";
-    const alphaMeasurement = measureFastest(() => analyzeWasm(built.request));
-    const alphaResponse = alphaMeasurement.value;
-
-    expect(alphaResponse.algorithm).toBe("alpha-beta");
-    expect(alphaResponse.chosen).toBeDefined();
-    expect(alphaResponse.actions.length).toBeGreaterThan(0);
-    expect(alphaResponse.nodes).toBeLessThanOrEqual(
-      built.request.maxNodes,
+  it("rejects unknown WASM search modes instead of silently changing algorithms", async () => {
+    const bytes = await readFile(
+      new URL(
+        "../src/generated/wasm/colonist_search_bg.wasm",
+        import.meta.url,
+      ),
     );
-    expect(alphaMeasurement.elapsedMs).toBeLessThan(1_000);
+    await initWasm({ module_or_path: bytes });
+    const built = buildDeepSearchRequest(state, board, "You");
+    built.request.mode = "not-an-engine";
+
+    expect(() => analyzeWasm(built.request)).toThrow(
+      /unknown search mode/u,
+    );
   });
+
+  it("honors the cooperative MaxN deadline at the packaged WASM boundary", async () => {
+    const bytes = await readFile(
+      new URL(
+        "../src/generated/wasm/colonist_search_bg.wasm",
+        import.meta.url,
+      ),
+    );
+    await initWasm({ module_or_path: bytes });
+    const built = buildDeepSearchRequest(state, board, "You");
+    built.request.depth = 6;
+    built.request.branchCap = 32;
+    built.request.maxNodes = 250_000;
+    built.request.tacticalNodes = 100;
+    built.request.timeBudgetMs = 250;
+    const started = performance.now();
+    const response = analyzeWasm(built.request);
+    const elapsed = performance.now() - started;
+
+    expect(response.deadlineReached).toBe(true);
+    expect(response.nodes).toBeLessThan(built.request.maxNodes);
+    expect(response.chosen).toBeDefined();
+    expect(elapsed).toBeLessThan(2_000);
+  }, 10_000);
 
   it("returns mandatory discard decisions without paying the strategic search budget", async () => {
     const bytes = await readFile(
@@ -544,7 +643,7 @@ describe("deep-search state adapter", () => {
     expect(elapsed).toBeLessThan(100);
   });
 
-  it("finishes a live-sized PUCT request within the interactive budget", async () => {
+  it("keeps experimental PUCT bounded outside the live default", async () => {
     const bytes = await readFile(
       new URL(
         "../src/generated/wasm/colonist_search_bg.wasm",

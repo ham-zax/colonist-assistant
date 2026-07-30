@@ -97,15 +97,29 @@ export const renderTradeVerdicts = (
     (container, index, items) =>
       items.findIndex((candidate) => candidate === container) === index,
   );
-  for (
-    let index = 0;
-    index < Math.min(activeTrades.length, tradeContainers.length);
-    index += 1
-  ) {
-    const trade = activeTrades[index]!;
+  const unmatched = new Set(tradeContainers);
+  for (const trade of activeTrades) {
     const verdict = verdicts.get(trade.id);
-    const container = tradeContainers[index];
+    const namedMatches = [...unmatched].filter((container) => {
+      const text = container.textContent?.toLocaleLowerCase() ?? "";
+      return [trade.creator, trade.tradeExecutor]
+        .filter(Boolean)
+        .some((player) => text.includes(player.toLocaleLowerCase()));
+    });
+    // Colonist does not currently expose its internal offer id in the DOM.
+    // A unique player-name match is safe; a single remaining one-to-one pair
+    // is also safe. With multiple ambiguous offers, omit the cosmetic badge
+    // instead of attaching advice to the wrong transaction by array index.
+    const container =
+      namedMatches.length === 1
+        ? namedMatches[0]
+        : unmatched.size === 1 &&
+            activeTrades.filter((candidate) => verdicts.has(candidate.id))
+              .length === 1
+          ? [...unmatched][0]
+          : undefined;
     if (!verdict || !container) continue;
+    unmatched.delete(container);
     const badge = document.createElement("div");
     badge.className = VERDICT_CLASS;
     badge.dataset.verdict = verdict.kind;

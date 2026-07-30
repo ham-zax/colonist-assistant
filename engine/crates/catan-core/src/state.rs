@@ -477,12 +477,15 @@ impl GameState {
         hash
     }
 
-    /// Hash of everything an observer is allowed to condition a policy on.
+    /// Canonical state containing exactly the information available to one
+    /// observer.
     ///
-    /// Other players' resource and development identities are replaced by
-    /// their public totals. The observer's own hand remains exact. This is used
-    /// by information-set search tests to catch accidental hidden-state reads.
-    pub fn observation_hash(&self, observer: u8) -> u64 {
+    /// The acting player's own resource and development identities remain
+    /// exact. Every other private hand, the hidden development deck, and a
+    /// non-public bank are reduced to their observable totals. Policies and
+    /// learned priors must consume this view rather than a determinized state;
+    /// the simulator still applies the selected action to the exact particle.
+    pub fn observed_state(&self, observer: u8) -> Self {
         let mut observation = self.clone();
         for (player, state) in observation.players.iter_mut().enumerate() {
             if player == observer as usize {
@@ -501,7 +504,16 @@ impl GameState {
             let bank_total = observation.bank.iter().sum::<u8>();
             observation.bank = [bank_total, 0, 0, 0, 0];
         }
-        observation.state_hash()
+        observation
+    }
+
+    /// Hash of everything an observer is allowed to condition a policy on.
+    ///
+    /// Other players' resource and development identities are replaced by
+    /// their public totals. The observer's own hand remains exact. This is used
+    /// by information-set search tests to catch accidental hidden-state reads.
+    pub fn observation_hash(&self, observer: u8) -> u64 {
+        self.observed_state(observer).state_hash()
     }
 
     /// Public-state hash with every private hand redacted to its public total.
@@ -2411,5 +2423,20 @@ mod tests {
         assert_eq!(first.public_hash(), second.public_hash());
         assert_eq!(first.observation_hash(0), second.observation_hash(0));
         assert_ne!(first.observation_hash(1), second.observation_hash(1));
+
+        first.players[0].development = [1, 0, 0, 0, 0];
+        first.players[0].bought_development = [1, 0, 0, 0, 0];
+        first.players[1].development = [0, 1, 0, 0, 0];
+        first.players[1].bought_development = [0, 1, 0, 0, 0];
+        first.development_deck = [10, 2, 1, 1, 1];
+        first.bank = [7, 6, 5, 4, 3];
+        first.bank_is_public = false;
+        let observed = first.observed_state(0);
+        assert_eq!(observed.players[0].development, [1, 0, 0, 0, 0]);
+        assert_eq!(observed.players[0].bought_development, [1, 0, 0, 0, 0]);
+        assert_eq!(observed.players[1].development, [1, 0, 0, 0, 0]);
+        assert_eq!(observed.players[1].bought_development, [1, 0, 0, 0, 0]);
+        assert_eq!(observed.development_deck, [15, 0, 0, 0, 0]);
+        assert_eq!(observed.bank, [25, 0, 0, 0, 0]);
     }
 }

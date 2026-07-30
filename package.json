@@ -1,6 +1,6 @@
 {
   "name": "colonist-assistant",
-  "version": "0.7.14",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "description": "Explainable, board-aware guidance for friendly Colonist games.",
@@ -13,6 +13,7 @@
     "benchmark:colonist": "node scripts/benchmark-colonist.mjs",
     "benchmark:catanatron": "python3 scripts/benchmark-catanatron.py",
     "benchmark:local": "node scripts/benchmark-local.mjs",
+    "benchmark:checkpoint": "node scripts/read-arena-checkpoint.mjs",
     "train:model": "python3 scripts/train-strategic-model.py",
     "train:trade": "python3 scripts/train-trade-model.py",
     "train:expert": "node scripts/run-expert-iteration.mjs",

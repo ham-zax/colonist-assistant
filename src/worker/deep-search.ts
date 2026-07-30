@@ -294,6 +294,7 @@ const sampledDevelopmentWorld = (
   random: () => number,
 ): {
   hands: Array<[number, number, number, number, number]>;
+  bought: Array<[number, number, number, number, number]>;
   deck: [number, number, number, number, number];
 } => {
   const played = publicDevelopmentEvidence(state);
@@ -303,10 +304,16 @@ const sampledDevelopmentWorld = (
   const hands = players.map(
     () => [0, 0, 0, 0, 0] as [number, number, number, number, number],
   );
+  const bought = players.map(
+    () => [0, 0, 0, 0, 0] as [number, number, number, number, number],
+  );
   const ownIndex = board.myPlayer ? players.indexOf(board.myPlayer) : -1;
   if (ownIndex >= 0) {
     const exact = development(board.ownDevelopmentCards?.cards);
     hands[ownIndex] = exact;
+    bought[ownIndex] = development(
+      board.ownDevelopmentCards?.boughtThisTurn,
+    );
     for (let index = 0; index < exact.length; index += 1) {
       remaining[index] = Math.max(
         0,
@@ -316,16 +323,41 @@ const sampledDevelopmentWorld = (
   }
   for (let player = 0; player < players.length; player += 1) {
     if (player === ownIndex) continue;
-    const count = clampCard(board.players?.[players[player]!]?.developmentCards ?? 0);
+    const playerName = players[player]!;
+    const count = clampCard(
+      board.players?.[playerName]?.developmentCards ?? 0,
+    );
+    const sampledCards: number[] = [];
     for (let card = 0; card < count; card += 1) {
       const index = sampleIndex(remaining, random);
       if ((remaining[index] ?? 0) <= 0) break;
       hands[player]![index] = (hands[player]![index] ?? 0) + 1;
       remaining[index] = (remaining[index] ?? 0) - 1;
+      sampledCards.push(index);
+    }
+    // The tracker knows purchase age even when it does not know card identity.
+    // Preserve that joint uncertainty in each determinization so a simulated
+    // opponent cannot play a card bought on the current turn.
+    const unreadyCount = Math.min(
+      sampledCards.length,
+      state.players[playerName]?.devCards.filter(
+        (card) => card.boughtOnTurn >= state.currentTurn.sequence,
+      ).length ?? 0,
+    );
+    for (
+      let index = sampledCards.length - unreadyCount;
+      index < sampledCards.length;
+      index += 1
+    ) {
+      const card = sampledCards[index];
+      if (card !== undefined) {
+        bought[player]![card] = (bought[player]![card] ?? 0) + 1;
+      }
     }
   }
   return {
     hands,
+    bought,
     deck: remaining as [number, number, number, number, number],
   };
 };
@@ -362,12 +394,29 @@ const currentPlayerIndex = (
 
 const inferPhase = (
   board: BoardSnapshot,
+  actingPlayer?: string,
 ): { phase: string; parameter?: number } => {
   if (board.initialPlacement && board.action === "settlement") {
     return { phase: "setup-settlement" };
   }
   if (board.initialPlacement && board.action === "road") {
-    return { phase: "setup-road" };
+    const anchor = actingPlayer
+      ? board.vertices.findIndex(
+          (vertex) =>
+            vertex.building?.player === actingPlayer &&
+            !board.edges.some(
+              (edge) =>
+                edge.player === actingPlayer &&
+                edge.vertices.includes(vertex.id),
+            ),
+        )
+      : -1;
+    // Colonist can publish the previous player's road prompt for one snapshot
+    // after control has advanced. Never construct an invalid setup-road state
+    // for a player who does not yet own its settlement anchor.
+    return anchor >= 0
+      ? { phase: "setup-road", parameter: anchor }
+      : { phase: "setup-settlement" };
   }
   if (board.action === "discard") return { phase: "discard" };
   if (board.action === "robber") return { phase: "move-robber" };
@@ -524,10 +573,10 @@ export const buildDeepSearchRequest = (
   const hexIndex = new Map(board.hexes.map((hex, index) => [hex.id, index]));
   let current = currentPlayerIndex(state, board, players);
   const root = Math.max(0, players.indexOf(rootPlayer));
-  const phase = inferPhase(board);
-  if (phase.phase.startsWith("setup") || board.action === "discard") {
+  if (board.isMyTurn || board.action === "discard") {
     current = root;
   }
+  const phase = inferPhase(board, players[current] ?? rootPlayer);
   const activeTrade = board.activeTrades?.find(
     (trade) =>
       (
@@ -602,18 +651,6 @@ export const buildDeepSearchRequest = (
   }));
   const exactOwnDevelopment = development(board.ownDevelopmentCards?.cards);
   const exactOwnBought = development(board.ownDevelopmentCards?.boughtThisTurn);
-  const phaseParameter =
-    phase.phase === "setup-road"
-      ? board.vertices.findIndex(
-          (vertex) =>
-            vertex.building?.player === rootPlayer &&
-            !board.edges.some(
-              (edge) =>
-                edge.player === rootPlayer &&
-                edge.vertices.includes(vertex.id),
-            ),
-        )
-      : undefined;
   const basePlayers = players.map((player, index) => {
     const pieces = piecesByPlayer[index]!;
     const publicState = board.players?.[player];
@@ -799,6 +836,7 @@ export const buildDeepSearchRequest = (
       weight: world.weight / developmentSamples,
       hands,
       development: developmentWorld.hands,
+      boughtDevelopment: developmentWorld.bought,
       developmentDeck: developmentWorld.deck,
       bank:
         board.bankVisible && board.bank ? resources(board.bank) : inferredBank,
@@ -811,6 +849,7 @@ export const buildDeepSearchRequest = (
     const key = JSON.stringify([
       world.hands,
       world.development,
+      world.boughtDevelopment,
       world.developmentDeck,
       world.bank,
     ]);
@@ -919,8 +958,8 @@ export const buildDeepSearchRequest = (
         robberHex,
         currentPlayer: current,
         phase: phase.phase,
-        ...(phaseParameter !== undefined && phaseParameter >= 0
-          ? { phaseParameter }
+        ...(phase.parameter !== undefined && phase.parameter >= 0
+          ? { phaseParameter: phase.parameter }
           : {}),
         turn: Math.max(0, board.turn ?? state.currentTurn.sequence),
         lastRoll: Math.max(0, board.lastRoll ?? 0),
@@ -975,15 +1014,16 @@ export const buildDeepSearchRequest = (
       // Keep live decisions interactive. Longer searches belong in the
       // native arena/training pipeline; exact mandatory and tactical solvers
       // still run ahead of this bounded strategic search.
-      iterations: players.length >= 3 ? 112 : 128,
-      maxNodes: 2_000,
-      rolloutActions: players.length >= 3 ? 72 : 84,
+      iterations: players.length >= 3 ? 320 : 384,
+      maxNodes: 4_000,
+      rolloutActions: players.length >= 3 ? 96 : 108,
       tacticalDepth: 14,
-      tacticalNodes: 560,
+      tacticalNodes: 900,
+      timeBudgetMs: 350,
       seed,
       mode: "maxn",
-      depth: 3,
-      branchCap: 12,
+      depth: 4,
+      branchCap: 16,
       ponder: false,
     },
   };
@@ -994,7 +1034,6 @@ export const analyzeDeepSearch = async (
   board: BoardSnapshot,
   rootPlayer: string,
   fallback: DecisionAnalysis,
-  algorithm: "maxn" | "alpha-beta" | "puct" = "maxn",
 ): Promise<DecisionAnalysis> => {
   await ensureWasm();
   const { request, players, root } = buildDeepSearchRequest(
@@ -1002,28 +1041,26 @@ export const analyzeDeepSearch = async (
     board,
     rootPlayer,
   );
-  request.mode = algorithm;
-  if (algorithm === "maxn" || algorithm === "alpha-beta") {
-    // One depth unit is a completed turn, not a UI click. A player-count
-    // horizon therefore covers one complete table rotation. The previous
-    // `players + 1` setting spent roughly twice the interactive latency for
-    // almost identical live choices.
+  request.mode = "maxn";
+  if (board.initialPlacement) {
+    // Setup is a fully public sequential draft. Deep MaxN routes it to the
+    // dedicated snake-order settlement+road solver. The shared live bound was
+    // replayed across every setup state from a headed Hard-bot game.
+    request.maxNodes = 4_000;
     request.depth = Math.min(4, Math.max(2, players.length));
-    request.maxNodes = 2_000;
-    request.tacticalNodes = 560;
   }
-  request.branchCap = 12;
+  request.branchCap = 16;
   if (request.state.phase === "trade-responses") {
-    request.iterations = 48;
-    request.maxNodes = 2_000;
-    request.rolloutActions = 48;
-    request.tacticalNodes = 560;
-  } else if (!board.isMyTurn) {
-    request.ponder = true;
     request.iterations = 64;
     request.maxNodes = 2_000;
-    request.rolloutActions = 56;
-    request.tacticalNodes = 480;
+    request.rolloutActions = 48;
+    request.tacticalNodes = 600;
+  } else if (!board.isMyTurn) {
+    request.ponder = true;
+    request.iterations = 96;
+    request.maxNodes = 3_000;
+    request.rolloutActions = 64;
+    request.tacticalNodes = 600;
   }
   const startedAt = performance.now();
   const response = analyzeWasm(request) as WasmSearchResponse;
@@ -1074,6 +1111,7 @@ export const analyzeDeepSearch = async (
     rollouts: response.rollouts,
     particles: response.particles,
     effectiveParticleCount: response.effectiveParticleCount,
+    deadlineReached: response.deadlineReached,
     elapsedMs,
     seed: request.seed,
   };
@@ -1092,8 +1130,8 @@ export const analyzeDeepSearch = async (
   // probabilities. Blend them with the independent rollout/ETA estimate,
   // trusting the strategic search more as public victory progress accumulates.
   const strategicProbabilityWeight = Math.min(
-    algorithm === "puct" ? 0.62 : 0.76,
-    (algorithm === "puct" ? 0.38 : 0.52) + visibleProgress * 0.24,
+    0.68,
+    0.44 + visibleProgress * 0.24,
   );
   const deepPlayers =
     deepValueTotal > Number.EPSILON
@@ -1113,11 +1151,9 @@ export const analyzeDeepSearch = async (
                     strategicProbabilityWeight,
                 reasons: [
                   `${
-                    response.algorithm === "puct"
-                      ? "Belief PUCT"
-                      : response.algorithm === "alpha-beta"
-                        ? "Belief AlphaBeta"
-                        : "Belief MaxN"
+                    response.algorithm === "maxn"
+                      ? "Deep MaxN belief search"
+                      : response.algorithm
                   } relative race value from the current live board`,
                   ...estimate.reasons.filter(
                     (reason) =>
@@ -1129,24 +1165,14 @@ export const analyzeDeepSearch = async (
       : fallback.players;
   return {
     ...fallback,
-    engine:
-      algorithm === "puct"
-        ? "deep-puct"
-        : algorithm === "alpha-beta"
-          ? "deep-alpha-beta"
-          : "deep-search",
+    engine: "deep-search",
     actionScores: {
       ...fallback.actionScores,
       ...deepActionScores(response.actions, root),
     },
     players: deepPlayers,
     simulations: response.rollouts,
-    model:
-      response.algorithm === "maxn"
-        ? `Belief-aggregated multiplayer MaxN (${response.particles} particles, ${response.nodes.toLocaleString()} nodes, depth ${response.deepestDecisionDepth})`
-        : response.algorithm === "alpha-beta"
-          ? `Belief-aggregated paranoid AlphaBeta (${response.particles} particles, ${response.nodes.toLocaleString()} nodes, depth ${response.deepestDecisionDepth})`
-          : `Belief-sampled multiplayer PUCT (${response.particles} particles, ${response.nodes.toLocaleString()} nodes, depth ${response.deepestDecisionDepth})`,
+    model: `Observation-safe weighted-belief Deep MaxN (${response.particles} particles, ${response.nodes.toLocaleString()} nodes, depth ${response.deepestDecisionDepth})`,
     deepSearch: search,
   };
 };

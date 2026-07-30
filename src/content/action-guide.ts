@@ -38,7 +38,7 @@ export type NextClick =
   | {
       kind: "trade";
       offerIndex: number;
-      tradeId?: string;
+      tradeId: string;
       verdict: "accept" | "counter" | "decline";
       label: string;
       signature: string;
@@ -61,6 +61,7 @@ export type NextClick =
   | {
       kind: "trade-partner";
       offerIndex: number;
+      tradeId: string;
       acceptedIndex: number;
       player: string;
       label: string;
@@ -70,6 +71,7 @@ export type NextClick =
   | {
       kind: "trade-cancel";
       offerIndex: number;
+      tradeId: string;
       label: string;
       signature: string;
       confidence: number;
@@ -117,6 +119,13 @@ export interface ActionGuideOptions {
   /// turn, and modal workflow still belong to this action without requiring
   /// the original first click to remain legal.
   validateContinuation?: () => boolean;
+  /// Confirms the exact expected road/building/robber mutation after a canvas
+  /// command stops being legal. Dispatch alone is not a successful commit.
+  validateBoardCommit?: () => boolean;
+  /// Trade submission is not complete merely because the Send button was
+  /// clicked. The owner must observe the resulting outgoing offer or exact
+  /// bank-hand transfer before the workflow may report success.
+  validateTransactionCommit?: () => boolean;
   onExecution?: (result: {
     succeeded: boolean;
     signature: string;
@@ -550,7 +559,7 @@ const findTradePartnerControl = (
 const modalRoots = (): HTMLElement[] =>
   [
     ...document.querySelectorAll<HTMLElement>(
-      "[role='dialog'], [class*='modal-'], [class*='popup-'], [class*='actionBox-'], [class*='selectResource-'], [class*='chooseResource-'], [class*='selectPlayer-']",
+      "[role='dialog'], [class*='modal-'], [class*='popup-'], [class*='gameActionBox-'], [class*='actionBoxContainer-'], [class*='actionBox-'], [class*='selectResource-'], [class*='chooseResource-'], [class*='selectPlayer-']",
     ),
   ].filter(visible);
 
@@ -589,26 +598,8 @@ const findDiscardCard = (resource: Resource): HTMLElement | undefined => {
 
 const findResourceChoice = (resource: Resource): HTMLElement | undefined => {
   for (const root of modalRoots()) {
-    const images = [
-      ...root.querySelectorAll<HTMLImageElement>("img[src], [aria-label]"),
-    ];
-    for (const image of images) {
-      const evidence = normalized(
-        [
-          image.getAttribute("src") ?? "",
-          image.getAttribute("aria-label") ?? "",
-          image.getAttribute("title") ?? "",
-          image.getAttribute("alt") ?? "",
-        ].join(" "),
-      );
-      if (
-        evidence.includes(resourceAsset[resource]) ||
-        evidence.includes(resource)
-      ) {
-        const clickable = nearestClickable(image);
-        if (clickable) return clickable;
-      }
-    }
+    const choice = findResourceInRoot(root, resource);
+    if (choice) return choice;
   }
   return undefined;
 };
@@ -798,18 +789,23 @@ const drawHighlight = (
 const executeBoardAction = (
   action: Extract<NextClick, { kind: "board" }>,
   attempt: number,
-): void => {
-  window.postMessage(
-    {
-      source: "colonist-assistant-content",
-      type: "execute-board-action",
-      action: action.boardAction,
-      targetId: action.targetId,
-      signature: action.signature,
-      attempt,
-    },
-    window.location.origin,
-  );
+): boolean => {
+  try {
+    window.postMessage(
+      {
+        source: "colonist-assistant-content",
+        type: "execute-board-action",
+        action: action.boardAction,
+        targetId: action.targetId,
+        signature: action.signature,
+        attempt,
+      },
+      window.location.origin,
+    );
+    return true;
+  } catch {
+    return false;
+  }
 };
 
 const requestBoardRefresh = (): void => {
@@ -853,14 +849,28 @@ const scheduleBoardCommandRetry = (
     ) {
       return;
     }
-    if (
-      !command.options.autonomous ||
-      !boardCommandStillLegal(command)
-    ) {
-      // The phase or legal target changed, which normally means Colonist
-      // committed the placement. Either way, this transaction must not click
-      // through the changed state.
+    if (!command.options.autonomous) {
       clearBoardCommand(command.action.signature);
+      return;
+    }
+    if (!boardCommandStillLegal(command)) {
+      // A changed phase/target is success only when the authoritative
+      // snapshot contains the exact expected mutation.
+      const { action, options } = command;
+      const committed = options.validateBoardCommit?.();
+      clearBoardCommand(action.signature);
+      if (committed !== undefined) {
+        options.onExecution?.({
+          succeeded: committed,
+          signature: action.signature,
+          ...(!committed
+            ? {
+                reason:
+                  "Board state changed without the expected placement commit",
+              }
+            : {}),
+        });
+      }
       return;
     }
     if (command.attempt >= 5) {
@@ -877,7 +887,16 @@ const scheduleBoardCommandRetry = (
     }
     command.attempt += 1;
     boardCommandAttempts.set(command.action.signature, command.attempt);
-    executeBoardAction(command.action, command.attempt);
+    if (!executeBoardAction(command.action, command.attempt)) {
+      const { action, options } = command;
+      clearBoardCommand(action.signature);
+      options.onExecution?.({
+        succeeded: false,
+        signature: action.signature,
+        reason: "Colonist board command could not be dispatched",
+      });
+      return;
+    }
     scheduleBoardCommandRetry(command);
   }, 1_400);
 };
@@ -889,6 +908,7 @@ const validatedClick = (
   reportExecution = true,
 ): boolean => {
   if (options.validate && !options.validate()) {
+    if (lastClickSignature === signature) lastClickSignature = "";
     options.onExecution?.({
       succeeded: false,
       signature,
@@ -896,7 +916,17 @@ const validatedClick = (
     });
     return false;
   }
-  element.click();
+  try {
+    element.click();
+  } catch {
+    if (lastClickSignature === signature) lastClickSignature = "";
+    options.onExecution?.({
+      succeeded: false,
+      signature,
+      reason: "Colonist control could not be dispatched",
+    });
+    return false;
+  }
   if (reportExecution) {
     options.onExecution?.({ succeeded: true, signature });
   }
@@ -922,6 +952,7 @@ const maybeAutoclick = (
   if (action.kind === "board") {
     lastClickSignature = action.signature;
     if (options.validate && !options.validate()) {
+      lastClickSignature = "";
       options.onExecution?.({
         succeeded: false,
         signature: action.signature,
@@ -938,11 +969,15 @@ const maybeAutoclick = (
     };
     activeBoardCommand = command;
     boardCommandAttempts.set(action.signature, 1);
-    executeBoardAction(action, 1);
-    options.onExecution?.({
-      succeeded: true,
-      signature: action.signature,
-    });
+    if (!executeBoardAction(action, 1)) {
+      clearBoardCommand(action.signature);
+      options.onExecution?.({
+        succeeded: false,
+        signature: action.signature,
+        reason: "Colonist board command could not be dispatched",
+      });
+      return;
+    }
     if (action.followupPlayer) {
       activeBoardFollowupSignature = action.signature;
       const stillCurrent = () =>
@@ -1413,6 +1448,19 @@ const cancelWorkflow = (): void => {
   workflowCurrentElement = undefined;
 };
 
+const cancelAutonomousContinuations = (): void => {
+  for (const timer of followupTimers) window.clearTimeout(timer);
+  followupTimers.clear();
+  clearBoardCommand();
+  cancelWorkflow();
+  tradePreflightSignature = "";
+  activeBoardFollowupSignature = "";
+  boardFollowupCleanup?.();
+  controlResolutionAttempts.clear();
+  buildControlCommitAttempts.clear();
+  reportedMissingControls.clear();
+};
+
 export const activeWorkflowAction = (
   boardAction?: BoardAction,
   robberVictimSelection = false,
@@ -1501,6 +1549,19 @@ const startWorkflow = (
     const step = steps[index];
     if (!step) {
       const completedOptions = workflowOptions ?? options;
+      if (
+        tradeTransaction &&
+        completedOptions.validateTransactionCommit &&
+        !completedOptions.validateTransactionCommit()
+      ) {
+        if (attempts < 24) {
+          requestBoardRefresh();
+          later(() => run(index, attempts + 1), 140);
+        } else {
+          fail("Colonist did not commit the submitted trade");
+        }
+        return;
+      }
       lastClickSignature = action.signature;
       completedOptions.onExecution?.({
         succeeded: true,
@@ -1865,6 +1926,9 @@ export const renderActionGuide = (
 ): void => {
   const activatingAutopilot =
     !currentGuideOptions?.autonomous && options.autonomous;
+  const deactivatingAutopilot =
+    currentGuideOptions?.autonomous === true && !options.autonomous;
+  if (deactivatingAutopilot) cancelAutonomousContinuations();
   currentGuideOptions = options;
   currentGuideAction = action;
   if (
@@ -1883,7 +1947,25 @@ export const renderActionGuide = (
       !activeBoardCommand.options.validateBoardContinuation ||
       !boardCommandStillLegal(activeBoardCommand)
     ) {
-      clearBoardCommand();
+      const command = activeBoardCommand;
+      if (command) {
+        const committed = command.options.validateBoardCommit?.();
+        clearBoardCommand(command.action.signature);
+        if (committed !== undefined) {
+          command.options.onExecution?.({
+            succeeded: committed,
+            signature: command.action.signature,
+            ...(!committed
+              ? {
+                  reason:
+                    "Board state changed without the expected placement commit",
+                }
+              : {}),
+          });
+        }
+      } else {
+        clearBoardCommand();
+      }
     }
     cancelWorkflow();
     boardFollowupCleanup?.();
@@ -1898,6 +1980,9 @@ export const renderActionGuide = (
       ...options,
       onExecution:
         workflowOptions?.onExecution ?? options.onExecution,
+      validateTransactionCommit:
+        workflowOptions?.validateTransactionCommit ??
+        options.validateTransactionCommit,
     };
     if (activatingAutopilot && workflowCurrentElement) {
       const element = workflowCurrentElement;

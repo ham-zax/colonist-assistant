@@ -15,8 +15,16 @@ const KNOWN_ENGINES = new Set([
   "maxn",
   "alphabeta",
   "uct",
+  "strategist",
+  "deep",
   "puct",
 ]);
+const canonicalEngine = (engine) =>
+  engine === "strategist"
+    ? "puct"
+    : engine === "deep"
+      ? "maxn"
+      : engine;
 
 function parseCsv(value) {
   return value
@@ -27,8 +35,8 @@ function parseCsv(value) {
 
 function readOptions(argv) {
   const options = {
-    candidate: "puct",
-    baselines: ["random", "weighted", "maxn", "alphabeta", "uct"],
+    candidate: "maxn",
+    baselines: ["random", "weighted", "alphabeta", "uct", "puct"],
     players: [2, 3, 4],
     games: 200,
     iterations: 80,
@@ -101,7 +109,7 @@ function readOptions(argv) {
       case "-h":
         console.log(`Usage: npm run benchmark:local -- [options]
 
-  --candidate ENGINE       Engine under test (default: puct)
+  --candidate ENGINE       Engine under test (default: maxn)
   --baselines A,B,C        Opponent engines
   --players 2,3,4          Player counts
   --games N                Minimum games per matchup; rounded for seat rotation
@@ -111,6 +119,7 @@ function readOptions(argv) {
   --max-turns N            Cutoff (reported, never hidden)
   --seed N                 First deterministic seed
   --output PATH            Output path without extension
+                           Checkpoints go to <output>.checkpoints/
   --no-validate            Skip per-transition invariant validation
   --no-build               Reuse the current release binary
   --quick                  24 games versus weighted and alpha-beta
@@ -127,6 +136,15 @@ function readOptions(argv) {
     if (!KNOWN_ENGINES.has(baseline)) {
       throw new Error(`Unknown baseline engine: ${baseline}`);
     }
+  }
+  options.candidate = canonicalEngine(options.candidate);
+  options.baselines = [
+    ...new Set(options.baselines.map(canonicalEngine)),
+  ];
+  if (options.baselines.includes(options.candidate)) {
+    throw new Error(
+      "Candidate and baseline resolve to the same engine; self-matches are not strength evidence.",
+    );
   }
   if (
     options.players.some((players) => ![2, 3, 4].includes(players)) ||
@@ -189,7 +207,7 @@ function markdown(report) {
   const rows = report.results
     .map(
       (result) =>
-        `| ${result.players} | ${result.baseline} | ${result.games.toLocaleString()} | ${result.candidateWins.toLocaleString()} | ${percent(result.winShare)} | ${percent(result.blockedCi95.lower)}–${percent(result.blockedCi95.upper)} | ${percent(result.fairShareDelta)} | ${result.cutoffs} |`,
+        `| ${result.players} | ${result.baseline} | ${result.games.toLocaleString()} | ${(result.terminalGames ?? result.games - result.cutoffs).toLocaleString()} | ${result.candidateWins.toLocaleString()} | ${percent(result.winShare)} | ${percent(result.blockedCi95.lower)}–${percent(result.blockedCi95.upper)} | ${percent(result.fairShareDelta)} | ${result.cutoffs} |`,
     )
     .join("\n");
   return `# Colonist Assistant native arena benchmark
@@ -198,12 +216,13 @@ Generated: ${report.generatedAt}
 
 Candidate: \`${report.configuration.candidate}\`. Each board block rotates the
 candidate through every seat while preserving the board and chance seed.
-Confidence intervals are block bootstraps. Arena games expose complete
-simulator state, so these results measure policy/search strength rather than
-live DOM extraction or hidden-card inference.
+Confidence intervals are block bootstraps. Strategic engines receive the same
+deterministic weighted belief particles unless an arena run is explicitly
+labelled perfect-information, so these results do not grant one candidate
+hidden-card access that another candidate lacks.
 
-| Players | Opponents | Games | Wins | Win share | 95% CI | Above fair share | Cutoffs |
-|---:|---|---:|---:|---:|---:|---:|---:|
+| Players | Opponents | Games | Terminal | Wins | Win share | 95% CI | Above fair share | Cutoffs |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
 ${rows}
 
 Total games: ${report.totalGames.toLocaleString()}.
@@ -221,6 +240,8 @@ if (options.build) {
 }
 
 const results = [];
+const checkpointDirectory = `${options.output}.checkpoints`;
+await mkdir(checkpointDirectory, { recursive: true });
 const matchupCount = options.players.length * options.baselines.length;
 let matchupIndex = 0;
 for (const players of options.players) {
@@ -229,9 +250,14 @@ for (const players of options.players) {
     const blocks = Math.ceil(options.games / players);
     const seed =
       options.seed + players * 1_000_000 + baselineIndex * 100_000;
+    const checkpointOutput = resolve(
+      checkpointDirectory,
+      `${players}p-${options.candidate}-vs-${baseline}.jsonl`,
+    );
     console.error(
       `[${matchupIndex}/${matchupCount}] ${options.candidate} vs ${baseline}, ${players} players, ${blocks * players} games…`,
     );
+    console.error(`  checkpoint: ${checkpointOutput}`);
     const args = [
       "--players",
       String(players),
@@ -251,6 +277,8 @@ for (const players of options.players) {
       String(options.maxTurns),
       "--threads",
       String(options.threads),
+      "--checkpoint-output",
+      checkpointOutput,
       "--json",
     ];
     if (options.validate) args.push("--validate");
@@ -261,7 +289,7 @@ for (const players of options.players) {
     const result = JSON.parse(output.trim());
     results.push(result);
     console.error(
-      `  ${result.candidateWins}/${result.games} = ${percent(result.winShare)} (${percent(result.blockedCi95.lower)}–${percent(result.blockedCi95.upper)})`,
+      `  ${result.candidateWins}/${result.terminalGames ?? result.games - result.cutoffs} terminal = ${percent(result.winShare)} (${percent(result.blockedCi95.lower)}–${percent(result.blockedCi95.upper)}), ${result.cutoffs} cutoffs`,
     );
   }
 }
@@ -271,6 +299,7 @@ const report = {
   kind: "colonist-assistant-native-arena-matrix",
   generatedAt: new Date().toISOString(),
   configuration: options,
+  checkpointDirectory,
   totalGames: results.reduce((sum, result) => sum + result.games, 0),
   results,
 };
@@ -284,6 +313,7 @@ console.log(
     {
       json: `${options.output}.json`,
       markdown: `${options.output}.md`,
+      checkpoints: checkpointDirectory,
       totalGames: report.totalGames,
     },
     null,

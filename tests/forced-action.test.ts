@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { BoardSnapshot } from "../src/core/placement";
 import {
+  resolveLocalBoardAction,
   shouldFastTrackEndTurn,
   shouldFastTrackRoll,
 } from "../src/core/forced-action";
@@ -15,6 +16,12 @@ const board = (): BoardSnapshot => ({
 });
 
 describe("forced action fast lane", () => {
+  it("does not claim another player's discard phase as a local action", () => {
+    expect(resolveLocalBoardAction("discard", false)).toBe("none");
+    expect(resolveLocalBoardAction("none", true)).toBe("discard");
+    expect(resolveLocalBoardAction("robber", false)).toBe("robber");
+  });
+
   it("rolls immediately when no pre-roll decision exists", () => {
     expect(shouldFastTrackRoll(board(), "roll")).toBe(true);
   });

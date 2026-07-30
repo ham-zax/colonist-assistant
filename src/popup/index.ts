@@ -6,6 +6,7 @@ import {
   type AssistantSettings,
 } from "../content/settings";
 import { latestSummaryKey } from "../content/session";
+import { clearCurrentGameStorage } from "../core/local-data";
 
 const LATEST_SUMMARY_KEY = latestSummaryKey;
 
@@ -30,6 +31,7 @@ const boot = async (): Promise<void> => {
   let settings: AssistantSettings = {
     ...DEFAULT_SETTINGS,
     ...(sync[SETTINGS_KEY] as Partial<AssistantSettings> | undefined),
+    engine: "deep-search",
   };
   const summary = local[LATEST_SUMMARY_KEY] as SessionSummary | undefined;
 
@@ -50,21 +52,12 @@ const boot = async (): Promise<void> => {
     });
   }
 
-  const engine = document.querySelector<HTMLSelectElement>("#engine");
-  if (engine) {
-    engine.value = settings.engine;
-    engine.addEventListener("change", () => {
-      settings = {
-        ...settings,
-        engine: engine.value as AssistantSettings["engine"],
-      };
-      void chrome.storage.sync.set({ [SETTINGS_KEY]: settings });
-    });
-  }
-
   document.querySelector("#reset")?.addEventListener("click", () => {
-    void chrome.storage.sync.set({ [RESET_NONCE_KEY]: Date.now() });
-    window.close();
+    void (async () => {
+      await clearCurrentGameStorage();
+      await chrome.storage.sync.set({ [RESET_NONCE_KEY]: Date.now() });
+      window.close();
+    })();
   });
 };
 

@@ -2,7 +2,11 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { AssistantOverlay } from "../src/content/overlay";
+import {
+  AssistantOverlay,
+  autonomousExecutionAllowed,
+} from "../src/content/overlay";
+import type { NextClick } from "../src/content/action-guide";
 import { DEFAULT_SETTINGS } from "../src/content/settings";
 import {
   createTrackerState,
@@ -33,6 +37,7 @@ beforeEach(() => {
       local: {
         get: () => Promise.resolve({}),
         set: () => Promise.resolve(),
+        remove: () => Promise.resolve(),
       },
       sync: {
         set: () => Promise.resolve(),
@@ -68,6 +73,90 @@ afterEach(() => {
 });
 
 describe("overlay settings interaction", () => {
+  it("allows autonomous clicks only in a confirmed private or all-bot game", () => {
+    expect(autonomousExecutionAllowed(true, undefined)).toBe(false);
+    expect(autonomousExecutionAllowed(true, {})).toBe(false);
+    expect(
+      autonomousExecutionAllowed(true, { privateGame: false }),
+    ).toBe(false);
+    expect(
+      autonomousExecutionAllowed(false, { privateGame: true }),
+    ).toBe(false);
+    expect(
+      autonomousExecutionAllowed(true, { privateGame: true }),
+    ).toBe(true);
+    expect(
+      autonomousExecutionAllowed(true, {
+        privateGame: false,
+        botOnlyGame: true,
+      }),
+    ).toBe(true);
+    expect(
+      autonomousExecutionAllowed(true, {
+        privateGame: false,
+        botOnlyGame: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("does not recommend or execute a discard owned by another player", async () => {
+    const overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS },
+      { reset: vi.fn() },
+    );
+    await Promise.resolve();
+    const internals = overlay as unknown as {
+      board: {
+        hexes: [];
+        vertices: [];
+        edges: [];
+        myPlayer: string;
+        ownHand: ReturnType<typeof emptyResources>;
+        isMyTurn: false;
+        action: "discard";
+        discardCount: number;
+      };
+      discardRecommendation: (
+        state?: ReturnType<typeof createTrackerState>,
+      ) => unknown;
+      nextClickStillLegal: (next: {
+        kind: "discard";
+        cards: ReturnType<typeof emptyResources>;
+        label: string;
+        signature: string;
+        confidence: number;
+      }) => boolean;
+    };
+    internals.board = {
+      hexes: [],
+      vertices: [],
+      edges: [],
+      myPlayer: "rodrgds",
+      ownHand: {
+        lumber: 2,
+        brick: 2,
+        wool: 2,
+        grain: 2,
+        ore: 2,
+      },
+      isMyTurn: false,
+      action: "discard",
+      discardCount: 5,
+    };
+
+    expect(internals.discardRecommendation()).toBeUndefined();
+    expect(
+      internals.nextClickStillLegal({
+        kind: "discard",
+        cards: emptyResources(),
+        label: "Discard 5 cards",
+        signature: "other-player-discard",
+        confidence: 1,
+      }),
+    ).toBe(false);
+    overlay.destroy();
+  });
+
   it("uses a public-log-confirmed post-build hand until Colonist's hand snapshot catches up", () => {
     let tracker = reduceTracker(createTrackerState(), {
       type: "discover",
@@ -184,7 +273,7 @@ describe("overlay settings interaction", () => {
     overlay.destroy();
   });
 
-  it("does not replace the engine select while its native picker is open", () => {
+  it("presents Strategist as the single decision authority", () => {
     const overlay = new AssistantOverlay(
       { ...DEFAULT_SETTINGS },
       { reset: vi.fn() },
@@ -196,36 +285,83 @@ describe("overlay settings interaction", () => {
     shadow
       .querySelector<HTMLElement>("[data-action='view'][data-view='settings']")!
       .click();
-    const select = shadow.querySelector<HTMLSelectElement>(
-      "select[data-setting='engine']",
-    )!;
+    expect(shadow.querySelector("select[data-setting='engine']")).toBeNull();
+    expect(
+      shadow.querySelector<HTMLElement>(".engine-field strong")?.textContent,
+    ).toContain("Strategist");
+    overlay.destroy();
+  });
 
-    select.dispatchEvent(
-      new Event("pointerdown", { bubbles: true, composed: true }),
+  it("rejects volatile trade indices when the stable offer ID changed", () => {
+    const overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS },
+      { reset: vi.fn() },
     );
-    select.focus();
-    overlay.updateBoard({
+    const internals = overlay as unknown as {
+      board: {
+        hexes: [];
+        vertices: [];
+        edges: [];
+        activeTrades: Array<{
+          id: string;
+          creator: string;
+          tradeExecutor: string;
+          give: ReturnType<typeof emptyResources>;
+          receive: ReturnType<typeof emptyResources>;
+          incoming: boolean;
+          counterOffer: boolean;
+          canAccept: boolean;
+          acceptedPlayers?: string[];
+        }>;
+      };
+      nextClickStillLegal: (next: NextClick) => boolean;
+    };
+    internals.board = {
       hexes: [],
       vertices: [],
       edges: [],
-      gameKey: "same-game",
-      isMyTurn: false,
-      action: "none",
-    });
+      activeTrades: [{
+        id: "replacement-offer",
+        creator: "Rival",
+        tradeExecutor: "Rival",
+        give: emptyResources(),
+        receive: emptyResources(),
+        incoming: true,
+        counterOffer: false,
+        canAccept: true,
+        acceptedPlayers: ["You"],
+      }],
+    };
+    const common = {
+      offerIndex: 0,
+      tradeId: "original-offer",
+      label: "Stale trade action",
+      signature: "stale-trade-action",
+      confidence: 1,
+    };
 
     expect(
-      shadow.querySelector("select[data-setting='engine']"),
-    ).toBe(select);
-
-    select.value = "deep-alpha-beta";
-    select.dispatchEvent(
-      new Event("change", { bubbles: true, composed: true }),
-    );
+      internals.nextClickStillLegal({
+        ...common,
+        kind: "trade",
+        verdict: "accept",
+      }),
+    ).toBe(false);
+    internals.board.activeTrades[0]!.incoming = false;
     expect(
-      shadow.querySelector<HTMLSelectElement>(
-        "select[data-setting='engine']",
-      )?.value,
-    ).toBe("deep-alpha-beta");
+      internals.nextClickStillLegal({
+        ...common,
+        kind: "trade-partner",
+        acceptedIndex: 0,
+        player: "You",
+      }),
+    ).toBe(false);
+    expect(
+      internals.nextClickStillLegal({
+        ...common,
+        kind: "trade-cancel",
+      }),
+    ).toBe(false);
     overlay.destroy();
   });
 
@@ -288,7 +424,7 @@ describe("overlay settings interaction", () => {
     overlay.destroy();
   });
 
-  it("waits for an outgoing counteroffer without re-searching the completed incoming offer", async () => {
+  it("searches the live outgoing counteroffer while continuing to show its wait state", async () => {
     const tracker = reduceTracker(createTrackerState(), {
       type: "discover",
       player: "rodrgds",
@@ -357,14 +493,24 @@ describe("overlay settings interaction", () => {
 
     internals.scheduleDecisionAnalysis(tracker, "rodrgds");
 
-    expect(sendMessage).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledOnce();
+    expect(sendMessage.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        engine: "deep-search",
+        board: expect.objectContaining({
+          activeTrades: expect.arrayContaining([
+            expect.objectContaining({ id: outgoing.id }),
+          ]),
+        }),
+      }),
+    );
     const advice = internals.renderAdvice(
       tracker,
       undefined,
       undefined,
       undefined,
     );
-    expect(advice).toContain("Waiting for 1 response");
+    expect(advice).toContain("Calculating the next action");
     expect(advice).not.toContain("Send a counteroffer");
     overlay.destroy();
   });

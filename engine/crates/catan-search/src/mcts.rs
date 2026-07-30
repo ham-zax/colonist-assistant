@@ -1,13 +1,17 @@
 use colonist_catan_core::{Action, GameState, NodeKind, SplitMix64};
 
-use crate::eval::evaluate;
+use crate::deadline::CooperativeDeadline;
+use crate::eval::{evaluate, road_frontier_value};
 use crate::exact::{
     ExactActionFamily, ExactDecisionResult, exact_family_for_action, solve_exact_belief,
 };
 use crate::opening::opening_adjusted_priors;
 use crate::planner::plan_adjusted_priors;
-use crate::policy::{choose_rollout_action, normalize_priors, order_scored_with_state_quotas};
+use crate::policy::{
+    choose_rollout_action, normalize_observed_priors, order_scored_with_state_quotas,
+};
 use crate::tactical::{TacticalResult, solve_belief_current_turn, solve_current_turn};
+use crate::trade_safety::belief_domestic_trade_threat;
 
 const NONE: u32 = u32::MAX;
 
@@ -40,6 +44,45 @@ fn sample_weighted_index(weights: &[f32], rng: &mut SplitMix64) -> usize {
     weights.len().saturating_sub(1)
 }
 
+fn belief_fingerprint(particles: &[BeliefParticle]) -> u64 {
+    let total = particles
+        .iter()
+        .map(|particle| particle.weight.max(0.0))
+        .sum::<f32>()
+        .max(f32::EPSILON);
+    let mut worlds = particles
+        .iter()
+        .map(|particle| {
+            (
+                particle.state.state_hash(),
+                particle.weight.max(0.0) / total,
+            )
+        })
+        .collect::<Vec<_>>();
+    worlds.sort_by_key(|(state_hash, _)| *state_hash);
+    let mut merged = Vec::<(u64, f32)>::with_capacity(worlds.len());
+    for (state_hash, mass) in worlds {
+        if let Some((_, existing_mass)) = merged
+            .last_mut()
+            .filter(|(existing_hash, _)| *existing_hash == state_hash)
+        {
+            *existing_mass += mass;
+        } else {
+            merged.push((state_hash, mass));
+        }
+    }
+    merged.into_iter().fold(
+        0xcbf2_9ce4_8422_2325_u64,
+        |mut fingerprint, (state_hash, mass)| {
+            for value in [state_hash, (mass.clamp(0.0, 1.0) * 65_535.0).round() as u64] {
+                fingerprint ^= value;
+                fingerprint = fingerprint.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            fingerprint
+        },
+    )
+}
+
 fn progressive_width(config: &SearchConfig, visits: u32) -> usize {
     (config.progressive_width_k * (visits.max(1) as f32).powf(config.progressive_width_alpha))
         .ceil()
@@ -64,6 +107,9 @@ pub struct SearchConfig {
     pub progressive_width_alpha: f32,
     pub tactical_depth: u8,
     pub tactical_nodes: u32,
+    /// Cooperative wall-clock limit for strategic simulations. Zero keeps the
+    /// deterministic iteration/node-only behavior used by native benchmarks.
+    pub time_budget_ms: u32,
     pub seed: u64,
     pub mode: SearchMode,
 }
@@ -77,10 +123,14 @@ impl Default for SearchConfig {
             rollout_actions: 420,
             exploration: 1.35,
             opponent_temperature: 0.34,
-            progressive_width_k: 2.1,
-            progressive_width_alpha: 0.52,
+            // At live budgets this expands roughly 13 root candidates at 112
+            // visits and 21 at 320, leaving enough evidence per action while
+            // class quotas still preserve every strategically distinct family.
+            progressive_width_k: 1.45,
+            progressive_width_alpha: 0.46,
             tactical_depth: 18,
             tactical_nodes: 20_000,
+            time_budget_ms: 0,
             seed: 0x0043_4154_414e,
             mode: SearchMode::Puct,
         }
@@ -106,6 +156,7 @@ pub struct SearchStatistics {
     pub deepest_decision_depth: u16,
     pub rollouts: u32,
     pub effective_particle_count: f32,
+    pub deadline_reached: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -121,6 +172,7 @@ pub struct SearchReport {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BeliefError {
     Empty,
+    InvalidWeight,
     PublicStateMismatch,
     RootObservationMismatch,
 }
@@ -134,6 +186,18 @@ pub struct BeliefParticle {
 fn robust_root_score(candidate: &ActionStats, actor: usize) -> f32 {
     candidate.value[actor] * 0.72 + candidate.lower_confidence_value[actor] * 0.28
         - (1.0 - candidate.legal_weight).max(0.0) * 0.12
+}
+
+fn rank_root_actions(actions: &mut [ActionStats], actor: usize) {
+    // PUCT's supported policy target is visit count. Sorting primarily by a
+    // noisy sample mean created a winner's curse across dozens of roads and
+    // trade parameters; one lucky rollout could beat a well-supported action.
+    actions.sort_by(|a, b| {
+        b.visits
+            .cmp(&a.visits)
+            .then_with(|| robust_root_score(b, actor).total_cmp(&robust_root_score(a, actor)))
+            .then_with(|| b.prior.total_cmp(&a.prior))
+    });
 }
 
 pub fn safer_end_turn_alternative(
@@ -151,6 +215,11 @@ pub fn safer_end_turn_alternative(
         .map(|candidate| robust_root_score(candidate, actor))?;
     let alternative = actions.iter().find(|candidate| {
         if candidate.action == Action::EndTurn {
+            return false;
+        }
+        if let Action::BuildRoad { edge } = &candidate.action
+            && road_frontier_value(state, *edge, actor as u8) <= 0.04
+        {
             return false;
         }
         let mut next = state.clone();
@@ -296,6 +365,7 @@ pub struct Mcts {
     information_set_mode: bool,
     root_priors: Vec<(Action, f32)>,
     turn_plan_priors: Vec<(u64, Vec<(Action, f32)>)>,
+    belief_fingerprint: Option<u64>,
 }
 
 impl Mcts {
@@ -311,6 +381,7 @@ impl Mcts {
             information_set_mode: false,
             root_priors: Vec::new(),
             turn_plan_priors: Vec::new(),
+            belief_fingerprint: None,
         }
     }
 
@@ -348,6 +419,7 @@ impl Mcts {
         self.statistics = SearchStatistics::default();
         self.root_priors.clear();
         self.turn_plan_priors.clear();
+        self.belief_fingerprint = None;
     }
 
     fn reuse_identity(&mut self, identity: u64) -> bool {
@@ -387,7 +459,9 @@ impl Mcts {
     }
 
     pub fn search(&mut self, state: &GameState) -> SearchReport {
+        let timer = CooperativeDeadline::start(self.config.time_budget_ms);
         self.information_set_mode = false;
+        self.belief_fingerprint = None;
         if state.state_hash() != self.root_hash && !self.reuse_identity(state.state_hash()) {
             self.reset(state);
         }
@@ -418,6 +492,10 @@ impl Mcts {
             if self.arena.parent.len() >= self.config.max_nodes {
                 break;
             }
+            if timer.expired_at_checkpoint(self.statistics.iterations, 1) {
+                self.statistics.deadline_reached = true;
+                break;
+            }
             self.iteration(state);
             self.statistics.iterations += 1;
         }
@@ -443,13 +521,26 @@ impl Mcts {
         &mut self,
         particles: &[BeliefParticle],
     ) -> Result<SearchReport, BeliefError> {
+        let timer = CooperativeDeadline::start(self.config.time_budget_ms);
         let Some(first_particle) = particles.first() else {
             return Err(BeliefError::Empty);
         };
         let first = &first_particle.state;
+        if particles
+            .iter()
+            .any(|particle| !particle.weight.is_finite() || particle.weight < 0.0)
+            || particles
+                .iter()
+                .map(|particle| particle.weight)
+                .sum::<f32>()
+                <= f32::EPSILON
+        {
+            return Err(BeliefError::InvalidWeight);
+        }
         let observer = first.actor();
         let public = first.public_hash();
         let observation = first.observation_hash(observer);
+        let posterior_fingerprint = belief_fingerprint(particles);
         if particles
             .iter()
             .any(|particle| particle.state.public_hash() != public)
@@ -464,9 +555,17 @@ impl Mcts {
         }
         self.statistics = SearchStatistics::default();
         self.information_set_mode = true;
-        if observation != self.root_hash && !self.reuse_identity(observation) {
+        if observation != self.root_hash {
+            if !self.reuse_identity(observation) {
+                self.reset_identity(observation);
+            }
+        } else if self
+            .belief_fingerprint
+            .is_some_and(|previous| previous != posterior_fingerprint)
+        {
             self.reset_identity(observation);
         }
+        self.belief_fingerprint = Some(posterior_fingerprint);
         let exact = solve_exact_belief(particles, ExactActionFamily::Mandatory);
         if exact.applicable {
             // The response family already evaluates every legal action over
@@ -505,6 +604,10 @@ impl Mcts {
             if self.arena.parent.len() >= self.config.max_nodes {
                 break;
             }
+            if timer.expired_at_checkpoint(self.statistics.iterations, 1) {
+                self.statistics.deadline_reached = true;
+                break;
+            }
             let particle = &particles[sample_weighted_index(&weights, &mut self.rng)].state;
             self.iteration(particle);
             self.statistics.iterations += 1;
@@ -514,9 +617,11 @@ impl Mcts {
 
     fn prepare_root_priors(&mut self, state: &GameState) {
         let legal = state.legal_actions();
-        let mut ranked = normalize_priors(state, &legal, state.actor());
+        let actor = state.actor();
+        let observed = state.observed_state(actor);
+        let mut ranked = normalize_observed_priors(state, &legal, actor);
         plan_adjusted_priors(
-            state,
+            &observed,
             &mut ranked,
             // The root plan generator supplies an informed prior; it is not a
             // second exhaustive search. Reserve most of the node budget for
@@ -524,11 +629,11 @@ impl Mcts {
             (self.config.max_nodes as u32 / 80).clamp(160, 2_000),
         );
         opening_adjusted_priors(
-            state,
+            &observed,
             &mut ranked,
             (self.config.max_nodes as u32 / 10).clamp(1_000, 18_000),
         );
-        self.root_priors = order_scored_with_state_quotas(state, state.actor(), ranked);
+        self.root_priors = order_scored_with_state_quotas(&observed, actor, ranked);
         let identity = if self.information_set_mode {
             information_identity(state)
         } else {
@@ -574,23 +679,24 @@ impl Mcts {
                 .cloned()
                 .collect();
         }
-        let mut ranked = normalize_priors(state, legal, actor);
+        let observed = state.observed_state(actor);
+        let mut ranked = normalize_observed_priors(state, legal, actor);
         if matches!(state.phase, colonist_catan_core::Phase::Main) {
             // The tree still returns one state-validated click at a time, but
             // every newly reached turn node is expanded from coherent endpoint
             // plans (trade → road → settlement, YOP → city, and so on).
             // Caching makes this a turn-level abstraction instead of paying for
             // the planner on every simulation through the same information set.
-            plan_adjusted_priors(state, &mut ranked, 320);
+            plan_adjusted_priors(&observed, &mut ranked, 320);
         }
         if matches!(
             state.phase,
             colonist_catan_core::Phase::SetupSettlement
                 | colonist_catan_core::Phase::SetupRoad { .. }
         ) {
-            opening_adjusted_priors(state, &mut ranked, 900);
+            opening_adjusted_priors(&observed, &mut ranked, 900);
         }
-        let ranked = order_scored_with_state_quotas(state, actor, ranked);
+        let ranked = order_scored_with_state_quotas(&observed, actor, ranked);
         self.remember_turn_priors(identity, ranked.clone());
         ranked
     }
@@ -695,12 +801,30 @@ impl Mcts {
                 }
             })
             .collect::<Vec<_>>();
-        actions.sort_by(|a, b| {
-            robust_root_score(b, actor)
-                .total_cmp(&robust_root_score(a, actor))
-                .then_with(|| b.visits.cmp(&a.visits))
-                .then_with(|| b.prior.total_cmp(&a.prior))
-        });
+        let safe_actions = actions
+            .iter()
+            .filter(|stats| {
+                let threat = if let Some(worlds) = particles {
+                    belief_domestic_trade_threat(
+                        worlds
+                            .iter()
+                            .map(|particle| (&particle.state, particle.weight)),
+                        &stats.action,
+                    )
+                } else {
+                    belief_domestic_trade_threat(std::iter::once((state, 1.0)), &stats.action)
+                };
+                threat.is_none()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        // Main-phase roots always retain EndTurn, and trade-response roots
+        // retain reject/cancel. The fallback protects malformed diagnostic
+        // roots without ever manufacturing an illegal action.
+        if !safe_actions.is_empty() {
+            actions = safe_actions;
+        }
+        rank_root_actions(&mut actions, actor);
         let mut exact = exact;
         let mut chosen = if exact.applicable {
             exact.chosen.clone()
@@ -945,8 +1069,17 @@ impl Mcts {
 
     fn rollout(&mut self, state: &mut GameState) -> [f32; 4] {
         self.statistics.rollouts += 1;
-        for _ in 0..self.config.rollout_actions {
+        // Compare branches at a common strategic horizon. Counting only
+        // primitive actions let trade-heavy or road-first lines terminate
+        // before the same opponent turns that an immediate EndTurn exposed.
+        let starting_turn = state.turn;
+        let target_turns = (self.config.rollout_actions / 16).clamp(4, 12);
+        let atomic_safety_cap = self.config.rollout_actions.saturating_mul(3);
+        for _ in 0..atomic_safety_cap {
             if state.is_terminal() {
+                break;
+            }
+            if state.turn.saturating_sub(starting_turn) >= target_turns {
                 break;
             }
             let actions = state.legal_actions();
@@ -973,7 +1106,10 @@ impl Mcts {
 mod tests {
     use colonist_catan_core::{Action, GameState, NodeKind, Phase, SplitMix64};
 
-    use super::{ActionStats, Mcts, SearchConfig, progressive_width, safer_end_turn_alternative};
+    use super::{
+        ActionStats, BeliefError, BeliefParticle, Mcts, SearchConfig, progressive_width,
+        rank_root_actions, safer_end_turn_alternative,
+    };
 
     #[test]
     fn progressive_widening_follows_k_times_visits_to_alpha() {
@@ -999,6 +1135,19 @@ mod tests {
             value: [value; 4],
             lower_confidence_value: [value; 4],
         }
+    }
+
+    #[test]
+    fn one_visit_outlier_does_not_beat_a_supported_root_action() {
+        let mut supported = root_stats(Action::EndTurn, 0.54);
+        supported.visits = 24;
+        let mut outlier = root_stats(Action::BuyDevelopment, 0.99);
+        outlier.visits = 1;
+        let mut actions = vec![outlier, supported];
+
+        rank_root_actions(&mut actions, 0);
+
+        assert_eq!(actions[0].action, Action::EndTurn);
     }
 
     fn advance_setup_and_roll(state: &mut GameState, rng: &mut SplitMix64) {
@@ -1058,6 +1207,30 @@ mod tests {
         );
         assert_eq!(first_report.statistics.iterations, 120);
         assert!(first_report.statistics.nodes > 1);
+    }
+
+    #[test]
+    fn strategic_simulations_honor_the_cooperative_deadline() {
+        let mut state = GameState::standard(8, 4);
+        let mut rng = SplitMix64::new(10);
+        advance_setup_and_roll(&mut state, &mut rng);
+        let config = SearchConfig {
+            iterations: 50_000,
+            max_nodes: 100_000,
+            rollout_actions: 80,
+            tactical_nodes: 100,
+            time_budget_ms: 1,
+            ..SearchConfig::default()
+        };
+        let mut search = Mcts::new(config, &state);
+        let report = search.search(&state);
+
+        assert!(report.statistics.deadline_reached);
+        assert!(
+            state
+                .legal_actions()
+                .contains(report.chosen.as_ref().unwrap())
+        );
     }
 
     #[test]
@@ -1167,5 +1340,92 @@ mod tests {
                 .contains(report.chosen.as_ref().unwrap())
         );
         assert!(report.statistics.nodes > 1);
+    }
+
+    #[test]
+    fn belief_search_rejects_a_zero_mass_posterior() {
+        let state = GameState::standard(91, 3);
+        let mut search = Mcts::new(SearchConfig::default(), &state);
+        let error = search
+            .search_weighted_belief(&[BeliefParticle { state, weight: 0.0 }])
+            .unwrap_err();
+        assert_eq!(error, BeliefError::InvalidWeight);
+    }
+
+    #[test]
+    fn belief_tree_reuses_equivalent_ordering_and_resets_on_new_posterior() {
+        let mut first = GameState::standard(93, 3);
+        let mut rng = SplitMix64::new(94);
+        advance_setup_and_roll(&mut first, &mut rng);
+        let hidden_player = (first.actor() as usize + 1) % 3;
+        first.players[hidden_player].resources = [2, 1, 0, 0, 0];
+        let mut second = first.clone();
+        second.players[hidden_player].resources.rotate_left(1);
+        assert_eq!(
+            first.observation_hash(first.actor()),
+            second.observation_hash(second.actor())
+        );
+        let config = SearchConfig {
+            iterations: 32,
+            max_nodes: 6_000,
+            rollout_actions: 32,
+            tactical_nodes: 100,
+            ..SearchConfig::default()
+        };
+        let mut search = Mcts::new(config, &first);
+        let first_report = search
+            .search_weighted_belief(&[
+                BeliefParticle {
+                    state: first.clone(),
+                    weight: 0.5,
+                },
+                BeliefParticle {
+                    state: second.clone(),
+                    weight: 0.5,
+                },
+            ])
+            .unwrap();
+        let first_visits = first_report
+            .actions
+            .iter()
+            .map(|action| action.visits)
+            .sum::<u32>();
+        let reordered = search
+            .search_weighted_belief(&[
+                BeliefParticle {
+                    state: second.clone(),
+                    weight: 0.5,
+                },
+                BeliefParticle {
+                    state: first.clone(),
+                    weight: 0.5,
+                },
+            ])
+            .unwrap();
+        let reordered_visits = reordered
+            .actions
+            .iter()
+            .map(|action| action.visits)
+            .sum::<u32>();
+        assert!(reordered_visits > first_visits);
+
+        let changed = search
+            .search_weighted_belief(&[
+                BeliefParticle {
+                    state: first,
+                    weight: 0.9,
+                },
+                BeliefParticle {
+                    state: second,
+                    weight: 0.1,
+                },
+            ])
+            .unwrap();
+        let changed_visits = changed
+            .actions
+            .iter()
+            .map(|action| action.visits)
+            .sum::<u32>();
+        assert!(changed_visits < reordered_visits);
     }
 }

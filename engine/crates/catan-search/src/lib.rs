@@ -4,6 +4,7 @@
 //! acting player's component, while dice, development draws, and steals are
 //! sampled from explicit chance nodes in `colonist-catan-core`.
 
+mod deadline;
 mod depth;
 mod eval;
 mod exact;
@@ -15,6 +16,7 @@ mod planner;
 mod policy;
 mod tactical;
 mod trade_model;
+mod trade_safety;
 
 pub use eval::{
     ExpansionOption, TrophyOutlook, evaluate, expansion_option_value, expected_discard_loss,
@@ -36,7 +38,7 @@ pub use mcts::{
 };
 pub use model::{
     learned_action_logit, learned_action_logits, learned_model_ready, learned_model_version,
-    learned_value,
+    learned_policy_promoted, learned_value,
 };
 pub use opening::{OpeningActionValue, OpeningConfig, OpeningReport, solve_opening};
 pub use planner::{TurnPlan, TurnPlanConfig, plan_current_turn};
@@ -46,11 +48,15 @@ pub use trade_model::{
     TRADE_ACCEPTANCE_FEATURES, learned_trade_acceptance_probability, learned_trade_model_version,
     trade_acceptance_features,
 };
+pub use trade_safety::{
+    DomesticTradeThreat, HARD_VETO_POSTERIOR, belief_domestic_trade_threat, domestic_trade_threat,
+};
 
-pub const ENGINE_REVISION: &str = "belief-puct-v3";
+pub const ENGINE_REVISION: &str = "deep-maxn-v3";
 pub use depth::{
     BeliefDepthResult, DepthActionValue, DepthBeliefError, DepthSearchResult, search_belief_maxn,
     search_belief_maxn_bounded, search_belief_paranoid, search_belief_paranoid_bounded,
     search_maxn, search_maxn_bounded, search_paranoid, search_paranoid_bounded,
-    search_weighted_belief_maxn_bounded, search_weighted_belief_paranoid_bounded,
+    search_weighted_belief_maxn_bounded, search_weighted_belief_maxn_bounded_timed,
+    search_weighted_belief_paranoid_bounded, search_weighted_belief_paranoid_bounded_timed,
 };

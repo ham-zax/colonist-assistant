@@ -3,16 +3,16 @@ import { describe, expect, it } from "vitest";
 import { InteractionRenderGate } from "../src/content/render-gate";
 
 describe("overlay interaction render gate", () => {
-  it("keeps the native engine selector mounted throughout its open interaction", () => {
+  it("keeps an active settings interaction mounted throughout rerenders", () => {
     const gate = new InteractionRenderGate();
 
     expect(gate.tryRender()).toBe(true);
-    gate.hold("engine-select");
+    gate.hold("settings-interaction");
     expect(gate.tryRender()).toBe(false);
     expect(gate.tryRender()).toBe(false);
     expect(gate.hasDeferredRender()).toBe(true);
 
-    gate.release("engine-select");
+    gate.release("settings-interaction");
     expect(gate.tryRender()).toBe(true);
     expect(gate.hasDeferredRender()).toBe(false);
   });
@@ -20,9 +20,9 @@ describe("overlay interaction render gate", () => {
   it("requires every active interaction lock to release before rendering", () => {
     const gate = new InteractionRenderGate();
 
-    gate.hold("engine-select");
+    gate.hold("settings-interaction");
     gate.hold("secondary");
-    gate.release("engine-select");
+    gate.release("settings-interaction");
     expect(gate.tryRender()).toBe(false);
 
     gate.release("secondary");

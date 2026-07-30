@@ -41,6 +41,7 @@ export interface WasmSearchResponse {
   rollouts: number;
   particles: number;
   effectiveParticleCount: number;
+  deadlineReached: boolean;
 }
 
 export function analyze(request: unknown): WasmSearchResponse;

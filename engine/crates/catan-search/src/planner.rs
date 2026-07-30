@@ -232,7 +232,7 @@ pub fn plan_current_turn(state: &GameState, config: TurnPlanConfig) -> Vec<TurnP
     };
     let root_count = ranked.len().max(1) as u32;
     let per_root_budget = (planner.config.maximum_nodes / root_count)
-        .max(48)
+        .max(1)
         .min(planner.config.maximum_nodes);
     let mut plans = Vec::new();
     for (action, _) in ranked {
@@ -278,18 +278,24 @@ pub(crate) fn plan_adjusted_priors(
         state,
         TurnPlanConfig {
             maximum_nodes,
-            root_cap: ranked.len().max(12),
+            // Preserve semantic-family representatives, but do not spread a
+            // tiny live prior budget over every parameterized road/trade.
+            root_cap: ranked.len().min(14),
             ..TurnPlanConfig::default()
         },
     );
-    let Some(minimum) = plans.iter().map(|plan| plan.value).reduce(f32::min) else {
+    let completed = plans
+        .iter()
+        .filter(|plan| plan.completed)
+        .collect::<Vec<_>>();
+    let Some(minimum) = completed.iter().map(|plan| plan.value).reduce(f32::min) else {
         return;
     };
-    let Some(maximum) = plans.iter().map(|plan| plan.value).reduce(f32::max) else {
+    let Some(maximum) = completed.iter().map(|plan| plan.value).reduce(f32::max) else {
         return;
     };
     for (action, prior) in ranked.iter_mut() {
-        if let Some(plan) = plans.iter().find(|plan| plan.first_action == *action) {
+        if let Some(plan) = completed.iter().find(|plan| plan.first_action == *action) {
             let normalized = if maximum > minimum {
                 (plan.value - minimum) / (maximum - minimum)
             } else {
@@ -297,7 +303,7 @@ pub(crate) fn plan_adjusted_priors(
             };
             // Preserve a small policy prior while letting a coherent endpoint
             // dominate shallow inventory rewards.
-            *prior = (*prior * 0.24 + 0.04 + normalized * 0.72).max(0.0001);
+            *prior = (*prior * 0.40 + normalized * 0.60).max(0.0001);
         }
     }
     let total = ranked

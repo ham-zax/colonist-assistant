@@ -319,6 +319,21 @@ describe("live trade guard", () => {
     ).toBe(true);
   });
 
+  it("resets rejection memory on a new turn without a current-player label", () => {
+    expect(
+      tradeMemoryScopeChanged(
+        { gameKey: "g", turn: 8, isMyTurn: false },
+        { gameKey: "g", turn: 9, isMyTurn: false },
+      ),
+    ).toBe(true);
+    expect(
+      tradeMemoryScopeChanged(
+        { gameKey: "g", isMyTurn: false },
+        { gameKey: "g", isMyTurn: true },
+      ),
+    ).toBe(true);
+  });
+
   it("does not re-analyse an incoming offer after its response workflow completed", () => {
     const incoming = {
       id: "incoming-1",

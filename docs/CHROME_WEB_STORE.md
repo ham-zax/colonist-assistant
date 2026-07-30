@@ -16,7 +16,11 @@ release_version=$(node -p "require('./package.json').version")
 )
 ```
 
-The ZIP must have `manifest.json` at its root.
+The ZIP must have `manifest.json` at its root. `npm run verify` includes the
+packaged cold-WASM adapter regression: the single Strategist authority must
+return a legal weighted-belief Deep MaxN result in less than one second before
+packaging. Do not substitute an experimental arena policy or publish a build
+that misses this gate.
 
 ## Store listing
 
@@ -51,11 +55,13 @@ It uses that data to:
 
 • track known cards and honest ranges for unknown cards
 • suggest legal moves, builds, trades, robber targets, and discards
-• show win estimates
+• show model-based win estimates
 • mark the next Colonist control or board place
-• carry out moves when you turn on autopilot
+• carry out moves in a verified private or all-bot game when you turn on
+  autopilot
 
-Autopilot is off by default. Before each step, the extension checks that the
+Autopilot is off by default and remains unavailable unless the extension can
+verify a private game or an all-bot match. Before each step, it checks that the
 board still matches the state used to pick the move. If the state has changed,
 it stops and plans again.
 
@@ -110,8 +116,10 @@ friendly Colonist games where all players agree to its use.
 
 ```text
 The storage permission saves settings, the overlay place, current game events,
-possible card states, and a short game summary. Game data stays in the local
-Chrome profile. Chrome may sync settings when Chrome Sync is on.
+possible card states, a short game summary, and bounded current-game decision
+diagnostics used to replay advice or automation failures. Game data stays in
+the local Chrome profile and is replaced when a different game starts. Chrome
+may sync settings when Chrome Sync is on.
 ```
 
 ### Host access reason
@@ -119,7 +127,7 @@ Chrome profile. Chrome may sync settings when Chrome Sync is on.
 ```text
 Access to https://colonist.io/* lets the extension read game data shown to the
 player, add its help panel, mark legal controls, and carry out a step only when
-the user turns on autopilot.
+the user turns on autopilot in a verified private or all-bot game.
 ```
 
 ### Remote code
@@ -162,11 +170,14 @@ Paste:
 
 ```text
 1. Install the extension.
-2. Open https://colonist.io/ and start or join a friendly base game.
+2. Open https://colonist.io/ and start an all-bot base game, or join a private
+   base game where all players agreed to use the extension.
 3. If the Colonist tab was open before install, refresh it.
 4. The Colonist Assistant panel appears during the game.
-5. Use the extension popup to turn hints on or off, choose a game engine, or
-   turn on autopilot. Autopilot is off by default.
+5. Use the extension popup to turn hints on or off, confirm the single
+   Strategist engine status, or turn on autopilot. Autopilot is off by default;
+   it is available only after the extension verifies a private or all-bot
+   game. There is no engine selector.
 6. The panel reads shown game state and gives a legal next step.
 7. Use Reset session in the popup to clear the current game state.
 

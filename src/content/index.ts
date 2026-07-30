@@ -11,6 +11,7 @@ import {
   SETTINGS_KEY,
   type AssistantSettings,
 } from "./settings";
+import { clearCurrentGameStorage } from "../core/local-data";
 
 const boot = async (): Promise<void> => {
   if (document.getElementById("colonist-assistant-root")) return;
@@ -23,8 +24,17 @@ const boot = async (): Promise<void> => {
   currentGameKey = initialBoard?.gameKey;
   currentMyPlayer = initialBoard?.myPlayer;
 
-  const overlay = new AssistantOverlay(settings, {
-    reset: () => session?.reset(),
+  let overlay: AssistantOverlay;
+  const clearCurrentSession = async (): Promise<void> => {
+    await Promise.all([
+      session
+        ? session.clearStoredData()
+        : clearCurrentGameStorage(),
+      overlay.clearStoredSessionData(),
+    ]);
+  };
+  overlay = new AssistantOverlay(settings, {
+    reset: clearCurrentSession,
   });
   overlay.setSettings(settings);
   overlay.updateBoard(initialBoard);
@@ -93,7 +103,9 @@ const boot = async (): Promise<void> => {
       overlay.setSettings(settings);
       void attach();
     }
-    if (area === "sync" && changes[RESET_NONCE_KEY]) session?.reset();
+    if (area === "sync" && changes[RESET_NONCE_KEY]) {
+      void clearCurrentSession();
+    }
   });
 
   window.addEventListener(

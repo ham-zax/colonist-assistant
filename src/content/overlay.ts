@@ -72,7 +72,6 @@ import {
 import type { TradeVerdict } from "../core/trades";
 import type {
   DecisionAnalysis,
-  DecisionEngine,
   DecisionRuntime,
 } from "../core/engine";
 import { isDeepDecisionEngine } from "../core/engine";
@@ -109,14 +108,14 @@ import { InteractionRenderGate } from "./render-gate";
 
 type ViewName = "advice" | "cards" | "settings";
 
-const ENGINE_LABELS: Record<DecisionEngine, string> = {
-  "deep-search": "Deep MaxN ★",
-  "deep-alpha-beta": "AlphaBeta",
-  "deep-puct": "Belief PUCT 🧪",
-  hybrid: "Hybrid",
-  "race-eta": "Race ETA",
-  "vector-mcts": "Vector rollouts",
-};
+const STRATEGIST_LABEL = "Strategist ★";
+
+export const autonomousExecutionAllowed = (
+  enabled: boolean,
+  board: Pick<BoardSnapshot, "privateGame" | "botOnlyGame"> | undefined,
+): boolean =>
+  enabled &&
+  (board?.privateGame === true || board?.botOnlyGame === true);
 
 const escapeHtml = (value: string): string =>
   value.replace(/[&<>"']/g, (character) => {
@@ -290,12 +289,14 @@ export class AssistantOverlay {
   private decisionRuntimeDetail = "Connecting to the packaged search engine.";
   private decisionRuntimeError = "";
   private decisionContextInvalidated = false;
-  private domesticTradeAttempt?: { gameKey?: string };
+  private domesticTradeAttempt?: { gameKey?: string; turn?: number };
   private readonly attemptedTradeOffers = new Set<string>();
   private readonly failedTradeActions = new Set<string>();
   private readonly completedIncomingTradeIds = new Set<string>();
   private readonly outgoingTradeSeenAt = new Map<string, number>();
   private readonly outgoingTradeWatchdogs = new Map<string, number>();
+  private decisionTraceGameScope: string | null | undefined;
+  private resetGameScope: string | null | undefined;
   private robberVictimPlan?: {
     gameKey?: string;
     turn?: number;
@@ -305,7 +306,7 @@ export class AssistantOverlay {
 
   constructor(
     private settings: AssistantSettings,
-    private readonly callbacks: { reset: () => void },
+    private readonly callbacks: { reset: () => void | Promise<void> },
   ) {
     this.collapsed = settings.startCollapsed;
     this.host = document.createElement("div");
@@ -349,12 +350,32 @@ export class AssistantOverlay {
 
   update(session?: GameSession): void {
     this.session = session;
+    if (session?.events?.length) this.resetGameScope = undefined;
     this.confirmPendingPlacementFromLog();
     this.render();
   }
 
   updateBoard(board?: BoardSnapshot): void {
     let nextBoard = board;
+    if (nextBoard) {
+      const traceScope = nextBoard.gameKey ?? null;
+      if (
+        this.decisionTraceGameScope === undefined ||
+        this.decisionTraceGameScope !== traceScope
+      ) {
+        this.decisionTraceGameScope = traceScope;
+        // Queue deletion ahead of the first trace for this game. The recorder
+        // serializes its storage writes, so a fast first decision cannot be
+        // erased by a slower stale-game cleanup.
+        void this.decisionTraces.reset().catch(() => undefined);
+      }
+    }
+    if (
+      this.resetGameScope !== undefined &&
+      this.resetGameScope !== (nextBoard?.gameKey ?? null)
+    ) {
+      this.resetGameScope = undefined;
+    }
     if (tradeMemoryScopeChanged(this.board, nextBoard)) {
       this.domesticTradeAttempt = undefined;
       this.attemptedTradeOffers.clear();
@@ -368,6 +389,7 @@ export class AssistantOverlay {
     if (outgoingTrades.length) {
       this.domesticTradeAttempt = {
         gameKey: nextBoard?.gameKey,
+        turn: nextBoard?.turn,
       };
       for (const trade of outgoingTrades) {
         if (!this.outgoingTradeSeenAt.has(trade.id)) {
@@ -402,7 +424,12 @@ export class AssistantOverlay {
       nextBoard &&
       nextBoard.isMyTurn &&
       domesticTradeAttempt &&
-      domesticTradeAttempt.gameKey === nextBoard.gameKey
+      domesticTradeAttempt.gameKey === nextBoard.gameKey &&
+      (
+        domesticTradeAttempt.turn === undefined ||
+        nextBoard.turn === undefined ||
+        domesticTradeAttempt.turn === nextBoard.turn
+      )
     ) {
       nextBoard = { ...nextBoard, domesticTradeUsed: true };
     }
@@ -457,6 +484,11 @@ export class AssistantOverlay {
       nextBoard?.gameKey &&
       this.board.gameKey !== nextBoard.gameKey
     ) {
+      // A canvas command may be waiting for a bounded commit retry. Base-map
+      // target IDs repeat between games, so cancel it before the replacement
+      // board can make the old target appear legal again.
+      destroyActionGuide();
+      this.actionGuideSignature = "";
       this.decisionAnalysis = undefined;
       this.freeRoadPlan = undefined;
       this.queuedPlacement = undefined;
@@ -547,6 +579,38 @@ export class AssistantOverlay {
     this.render();
   }
 
+  async clearStoredSessionData(): Promise<void> {
+    this.resetGameScope = this.board?.gameKey ?? null;
+    this.session = undefined;
+    this.board = undefined;
+    this.decisionAnalysis = undefined;
+    this.decisionKey = "";
+    this.decisionPendingKey = "";
+    this.decisionSlowKey = "";
+    this.decisionRuntimeError = "";
+    this.decisionWorker.reset();
+    this.winPredictions.reset();
+    this.activeSpatial = undefined;
+    this.roadPlan = undefined;
+    this.freeRoadPlan = undefined;
+    this.queuedPlacement = undefined;
+    this.robberVictimPlan = undefined;
+    this.confirmedPlacement = undefined;
+    this.confirmedPlacementSpend = undefined;
+    this.domesticTradeAttempt = undefined;
+    this.attemptedTradeOffers.clear();
+    this.failedTradeActions.clear();
+    this.completedIncomingTradeIds.clear();
+    this.outgoingTradeSeenAt.clear();
+    this.clearOutgoingTradeWatchdogs();
+    this.clearPendingPlacement();
+    destroyTradeVerdicts();
+    destroyActionGuide();
+    destroyWinOdds();
+    await this.decisionTraces.reset();
+    this.render();
+  }
+
   destroy(): void {
     if (this.tradeRenderFrame !== undefined) {
       window.cancelAnimationFrame(this.tradeRenderFrame);
@@ -588,33 +652,6 @@ export class AssistantOverlay {
   }
 
   private installHandlers(): void {
-    this.shadow.addEventListener("pointerdown", (rawEvent) => {
-      const target = rawEvent.target;
-      if (
-        target instanceof HTMLSelectElement &&
-        target.dataset.setting === "engine"
-      ) {
-        this.renderGate.hold("engine-select");
-      }
-    });
-    this.shadow.addEventListener("focusin", (rawEvent) => {
-      const target = rawEvent.target;
-      if (
-        target instanceof HTMLSelectElement &&
-        target.dataset.setting === "engine"
-      ) {
-        this.renderGate.hold("engine-select");
-      }
-    });
-    this.shadow.addEventListener("focusout", (rawEvent) => {
-      const target = rawEvent.target;
-      if (
-        target instanceof HTMLSelectElement &&
-        target.dataset.setting === "engine"
-      ) {
-        this.renderGate.release("engine-select");
-      }
-    });
     this.shadow.addEventListener("click", (rawEvent) => {
       const target = (rawEvent.target as Element).closest<HTMLElement>("[data-action]");
       if (!target) return;
@@ -626,23 +663,13 @@ export class AssistantOverlay {
           requested === this.activeView ? "advice" : requested;
       }
       if (action === "reset" && confirm("Reset the current Colonist Assistant session?")) {
-        this.callbacks.reset();
+        void this.callbacks.reset();
       }
       this.render();
     });
 
     this.shadow.addEventListener("change", (rawEvent) => {
       const target = rawEvent.target;
-      if (
-        target instanceof HTMLSelectElement &&
-        target.dataset.setting === "engine"
-      ) {
-        this.renderGate.release("engine-select");
-        this.applySettings({
-          ...this.settings,
-          engine: target.value as DecisionEngine,
-        });
-      }
       if (
         target instanceof HTMLInputElement &&
         target.dataset.setting &&
@@ -986,22 +1013,90 @@ export class AssistantOverlay {
     }
     const nextSignature = next?.signature ?? "";
     const traceKey = this.decisionKey;
+    const guideGameScope = this.board?.gameKey ?? location.pathname;
+    const stillInGuideGame = (): boolean =>
+      (this.board?.gameKey ?? location.pathname) === guideGameScope;
+    const transactionCommit = (() => {
+      if (
+        !next ||
+        (
+          next.kind !== "trade-builder" &&
+          !(
+            next.kind === "trade" &&
+            next.verdict === "counter" &&
+            next.counterGive &&
+            next.counterReceive
+          )
+        )
+      ) {
+        return undefined;
+      }
+      const baselineOfferIds = new Set(
+        (this.board?.activeTrades ?? [])
+          .filter((trade) => !trade.incoming)
+          .map((trade) => trade.id),
+      );
+      const give =
+        next.kind === "trade-builder" ? next.give : next.counterGive!;
+      const receive =
+        next.kind === "trade-builder" ? next.receive : next.counterReceive!;
+      const offerKey = tradeOfferKey(give, receive);
+      const baselineHand = this.board?.ownHand
+        ? { ...this.board.ownHand }
+        : undefined;
+      const bankTrade =
+        next.kind === "trade-builder" && next.mode === "bank";
+      return (): boolean => {
+        const current = this.board;
+        if (!current || !stillInGuideGame()) return false;
+        if (bankTrade) {
+          if (!baselineHand || !current.ownHand) return false;
+          return RESOURCE_ORDER.every(
+            (resource) =>
+              current.ownHand![resource] ===
+              baselineHand[resource] -
+                give[resource] +
+                receive[resource],
+          );
+        }
+        return Boolean(
+          current.activeTrades?.some(
+            (trade) =>
+              !trade.incoming &&
+              !baselineOfferIds.has(trade.id) &&
+              tradeOfferKey(trade.give, trade.receive) === offerKey,
+          ),
+        );
+      };
+    })();
     this.actionGuideSignature = nextSignature;
     renderActionGuide(next, {
       highlight: this.settings.highlightNextAction,
-      autonomous: this.settings.autonomousPrivateGames,
+      autonomous: autonomousExecutionAllowed(
+        this.settings.autonomousPrivateGames,
+        this.board,
+      ),
       validate: () =>
         Boolean(next && nextSignature) &&
+        stillInGuideGame() &&
         this.actionGuideSignature === nextSignature &&
         Boolean(next && this.nextClickStillLegal(next)),
       validateBoardContinuation: () =>
-        next?.kind === "board"
+        next?.kind === "board" && stillInGuideGame()
           ? this.nextClickStillLegal(next)
+          : false,
+      validateBoardCommit: () =>
+        next?.kind === "board" && stillInGuideGame()
+          ? this.boardActionCommitted(next)
           : false,
       validateContinuation: () =>
         Boolean(next && nextSignature) &&
+        stillInGuideGame() &&
         this.actionGuideSignature === nextSignature &&
         Boolean(next && this.workflowContinuationStillLegal(next)),
+      ...(transactionCommit
+        ? { validateTransactionCommit: transactionCommit }
+        : {}),
       onExecution: ({ succeeded, reason }) => {
         if (next && traceKey) {
           this.decisionTraces.final(
@@ -1010,7 +1105,11 @@ export class AssistantOverlay {
             this.decisionSource(next, Boolean(workflow)),
           );
         }
-        if (next?.kind === "trade-builder" && next.mode === "player") {
+        if (
+          succeeded &&
+          next?.kind === "trade-builder" &&
+          next.mode === "player"
+        ) {
           this.rememberDomesticTradeAttempt(next);
         }
         if (succeeded && next?.kind === "build") {
@@ -1060,10 +1159,11 @@ export class AssistantOverlay {
           this.render();
         }
         if (succeeded && next?.kind === "trade") {
-          const trade = this.board?.activeTrades?.[next.offerIndex];
+          const trade = this.board?.activeTrades?.find(
+            (candidate) => candidate.id === next.tradeId,
+          );
           const completedId =
-            next.tradeId ??
-            (trade?.incoming ? trade.id : undefined);
+            trade?.incoming ? next.tradeId : undefined;
           if (completedId) {
             this.completedIncomingTradeIds.add(completedId);
           }
@@ -1077,7 +1177,10 @@ export class AssistantOverlay {
   ): void {
     if (next.mode !== "player") return;
     this.attemptedTradeOffers.add(tradeOfferKey(next.give, next.receive));
-    this.domesticTradeAttempt = { gameKey: this.board?.gameKey };
+    this.domesticTradeAttempt = {
+      gameKey: this.board?.gameKey,
+      turn: this.board?.turn,
+    };
     if (this.board?.isMyTurn) {
       this.board = { ...this.board, domesticTradeUsed: true };
     }
@@ -1129,7 +1232,9 @@ export class AssistantOverlay {
           : board.buildableSettlementIds;
       return Boolean(board.isMyTurn) && (!legal || legal.includes(next.targetId));
     }
-    if (next.kind === "discard") return board.action === "discard";
+    if (next.kind === "discard") {
+      return Boolean(board.isMyTurn) && board.action === "discard";
+    }
     if (next.kind === "player") {
       return Boolean(
         board.robberVictimSelection &&
@@ -1140,6 +1245,7 @@ export class AssistantOverlay {
       const trade = board.activeTrades?.[next.offerIndex];
       return Boolean(
         trade?.incoming &&
+        trade.id === next.tradeId &&
         (!trade.myResponse || trade.myResponse === "pending"),
       );
     }
@@ -1147,13 +1253,18 @@ export class AssistantOverlay {
       const trade = board.activeTrades?.[next.offerIndex];
       return Boolean(
         trade &&
+        trade.id === next.tradeId &&
         !trade.incoming &&
         trade.acceptedPlayers?.includes(next.player),
       );
     }
     if (next.kind === "trade-cancel") {
       const trade = board.activeTrades?.[next.offerIndex];
-      return Boolean(trade && !trade.incoming);
+      return Boolean(
+        trade &&
+        trade.id === next.tradeId &&
+        !trade.incoming,
+      );
     }
     if (next.kind === "turn-control") {
       if (!board.isMyTurn) return false;
@@ -1173,10 +1284,41 @@ export class AssistantOverlay {
     return true;
   }
 
+  private boardActionCommitted(
+    next: Extract<NextClick, { kind: "board" }>,
+  ): boolean {
+    const board = this.board;
+    if (!board) return false;
+    if (next.boardAction === "road") {
+      return board.edges.some(
+        (edge) =>
+          edge.id === next.targetId &&
+          Boolean(edge.player) &&
+          (!board.myPlayer || edge.player === board.myPlayer),
+      );
+    }
+    if (next.boardAction === "robber") {
+      return board.hexes.some(
+        (hex) => hex.id === next.targetId && Boolean(hex.blocked),
+      );
+    }
+    return board.vertices.some(
+      (vertex) =>
+        vertex.id === next.targetId &&
+        vertex.building?.kind === next.boardAction &&
+        (
+          !board.myPlayer ||
+          vertex.building.player === board.myPlayer
+        ),
+    );
+  }
+
   private workflowContinuationStillLegal(next: NextClick): boolean {
     const board = this.board;
     if (!board || board.gameOver) return false;
-    if (next.kind === "discard") return board.action === "discard";
+    if (next.kind === "discard") {
+      return Boolean(board.isMyTurn) && board.action === "discard";
+    }
     if (next.kind === "player") {
       return Boolean(
         board.isMyTurn &&
@@ -1199,6 +1341,7 @@ export class AssistantOverlay {
       const trade = board.activeTrades?.[next.offerIndex];
       return Boolean(
         trade?.incoming &&
+        trade.id === next.tradeId &&
         (
           !trade.myResponse ||
           trade.myResponse === "pending"
@@ -1373,7 +1516,7 @@ export class AssistantOverlay {
     const runtime = this.runtimePresentation();
     return `<button class="model-strip engine-strip ${runtime.state}" data-action="view" data-view="settings" aria-label="Open decision engine settings. Runtime: ${escapeHtml(runtime.label.toLowerCase())}">
       <span>Decision engine <small>${escapeHtml(runtime.label.toUpperCase())}</small></span>
-      <b>${escapeHtml(ENGINE_LABELS[this.settings.engine])}</b>
+      <b>${STRATEGIST_LABEL}</b>
     </button>`;
   }
 
@@ -1401,9 +1544,9 @@ export class AssistantOverlay {
     if (this.decisionPendingKey) {
       if (this.decisionSlowKey === this.decisionPendingKey) {
         return {
-          label: "WASM · 5s+",
+          label: "WASM · 1s+",
           detail:
-            `${ENGINE_LABELS[this.settings.engine]} is still evaluating this position. The selected engine remains active; no fallback or duplicate search was started.`,
+            `${STRATEGIST_LABEL} is still evaluating this position. No fallback policy is allowed to replace it.`,
           state: "slow",
         };
       }
@@ -1485,7 +1628,7 @@ export class AssistantOverlay {
       const deepAction = this.preferredDeepAction(state, player);
       const verdicts = new Map(
         pendingIncoming
-          .map((trade) => {
+          .flatMap((trade) => {
             const searchedKind =
               deepAction?.kind === "counter-trade"
                 ? "counter"
@@ -1494,6 +1637,9 @@ export class AssistantOverlay {
                     ? "accept"
                     : "decline"
                   : undefined;
+            if (this.decisionAnalysis?.deepSearch && !searchedKind) {
+              return [];
+            }
             const verdict: TradeVerdict = searchedKind
               ? {
                   tradeId: trade.id,
@@ -1511,14 +1657,8 @@ export class AssistantOverlay {
                       : searchedKind === "counter"
                         ? "A nearby bundle produces a stronger continuation"
                         : "Accepting helps the sender more than it helps your race",
-                  detail: `${
-                    this.decisionAnalysis?.deepSearch?.algorithm === "puct"
-                      ? "PUCT"
-                      : this.decisionAnalysis?.deepSearch?.algorithm ===
-                          "alpha-beta"
-                        ? "AlphaBeta"
-                        : "MaxN"
-                  } evaluated accept, reject, and legal counteroffer continuations.`,
+                  detail:
+                    "Strategist evaluated accept, reject, and legal counteroffer continuations.",
                 }
               : evaluateTradeOffer(
                   state,
@@ -1531,7 +1671,7 @@ export class AssistantOverlay {
                     phase: report.phase,
                   },
                 );
-            return [trade.id, verdict] as const;
+            return [[trade.id, verdict] as const];
           }),
       );
       renderTradeVerdicts(activeTrades, verdicts);
@@ -1546,22 +1686,40 @@ export class AssistantOverlay {
     return JSON.stringify({
       engine: this.settings.engine,
       game: board.gameKey,
-      turn: state.currentTurn.sequence,
+      trackerTurn: state.currentTurn.sequence,
+      boardTurn: board.turn,
       player,
       action: board.action,
       hasRolled: board.hasRolled,
+      discardCount: board.discardCount,
+      robberVictimSelection: board.robberVictimSelection,
+      robberVictimPlayers: board.robberVictimPlayers,
       domesticTradeUsed: board.domesticTradeUsed,
       currentPlayer: board.currentPlayer,
+      legalVertices: [...(board.legalVertexIds ?? [])].sort(),
+      legalEdges: [...(board.legalEdgeIds ?? [])].sort(),
+      buildableSettlements: [
+        ...(board.buildableSettlementIds ?? []),
+      ].sort(),
+      buildableCities: [...(board.buildableCityIds ?? [])].sort(),
+      buildableRoads: [...(board.buildableRoadIds ?? [])].sort(),
       hand: board.ownHand,
       dev: board.ownDevelopmentCards,
       bank: board.bankVisible ? board.bank : undefined,
       trades: board.activeTrades?.map((trade) => ({
         id: trade.id,
+        creator: trade.creator,
+        executor: trade.tradeExecutor,
         incoming: trade.incoming,
+        counter: trade.counterOffer,
+        canAccept: trade.canAccept,
+        give: trade.give,
+        receive: trade.receive,
         accepted: trade.acceptedPlayers,
         pending: trade.pendingPlayers,
         rejected: trade.rejectedPlayers,
         complete: trade.responsesComplete,
+        response: trade.myResponse,
       })),
       public: board.players,
       beliefs: state.playerOrder.map((candidate) => {
@@ -1597,37 +1755,57 @@ export class AssistantOverlay {
         this.completedIncomingTradeIds,
       ).length,
     );
-    const hasOutgoingTradeProtocol = Boolean(
-      board?.activeTrades?.some((trade) => !trade.incoming),
-    );
     if (
       !state ||
       !player ||
       !board ||
-      board.gameOver ||
-      hasOutgoingTradeProtocol ||
-      (
-        !board.isMyTurn &&
-        !hasPendingIncomingTrade &&
-        this.settings.engine !== "deep-puct"
-      ) ||
-      this.settings.engine === "race-eta"
+      board.gameOver
     ) {
       this.decisionPendingKey = "";
       this.decisionSlowKey = "";
+      return;
+    }
+    if (
+      board.initialPlacement &&
+      !board.isMyTurn &&
+      !hasPendingIncomingTrade
+    ) {
+      // Setup search returns the acting player's placement. Running it during
+      // another seat's road transition both wastes the live budget and can
+      // observe Colonist's previous prompt before the new settlement anchor
+      // is public. Start the bounded draft search when our setup turn begins.
       if (
-        hasOutgoingTradeProtocol &&
-        (
-          this.decisionPendingKey ||
-          this.decisionKey ||
-          this.decisionAnalysis
-        )
+        this.decisionKey ||
+        this.decisionPendingKey ||
+        this.decisionAnalysis
       ) {
-        // An outgoing offer is a Colonist protocol wait/confirm/cancel state,
-        // not a strategic position. Invalidate any now-stale queued request so
-        // it cannot repaint the completed incoming offer when it returns.
         this.decisionAnalysis = undefined;
         this.decisionKey = "";
+        this.decisionPendingKey = "";
+        this.decisionSlowKey = "";
+        this.decisionRuntimeError = "";
+        this.decisionWorker.reset();
+      }
+      return;
+    }
+    if (
+      board.botOnlyGame &&
+      !board.isMyTurn &&
+      !hasPendingIncomingTrade
+    ) {
+      // Fast Colonist bots often complete a turn before a synchronous WASM
+      // ponder finishes. Do not let a now-stale opponent search occupy the
+      // service worker and add several seconds of queueing to our next move.
+      if (
+        this.decisionKey ||
+        this.decisionPendingKey ||
+        this.decisionAnalysis
+      ) {
+        this.decisionAnalysis = undefined;
+        this.decisionKey = "";
+        this.decisionPendingKey = "";
+        this.decisionSlowKey = "";
+        this.decisionRuntimeError = "";
         this.decisionWorker.reset();
       }
       return;
@@ -1785,7 +1963,6 @@ export class AssistantOverlay {
       state,
       player,
       this.board,
-      prepared ? this.settings.engine : "race-eta",
       prepared,
     );
   }
@@ -1961,13 +2138,20 @@ export class AssistantOverlay {
     const board = this.board;
     if (!board?.isMyTurn || board.gameOver) return undefined;
     if (
-      board.action === "robber" &&
+      this.decisionRuntimeError &&
+      isDeepDecisionEngine(this.settings.engine)
+    ) {
+      return undefined;
+    }
+    if (
+      board.action !== "none" &&
+      board.action !== "discard" &&
       this.decisionPendingKey &&
       isDeepDecisionEngine(this.settings.engine)
     ) {
-      // Robber placement is an exact mandatory family in the WASM engine.
-      // Its response is intentionally fast, so do not let the legacy spatial
-      // heuristic race and place on a different hex first.
+      // Every spatial prompt is owned by the same state-locked planner. Do not
+      // let a legacy coordinate score race settlement, road, city, or robber
+      // search while that board signature is still being evaluated.
       return undefined;
     }
     const coachPlayer = this.userPlayer(state);
@@ -1975,7 +2159,10 @@ export class AssistantOverlay {
       state && coachPlayer
         ? this.coachReport(state, coachPlayer)
         : undefined;
-    const deepAction = this.decisionAnalysis?.deepSearch?.chosen;
+    const deepAction = this.preferredDeepAction(state, coachPlayer);
+    const authoritativeDeep =
+      Boolean(this.decisionAnalysis?.deepSearch) &&
+      this.decisionAnalysis?.runtime === "background-wasm";
     const deepSpatialAction =
       deepAction?.kind === "build-road" || deepAction?.kind === "place-road"
         ? "road"
@@ -1992,14 +2179,7 @@ export class AssistantOverlay {
         ? board.action
         : undefined;
     const proactiveAction = !activeAction
-      ? deepSpatialAction ??
-        (
-          !report?.developmentTiming?.primary &&
-          report?.primary.affordableProbability === 1 &&
-          report.primary.kind !== "development"
-            ? report.primary.kind
-            : undefined
-        )
+      ? deepSpatialAction
       : undefined;
     const action = activeAction ?? proactiveAction;
     if (!action) return undefined;
@@ -2050,22 +2230,31 @@ export class AssistantOverlay {
             (candidate) => candidate.id === this.freeRoadPlan?.edgeIds[0],
           )
         : undefined;
-    let recommendation =
-      queuedFreeRoad ??
-      (deepAction?.targetId && deepSpatialAction === action
-        ? recommendations.find(
-            (candidate) => candidate.id === deepAction.targetId,
-          ) ?? recommendations[0]
-        : recommendations[0]);
-    if (action === "road" && recommendations.length) {
-      const authoritativeDeep =
-        Boolean(this.decisionAnalysis?.deepSearch?.chosen) &&
-        this.decisionAnalysis?.runtime === "background-wasm";
-      const searched = deepAction?.targetId
+    const searched =
+      deepAction?.targetId && deepSpatialAction === action
         ? recommendations.find(
             (candidate) => candidate.id === deepAction.targetId,
           )
         : undefined;
+    if (
+      authoritativeDeep &&
+      activeAction &&
+      !queuedFreeRoad &&
+      (
+        deepSpatialAction !== action ||
+        Boolean(deepAction?.targetId && !searched)
+      )
+    ) {
+      // The authoritative target no longer maps to this exact legal set.
+      // Wait for the changed signature to be replanned; never click the top
+      // heuristic coordinate as a substitute.
+      return undefined;
+    }
+    let recommendation =
+      queuedFreeRoad ??
+      searched ??
+      (authoritativeDeep ? undefined : recommendations[0]);
+    if (action === "road" && recommendations.length) {
       const continuing = !authoritativeDeep && this.roadPlan
         ? recommendations.find(
             (candidate) =>
@@ -2114,13 +2303,7 @@ export class AssistantOverlay {
         ...recommendation,
         ...(deepAction.player ? { targetPlayer: deepAction.player } : {}),
         reasons: [
-          `${
-            search.algorithm === "maxn"
-              ? "MaxN"
-              : search.algorithm === "alpha-beta"
-                ? "AlphaBeta"
-                : "PUCT"
-          } selected this after ${search.nodes.toLocaleString()} search nodes at decision depth ${search.deepestDecisionDepth}`,
+          `Strategist selected this after ${search.nodes.toLocaleString()} search nodes at decision depth ${search.deepestDecisionDepth}`,
           statistic
             ? `Its relative strategic value is ${Math.round((statistic.value[state ? state.playerOrder.indexOf(coachPlayer ?? "") : 0] ?? 0) * 100)} across the current belief set`
             : `It remained best across ${search.particles} legal hidden-card particles`,
@@ -2145,14 +2328,48 @@ export class AssistantOverlay {
     report: CoachReport | undefined,
   ): NextClick | undefined {
     const board = this.board;
-    if (!board || board.gameOver) return undefined;
-    const tradeSignature = (board.activeTrades ?? [])
-      .map(
-        (trade) =>
-          `${trade.id}:${trade.incoming ? "in" : "out"}:${trade.acceptedPlayers?.join(",") ?? ""}:${trade.pendingPlayers?.join(",") ?? ""}:${trade.rejectedPlayers?.join(",") ?? ""}`,
-      )
-      .join("|");
-    const signatureBase = `${board.gameKey ?? location.pathname}|${board.currentPlayer ?? ""}|${board.action ?? "none"}|${board.hasRolled ? "rolled" : "unrolled"}|${RESOURCE_ORDER.map((resource) => board.ownHand?.[resource] ?? 0).join(",")}|${tradeSignature}`;
+    if (
+      !board ||
+      board.gameOver ||
+      this.resetGameScope !== undefined
+    ) {
+      return undefined;
+    }
+    const signatureBase = JSON.stringify({
+      game: board.gameKey ?? location.pathname,
+      turn: board.turn,
+      currentPlayer: board.currentPlayer,
+      action: board.action ?? "none",
+      hasRolled: board.hasRolled,
+      discardCount: board.discardCount,
+      robberVictimSelection: board.robberVictimSelection,
+      robberVictimPlayers: board.robberVictimPlayers,
+      hand: RESOURCE_ORDER.map(
+        (resource) => board.ownHand?.[resource] ?? 0,
+      ),
+      legalVertices: [...(board.legalVertexIds ?? [])].sort(),
+      legalEdges: [...(board.legalEdgeIds ?? [])].sort(),
+      buildableSettlements: [
+        ...(board.buildableSettlementIds ?? []),
+      ].sort(),
+      buildableCities: [...(board.buildableCityIds ?? [])].sort(),
+      buildableRoads: [...(board.buildableRoadIds ?? [])].sort(),
+      trades: (board.activeTrades ?? []).map((trade) => ({
+        id: trade.id,
+        creator: trade.creator,
+        executor: trade.tradeExecutor,
+        incoming: trade.incoming,
+        counter: trade.counterOffer,
+        canAccept: trade.canAccept,
+        give: trade.give,
+        receive: trade.receive,
+        accepted: trade.acceptedPlayers,
+        pending: trade.pendingPlayers,
+        rejected: trade.rejectedPlayers,
+        complete: trade.responsesComplete,
+        response: trade.myResponse,
+      })),
+    });
     const discard = this.discardRecommendation(state);
     if (discard) {
       return {
@@ -2227,9 +2444,14 @@ export class AssistantOverlay {
               : undefined;
         if (
           !deepVerdict &&
-          this.decisionPendingKey &&
+          (
+            this.decisionPendingKey ||
+            this.decisionAnalysis?.deepSearch
+          ) &&
           isDeepDecisionEngine(this.settings.engine)
         ) {
+          // A missing or stale searched response is an engine-error state, not
+          // permission for the older material-gain heuristic to accept a deal.
           return undefined;
         }
         const fallbackVerdict = deepVerdict
@@ -2307,7 +2529,10 @@ export class AssistantOverlay {
         if (
           !confirmImmediately &&
           deepAction?.kind !== "confirm-trade" &&
-          this.decisionPendingKey &&
+          (
+            this.decisionPendingKey ||
+            this.decisionAnalysis?.deepSearch
+          ) &&
           isDeepDecisionEngine(this.settings.engine)
         ) {
           return undefined;
@@ -2333,6 +2558,7 @@ export class AssistantOverlay {
         return {
           kind: "trade-partner",
           offerIndex: board.activeTrades!.indexOf(trade),
+          tradeId: trade.id,
           acceptedIndex: trade.acceptedPlayers.indexOf(selected),
           player: selected,
           label: `Trade with ${selected}`,
@@ -2355,6 +2581,7 @@ export class AssistantOverlay {
         return {
           kind: "trade-cancel",
           offerIndex: board.activeTrades!.indexOf(trade),
+          tradeId: trade.id,
           label: "Cancel unanswered trade",
           signature: `${signatureBase}|cancel-trade|${trade.id}|timeout`,
           confidence: 1,
@@ -2363,6 +2590,7 @@ export class AssistantOverlay {
       return {
         kind: "trade-cancel",
         offerIndex: board.activeTrades!.indexOf(trade),
+        tradeId: trade.id,
         label: "Close rejected trade",
         signature: `${signatureBase}|cancel-trade|${trade.id}|complete`,
         confidence: 1,
@@ -2580,6 +2808,13 @@ export class AssistantOverlay {
           confidence,
         };
       }
+      // The selected action could not be mapped to a validated live control.
+      // The changed board signature must be searched again; no legacy policy
+      // is allowed to silently choose a different action.
+      return undefined;
+    }
+    if (board.isMyTurn && deep) {
+      return undefined;
     }
 
     const development = report?.developmentTiming?.primary;
@@ -2706,6 +2941,20 @@ export class AssistantOverlay {
     ) {
       return this.renderPlacementSync(this.pendingPlacement);
     }
+    if (
+      this.decisionRuntimeError &&
+      isDeepDecisionEngine(this.settings.engine)
+    ) {
+      return `<section class="decision pending-decision" aria-live="assertive">
+        <div class="decision-meta"><span>STRATEGIST PAUSED</span><span>NO FALLBACK</span></div>
+        <div class="decision-command">
+          <span class="command-art">${assistantMark()}</span>
+          <h1>Waiting for a valid engine result</h1>
+        </div>
+        <p class="why">${escapeHtml(this.decisionRuntimeError)}. No heuristic recommendation or autonomous action can replace the failed decision.</p>
+        <div class="board-confirm pending"><i></i><span>The engine will retry after the next authoritative board update</span></div>
+      </section>`;
+    }
     const discard = this.discardRecommendation(state);
     if (discard) return this.renderDiscardAdvice(discard);
     if (next?.kind === "trade") {
@@ -2719,6 +2968,21 @@ export class AssistantOverlay {
     }
     if (next?.kind === "turn-control") {
       return this.renderTurnControlAdvice(next);
+    }
+    if (
+      this.board &&
+      !this.board.isMyTurn &&
+      !unansweredIncomingTrades(
+        this.board.activeTrades,
+        this.completedIncomingTradeIds,
+      ).length &&
+      !this.decisionPendingKey
+    ) {
+      return `<section class="empty compact-empty" aria-live="polite">
+        <span class="empty-mark">${assistantMark()}</span>
+        <h1>Waiting for ${escapeHtml(this.board.currentPlayer ?? "the next player")}</h1>
+        <p>Strategist will evaluate the authoritative board when your turn or a trade response begins.</p>
+      </section>`;
     }
     if (
       !next &&
@@ -2851,7 +3115,9 @@ export class AssistantOverlay {
   private renderIncomingTradeAdvice(
     next: Extract<NextClick, { kind: "trade" }>,
   ): string {
-    const trade = this.board?.activeTrades?.[next.offerIndex];
+    const trade = this.board?.activeTrades?.find(
+      (candidate) => candidate.id === next.tradeId,
+    );
     const creator = trade?.creator ?? "this player";
     const title =
       next.verdict === "accept"
@@ -3172,6 +3438,7 @@ export class AssistantOverlay {
     if (
       !board?.myPlayer ||
       !board.ownHand ||
+      !board.isMyTurn ||
       board.action !== "discard" ||
       !board.discardCount
     ) {
@@ -3289,7 +3556,7 @@ export class AssistantOverlay {
             affordableProbability:
               resourceTotal(fallbackDeficit) === 0 ? 1 : 0,
             reasons: [
-              `${ENGINE_LABELS[this.settings.engine]} selected this action from the current legal position`,
+              `${STRATEGIST_LABEL} selected this action from the current legal position`,
               this.decisionAnalysis?.model ??
                 "It is the highest-value legal continuation now",
             ],
@@ -3402,14 +3669,6 @@ export class AssistantOverlay {
   }
 
   private renderSettings(): string {
-    const engineOptions = (
-      Object.entries(ENGINE_LABELS) as Array<[DecisionEngine, string]>
-    )
-      .map(
-        ([engine, label]) =>
-          `<option value="${engine}"${this.settings.engine === engine ? " selected" : ""}>${escapeHtml(label)}</option>`,
-      )
-      .join("");
     const version = chrome.runtime.getManifest().version;
     const runtime = this.runtimePresentation();
     return `<section class="settings-panel">
@@ -3418,10 +3677,10 @@ export class AssistantOverlay {
         <h1>How it thinks</h1>
         <p>Changes apply immediately to this game.</p>
       </header>
-      <label class="settings-field engine-field">
-        <span><b>Decision engine</b><small>MaxN is the strongest validated default. AlphaBeta is a defensive peer; PUCT remains experimental.</small></span>
-        <select data-setting="engine" aria-label="Decision engine">${engineOptions}</select>
-      </label>
+      <div class="runtime-field engine-field">
+        <span><b>Decision engine</b><small>Weighted-belief Deep MaxN handles tactics, trading, and multiplayer strategy.</small></span>
+        <strong>${STRATEGIST_LABEL}</strong>
+      </div>
       <div class="runtime-field" data-runtime="${runtime.state}">
         <span><b>Engine runtime</b><small>${escapeHtml(runtime.detail)}</small></span>
         <strong><i></i>${escapeHtml(runtime.label)}</strong>
@@ -3432,7 +3691,7 @@ export class AssistantOverlay {
         <i aria-hidden="true"></i>
       </label>
       <label class="settings-field">
-        <span><b>Autopilot</b><small>Play every high-confidence step automatically in this match.</small></span>
+        <span><b>Autopilot</b><small>Play high-confidence steps only in private or bot matches.</small></span>
         <input type="checkbox" data-setting="autonomousPrivateGames"${this.settings.autonomousPrivateGames ? " checked" : ""}>
         <i aria-hidden="true"></i>
       </label>

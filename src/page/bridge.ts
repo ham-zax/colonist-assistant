@@ -1,4 +1,9 @@
-import { openingRoadEdgeIds } from "../core/placement";
+import { resolveLocalBoardAction } from "../core/forced-action";
+import { isTerminalGameHeading } from "../core/game-over";
+import {
+  openingRoadEdgeIds,
+  type BoardAction,
+} from "../core/placement";
 
 (() => {
   const SOURCE = "colonist-assistant-public-board";
@@ -17,7 +22,7 @@ import { openingRoadEdgeIds } from "../core/placement";
     5: "grain",
     6: "ore",
   };
-  const ACTION_BY_STATE: Record<number, string> = {
+  const ACTION_BY_STATE: Record<number, BoardAction> = {
     1: "settlement",
     2: "settlement",
     3: "road",
@@ -415,7 +420,7 @@ import { openingRoadEdgeIds } from "../core/placement";
     const playerActionState =
       gameController.currentStateValidator?.getPlayerActionState?.(myColor) ??
       currentState.actionState;
-    let action = ACTION_BY_STATE[playerActionState] ?? "none";
+    let action: BoardAction = ACTION_BY_STATE[playerActionState] ?? "none";
     const actionBoxData = rootStoreState?.actionBox?.actionBoxData;
     const actionBoxEvidence = JSON.stringify({
       type: actionBoxData?.type,
@@ -484,7 +489,7 @@ import { openingRoadEdgeIds } from "../core/placement";
         actionBoxEvidence.includes("discard")
       ) ||
       visibleDiscardCount > 0;
-    if (discardPromptVisible) action = "discard";
+    action = resolveLocalBoardAction(action, discardPromptVisible);
     const initialPlacement = currentState.turnState === 0;
 
     const hexes = tileState._tiles.flatMap((tile: Record<string, any>, index: number) => {
@@ -672,6 +677,14 @@ import { openingRoadEdgeIds } from "../core/placement";
     const playOrder: number[] = Array.isArray(gameController.playOrder)
       ? gameController.playOrder
       : [];
+    const botOnlyGame =
+      playOrder.length >= 2 &&
+      playOrder
+        .filter((color) => color !== myColor)
+        .every(
+          (color) =>
+            gameController.getPlayerState?.(color)?.userState?.isBot === true,
+        );
     const myOrderIndex = playOrder.indexOf(myColor);
     const ownedSettlements = vertices.filter(
       (vertex: Record<string, any>) => vertex.building?.player === myPlayer,
@@ -1005,9 +1018,7 @@ import { openingRoadEdgeIds } from "../core/placement";
         style.visibility !== "hidden" &&
         rect.width > 0 &&
         rect.height > 0 &&
-        /victory|defeat|game over|well played/iu.test(
-          element.textContent ?? "",
-        )
+        isTerminalGameHeading(element.textContent)
       );
     });
     const winnerText = (document.body.textContent ?? "").match(
@@ -1095,6 +1106,7 @@ import { openingRoadEdgeIds } from "../core/placement";
           rootStoreState?.lobbyState?.isPrivateGame ??
           false,
       ),
+      botOnlyGame,
       ...(currentTurnPlayers[0] !== undefined
         ? {
             currentPlayer: playerName(

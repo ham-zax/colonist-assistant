@@ -33,9 +33,8 @@ import {
 } from "./development";
 import { generateTradeProposals } from "./trades";
 import {
-  analyzeDecision,
+  analyzePublicEstimate,
   type DecisionAnalysis,
-  type DecisionEngine,
 } from "./engine";
 
 export type GamePhase = "opening" | "middle" | "closing";
@@ -667,7 +666,6 @@ export const createCoachReport = (
   state: TrackerState,
   preferredPlayer?: string,
   board?: BoardSnapshot,
-  engine: DecisionEngine = "hybrid",
   preparedAnalysis?: DecisionAnalysis,
 ): CoachReport | undefined => {
   const player = resolveCoachPlayer(state, preferredPlayer);
@@ -676,7 +674,7 @@ export const createCoachReport = (
   const strategy = strategyFor(state, player, board);
   const developmentDeck = developmentDeckFor(state, board);
   const decisionAnalysis = board
-    ? preparedAnalysis ?? analyzeDecision(state, board, player, engine)
+    ? preparedAnalysis ?? analyzePublicEstimate(state, board, player)
     : undefined;
   const recommendations = buildRecommendations(
     state,

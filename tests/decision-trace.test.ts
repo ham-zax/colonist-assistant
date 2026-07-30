@@ -68,7 +68,7 @@ describe("decision trace recorder", () => {
     const recorder = new DecisionTraceRecorder();
     recorder.begin("state-17", state, board(), 100);
     const analysis: DecisionAnalysis = {
-      engine: "deep-puct",
+      engine: "deep-search",
       players: [
         {
           player: "Rival",
@@ -133,6 +133,7 @@ describe("decision trace recorder", () => {
         rollouts: 12,
         particles: 3,
         effectiveParticleCount: 2.8,
+        deadlineReached: true,
         elapsedMs: 4,
         seed: 17,
       },
@@ -155,7 +156,7 @@ describe("decision trace recorder", () => {
     expect(traces?.[0]).toMatchObject({
       stateHash: "state-17",
       turn: 17,
-      deepTimedOut: false,
+      deepTimedOut: true,
       finalActionSource: "deep",
       executedBeforeDeepResult: false,
       executionSucceeded: true,
@@ -206,5 +207,75 @@ describe("decision trace recorder", () => {
       executedBeforeDeepResult: true,
       finalActionSource: "end-turn-fallback",
     });
+  });
+
+  it("cancels pending persistence and deletes stored traces on reset", async () => {
+    vi.useFakeTimers();
+    const set = vi.fn(async (_value: Record<string, unknown>) => undefined);
+    const remove = vi.fn(async (_key: string) => undefined);
+    vi.stubGlobal("chrome", {
+      storage: {
+        local: {
+          set,
+          remove,
+          get: vi.fn(async () => ({})),
+        },
+      },
+    });
+    let state = createTrackerState();
+    state = reduceTracker(state, { type: "discover", player: "You" });
+    const recorder = new DecisionTraceRecorder();
+    recorder.begin("sensitive-state", state, {
+      ...board(),
+      playerOrder: ["You"],
+      players: { You: board().players!.You! },
+    });
+
+    await recorder.reset();
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(set).not.toHaveBeenCalled();
+    expect(remove).toHaveBeenCalledWith(
+      "colonist-assistant-decision-traces-v1",
+    );
+  });
+
+  it("serializes reset before persisting a new game's first trace", async () => {
+    vi.useFakeTimers();
+    const operations: string[] = [];
+    vi.stubGlobal("chrome", {
+      storage: {
+        local: {
+          set: vi.fn(async () => {
+            operations.push("set");
+          }),
+          remove: vi.fn(async () => {
+            operations.push("remove");
+          }),
+          get: vi.fn(async () => ({})),
+        },
+      },
+    });
+    let state = createTrackerState();
+    state = reduceTracker(state, { type: "discover", player: "You" });
+    const recorder = new DecisionTraceRecorder();
+    recorder.begin("old-game", state, {
+      ...board(),
+      gameKey: "old-game",
+      playerOrder: ["You"],
+      players: { You: board().players!.You! },
+    });
+
+    const resetting = recorder.reset();
+    recorder.begin("new-game", state, {
+      ...board(),
+      gameKey: "new-game",
+      playerOrder: ["You"],
+      players: { You: board().players!.You! },
+    });
+    await vi.advanceTimersByTimeAsync(250);
+    await resetting;
+
+    expect(operations).toEqual(["remove", "set"]);
   });
 });

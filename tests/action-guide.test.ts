@@ -82,6 +82,81 @@ describe("action guide autopilot", () => {
     expect(clicked).toHaveBeenCalledOnce();
   });
 
+  it("retries the same ordinary control after its first validation fails", () => {
+    const roll = document.createElement("button");
+    roll.textContent = "Roll dice";
+    const clicked = vi.fn();
+    roll.addEventListener("click", clicked);
+    document.body.append(roll);
+    let valid = false;
+    const action = {
+      kind: "turn-control" as const,
+      control: "roll" as const,
+      label: "Roll dice",
+      signature: "replanned-roll",
+      confidence: 1,
+    };
+
+    renderActionGuide(action, {
+      highlight: true,
+      autonomous: true,
+      validate: () => valid,
+    });
+    expect(clicked).not.toHaveBeenCalled();
+
+    valid = true;
+    renderActionGuide(action, {
+      highlight: true,
+      autonomous: true,
+      validate: () => valid,
+    });
+
+    expect(clicked).toHaveBeenCalledOnce();
+  });
+
+  it("retries the same board action after its first dispatch fails", () => {
+    let failDispatch = true;
+    const messages: unknown[] = [];
+    vi.spyOn(window, "postMessage").mockImplementation((message) => {
+      if (failDispatch) throw new Error("fixture dispatch failure");
+      messages.push(message);
+    });
+    const action = {
+      kind: "board" as const,
+      boardAction: "road" as const,
+      targetId: "e:1,0,0",
+      point: { x: 240, y: 180 },
+      label: "Place road here",
+      signature: "replanned-board-road",
+      confidence: 1,
+    };
+
+    expect(() =>
+      renderActionGuide(action, {
+        highlight: true,
+        autonomous: true,
+        validate: () => true,
+      }),
+    ).not.toThrow();
+    expect(messages).toHaveLength(0);
+
+    failDispatch = false;
+    renderActionGuide(action, {
+      highlight: true,
+      autonomous: true,
+      validate: () => true,
+    });
+
+    expect(messages).toContainEqual({
+      source: "colonist-assistant-content",
+      type: "execute-board-action",
+      action: "road",
+      targetId: "e:1,0,0",
+      signature: "replanned-board-road",
+      attempt: 1,
+    });
+  });
+
   it("clicks an active dice face and never mistakes pass-turn for roll", async () => {
     const rollGroup = document.createElement("div");
     rollGroup.id = "roll-dice-button";
@@ -404,6 +479,68 @@ describe("action guide autopilot", () => {
     expect(resourceClicks).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps highlighting manual Year of Plenty picks in Colonist's action-box container", async () => {
+    const card = document.createElement("div");
+    card.className = "cardContainer-fixture";
+    card.innerHTML = '<img src="card_yearofplenty.fixture.svg">';
+    const resourceClicks = vi.fn();
+    card.addEventListener("click", () => {
+      const actionBox = document.createElement("div");
+      actionBox.className = "actionBoxContainer-fixture";
+      const confirmCard = document.createElement("button");
+      confirmCard.className = "confirmButton-fixture";
+      confirmCard.addEventListener("click", () => {
+        const grain = document.createElement("div");
+        grain.dataset.cardEnum = "4";
+        grain.innerHTML = '<img src="card_grain.svg">';
+        grain.addEventListener("click", resourceClicks);
+        const confirmResources = document.createElement("button");
+        confirmResources.className = "confirmButton-fixture";
+        actionBox.replaceChildren(grain, confirmResources);
+      });
+      actionBox.append(confirmCard);
+      document.body.append(actionBox);
+    });
+    document.body.append(card);
+
+    renderActionGuide(
+      {
+        kind: "development",
+        card: "year-of-plenty",
+        label: "Play year of plenty",
+        signature: "manual-yop",
+        confidence: 1,
+        followupResources: ["grain", "grain"],
+      },
+      { highlight: true, autonomous: false },
+    );
+
+    card.click();
+    await vi.advanceTimersByTimeAsync(260);
+    const confirmCard = document.querySelector<HTMLElement>(
+      "[class*='confirmButton-']",
+    )!;
+    expect(
+      document.querySelector("#colonist-assistant-action-guide span")
+        ?.textContent,
+    ).toContain("Confirm year of plenty");
+
+    confirmCard.click();
+    await vi.advanceTimersByTimeAsync(320);
+    expect(
+      document.querySelector("#colonist-assistant-action-guide span")
+        ?.textContent,
+    ).toContain("Choose grain 1/2");
+
+    document.querySelector<HTMLElement>("[data-card-enum='4']")!.click();
+    await vi.advanceTimersByTimeAsync(260);
+    expect(resourceClicks).toHaveBeenCalledOnce();
+    expect(
+      document.querySelector("#colonist-assistant-action-guide span")
+        ?.textContent,
+    ).toContain("Choose grain 2/2");
+  });
+
   it("sends a validated board command for canvas autopilot", async () => {
     const messages: unknown[] = [];
     window.addEventListener("message", (event) => {
@@ -479,6 +616,81 @@ describe("action guide autopilot", () => {
     });
   });
 
+  it("cancels pending board retries when autopilot is disabled", async () => {
+    const attempts: number[] = [];
+    window.addEventListener("message", (event) => {
+      if (
+        event.data?.source === "colonist-assistant-content" &&
+        event.data?.type === "execute-board-action"
+      ) {
+        attempts.push(event.data.attempt);
+      }
+    });
+    const action = {
+      kind: "board" as const,
+      boardAction: "road" as const,
+      targetId: "e:1,-1,0",
+      point: { x: 360, y: 260 },
+      label: "Build this road",
+      signature: "disable-autopilot-board-road",
+      confidence: 1,
+    };
+    const options = {
+      highlight: true,
+      autonomous: true,
+      validate: () => true,
+      validateBoardContinuation: () => true,
+    };
+
+    renderActionGuide(action, options);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(attempts).toEqual([1]);
+
+    renderActionGuide(action, {
+      ...options,
+      autonomous: false,
+    });
+    await vi.advanceTimersByTimeAsync(7_200);
+
+    expect(attempts).toEqual([1]);
+  });
+
+  it("cancels pending board retries when a game transition destroys the guide", async () => {
+    const attempts: number[] = [];
+    window.addEventListener("message", (event) => {
+      if (
+        event.data?.source === "colonist-assistant-content" &&
+        event.data?.type === "execute-board-action"
+      ) {
+        attempts.push(event.data.attempt);
+      }
+    });
+    renderActionGuide(
+      {
+        kind: "board",
+        boardAction: "settlement",
+        targetId: "v:reused-base-map-target",
+        point: { x: 360, y: 260 },
+        label: "Build this settlement",
+        signature: "old-game-settlement",
+        confidence: 1,
+      },
+      {
+        highlight: true,
+        autonomous: true,
+        validate: () => true,
+        validateBoardContinuation: () => true,
+      },
+    );
+    await vi.advanceTimersByTimeAsync(50);
+    expect(attempts).toEqual([1]);
+
+    destroyActionGuide();
+    await vi.advanceTimersByTimeAsync(7_200);
+
+    expect(attempts).toEqual([1]);
+  });
+
   it("keeps a legal board placement retry alive while the overlay renders pending", async () => {
     const attempts: number[] = [];
     const executions = vi.fn();
@@ -525,7 +737,9 @@ describe("action guide autopilot", () => {
 
   it("stops board retries once the placement phase advances", async () => {
     const attempts: number[] = [];
+    const executions = vi.fn();
     let placementStillLegal = true;
+    let expectedPlacementObserved = false;
     window.addEventListener("message", (event) => {
       if (
         event.data?.source === "colonist-assistant-content" &&
@@ -549,8 +763,12 @@ describe("action guide autopilot", () => {
       autonomous: true,
       validate: () => placementStillLegal,
       validateBoardContinuation: () => placementStillLegal,
+      validateBoardCommit: () => expectedPlacementObserved,
+      onExecution: executions,
     });
+    expect(executions).not.toHaveBeenCalled();
     placementStillLegal = false;
+    expectedPlacementObserved = true;
     renderActionGuide(undefined, {
       highlight: true,
       autonomous: true,
@@ -558,6 +776,45 @@ describe("action guide autopilot", () => {
     await vi.advanceTimersByTimeAsync(3_000);
 
     expect(attempts).toEqual([1]);
+    expect(executions).toHaveBeenCalledWith({
+      succeeded: true,
+      signature: "committed-board-city",
+    });
+  });
+
+  it("reports a changed board without the requested placement as failure", () => {
+    const executions = vi.fn();
+    let placementStillLegal = true;
+    const action = {
+      kind: "board" as const,
+      boardAction: "road" as const,
+      targetId: "e:1,1,0",
+      point: { x: 400, y: 300 },
+      label: "Build this road",
+      signature: "uncommitted-board-road",
+      confidence: 1,
+    };
+
+    renderActionGuide(action, {
+      highlight: true,
+      autonomous: true,
+      validate: () => placementStillLegal,
+      validateBoardContinuation: () => placementStillLegal,
+      validateBoardCommit: () => false,
+      onExecution: executions,
+    });
+    placementStillLegal = false;
+    renderActionGuide(undefined, {
+      highlight: true,
+      autonomous: true,
+    });
+
+    expect(executions).toHaveBeenCalledWith({
+      succeeded: false,
+      signature: "uncommitted-board-road",
+      reason:
+        "Board state changed without the expected placement commit",
+    });
   });
 
   it("cancels a stale robber-victim follow-up after the board phase advances", async () => {
@@ -637,6 +894,7 @@ describe("action guide autopilot", () => {
         {
           kind: "trade",
           offerIndex: 0,
+          tradeId: `offer-${verdict}`,
           verdict,
           label: `${verdict} trade`,
           signature: `trade-${verdict}`,
@@ -681,6 +939,7 @@ describe("action guide autopilot", () => {
       {
         kind: "trade-partner",
         offerIndex: 0,
+        tradeId: "outgoing-offer",
         acceptedIndex: 0,
         player: "Ajax",
         label: "Trade with Ajax",
@@ -715,6 +974,7 @@ describe("action guide autopilot", () => {
       {
         kind: "trade-cancel",
         offerIndex: 0,
+        tradeId: "outgoing-offer",
         label: "Cancel unanswered trade",
         signature: "cancel-outgoing",
         confidence: 1,
@@ -792,6 +1052,7 @@ describe("action guide autopilot", () => {
       {
         kind: "trade",
         offerIndex: 0,
+        tradeId: "incoming-counter",
         verdict: "counter",
         counterGive: give,
         counterReceive: receive,

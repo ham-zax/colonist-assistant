@@ -17,7 +17,7 @@ afterEach(() => {
 });
 
 describe("assistant settings", () => {
-  it("migrates existing installs to the validated Deep MaxN default once", async () => {
+  it("migrates every retired engine to Strategist", async () => {
     const set = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("chrome", {
       storage: {
@@ -41,12 +41,12 @@ describe("assistant settings", () => {
         [SETTINGS_KEY]: expect.objectContaining({
           engine: "deep-search",
         }),
-        colonistAssistantMaxNDefaultV1: true,
+        colonistAssistantStrategistDefaultV1: true,
       }),
     );
   });
 
-  it("preserves an explicit engine choice after the default migration", async () => {
+  it("does not preserve a retired engine after migration", async () => {
     const set = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("chrome", {
       storage: {
@@ -56,7 +56,7 @@ describe("assistant settings", () => {
               ...DEFAULT_SETTINGS,
               engine: "deep-puct",
             },
-            colonistAssistantMaxNDefaultV1: true,
+            colonistAssistantStrategistDefaultV1: true,
           }),
           set,
         },
@@ -65,11 +65,17 @@ describe("assistant settings", () => {
 
     const settings = await readSettings();
 
-    expect(settings.engine).toBe("deep-puct");
-    expect(set).not.toHaveBeenCalled();
+    expect(settings.engine).toBe("deep-search");
+    expect(set).toHaveBeenCalledWith(
+      expect.objectContaining({
+        [SETTINGS_KEY]: expect.objectContaining({
+          engine: "deep-search",
+        }),
+      }),
+    );
   });
 
-  it("preserves the selectable AlphaBeta engine", async () => {
+  it("sanitizes invalid stored engine strings", async () => {
     const set = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("chrome", {
       storage: {
@@ -77,9 +83,9 @@ describe("assistant settings", () => {
           get: vi.fn().mockResolvedValue({
             [SETTINGS_KEY]: {
               ...DEFAULT_SETTINGS,
-              engine: "deep-alpha-beta",
+              engine: "corrupt-engine",
             },
-            colonistAssistantMaxNDefaultV1: true,
+            colonistAssistantStrategistDefaultV1: true,
           }),
           set,
         },
@@ -88,8 +94,8 @@ describe("assistant settings", () => {
 
     const settings = await readSettings();
 
-    expect(settings.engine).toBe("deep-alpha-beta");
-    expect(set).not.toHaveBeenCalled();
+    expect(settings.engine).toBe("deep-search");
+    expect(set).toHaveBeenCalled();
   });
 
   it("silences storage cleanup after the extension context is replaced", async () => {

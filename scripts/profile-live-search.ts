@@ -68,10 +68,34 @@ const traces = strategic
   .slice(0, maximum);
 
 const configurations = [
-  { name: "live-depth4-4k", depth: 4, maxNodes: 4_000, tacticalNodes: 900 },
-  { name: "live-depth4-3k", depth: 4, maxNodes: 3_000, tacticalNodes: 760 },
-  { name: "live-depth4-2400", depth: 4, maxNodes: 2_400, tacticalNodes: 640 },
-  { name: "live-depth4-2k", depth: 4, maxNodes: 2_000, tacticalNodes: 560 },
+  {
+    name: "live-depth4-4k-600ms",
+    depth: 4,
+    maxNodes: 4_000,
+    tacticalNodes: 900,
+    timeBudgetMs: 600,
+  },
+  {
+    name: "live-depth4-4k-450ms",
+    depth: 4,
+    maxNodes: 4_000,
+    tacticalNodes: 900,
+    timeBudgetMs: 450,
+  },
+  {
+    name: "live-depth4-4k-350ms",
+    depth: 4,
+    maxNodes: 4_000,
+    tacticalNodes: 900,
+    timeBudgetMs: 350,
+  },
+  {
+    name: "live-depth4-4k-300ms",
+    depth: 4,
+    maxNodes: 4_000,
+    tacticalNodes: 900,
+    timeBudgetMs: 300,
+  },
 ] as const;
 
 const results = new Map<
@@ -104,6 +128,7 @@ for (const trace of traces) {
       depth: configuration.depth,
       maxNodes: configuration.maxNodes,
       tacticalNodes: configuration.tacticalNodes,
+      timeBudgetMs: configuration.timeBudgetMs,
     };
     const startedAt = performance.now();
     const response = analyzeWasm(request) as WasmSearchResponse;

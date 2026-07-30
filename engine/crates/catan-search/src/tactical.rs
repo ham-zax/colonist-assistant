@@ -136,9 +136,11 @@ pub fn solve_current_turn(
     }
 }
 
-/// A tactical line is called proven only when the same observable first action
+/// A tactical line is called proven only when the same executable continuation
 /// wins in every materially weighted hidden world and no per-world proof
-/// exhausted its bound. A win in particle zero is never promoted to proof.
+/// exhausted its bound. Requiring the complete line is deliberately
+/// conservative: agreement on only the first click can still hide
+/// incompatible later choices (strategy fusion).
 pub fn solve_belief_current_turn(
     particles: &[(&GameState, f32)],
     maximum_depth: u8,
@@ -158,7 +160,7 @@ pub fn solve_belief_current_turn(
         .map(|(_, weight)| weight.max(0.0))
         .sum::<f32>()
         .max(f32::EPSILON);
-    let nodes_per_particle = (maximum_nodes / particles.len() as u32).max(32);
+    let nodes_per_particle = (maximum_nodes / particles.len() as u32).max(1);
     let mut expected = 0.0;
     let mut lower_bound = 0.0;
     let mut nodes = 0;
@@ -183,7 +185,9 @@ pub fn solve_belief_current_turn(
                 common_first = first;
                 common_line = result.principal_line;
             }
-            Some(expected_action) if first.as_ref() == Some(expected_action) => {}
+            Some(expected_action)
+                if first.as_ref() == Some(expected_action)
+                    && result.principal_line == common_line => {}
             Some(_) => proven = false,
         }
     }
@@ -196,5 +200,33 @@ pub fn solve_belief_current_turn(
         principal_line: common_line,
         nodes,
         proven,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use colonist_catan_core::{GameState, Phase};
+
+    use super::solve_belief_current_turn;
+
+    #[test]
+    fn belief_tactical_solver_respects_one_global_node_budget() {
+        let mut worlds = Vec::new();
+        for hidden_lumber in 0..32_u8 {
+            let mut state = GameState::standard(301 + u64::from(hidden_lumber), 4);
+            state.phase = Phase::Main;
+            state.current_player = 0;
+            state.players[0].resources = [2, 2, 2, 2, 3];
+            state.players[1].resources = [hidden_lumber % 4, 0, 0, 0, 0];
+            worlds.push(state);
+        }
+        let particles = worlds
+            .iter()
+            .map(|state| (state, 1.0 / worlds.len() as f32))
+            .collect::<Vec<_>>();
+
+        let result = solve_belief_current_turn(&particles, 8, 64);
+
+        assert!(result.nodes <= 64);
     }
 }

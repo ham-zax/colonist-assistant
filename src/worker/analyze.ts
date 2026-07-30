@@ -1,6 +1,5 @@
 import {
-  analyzeDecision,
-  isDeepDecisionEngine,
+  analyzePublicEstimate,
   type DecisionAnalysis,
   type DecisionEngine,
 } from "../core/engine";
@@ -18,30 +17,17 @@ export interface DecisionRequest {
 export const analyzeDecisionRequest = async (
   request: DecisionRequest,
 ): Promise<DecisionAnalysis> => {
-  const deep = isDeepDecisionEngine(request.engine);
-  // Deep engines use this only for auxiliary ETA/win-race presentation.
-  // Running the full JavaScript rollout policy here delayed WASM by roughly
-  // two seconds and did not influence the selected deep-search action.
-  const baseline = analyzeDecision(
+  // This inexpensive public estimate stabilizes the presentation while the
+  // Strategist's own root values arrive. It is never an action authority.
+  const baseline = analyzePublicEstimate(
     request.state,
     request.board,
     request.rootPlayer,
-    deep ? "race-eta" : request.engine,
   );
-  if (!deep) {
-    return baseline;
-  }
-  const algorithm =
-    request.engine === "deep-puct"
-      ? "puct"
-      : request.engine === "deep-alpha-beta"
-        ? "alpha-beta"
-        : "maxn";
   return analyzeDeepSearch(
     request.state,
     request.board,
     request.rootPlayer,
     baseline,
-    algorithm,
   );
 };

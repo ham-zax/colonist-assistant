@@ -13,8 +13,9 @@ use colonist_catan_search::{
     ActionStats, BeliefParticle, ENGINE_REVISION, ExactActionFamily, ExactActionValue,
     ExactDecisionResult, Mcts, SearchConfig, SearchMode, SearchReport, SearchStatistics,
     TacticalResult, evaluate, exact_family_for_action, learned_model_version,
-    learned_trade_model_version, safer_end_turn_alternative, search_weighted_belief_maxn_bounded,
-    search_weighted_belief_paranoid_bounded, solve_belief_current_turn, solve_exact_belief,
+    learned_trade_model_version, safer_end_turn_alternative,
+    search_weighted_belief_maxn_bounded_timed, search_weighted_belief_paranoid_bounded_timed,
+    solve_belief_current_turn, solve_exact_belief,
 };
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -77,6 +78,7 @@ struct WorldInput {
     weight: Option<f32>,
     hands: Vec<[u8; 5]>,
     development: Option<Vec<[u8; 5]>>,
+    bought_development: Option<Vec<[u8; 5]>>,
     development_deck: Option<[u8; 5]>,
     bank: Option<[u8; 5]>,
 }
@@ -131,11 +133,51 @@ struct Request {
     rollout_actions: Option<u16>,
     tactical_depth: Option<u8>,
     tactical_nodes: Option<u32>,
+    time_budget_ms: Option<u32>,
     seed: Option<u64>,
     mode: Option<String>,
     depth: Option<u8>,
     branch_cap: Option<usize>,
     ponder: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestedMode {
+    Maxn,
+    Puct,
+    Uct,
+    AlphaBeta,
+}
+
+impl RequestedMode {
+    fn parse(value: Option<&str>) -> Result<Self, JsValue> {
+        match value.unwrap_or("maxn") {
+            "maxn" | "deep" => Ok(Self::Maxn),
+            // Retain old request names only as an explicit experimental PUCT
+            // compatibility path. The packaged live worker never selects it.
+            "puct" | "strategist" => Ok(Self::Puct),
+            "uct" => Ok(Self::Uct),
+            "alpha-beta" => Ok(Self::AlphaBeta),
+            other => Err(JsValue::from_str(&format!("unknown search mode: {other}"))),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Maxn => "maxn",
+            Self::Puct => "puct",
+            Self::Uct => "uct",
+            Self::AlphaBeta => "alpha-beta",
+        }
+    }
+
+    fn mcts_mode(self) -> SearchMode {
+        if self == Self::Uct {
+            SearchMode::Uct
+        } else {
+            SearchMode::Puct
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -187,6 +229,7 @@ struct Response {
     rollouts: u32,
     particles: usize,
     effective_particle_count: f32,
+    deadline_reached: bool,
 }
 
 fn resource(value: i8) -> Result<Option<Resource>, JsValue> {
@@ -327,6 +370,7 @@ fn game_states(input: StateInput) -> Result<Vec<BeliefParticle>, JsValue> {
             weight: Some(1.0),
             hands: players.iter().map(|state| state.resources).collect(),
             development: None,
+            bought_development: None,
             development_deck: None,
             bank: None,
         }]
@@ -340,6 +384,10 @@ fn game_states(input: StateInput) -> Result<Vec<BeliefParticle>, JsValue> {
                 .development
                 .as_ref()
                 .is_some_and(|cards| cards.len() != players.len())
+            || world
+                .bought_development
+                .as_ref()
+                .is_some_and(|cards| cards.len() != players.len())
         {
             return Err(JsValue::from_str("world player count mismatch"));
         }
@@ -350,6 +398,11 @@ fn game_states(input: StateInput) -> Result<Vec<BeliefParticle>, JsValue> {
         if let Some(development) = world.development {
             for (state, cards) in world_players.iter_mut().zip(development) {
                 state.development = cards;
+            }
+        }
+        if let Some(bought_development) = world.bought_development {
+            for (state, cards) in world_players.iter_mut().zip(bought_development) {
+                state.bought_development = cards;
             }
         }
         result.push(BeliefParticle {
@@ -546,6 +599,7 @@ fn response(report: SearchReport, particles: usize, algorithm: &'static str) -> 
         rollouts: report.statistics.rollouts,
         particles,
         effective_particle_count: report.statistics.effective_particle_count,
+        deadline_reached: report.statistics.deadline_reached,
     }
 }
 
@@ -668,6 +722,7 @@ fn exact_mandatory_report(particles: &[BeliefParticle]) -> Option<SearchReport> 
             deepest_decision_depth: 0,
             rollouts: 0,
             effective_particle_count: effective_particle_count(particles),
+            deadline_reached: false,
         },
     })
 }
@@ -676,14 +731,9 @@ fn exact_mandatory_report(particles: &[BeliefParticle]) -> Option<SearchReport> 
 pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
     let request: Request = serde_wasm_bindgen::from_value(request)
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let mode = RequestedMode::parse(request.mode.as_deref())?;
     let particles = game_states(request.state)?;
-    let mode = request.mode.as_deref().unwrap_or("maxn");
-    let algorithm = match mode {
-        "uct" => "uct",
-        "puct" => "puct",
-        "alpha-beta" => "alpha-beta",
-        _ => "maxn",
-    };
+    let algorithm = mode.label();
     if !request.ponder.unwrap_or(false)
         && let Some(report) = exact_mandatory_report(&particles)
     {
@@ -696,22 +746,35 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
         rollout_actions: request.rollout_actions.unwrap_or(260).clamp(24, 800),
         tactical_depth: request.tactical_depth.unwrap_or(18).clamp(4, 32),
         tactical_nodes: request.tactical_nodes.unwrap_or(12_000).clamp(100, 100_000),
+        time_budget_ms: request.time_budget_ms.unwrap_or(2_800).clamp(250, 10_000),
         seed: request.seed.unwrap_or(0x0043_4154_414e),
-        mode: if mode == "uct" {
-            SearchMode::Uct
-        } else {
-            SearchMode::Puct
-        },
+        mode: mode.mcts_mode(),
         ..SearchConfig::default()
     };
-    let report = if mode == "maxn" || mode == "alpha-beta" {
+    let opening = matches!(
+        particles[0].state.phase,
+        Phase::SetupSettlement | Phase::SetupRoad { .. }
+    );
+    let report = if matches!(mode, RequestedMode::Maxn | RequestedMode::AlphaBeta) || opening {
         let depth = request.depth.unwrap_or(3).clamp(1, 6);
         let branch_cap = request.branch_cap.unwrap_or(12).clamp(2, 32);
         let maximum_nodes = request.max_nodes.unwrap_or(48_000).clamp(1_000, 250_000) as u32;
-        let depth_report = if mode == "alpha-beta" {
-            search_weighted_belief_paranoid_bounded(&particles, depth, branch_cap, maximum_nodes)
+        let depth_report = if mode == RequestedMode::AlphaBeta {
+            search_weighted_belief_paranoid_bounded_timed(
+                &particles,
+                depth,
+                branch_cap,
+                maximum_nodes,
+                config.time_budget_ms,
+            )
         } else {
-            search_weighted_belief_maxn_bounded(&particles, depth, branch_cap, maximum_nodes)
+            search_weighted_belief_maxn_bounded_timed(
+                &particles,
+                depth,
+                branch_cap,
+                maximum_nodes,
+                config.time_budget_ms,
+            )
         }
         .map_err(|error| JsValue::from_str(&format!("{error:?}")))?;
         let tactical_particles = particles
@@ -773,6 +836,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
                 deepest_decision_depth: depth_report.depth as u16,
                 rollouts: 0,
                 effective_particle_count: effective_particle_count(&particles),
+                deadline_reached: depth_report.deadline_reached,
             },
         }
     } else {

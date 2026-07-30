@@ -2,6 +2,13 @@ import { parseLogSnapshot } from "../core/parser";
 import { createTrackerState, reduceTracker, replayEvents } from "../core/tracker";
 import type { StoredEvent, TrackerState } from "../core/types";
 import {
+  ACTIVE_SESSION_STORAGE_KEY,
+  clearCurrentGameStorage,
+  LATEST_SUMMARY_STORAGE_KEY,
+  pruneHistoricalSessionStorage,
+  sessionStorageKey,
+} from "../core/local-data";
+import {
   detectLanguage,
   findMessageElements,
   hashString,
@@ -33,11 +40,16 @@ export interface SessionSummary {
   updatedAt: number;
 }
 
-const ACTIVE_SESSION_KEY = "colonistAssistantActiveSession";
-const LATEST_SUMMARY_KEY = "colonistAssistantLatestSummary";
-const SESSION_PREFIX = "colonistAssistantSession:";
 const MAX_STORED_EVENTS = 1600;
 const MAX_SEEN_IDS = 2600;
+
+let storageOperations: Promise<void> = Promise.resolve();
+
+const enqueueStorage = (operation: () => Promise<void>): Promise<void> => {
+  const next = storageOperations.then(operation, operation);
+  storageOperations = next.catch(() => undefined);
+  return next;
+};
 
 const pageIdentity = (): string => `${location.origin}${location.pathname}${location.search}`;
 
@@ -95,12 +107,20 @@ export class GameSession {
 
   private readonly root: HTMLElement;
   private readonly seenIds = new Set<string>();
-  private readonly seenElements = new WeakSet<Element>();
+  /**
+   * Colonist virtualizes its log and can reuse one DOM element for several
+   * messages. Remember the last logical identity observed on each element
+   * rather than treating the element itself as permanently consumed.
+   */
+  private readonly seenElements = new WeakMap<Element, string>();
   private observer?: MutationObserver;
   private saveTimer?: number;
   private syntheticSequence = 0;
   private disposed = false;
   private myPlayer?: string;
+  private storageGeneration = 0;
+  private storageSuppressed = false;
+  private pruneSessionHistory = true;
 
   constructor(
     root: HTMLElement,
@@ -122,6 +142,9 @@ export class GameSession {
       attributes: true,
       attributeFilter: ["data-index", "src", "style"],
     });
+    // A restored session can have no unseen log entries. Still claim it as the
+    // current game and prune records retained by older extension versions.
+    this.queueSave();
     this.onUpdate(this);
   }
 
@@ -133,6 +156,9 @@ export class GameSession {
   }
 
   reset(rescan = true): void {
+    this.storageGeneration += 1;
+    this.storageSuppressed = false;
+    this.pruneSessionHistory = true;
     this.state = createTrackerState();
     this.events = [];
     this.partialHistory = false;
@@ -142,6 +168,31 @@ export class GameSession {
     if (rescan) this.scan(true);
     this.queueSave();
     this.onUpdate(this);
+  }
+
+  /**
+   * User-requested deletion differs from a game-key rollover: preserve only
+   * in-memory message identities so the still-mounted historical log cannot
+   * be immediately re-ingested, suppress persistence until a genuinely new
+   * message arrives, and remove all persisted game records.
+   */
+  async clearStoredData(): Promise<void> {
+    if (this.saveTimer) {
+      window.clearTimeout(this.saveTimer);
+      this.saveTimer = undefined;
+    }
+    this.storageGeneration += 1;
+    this.storageSuppressed = true;
+    this.pruneSessionHistory = true;
+    this.state = createTrackerState();
+    this.events = [];
+    this.partialHistory = false;
+    this.unmatchedCount = 0;
+    try {
+      await enqueueStorage(clearCurrentGameStorage);
+    } catch (error) {
+      if (!isExtensionContextInvalidatedError(error)) throw error;
+    }
   }
 
   setGameKey(gameKey: string): void {
@@ -197,7 +248,7 @@ export class GameSession {
         occurrence.set(base, ordinal + 1);
         id = `message:${base}:${ordinal}`;
       }
-      if (!force && this.seenElements.has(element)) continue;
+      if (!force && this.seenElements.get(element) === id) continue;
       candidates.push({ element, id, index: snapshot.index ?? this.syntheticSequence++ });
     }
 
@@ -210,6 +261,8 @@ export class GameSession {
       currentFirstIds.length &&
       currentFirstIds.every((id) => !this.seenIds.has(id))
     ) {
+      this.storageGeneration += 1;
+      this.pruneSessionHistory = true;
       this.state = createTrackerState();
       this.events = [];
       this.partialHistory = false;
@@ -228,7 +281,7 @@ export class GameSession {
 
     let changed = false;
     for (const candidate of candidates) {
-      this.seenElements.add(candidate.element);
+      this.seenElements.set(candidate.element, candidate.id);
       if (this.seenIds.has(candidate.id)) continue;
       this.seenIds.add(candidate.id);
       const snapshot = snapshotMessage(candidate.element, language);
@@ -252,6 +305,10 @@ export class GameSession {
     }
 
     if (changed) {
+      if (this.storageSuppressed) {
+        this.storageSuppressed = false;
+        this.storageGeneration += 1;
+      }
       if (this.events.length > MAX_STORED_EVENTS) {
         this.events = this.events.slice(-MAX_STORED_EVENTS);
         this.state = replayEvents(this.events);
@@ -263,7 +320,7 @@ export class GameSession {
   }
 
   private async restore(): Promise<void> {
-    const key = `${SESSION_PREFIX}${this.id}`;
+    const key = sessionStorageKey(this.id);
     let result: Record<string, unknown>;
     try {
       result = await chrome.storage.local.get(key);
@@ -284,12 +341,15 @@ export class GameSession {
   }
 
   private queueSave(): void {
+    if (this.storageSuppressed) return;
     if (this.saveTimer) window.clearTimeout(this.saveTimer);
     this.saveTimer = window.setTimeout(() => void this.save(), 180);
   }
 
   private async save(): Promise<void> {
-    if (!this.id) return;
+    if (!this.id || this.storageSuppressed) return;
+    const generation = this.storageGeneration;
+    const shouldPruneHistory = this.pruneSessionHistory;
     const now = Date.now();
     const record: StoredSession = {
       schema: 3,
@@ -313,10 +373,24 @@ export class GameSession {
       updatedAt: now,
     };
     try {
-      await chrome.storage.local.set({
-        [`${SESSION_PREFIX}${this.id}`]: record,
-        [ACTIVE_SESSION_KEY]: this.id,
-        [LATEST_SUMMARY_KEY]: summary,
+      await enqueueStorage(async () => {
+        if (
+          this.storageSuppressed ||
+          generation !== this.storageGeneration
+        ) {
+          return;
+        }
+        await chrome.storage.local.set({
+          [sessionStorageKey(this.id)]: record,
+          [ACTIVE_SESSION_STORAGE_KEY]: this.id,
+          [LATEST_SUMMARY_STORAGE_KEY]: summary,
+        });
+        if (shouldPruneHistory) {
+          await pruneHistoricalSessionStorage(this.id);
+          if (generation === this.storageGeneration) {
+            this.pruneSessionHistory = false;
+          }
+        }
       });
     } catch (error) {
       if (!isExtensionContextInvalidatedError(error)) throw error;
@@ -324,4 +398,4 @@ export class GameSession {
   }
 }
 
-export const latestSummaryKey = LATEST_SUMMARY_KEY;
+export const latestSummaryKey = LATEST_SUMMARY_STORAGE_KEY;

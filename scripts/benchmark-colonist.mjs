@@ -13,6 +13,9 @@ const DIST = resolve(ROOT, "dist");
 const SETTINGS_KEY = "colonistAssistantSettings";
 const DECISION_TRACES_KEY = "colonist-assistant-decision-traces-v1";
 const DIFFICULTIES = new Set(["Easy", "Medium", "Hard"]);
+const BENCHMARK_ENGINE = "deep-search";
+const BENCHMARK_ENGINE_LABEL = "Strategist";
+const CDP_COMMAND_TIMEOUT_MS = 15_000;
 
 const delay = (milliseconds) =>
   new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
@@ -30,6 +33,7 @@ function readOptions(argv) {
       process.env.CHROMIUM_PATH ?? "/run/current-system/sw/bin/chromium",
     output: resolve(ROOT, "benchmark-results", "colonist-latest"),
     keepProfiles: false,
+    storeScreenshots: undefined,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const name = argv[index];
@@ -79,6 +83,10 @@ function readOptions(argv) {
       case "--keep-profiles":
         options.keepProfiles = true;
         break;
+      case "--store-screenshots":
+        options.storeScreenshots = resolve(value);
+        index += 1;
+        break;
       case "--help":
       case "-h":
         console.log(`Usage: npm run benchmark:colonist -- [options]
@@ -94,10 +102,11 @@ function readOptions(argv) {
   --headless                      Experimental; fresh profiles may be rejected
   --headed                        Show browser windows (default)
   --keep-profiles                 Preserve temporary profiles for debugging
+  --store-screenshots DIR         Capture four current 1280x800 store images
 
 Every run selects and verifies the normal four-player Base map. Weekly maps are
-never accepted. Startup failures and timeouts are reported separately and are
-not counted as losses.
+never accepted. It enables Strategist (\`deep-search\`) and autopilot. Startup
+failures and timeouts are reported separately and are not counted as losses.
 `);
         process.exit(0);
       default:
@@ -116,10 +125,18 @@ not counted as losses.
     !Number.isFinite(options.timeoutMinutes) ||
     options.timeoutMinutes <= 0 ||
     !Number.isFinite(options.stallSeconds) ||
-    options.stallSeconds < 15
+    options.stallSeconds < 15 ||
+    (
+      options.storeScreenshots &&
+      (
+        options.games !== 1 ||
+        options.jobs !== 1 ||
+        options.difficulties.length !== 1
+      )
+    )
   ) {
     throw new Error(
-      "Invalid difficulty, game count, job count, timeout, or stall threshold.",
+      "Invalid difficulty, game count, job count, timeout, stall threshold, or screenshot capture cardinality.",
     );
   }
   return options;
@@ -130,10 +147,37 @@ class CdpClient {
     this.nextId = 1;
     this.pending = new Map();
     this.events = [];
+    this.closedError = undefined;
     this.socket = new WebSocket(url);
     this.ready = new Promise((resolvePromise, reject) => {
-      this.socket.once("open", resolvePromise);
-      this.socket.once("error", reject);
+      let settled = false;
+      const resolveReady = () => {
+        if (settled) return;
+        settled = true;
+        resolvePromise();
+      };
+      const rejectReady = (error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
+      this.socket.once("open", resolveReady);
+      this.socket.on("error", (cause) => {
+        const error =
+          cause instanceof Error
+            ? cause
+            : new Error(`CDP WebSocket error: ${String(cause)}`);
+        this.failPending(error);
+        rejectReady(error);
+      });
+      this.socket.on("close", (code, rawReason) => {
+        const reason = rawReason?.toString().trim();
+        const error = new Error(
+          `CDP WebSocket closed (${code})${reason ? `: ${reason}` : ""}`,
+        );
+        this.failPending(error);
+        rejectReady(error);
+      });
     });
     this.socket.on("message", (payload) => {
       const message = JSON.parse(payload.toString());
@@ -141,6 +185,7 @@ class CdpClient {
         const pending = this.pending.get(message.id);
         if (!pending) return;
         this.pending.delete(message.id);
+        clearTimeout(pending.timer);
         if (message.error) pending.reject(new Error(message.error.message));
         else pending.resolve(message.result);
         return;
@@ -150,17 +195,92 @@ class CdpClient {
     });
   }
 
-  async command(method, params = {}) {
-    await this.ready;
+  failPending(error) {
+    this.closedError ??= error;
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pending.clear();
+  }
+
+  rejectCommand(id, error) {
+    const pending = this.pending.get(id);
+    if (!pending) return;
+    this.pending.delete(id);
+    clearTimeout(pending.timer);
+    pending.reject(error);
+  }
+
+  async command(method, params = {}, timeoutMs = CDP_COMMAND_TIMEOUT_MS) {
+    const startedAt = Date.now();
+    let readyTimer;
+    try {
+      await Promise.race([
+        this.ready,
+        new Promise((_, reject) => {
+          readyTimer = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `CDP command ${method} timed out waiting for a connection after ${timeoutMs} ms`,
+                ),
+              ),
+            timeoutMs,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(readyTimer);
+    }
+    if (this.closedError) throw this.closedError;
+    if (this.socket.readyState !== WebSocket.OPEN) {
+      throw new Error(`CDP command ${method} cannot use a closed connection`);
+    }
     const id = this.nextId++;
+    const remainingMs = Math.max(1, timeoutMs - (Date.now() - startedAt));
     return new Promise((resolvePromise, reject) => {
-      this.pending.set(id, { resolve: resolvePromise, reject });
-      this.socket.send(JSON.stringify({ id, method, params }));
+      const timer = setTimeout(() => {
+        this.rejectCommand(
+          id,
+          new Error(`CDP command ${method} timed out after ${timeoutMs} ms`),
+        );
+      }, remainingMs);
+      this.pending.set(id, {
+        resolve: resolvePromise,
+        reject,
+        timer,
+        method,
+      });
+      try {
+        this.socket.send(
+          JSON.stringify({ id, method, params }),
+          (error) => {
+            if (!error) return;
+            this.rejectCommand(
+              id,
+              new Error(`CDP command ${method} could not be sent: ${error.message}`),
+            );
+          },
+        );
+      } catch (cause) {
+        this.rejectCommand(
+          id,
+          cause instanceof Error
+            ? cause
+            : new Error(`CDP command ${method} could not be sent`),
+        );
+      }
     });
   }
 
   close() {
-    this.socket.close();
+    this.failPending(new Error("CDP connection closed by benchmark"));
+    try {
+      this.socket.close();
+    } catch {
+      this.socket.terminate();
+    }
   }
 }
 
@@ -286,12 +406,14 @@ function scrapeExpression() {
   return `(() => {
     const text = document.body?.innerText ?? "";
     const rankMatch = text.match(/You are\\s+(1st|2nd|3rd|4th)!/i);
-    let rank = rankMatch
-      ? ({ "1st": 1, "2nd": 2, "3rd": 3, "4th": 4 })[rankMatch[1].toLowerCase()]
-      : undefined;
+    let rank;
     const endgameHeading = [...document.querySelectorAll("[class*=heading]")]
       .map((node) => node.textContent?.trim())
-      .find((value) => /Victory|Defeat|Game Over|Well Played/i.test(value ?? ""));
+      .find((value) =>
+        /^(?:Victory|Defeat|Game Over|Well Played|You Won|You Lost)[!.]*$/i.test(
+          value ?? "",
+        )
+      );
     const overviewScores = [...document.querySelectorAll("[class^=row-]")]
       .map((row) => {
         const name = row.querySelector("[class^=name-]")?.textContent?.trim();
@@ -323,8 +445,27 @@ function scrapeExpression() {
     if (!rank && /Victory/i.test(endgameHeading ?? "")) rank = 1;
     const benchmark = window.__caBenchmark ?? { clicks: [], totalClicks: 0 };
     const assistantRoot = document.querySelector("#colonist-assistant-root");
+    const assistantMount =
+      assistantRoot?.shadowRoot?.querySelector("#mount");
     const assistantText =
-      assistantRoot?.shadowRoot?.textContent?.replace(/\\s+/g, " ").trim() ?? "";
+      assistantMount?.innerText?.replace(/\\s+/g, " ").trim() ?? "";
+    const winnerText =
+      text.match(/[^\\n]{0,80}won the game[^\\n]{0,80}/i)?.[0];
+    const terminal = Boolean(
+      endgameHeading ||
+      winnerText ||
+      /(?:YOU WON|GAME COMPLETE)/i.test(assistantText)
+    );
+    if (terminal && rankMatch) {
+      rank =
+        ({ "1st": 1, "2nd": 2, "3rd": 3, "4th": 4 })[
+          rankMatch[1].toLowerCase()
+        ];
+    }
+    if (!rank && terminal && winnerText && myName) {
+      const winner = winnerText.match(/^\\s*(.*?)\\s+won the game/i)?.[1]?.trim();
+      if (winner === myName) rank = 1;
+    }
     const actionGuide = Boolean(
       document.querySelector("#colonist-assistant-action-guide"),
     );
@@ -340,7 +481,9 @@ function scrapeExpression() {
       gameCanvas: Boolean(document.querySelector("#game-canvas")),
       assistant: Boolean(document.querySelector("#colonist-assistant-root")),
       assistantRuntime:
-        /LOCAL FALLBACK/i.test(assistantText)
+        /WASM ERROR|RELOAD TAB/i.test(assistantText)
+          ? "error"
+          : /LOCAL FALLBACK/i.test(assistantText)
           ? "fallback"
           : /BACKGROUND WASM|WASM SEARCHING/i.test(assistantText)
             ? "wasm"
@@ -350,12 +493,13 @@ function scrapeExpression() {
       assistantText: assistantText.slice(0, 900),
       actionGuide,
       actionable: actionGuide || ownTurn || pendingProtocol,
+      terminal,
       rank,
       endgameHeading,
       finalScores,
       myName,
       gameTime: text.match(/Time:\\s*([^\\n-]+)\\s*-\\s*Turns:\\s*(\\d+)/i)?.slice(1),
-      winnerText: text.match(/[^\\n]{0,80}won the game[^\\n]{0,80}/i)?.[0],
+      winnerText,
       clicks: benchmark.totalClicks ?? benchmark.clicks?.length ?? 0,
       lastClick: benchmark.clicks?.at(-1),
       textTail: text.slice(-3000),
@@ -367,8 +511,136 @@ async function saveScreenshot(client, path) {
   const screenshot = await client.command("Page.captureScreenshot", {
     format: "png",
     captureBeyondViewport: false,
+    fromSurface: true,
   });
   await writeFile(path, Buffer.from(screenshot.data, "base64"));
+}
+
+async function setAutopilot(worker, enabled) {
+  return evaluate(
+    worker,
+    `(async () => {
+      const key = ${JSON.stringify(SETTINGS_KEY)};
+      const stored = await chrome.storage.sync.get(key);
+      const settings = {
+        ...(stored[key] ?? {}),
+        autonomousPrivateGames: ${JSON.stringify(enabled)}
+      };
+      await chrome.storage.sync.set({ [key]: settings });
+      return settings.autonomousPrivateGames;
+    })()`,
+  );
+}
+
+async function selectOverlayView(page, view) {
+  const selected = await evaluate(
+    page,
+    `(() => {
+      const host = document.querySelector("#colonist-assistant-root");
+      const shadow = host?.shadowRoot;
+      if (!shadow) return false;
+      const requested = ${JSON.stringify(view)};
+      const active = shadow.querySelector("[data-action='view'][aria-pressed='true']");
+      if (requested === "advice") {
+        active?.click();
+      } else {
+        const button = shadow.querySelector(
+          \`[data-action="view"][data-view="\${requested}"]\`
+        );
+        if (!button) return false;
+        if (button.getAttribute("aria-pressed") !== "true") button.click();
+      }
+      return true;
+    })()`,
+  );
+  if (!selected) {
+    throw new Error(`Could not select the ${view} overlay view for capture.`);
+  }
+  await delay(220);
+}
+
+async function captureOverlayView(page, directory, filename, view) {
+  await selectOverlayView(page, view);
+  const path = resolve(directory, filename);
+  await saveScreenshot(page, path);
+  return path;
+}
+
+async function installStoreScreenshotWatcher(page) {
+  await evaluate(
+    page,
+    `(() => {
+      window.__caStoreCapture && clearInterval(window.__caStoreCapture.timer);
+      const capture = {
+        seen: { discard: false },
+        pausedFor: undefined,
+        timer: undefined
+      };
+      const pauseAutopilot = (kind, shadow) => {
+        const settingsButton = shadow.querySelector(
+          '[data-action="view"][data-view="settings"]'
+        );
+        if (!settingsButton) return;
+        if (settingsButton.getAttribute("aria-pressed") !== "true") {
+          settingsButton.click();
+        }
+        setTimeout(() => {
+          const currentHost = document.querySelector("#colonist-assistant-root");
+          const currentShadow = currentHost?.shadowRoot;
+          const checkbox = currentShadow?.querySelector(
+            'input[data-setting="autonomousPrivateGames"]'
+          );
+          if (checkbox?.checked) checkbox.click();
+          const activeSettings = currentShadow?.querySelector(
+            '[data-action="view"][data-view="settings"][aria-pressed="true"]'
+          );
+          activeSettings?.click();
+          capture.pausedFor = kind;
+        }, 0);
+      };
+      capture.timer = setInterval(() => {
+        if (capture.pausedFor) return;
+        const host = document.querySelector("#colonist-assistant-root");
+        const shadow = host?.shadowRoot;
+        const text = shadow?.querySelector("#mount")?.innerText ?? "";
+        const kind =
+          !capture.seen.discard && /Discard these\\s+\\d+/i.test(text)
+            ? "discard"
+            : undefined;
+        if (kind) pauseAutopilot(kind, shadow);
+      }, 25);
+      window.__caStoreCapture = capture;
+      return true;
+    })()`,
+  );
+}
+
+async function readStoreScreenshotSignal(page) {
+  return evaluate(
+    page,
+    `(() => {
+      const capture = window.__caStoreCapture;
+      return capture
+        ? {
+            pausedFor: capture.pausedFor,
+            discard: capture.seen.discard
+          }
+        : undefined;
+    })()`,
+  );
+}
+
+async function resolveStoreScreenshotSignal(page, kind) {
+  await evaluate(
+    page,
+    `(() => {
+      const capture = window.__caStoreCapture;
+      if (!capture) return false;
+      capture.seen[${JSON.stringify(kind)}] = true;
+      capture.pausedFor = undefined;
+      return true;
+    })()`,
+  );
 }
 
 function remoteValue(argument) {
@@ -623,6 +895,12 @@ async function runGame(task, options) {
   let lastState;
   let artifact;
   const archivedTraces = new Map();
+  const storeScreenshots = {
+    settings: false,
+    cards: false,
+    advice: false,
+    discard: false,
+  };
   try {
     let targets = await waitForTargets(port);
     const pageTarget = targets.find((target) => target.type === "page");
@@ -647,6 +925,14 @@ async function runGame(task, options) {
       page.command("Runtime.enable"),
       worker.command("Runtime.enable"),
     ]);
+    if (options.storeScreenshots) {
+      await page.command("Emulation.setDeviceMetricsOverride", {
+        width: 1280,
+        height: 800,
+        deviceScaleFactor: 1,
+        mobile: false,
+      });
+    }
 
     phase = "configure-extension";
     const extensionId = new URL(workerTarget.url).hostname;
@@ -666,16 +952,21 @@ async function runGame(task, options) {
         const settings = {
           ...(stored[key] ?? {}),
           enabled: true,
-          engine: "deep-search",
+          engine: ${JSON.stringify(BENCHMARK_ENGINE)},
           highlightNextAction: true,
-          autonomousPrivateGames: true
+          autonomousPrivateGames: ${JSON.stringify(!options.storeScreenshots)}
         };
         await chrome.storage.sync.set({ [key]: settings });
         return settings;
       })()`,
     );
-    if (!settings?.autonomousPrivateGames || settings.engine !== "deep-search") {
-      throw new Error("Autopilot settings did not persist.");
+    if (
+      settings?.autonomousPrivateGames !== !options.storeScreenshots ||
+      settings.engine !== BENCHMARK_ENGINE
+    ) {
+      throw new Error(
+        `${BENCHMARK_ENGINE_LABEL} and autopilot settings did not persist.`,
+      );
     }
     await evaluate(
       worker,
@@ -883,6 +1174,20 @@ async function runGame(task, options) {
         `Packaged WASM did not become authoritative: ${lastState?.assistantText ?? "no runtime text"}`,
       );
     }
+    if (options.storeScreenshots) {
+      await mkdir(options.storeScreenshots, { recursive: true });
+      await captureOverlayView(
+        page,
+        options.storeScreenshots,
+        "decision-engine-settings.png",
+        "settings",
+      );
+      storeScreenshots.settings = true;
+      await selectOverlayView(page, "advice");
+      await installStoreScreenshotWatcher(page);
+      await setAutopilot(worker, true);
+      await delay(250);
+    }
 
     phase = "play-game";
     await evaluate(
@@ -901,6 +1206,57 @@ async function runGame(task, options) {
     let lastTraceArchiveAt = 0;
     while (Date.now() < deadline) {
       lastState = await evaluate(page, scrapeExpression());
+      if (options.storeScreenshots) {
+        const signal = await readStoreScreenshotSignal(page);
+        if (
+          signal?.pausedFor === "discard" &&
+          !storeScreenshots.discard
+        ) {
+          await delay(120);
+          await captureOverlayView(
+            page,
+            options.storeScreenshots,
+            "discard-card-advice.png",
+            "advice",
+          );
+          storeScreenshots.discard = true;
+          await resolveStoreScreenshotSignal(page, "discard");
+          await setAutopilot(worker, true);
+          await delay(200);
+        }
+        if (
+          !storeScreenshots.cards &&
+          lastState.clicks >= 18 &&
+          !signal?.pausedFor &&
+          /YOUR NEXT MOVE|INCOMING TRADE|SEVEN ROLLED|START YOUR TURN|TURN COMPLETE|ROBBER|BUILD|PLACE|BUY/i.test(
+            lastState.assistantText,
+          )
+        ) {
+          await setAutopilot(worker, false);
+          await delay(180);
+          await captureOverlayView(
+            page,
+            options.storeScreenshots,
+            "card-tracking-and-win-estimates.png",
+            "cards",
+          );
+          storeScreenshots.cards = true;
+          await captureOverlayView(
+            page,
+            options.storeScreenshots,
+            "live-strategy-advice.png",
+            "advice",
+          );
+          storeScreenshots.advice = true;
+          await setAutopilot(worker, true);
+          await delay(200);
+        }
+      }
+      if (lastState.assistantRuntime === "error") {
+        throw new Error(
+          `Strategist entered an engine-error state: ${lastState.assistantText}`,
+        );
+      }
       if (Date.now() - lastTraceArchiveAt >= 8_000) {
         try {
           mergeDecisionTraces(
@@ -922,7 +1278,7 @@ async function runGame(task, options) {
       if (!lastState.actionable) {
         lastProgressAt = Date.now();
       }
-      if (lastState.rank) {
+      if (lastState.terminal && lastState.rank) {
         await delay(300);
         const diagnostics = await collectDiagnostics(
           page,
@@ -945,6 +1301,9 @@ async function runGame(task, options) {
           winnerText: lastState.winnerText,
           finalScores: lastState.finalScores,
           gameTime: lastState.gameTime,
+          ...(options.storeScreenshots
+            ? { storeScreenshots }
+            : {}),
           ...diagnostics,
         };
       }
@@ -1030,7 +1389,7 @@ Generated: ${report.generatedAt}
 
 Each completed game ran in an isolated Chromium profile against three
 Colonist.io bots. The harness verified the exact \`Base\` map before starting,
-enabled Deep MaxN and autopilot through extension storage, and waited for
+enabled Strategist (\`deep-search\`) and autopilot through extension storage, and waited for
 Colonist's final rank. Infrastructure failures and timeouts are excluded from
 the win-rate denominator and listed in the JSON report.
 
@@ -1133,6 +1492,8 @@ const report = {
     headless: !options.headed,
     exactMap: "Base",
     players: 4,
+    engine: BENCHMARK_ENGINE,
+    engineLabel: BENCHMARK_ENGINE_LABEL,
   },
   requestedGames: tasks.length,
   completedGames: completed.length,

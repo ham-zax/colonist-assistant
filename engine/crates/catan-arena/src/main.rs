@@ -10,8 +10,9 @@ use colonist_catan_core::{Action, GameState, NodeKind, Phase, SplitMix64};
 use colonist_catan_search::{
     BeliefParticle, Mcts, SearchConfig, SearchMode, SearchReport, action_prior,
     choose_rollout_action, encode_action, encode_heterogeneous_graph, evaluate,
-    pool_heterogeneous_graph, search_maxn_bounded, search_paranoid_bounded, strategic_utility,
-    trade_acceptance_features,
+    pool_heterogeneous_graph, search_maxn_bounded, search_paranoid_bounded,
+    search_weighted_belief_maxn_bounded, search_weighted_belief_paranoid_bounded,
+    strategic_utility, trade_acceptance_features,
 };
 use serde::Serialize;
 
@@ -30,10 +31,10 @@ impl Engine {
         match value {
             "random" => Some(Self::Random),
             "weighted" => Some(Self::Weighted),
-            "maxn" => Some(Self::MaxN),
+            "maxn" | "deep" => Some(Self::MaxN),
             "alphabeta" | "alpha-beta" => Some(Self::AlphaBeta),
             "uct" => Some(Self::Uct),
-            "puct" | "deep" => Some(Self::Puct),
+            "puct" | "strategist" => Some(Self::Puct),
             _ => None,
         }
     }
@@ -47,6 +48,10 @@ impl Engine {
             Self::Uct => "uct",
             Self::Puct => "puct",
         }
+    }
+
+    fn uses_search_information(self) -> bool {
+        matches!(self, Self::MaxN | Self::AlphaBeta | Self::Uct | Self::Puct)
     }
 }
 
@@ -65,6 +70,7 @@ struct Config {
     threads: usize,
     quiet: bool,
     json: bool,
+    checkpoint_output: Option<String>,
     expert_output: Option<String>,
     trade_output: Option<String>,
     expert_stride: u32,
@@ -83,7 +89,7 @@ impl Default for Config {
             iterations: 300,
             rollout_actions: 180,
             max_turns: 600,
-            candidate: Engine::Puct,
+            candidate: Engine::MaxN,
             baseline: Engine::Weighted,
             lineup: None,
             validate: false,
@@ -93,6 +99,7 @@ impl Default for Config {
                 .min(4),
             quiet: false,
             json: false,
+            checkpoint_output: None,
             expert_output: None,
             trade_output: None,
             expert_stride: 1,
@@ -119,6 +126,7 @@ fn parse_config() -> Config {
                 config.rollout_actions = value.and_then(|v| v.parse().ok()).unwrap_or(180)
             }
             "--max-turns" => config.max_turns = value.and_then(|v| v.parse().ok()).unwrap_or(600),
+            "--checkpoint-output" => config.checkpoint_output = value.map(str::to_string),
             "--expert-output" => config.expert_output = value.map(str::to_string),
             "--trade-output" => config.trade_output = value.map(str::to_string),
             "--expert-stride" => {
@@ -138,7 +146,7 @@ fn parse_config() -> Config {
             }
             "--threads" => config.threads = value.and_then(|v| v.parse().ok()).unwrap_or(1).max(1),
             "--candidate" => {
-                config.candidate = value.and_then(Engine::parse).unwrap_or(Engine::Puct)
+                config.candidate = value.and_then(Engine::parse).unwrap_or(Engine::MaxN)
             }
             "--baseline" => {
                 config.baseline = value.and_then(Engine::parse).unwrap_or(Engine::Weighted)
@@ -184,10 +192,15 @@ fn parse_config() -> Config {
                      [--lineup puct,puct,maxn,maxn] \\
                      [--iterations N] [--rollout-actions N] [--max-turns N] \\
                      [--belief-particles N] [--perfect-information] \\
+                     [--checkpoint-output progress.jsonl] \\
                      [--expert-output samples.jsonl] [--trade-output trades.jsonl] \\
                      [--expert-stride N] [--expert-iterations N] \\
                      [--expert-rollout-actions N] \\
-                     [--threads N] [--validate] [--quiet] [--json]"
+                     [--threads N] [--validate] [--quiet] [--json]\n\
+                     maxn (also deep) is the validated default; puct is experimental.\n\
+                     strategist remains a compatibility alias for puct.\n\
+                     Search engines use identical weighted beliefs unless --perfect-information\n\
+                     explicitly enables oracle access to hidden state."
                 );
                 std::process::exit(0);
             }
@@ -214,6 +227,10 @@ fn parse_config() -> Config {
         eprintln!("--lineup must contain exactly --players engines");
         std::process::exit(2);
     }
+    if config.lineup.is_none() && config.candidate == config.baseline {
+        eprintln!("--candidate and --baseline must be different engines");
+        std::process::exit(2);
+    }
     config
 }
 
@@ -234,12 +251,7 @@ fn belief_particles(
     count: usize,
     seed: u64,
 ) -> Vec<BeliefParticle> {
-    if count <= 1 {
-        return vec![BeliefParticle {
-            state: state.clone(),
-            weight: 1.0,
-        }];
-    }
+    debug_assert!(count > 0);
     let opponents = (0..state.board.num_players)
         .filter(|player| *player != observer)
         .collect::<Vec<_>>();
@@ -351,6 +363,27 @@ fn belief_particles(
         .collect()
 }
 
+fn search_belief_particles(state: &GameState, config: &Config) -> Option<Vec<BeliefParticle>> {
+    if config.perfect_information_search {
+        None
+    } else {
+        Some(belief_particles(
+            state,
+            state.actor(),
+            config.belief_particles,
+            state.observation_hash(state.actor()) ^ config.seed,
+        ))
+    }
+}
+
+fn information_mode(config: &Config) -> &'static str {
+    if config.perfect_information_search {
+        "perfect-information"
+    } else {
+        "weighted-belief"
+    }
+}
+
 fn choose_action(
     engine: Engine,
     state: &GameState,
@@ -359,23 +392,63 @@ fn choose_action(
     persistent_searches: &mut [Option<Mcts>],
 ) -> EngineChoice {
     let actions = state.legal_actions();
+    let search_particles = engine
+        .uses_search_information()
+        .then(|| search_belief_particles(state, config))
+        .flatten();
+    let depth_nodes = (config.iterations * 160).clamp(4_000, 80_000);
+    if engine == Engine::Puct
+        && matches!(
+            state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        )
+    {
+        // Keep experimental PUCT setup comparable with the packaged engine:
+        // use the snake-order opening horizon rather than low-visit PUCT.
+        let opening_nodes = (config.iterations * 100).clamp(10_000, 30_000);
+        let chosen = match search_particles.as_deref() {
+            Some(particles) => {
+                search_weighted_belief_maxn_bounded(
+                    particles,
+                    config.players.clamp(2, 4),
+                    16,
+                    opening_nodes,
+                )
+                .expect("arena belief particles share one public observation")
+                .chosen
+            }
+            None => {
+                search_maxn_bounded(state, config.players.clamp(2, 4), 16, opening_nodes).chosen
+            }
+        };
+        return EngineChoice {
+            action: chosen.unwrap_or_else(|| actions[0].clone()),
+            search: None,
+        };
+    }
     let action = match engine {
         Engine::Random => actions[rng.range(actions.len())].clone(),
         Engine::Weighted => choose_rollout_action(state, &actions, rng),
-        Engine::MaxN => {
-            search_maxn_bounded(state, 3, 12, (config.iterations * 160).clamp(4_000, 80_000))
+        Engine::MaxN => match search_particles.as_deref() {
+            Some(particles) => search_weighted_belief_maxn_bounded(particles, 3, 12, depth_nodes)
+                .expect("arena belief particles share one public observation")
                 .chosen
-                .unwrap_or_else(|| actions[0].clone())
-        }
-        Engine::AlphaBeta => search_paranoid_bounded(
-            state,
-            state.actor(),
-            3,
-            12,
-            (config.iterations * 160).clamp(4_000, 80_000),
-        )
-        .chosen
-        .unwrap_or_else(|| actions[0].clone()),
+                .unwrap_or_else(|| actions[0].clone()),
+            None => search_maxn_bounded(state, 3, 12, depth_nodes)
+                .chosen
+                .unwrap_or_else(|| actions[0].clone()),
+        },
+        Engine::AlphaBeta => match search_particles.as_deref() {
+            Some(particles) => {
+                search_weighted_belief_paranoid_bounded(particles, 3, 12, depth_nodes)
+                    .expect("arena belief particles share one public observation")
+                    .chosen
+                    .unwrap_or_else(|| actions[0].clone())
+            }
+            None => search_paranoid_bounded(state, state.actor(), 3, 12, depth_nodes)
+                .chosen
+                .unwrap_or_else(|| actions[0].clone()),
+        },
         Engine::Uct | Engine::Puct => {
             let actor = state.actor() as usize;
             let search = persistent_searches[actor]
@@ -383,10 +456,10 @@ fn choose_action(
             let report = run_mcts_search(
                 state,
                 rng.next_u64(),
-                config,
                 search,
                 config.iterations,
                 config.rollout_actions,
+                search_particles.as_deref(),
                 if engine == Engine::Uct {
                     SearchMode::Uct
                 } else {
@@ -409,10 +482,10 @@ fn choose_action(
 fn run_mcts_search(
     state: &GameState,
     seed: u64,
-    config: &Config,
     search: &mut Mcts,
     iterations: u32,
     rollout_actions: u16,
+    belief_particles: Option<&[BeliefParticle]>,
     mode: SearchMode,
 ) -> SearchReport {
     let search_config = SearchConfig {
@@ -426,18 +499,12 @@ fn run_mcts_search(
         ..SearchConfig::default()
     };
     search.reconfigure(search_config);
-    if config.perfect_information_search {
-        search.search(state)
-    } else {
-        let particles = belief_particles(
-            state,
-            state.actor(),
-            config.belief_particles,
-            state.observation_hash(state.actor()) ^ config.seed,
-        );
+    if let Some(particles) = belief_particles {
         search
-            .search_weighted_belief(&particles)
+            .search_weighted_belief(particles)
             .expect("arena belief particles share one public observation")
+    } else {
+        search.search(state)
     }
 }
 
@@ -553,6 +620,202 @@ struct CandidateMetrics {
     calibration_count: u64,
 }
 
+#[derive(Default)]
+struct CheckpointEngineMetrics {
+    wins: u32,
+    seats: u32,
+    points: u64,
+    ranks: f64,
+}
+
+struct PartialArenaMetrics {
+    completed_games: u32,
+    cutoffs: u32,
+    block_completions: Vec<u8>,
+    engines: [CheckpointEngineMetrics; 6],
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CheckpointEngineStanding {
+    engine: &'static str,
+    wins: u32,
+    win_share: f64,
+    seat_samples: u32,
+    seat_share: f64,
+    mean_rank: f64,
+    mean_victory_points: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CheckpointGame {
+    block: u32,
+    rotation: u8,
+    engines: Vec<&'static str>,
+    winner: u8,
+    winner_engine: &'static str,
+    points: Vec<u8>,
+    ranks: Vec<f32>,
+    turns: u16,
+    actions: u32,
+    cutoff: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArenaCheckpoint {
+    schema_version: u8,
+    kind: &'static str,
+    simulator: &'static str,
+    complete: bool,
+    completed_games: u32,
+    terminal_games: u32,
+    scheduled_games: u32,
+    completion_share: f64,
+    completed_matched_blocks: u32,
+    players: u8,
+    blocks: u32,
+    candidate: &'static str,
+    baseline: &'static str,
+    lineup: Option<Vec<&'static str>>,
+    seed: u64,
+    iterations: u32,
+    rollout_actions: u16,
+    max_turns: u16,
+    belief_particles: usize,
+    information_mode: &'static str,
+    perfect_information_search: bool,
+    validate: bool,
+    cutoffs: u32,
+    elapsed_ms: u128,
+    engine_standings: Vec<CheckpointEngineStanding>,
+    last_game: CheckpointGame,
+}
+
+impl PartialArenaMetrics {
+    fn new(blocks: u32) -> Self {
+        Self {
+            completed_games: 0,
+            cutoffs: 0,
+            block_completions: vec![0; blocks as usize],
+            engines: std::array::from_fn(|_| CheckpointEngineMetrics::default()),
+        }
+    }
+
+    fn record(&mut self, result: &ArenaResult) {
+        self.completed_games += 1;
+        self.cutoffs += u32::from(result.game.cutoff);
+        self.block_completions[result.block as usize] += 1;
+
+        let winner_engine = result.engines[result.game.winner as usize];
+        if !result.game.cutoff {
+            self.engines[winner_engine as usize].wins += 1;
+        }
+        for (player, engine) in result.engines.iter().enumerate() {
+            let metrics = &mut self.engines[*engine as usize];
+            metrics.seats += 1;
+            metrics.points += result.game.points[player] as u64;
+            metrics.ranks += result.game.ranks[player] as f64;
+        }
+    }
+
+    fn snapshot(
+        &self,
+        result: &ArenaResult,
+        config: &Config,
+        scheduled_games: u32,
+        elapsed: Duration,
+    ) -> ArenaCheckpoint {
+        let games = self.completed_games.saturating_sub(self.cutoffs).max(1) as f64;
+        let total_seats = (self.completed_games * u32::from(config.players)).max(1) as f64;
+        let engine_standings = [
+            Engine::Random,
+            Engine::Weighted,
+            Engine::MaxN,
+            Engine::AlphaBeta,
+            Engine::Uct,
+            Engine::Puct,
+        ]
+        .into_iter()
+        .map(|engine| {
+            let metrics = &self.engines[engine as usize];
+            let seats = metrics.seats.max(1) as f64;
+            CheckpointEngineStanding {
+                engine: engine.as_str(),
+                wins: metrics.wins,
+                win_share: metrics.wins as f64 / games,
+                seat_samples: metrics.seats,
+                seat_share: metrics.seats as f64 / total_seats,
+                mean_rank: metrics.ranks / seats,
+                mean_victory_points: metrics.points as f64 / seats,
+            }
+        })
+        .collect();
+        let winner_engine = result.engines[result.game.winner as usize];
+        ArenaCheckpoint {
+            schema_version: 1,
+            kind: "colonist-native-arena-checkpoint",
+            simulator: "colonist-native",
+            complete: self.completed_games == scheduled_games,
+            completed_games: self.completed_games,
+            terminal_games: self.completed_games.saturating_sub(self.cutoffs),
+            scheduled_games,
+            completion_share: self.completed_games as f64 / scheduled_games.max(1) as f64,
+            completed_matched_blocks: self
+                .block_completions
+                .iter()
+                .filter(|games| **games == config.players)
+                .count() as u32,
+            players: config.players,
+            blocks: config.blocks,
+            candidate: config.candidate.as_str(),
+            baseline: config.baseline.as_str(),
+            lineup: config.lineup.as_ref().map(|lineup| {
+                lineup
+                    .iter()
+                    .map(|engine| engine.as_str())
+                    .collect::<Vec<_>>()
+            }),
+            seed: config.seed,
+            iterations: config.iterations,
+            rollout_actions: config.rollout_actions,
+            max_turns: config.max_turns,
+            belief_particles: config.belief_particles,
+            information_mode: information_mode(config),
+            perfect_information_search: config.perfect_information_search,
+            validate: config.validate,
+            cutoffs: self.cutoffs,
+            elapsed_ms: elapsed.as_millis(),
+            engine_standings,
+            last_game: CheckpointGame {
+                block: result.block,
+                rotation: result.seat,
+                engines: result
+                    .engines
+                    .iter()
+                    .map(|engine| engine.as_str())
+                    .collect(),
+                winner: result.game.winner,
+                winner_engine: winner_engine.as_str(),
+                points: result.game.points[..config.players as usize].to_vec(),
+                ranks: result.game.ranks[..config.players as usize].to_vec(),
+                turns: result.game.turns,
+                actions: result.game.actions,
+                cutoff: result.game.cutoff,
+            },
+        }
+    }
+}
+
+fn write_checkpoint<W: Write>(writer: &mut W, checkpoint: &ArenaCheckpoint) {
+    serde_json::to_writer(&mut *writer, checkpoint).expect("arena checkpoint must serialize");
+    writer
+        .write_all(b"\n")
+        .expect("arena checkpoint must be writable");
+    writer.flush().expect("arena checkpoint must flush");
+}
+
 fn compact_engine_metrics(metrics: &[CandidateMetrics; 6]) -> String {
     [
         Engine::Random,
@@ -632,15 +895,16 @@ fn play_game(board_seed: u64, chance_seed: u64, engines: &[Engine], config: &Con
             let should_record_expert = config.expert_output.is_some()
                 && metrics.decision_count[actor] % config.expert_stride == 0;
             let teacher_report = if should_record_expert && config.expert_iterations > 0 {
+                let teacher_particles = search_belief_particles(&state, config);
                 let search = expert_searches[actor]
                     .get_or_insert_with(|| Mcts::new(SearchConfig::default(), &state));
                 Some(run_mcts_search(
                     &state,
                     state.observation_hash(actor as u8) ^ config.seed ^ 0x4558_5045_5254_5055,
-                    config,
                     search,
                     config.expert_iterations,
                     config.expert_rollout_actions.max(config.rollout_actions),
+                    teacher_particles.as_deref(),
                     SearchMode::Puct,
                 ))
             } else {
@@ -802,13 +1066,15 @@ fn play_game(board_seed: u64, chance_seed: u64, engines: &[Engine], config: &Con
             .map(|(player, _)| player as u8)
             .unwrap_or(0)
     });
-    for (player, prediction) in calibration {
-        let outcome = f32::from(player == winner);
-        let clipped = prediction.clamp(1e-6, 1.0 - 1e-6);
-        metrics.calibration_brier_sum[player as usize] += (prediction - outcome).powi(2);
-        metrics.calibration_log_loss_sum[player as usize] +=
-            -(outcome * clipped.ln() + (1.0 - outcome) * (1.0 - clipped).ln());
-        metrics.calibration_count[player as usize] += 1;
+    if terminal_winner.is_some() {
+        for (player, prediction) in calibration {
+            let outcome = f32::from(player == winner);
+            let clipped = prediction.clamp(1e-6, 1.0 - 1e-6);
+            metrics.calibration_brier_sum[player as usize] += (prediction - outcome).powi(2);
+            metrics.calibration_log_loss_sum[player as usize] +=
+                -(outcome * clipped.ln() + (1.0 - outcome) * (1.0 - clipped).ln());
+            metrics.calibration_count[player as usize] += 1;
+        }
     }
     for sample in &mut expert_samples {
         sample.winner = winner;
@@ -854,6 +1120,9 @@ fn percentile(sorted: &[f32], probability: f32) -> f32 {
 }
 
 fn bootstrap_interval(block_scores: &[f32], seed: u64) -> (f32, f32) {
+    if block_scores.is_empty() {
+        return (0.0, 0.0);
+    }
     let mut rng = SplitMix64::new(seed);
     let mut samples = Vec::with_capacity(2_000);
     for _ in 0..2_000 {
@@ -880,11 +1149,22 @@ fn main() {
         std::array::from_fn(|_| CandidateMetrics::default());
 
     if !config.json {
+        let lineup = config.lineup.as_ref().map_or_else(
+            || "none".to_string(),
+            |engines| {
+                engines
+                    .iter()
+                    .map(|engine| engine.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            },
+        );
         println!(
-            "arena candidate={:?} baseline={:?} lineup={:?} players={} blocks={} iterations={} threads={} seed={}",
-            config.candidate,
-            config.baseline,
-            config.lineup,
+            "arena candidate={} baseline={} lineup={} information={} players={} blocks={} iterations={} threads={} seed={}",
+            config.candidate.as_str(),
+            config.baseline.as_str(),
+            lineup,
+            information_mode(&config),
             config.players,
             config.blocks,
             config.iterations,
@@ -897,6 +1177,14 @@ fn main() {
             .flat_map(|block| (0..config.players).map(move |seat| (block, seat)))
             .collect::<Vec<_>>(),
     );
+    let scheduled_games = jobs.len() as u32;
+    let mut checkpoint_writer = config.checkpoint_output.as_ref().map(|path| {
+        BufWriter::new(
+            File::create(path)
+                .unwrap_or_else(|error| panic!("failed to create checkpoint {path}: {error}")),
+        )
+    });
+    let mut partial_metrics = PartialArenaMetrics::new(config.blocks);
     let next_job = Arc::new(AtomicUsize::new(0));
     let shared_config = Arc::new(config.clone());
     let (sender, receiver) = mpsc::channel::<ArenaResult>();
@@ -940,12 +1228,22 @@ fn main() {
         }));
     }
     drop(sender);
-    let mut results = receiver.into_iter().collect::<Vec<_>>();
+    let mut results = Vec::with_capacity(jobs.len());
+    for result in receiver {
+        partial_metrics.record(&result);
+        if let Some(writer) = &mut checkpoint_writer {
+            let checkpoint =
+                partial_metrics.snapshot(&result, &config, scheduled_games, started.elapsed());
+            write_checkpoint(writer, &checkpoint);
+        }
+        results.push(result);
+    }
     for worker in workers {
         worker.join().expect("arena worker panicked");
     }
     results.sort_by_key(|result| (result.block, result.seat));
     let mut block_wins = vec![0u32; config.blocks as usize];
+    let mut block_terminal_games = vec![0u32; config.blocks as usize];
     let mut engine_wins = [0u32; 6];
     let mut expert_writer = config.expert_output.as_ref().map(|path| {
         BufWriter::new(
@@ -981,10 +1279,13 @@ fn main() {
             }
         }
         let winner_engine = result.engines[result.game.winner as usize];
-        let won = winner_engine == config.candidate;
-        block_wins[result.block as usize] += u32::from(won);
-        candidate_wins += u32::from(won);
-        engine_wins[winner_engine as usize] += 1;
+        let won = !result.game.cutoff && winner_engine == config.candidate;
+        if !result.game.cutoff {
+            block_terminal_games[result.block as usize] += 1;
+            block_wins[result.block as usize] += u32::from(won);
+            candidate_wins += u32::from(won);
+            engine_wins[winner_engine as usize] += 1;
+        }
         for (player, engine) in result.engines.iter().enumerate() {
             let candidate_metrics = &mut engine_metrics[*engine as usize];
             let metrics = &result.game.metrics;
@@ -1038,10 +1339,13 @@ fn main() {
     block_scores.extend(
         block_wins
             .into_iter()
-            .map(|wins| wins as f32 / config.players as f32),
+            .zip(block_terminal_games)
+            .filter(|(_, terminal_games)| *terminal_games > 0)
+            .map(|(wins, terminal_games)| wins as f32 / terminal_games as f32),
     );
 
-    let win_share = candidate_wins as f32 / total_games as f32;
+    let terminal_games = total_games.saturating_sub(cutoffs);
+    let win_share = candidate_wins as f32 / terminal_games.max(1) as f32;
     let candidate_seats = config
         .lineup
         .as_ref()
@@ -1072,6 +1376,7 @@ fn main() {
                 "\"players\":{},",
                 "\"blocks\":{},",
                 "\"games\":{},",
+                "\"terminalGames\":{},",
                 "\"candidateWins\":{},",
                 "\"engineWins\":{{\"random\":{},\"weighted\":{},\"maxn\":{},\"alphabeta\":{},\"uct\":{},\"puct\":{}}},",
                 "\"engineMetrics\":{{{}}},",
@@ -1111,6 +1416,7 @@ fn main() {
                 "\"rolloutActions\":{},",
                 "\"maxTurns\":{},",
                 "\"beliefParticles\":{},",
+                "\"informationMode\":\"{}\",",
                 "\"perfectInformationSearch\":{},",
                 "\"threads\":{},",
                 "\"validate\":{}",
@@ -1132,6 +1438,7 @@ fn main() {
             config.players,
             config.blocks,
             total_games,
+            terminal_games,
             candidate_wins,
             engine_wins[Engine::Random as usize],
             engine_wins[Engine::Weighted as usize],
@@ -1180,13 +1487,14 @@ fn main() {
             config.rollout_actions,
             config.max_turns,
             config.belief_particles,
+            information_mode(&config),
             config.perfect_information_search,
             config.threads,
             config.validate,
         );
     } else {
         println!(
-            "summary games={total_games} candidate_wins={candidate_wins} win_share={win_share:.4} blocked_ci95=[{lower:.4},{upper:.4}] mean_turns={mean_turns:.1} mean_actions={mean_actions:.1} cutoffs={cutoffs} elapsed_ms={} games_per_second={games_per_second:.3}",
+            "summary games={total_games} terminal_games={terminal_games} candidate_wins={candidate_wins} win_share={win_share:.4} blocked_ci95=[{lower:.4},{upper:.4}] mean_turns={mean_turns:.1} mean_actions={mean_actions:.1} cutoffs={cutoffs} elapsed_ms={} games_per_second={games_per_second:.3}",
             elapsed.as_millis(),
         );
     }
@@ -1194,9 +1502,23 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use colonist_catan_core::Phase;
 
-    use super::{Config, Engine, belief_particles, play_game};
+    use super::{
+        ArenaResult, Config, Engine, GameMetrics, GameResult, PartialArenaMetrics,
+        belief_particles, information_mode, play_game, search_belief_particles, write_checkpoint,
+    };
+
+    #[test]
+    fn maxn_is_the_default_and_legacy_names_resolve_explicitly() {
+        assert_eq!(Engine::parse("strategist"), Some(Engine::Puct));
+        assert_eq!(Engine::parse("puct"), Some(Engine::Puct));
+        assert_eq!(Engine::parse("deep"), Some(Engine::MaxN));
+        assert_eq!(Engine::Puct.as_str(), "puct");
+        assert_eq!(Config::default().candidate, Engine::MaxN);
+    }
 
     #[test]
     fn random_arena_game_is_reproducible() {
@@ -1236,6 +1558,15 @@ mod tests {
         let observer = state.actor();
         let exact_hand = state.players[observer as usize].resources;
         let observation = state.observation_hash(observer);
+        let single_particle = belief_particles(&state, observer, 1, 991);
+        assert_eq!(single_particle.len(), 1);
+        assert_eq!(single_particle[0].weight, 1.0);
+        assert_eq!(
+            single_particle[0].state.observation_hash(observer),
+            observation,
+        );
+        single_particle[0].state.validate().unwrap();
+
         let particles = belief_particles(&state, observer, 24, 991);
         assert_eq!(particles.len(), 24);
         for particle in particles {
@@ -1246,5 +1577,149 @@ mod tests {
             assert_eq!(particle.state.observation_hash(observer), observation,);
             particle.state.validate().unwrap();
         }
+    }
+
+    #[test]
+    fn all_search_engines_use_the_configured_information_source() {
+        for engine in [Engine::MaxN, Engine::AlphaBeta, Engine::Uct, Engine::Puct] {
+            assert!(engine.uses_search_information());
+        }
+        assert!(!Engine::Random.uses_search_information());
+        assert!(!Engine::Weighted.uses_search_information());
+
+        let state = colonist_catan_core::GameState::standard(23, 4);
+        let belief_config = Config {
+            belief_particles: 7,
+            ..Config::default()
+        };
+        let particles = search_belief_particles(&state, &belief_config).unwrap();
+        assert_eq!(particles.len(), 7);
+        assert_eq!(information_mode(&belief_config), "weighted-belief");
+        assert!(
+            particles
+                .iter()
+                .all(|particle| (particle.weight - 1.0 / 7.0).abs() < f32::EPSILON)
+        );
+
+        let oracle_config = Config {
+            perfect_information_search: true,
+            ..belief_config
+        };
+        assert!(search_belief_particles(&state, &oracle_config).is_none());
+        assert_eq!(information_mode(&oracle_config), "perfect-information");
+    }
+
+    #[test]
+    fn checkpoints_flush_cumulative_multi_engine_standings_after_every_game() {
+        let lineup = vec![
+            Engine::Puct,
+            Engine::Weighted,
+            Engine::MaxN,
+            Engine::AlphaBeta,
+        ];
+        let config = Config {
+            players: 4,
+            blocks: 1,
+            lineup: Some(lineup.clone()),
+            validate: true,
+            ..Config::default()
+        };
+        let game = GameResult {
+            winner: 2,
+            turns: 91,
+            actions: 412,
+            cutoff: false,
+            points: [7, 5, 10, 8],
+            ranks: [3.0, 4.0, 1.0, 2.0],
+            metrics: GameMetrics::default(),
+            expert_samples: Vec::new(),
+            trade_samples: Vec::new(),
+        };
+        let mut partial = PartialArenaMetrics::new(config.blocks);
+        let mut output = Vec::new();
+
+        for rotation in 0..4 {
+            let result = ArenaResult {
+                block: 0,
+                seat: rotation,
+                engines: lineup.clone(),
+                game: game.clone(),
+            };
+            partial.record(&result);
+            let checkpoint = partial.snapshot(&result, &config, 4, Duration::from_millis(1_500));
+            write_checkpoint(&mut output, &checkpoint);
+        }
+
+        let lines = std::str::from_utf8(&output)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), 4);
+        for line in &lines {
+            serde_json::from_str::<serde_json::Value>(line).unwrap();
+        }
+        let first_checkpoint = serde_json::from_str::<serde_json::Value>(lines[0]).unwrap();
+        assert_eq!(first_checkpoint["completedGames"], 1);
+        assert_eq!(first_checkpoint["complete"], false);
+        assert_eq!(first_checkpoint["completedMatchedBlocks"], 0);
+        let final_checkpoint =
+            serde_json::from_str::<serde_json::Value>(lines.last().unwrap()).unwrap();
+        assert_eq!(final_checkpoint["completedGames"], 4);
+        assert_eq!(final_checkpoint["scheduledGames"], 4);
+        assert_eq!(final_checkpoint["complete"], true);
+        assert_eq!(final_checkpoint["completedMatchedBlocks"], 1);
+        assert_eq!(final_checkpoint["cutoffs"], 0);
+        assert_eq!(final_checkpoint["informationMode"], "weighted-belief");
+        assert_eq!(final_checkpoint["lastGame"]["winnerEngine"], "maxn");
+
+        let standings = final_checkpoint["engineStandings"].as_array().unwrap();
+        let maxn = standings
+            .iter()
+            .find(|standing| standing["engine"] == "maxn")
+            .unwrap();
+        assert_eq!(maxn["wins"], 4);
+        assert_eq!(maxn["winShare"], 1.0);
+        assert_eq!(maxn["seatSamples"], 4);
+        assert_eq!(maxn["meanRank"], 1.0);
+        assert_eq!(maxn["meanVictoryPoints"], 10.0);
+    }
+
+    #[test]
+    fn cutoff_adjudications_are_censored_from_win_rates() {
+        let config = Config {
+            players: 3,
+            blocks: 1,
+            ..Config::default()
+        };
+        let result = ArenaResult {
+            block: 0,
+            seat: 0,
+            engines: vec![Engine::Puct, Engine::Weighted, Engine::Weighted],
+            game: GameResult {
+                winner: 0,
+                turns: config.max_turns,
+                actions: 500,
+                cutoff: true,
+                points: [9, 8, 7, 0],
+                ranks: [1.0, 2.0, 3.0, 0.0],
+                metrics: GameMetrics::default(),
+                expert_samples: Vec::new(),
+                trade_samples: Vec::new(),
+            },
+        };
+        let mut partial = PartialArenaMetrics::new(1);
+        partial.record(&result);
+        let checkpoint = partial.snapshot(&result, &config, 3, Duration::from_secs(1));
+        let value = serde_json::to_value(checkpoint).unwrap();
+
+        assert_eq!(value["cutoffs"], 1);
+        assert_eq!(value["terminalGames"], 0);
+        assert!(
+            value["engineStandings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|standing| standing["wins"] == 0)
+        );
     }
 }

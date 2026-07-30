@@ -25,7 +25,7 @@ export const DEFAULT_SETTINGS: AssistantSettings = {
 export const SETTINGS_KEY = "colonistAssistantSettings";
 export const POSITION_KEY = "colonistAssistantPosition";
 export const RESET_NONCE_KEY = "colonistAssistantResetNonce";
-const ENGINE_DEFAULT_MIGRATION_KEY = "colonistAssistantMaxNDefaultV1";
+const STRATEGIST_MIGRATION_KEY = "colonistAssistantStrategistDefaultV1";
 
 const LEGACY_SETTINGS_KEY = "harborLedgerSettings";
 const LEGACY_POSITION_KEY = "harborLedgerPosition";
@@ -34,7 +34,7 @@ export const readSettings = async (): Promise<AssistantSettings> => {
   const result = await chrome.storage.sync.get([
     SETTINGS_KEY,
     LEGACY_SETTINGS_KEY,
-    ENGINE_DEFAULT_MIGRATION_KEY,
+    STRATEGIST_MIGRATION_KEY,
   ]);
   const settings = {
     ...DEFAULT_SETTINGS,
@@ -42,14 +42,16 @@ export const readSettings = async (): Promise<AssistantSettings> => {
       | Partial<AssistantSettings>
       | undefined),
   };
-  // Belief PUCT shipped as the experimental default before its strength gate
-  // was complete. Move existing installs to the stronger validated MaxN
-  // engine once; an explicit choice made after this migration is preserved.
-  if (result[ENGINE_DEFAULT_MIGRATION_KEY] !== true) {
-    settings.engine = "deep-search";
+  // Strategy selection is intentionally no longer a product setting. Migrate
+  // every historical or invalid value to the one observation-safe authority.
+  const needsMigration =
+    result[STRATEGIST_MIGRATION_KEY] !== true ||
+    settings.engine !== "deep-search";
+  settings.engine = "deep-search";
+  if (needsMigration) {
     await chrome.storage.sync.set({
       [SETTINGS_KEY]: settings,
-      [ENGINE_DEFAULT_MIGRATION_KEY]: true,
+      [STRATEGIST_MIGRATION_KEY]: true,
     });
   }
   return settings;
@@ -57,7 +59,9 @@ export const readSettings = async (): Promise<AssistantSettings> => {
 
 export const saveSettings = async (settings: AssistantSettings): Promise<void> => {
   try {
-    await chrome.storage.sync.set({ [SETTINGS_KEY]: settings });
+    await chrome.storage.sync.set({
+      [SETTINGS_KEY]: { ...settings, engine: "deep-search" },
+    });
   } catch (error) {
     if (!isExtensionContextInvalidatedError(error)) throw error;
   }

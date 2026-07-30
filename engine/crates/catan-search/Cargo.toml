@@ -10,3 +10,6 @@ path = "src/lib.rs"
 
 [dependencies]
 colonist-catan-core = { path = "../catan-core" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"

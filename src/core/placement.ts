@@ -141,6 +141,7 @@ export interface BoardSnapshot {
   victoryTarget?: number;
   friendlyRobber?: boolean;
   privateGame?: boolean;
+  botOnlyGame?: boolean;
   currentPlayer?: string;
   turn?: number;
   lastRoll?: number;

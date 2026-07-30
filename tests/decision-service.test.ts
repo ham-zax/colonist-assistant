@@ -165,7 +165,7 @@ describe("decision service client", () => {
     client.destroy();
   });
 
-  it("keeps the selected request alive after five seconds", async () => {
+  it("keeps the selected request alive after the one-second warning", async () => {
     vi.useFakeTimers();
     const analysis: DecisionAnalysis = {
       engine: "deep-search",
@@ -184,7 +184,7 @@ describe("decision service client", () => {
         new Promise<{ id: number; analysis: DecisionAnalysis }>((resolve) => {
           globalThis.setTimeout(
             () => resolve({ id: message.id, analysis }),
-            5_500,
+            1_500,
           );
         }),
     );
@@ -205,9 +205,9 @@ describe("decision service client", () => {
       slow,
       failure,
     );
-    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(1_000);
 
-    expect(slow).toHaveBeenCalledWith(5_000);
+    expect(slow).toHaveBeenCalledWith(1_000);
     expect(callback).not.toHaveBeenCalled();
     expect(failure).not.toHaveBeenCalled();
     expect(sendMessage).toHaveBeenCalledOnce();
@@ -231,7 +231,7 @@ describe("decision service client", () => {
     client.destroy();
   });
 
-  it("reissues a lost background transport with the same selected engine", async () => {
+  it("ends a silent transport at the hard limit without duplicating search", async () => {
     vi.useFakeTimers();
     const analysis: DecisionAnalysis = {
       engine: "deep-search",
@@ -243,7 +243,7 @@ describe("decision service client", () => {
         development: 0,
       },
       simulations: 1,
-      model: "retried-wasm-result",
+      model: "next-position-result",
     };
     const sendMessage = vi.fn((message: { id: number }) => {
       if (sendMessage.mock.calls.length === 1) {
@@ -252,7 +252,6 @@ describe("decision service client", () => {
       return Promise.resolve({ id: message.id, analysis });
     });
     vi.stubGlobal("chrome", { runtime: { sendMessage } });
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const callback = vi.fn();
     const failure = vi.fn();
     const client = new DecisionWorkerClient();
@@ -267,31 +266,36 @@ describe("decision service client", () => {
       undefined,
       failure,
     );
-    await vi.advanceTimersByTimeAsync(6_500);
+    await vi.advanceTimersByTimeAsync(12_000);
     await Promise.resolve();
+    await Promise.resolve();
+
+    expect(sendMessage).toHaveBeenCalledOnce();
+    expect(callback).not.toHaveBeenCalled();
+    expect(failure).toHaveBeenCalledWith(
+      "Strategist did not return before the 12-second safety limit",
+    );
+
+    const nextCallback = vi.fn();
+    client.request(
+      "next-position",
+      {} as TrackerState,
+      {} as BoardSnapshot,
+      "You",
+      "deep-search",
+      nextCallback,
+    );
+    await vi.advanceTimersByTimeAsync(0);
     await Promise.resolve();
 
     expect(sendMessage).toHaveBeenCalledTimes(2);
     expect(sendMessage.mock.calls[1]?.[0]).toEqual(
-      expect.objectContaining({
-        engine: "deep-search",
-        id: 2,
-      }),
+      expect.objectContaining({ engine: "deep-search", id: 2 }),
     );
-    expect(callback).toHaveBeenCalledWith(
+    expect(nextCallback).toHaveBeenCalledWith(
       expect.objectContaining({
-        model: "retried-wasm-result",
+        model: "next-position-result",
         runtime: "background-rollout",
-      }),
-    );
-    expect(failure).not.toHaveBeenCalled();
-    expect(warning).toHaveBeenCalledWith(
-      "[Colonist Assistant] Retrying selected WASM request",
-      expect.objectContaining({
-        engine: "deep-search",
-        attempt: 2,
-        policy: "selected-engine-only",
-        fallbackStarted: false,
       }),
     );
     client.destroy();

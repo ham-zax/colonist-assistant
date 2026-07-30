@@ -898,8 +898,13 @@ export const OVERLAY_STYLES = `
     outline-offset: 2px;
   }
   .engine-field {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 140px;
+    min-height: 68px;
+  }
+  .engine-field > strong {
+    max-width: none;
+    color: var(--ca-accent);
+    font-size: 11px;
+    letter-spacing: .025em;
   }
   .settings-version {
     display: flex;

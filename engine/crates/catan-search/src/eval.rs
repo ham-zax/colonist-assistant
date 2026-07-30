@@ -670,17 +670,55 @@ fn progress_card_utility(
 }
 
 fn development_utility(state: &GameState, player: u8, expansion: ExpansionOption) -> f32 {
-    let cards = &state.players[player as usize].development;
+    let player_state = &state.players[player as usize];
+    let cards = &player_state.development;
     let army = largest_army_outlook(state, player);
     let knights = cards[0] as f32;
     let knight_utility = knights.min(1.0) * (0.28 + army.acquire * 1.15)
         + (knights - 1.0).max(0.0) * (0.12 + army.acquire * 0.24);
     // Victory-point cards are already included exactly once by
     // PlayerState::victory_points and must not receive another inventory term.
-    knight_utility
+    let raw = knight_utility
         + progress_card_utility(state, player, 2, expansion)
         + progress_card_utility(state, player, 3, expansion)
-        + progress_card_utility(state, player, 4, expansion)
+        + progress_card_utility(state, player, 4, expansion);
+    let action_cards = [0, 2, 3, 4].into_iter().map(|card| cards[card]).sum::<u8>();
+    let newly_bought = [0, 2, 3, 4]
+        .into_iter()
+        .map(|card| player_state.bought_development[card])
+        .sum::<u8>();
+    let usable_horizon = state
+        .victory_target
+        .saturating_sub(player_state.victory_points())
+        .saturating_add(1);
+    let queue = action_cards.saturating_sub(1) as f32;
+    let horizon_excess = action_cards.saturating_sub(usable_horizon) as f32;
+    // Only one action card can be played per turn, and cards bought this turn
+    // are not immediately playable. Price that queue across card types rather
+    // than granting every first Knight/YOP/Monopoly its full standalone value.
+    raw / (1.0 + queue * 0.20 + newly_bought as f32 * 0.16 + horizon_excess * 0.30)
+}
+
+fn speculative_road_penalty(state: &GameState, player: u8, road: TrophyOutlook) -> f32 {
+    let roads_built = 15_u8.saturating_sub(state.players[player as usize].roads_left);
+    let buildings = state
+        .buildings
+        .iter()
+        .filter(|building| building.is_some_and(|piece| piece.player() == player))
+        .count() as u8;
+    // Two setup roads are free of strategic debt. Thereafter, allow a modest
+    // route buffer per realized building and a small award allowance; long
+    // speculative chains must justify the cards they consumed.
+    let award_allowance = if state.longest_road_holder == Some(player) {
+        3
+    } else if road.acquire * road.retain >= 0.55 {
+        2
+    } else {
+        0
+    };
+    let supported = buildings.saturating_add(2).saturating_add(award_allowance);
+    let excess = roads_built.saturating_sub(supported) as f32;
+    excess * 0.48 + excess * excess * 0.035
 }
 
 /// Expected marginal utility of the next development-card purchase. This is
@@ -864,6 +902,7 @@ fn strategic_utility_with_routes_and_knowledge(
         + development_utility(state, player, expansion) * 0.72
         + port_flexibility * 0.07
         - expected_discard_loss(state, player) * 2.4
+        - speculative_road_penalty(state, player, road)
 }
 
 fn strategic_utility_with_routes(state: &GameState, player: u8, route_maps: &[Vec<u8>]) -> f32 {
@@ -1090,18 +1129,17 @@ pub(crate) fn road_frontier_value(state: &GameState, edge: u8, actor: u8) -> f32
     let mut after = state.clone();
     after.roads[edge as usize] = Some(actor);
     let option = observed_option(&after);
-    let progress = (option.value - before.value).max(0.0)
-        + if option.roads_required < before.roads_required {
-            1.0 + (before.roads_required - option.roads_required) as f32 * 0.55
-        } else {
-            0.0
-        };
+    // `ExpansionOption::value` already prices road distance; adding another
+    // fixed reward for the same distance reduction double-counted every link
+    // in a speculative chain.
+    let progress = (option.value - before.value).clamp(0.0, 2.2);
     let road_before = longest_road_outlook(state, actor);
     let road_after = longest_road_outlook(&after, actor);
     let trophy = ((road_after.acquire * road_after.retain)
         - (road_before.acquire * road_before.retain))
         .max(0.0)
-        * 3.0;
+        * 3.0
+        / (1.0 + road_after.additional_cost * 0.32);
     progress + trophy
 }
 
@@ -1167,6 +1205,21 @@ mod tests {
         empty.players[0].development[4] = 2;
         let congested = marginal_development_value(&empty, 0);
         assert!(first > congested);
+    }
+
+    #[test]
+    fn action_card_queue_diminishes_value_across_card_types() {
+        let mut empty = after_setup(57, 4);
+        empty.phase = Phase::Main;
+        empty.current_player = 0;
+        let first = marginal_development_value(&empty, 0);
+        empty.players[0].development[0] = 1;
+        empty.players[0].development[2] = 1;
+        empty.players[0].development[3] = 1;
+        empty.players[0].bought_development[3] = 1;
+        let queued = marginal_development_value(&empty, 0);
+
+        assert!(first > queued);
     }
 
     #[test]

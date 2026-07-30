@@ -23,6 +23,14 @@ pub fn learned_model_ready() -> bool {
         && weights::POLICY_W2.len() == weights::POLICY_HIDDEN
 }
 
+pub fn learned_value_promoted() -> bool {
+    learned_model_ready() && weights::VALUE_MODEL_PROMOTED
+}
+
+pub fn learned_policy_promoted() -> bool {
+    learned_model_ready() && weights::POLICY_MODEL_PROMOTED
+}
+
 fn dense_relu(input: &[f32], weights: &[f32], bias: &[f32], width: usize) -> Vec<f32> {
     (0..width)
         .map(|unit| {
@@ -38,7 +46,7 @@ fn dense_relu(input: &[f32], weights: &[f32], bias: &[f32], width: usize) -> Vec
 }
 
 pub fn learned_value(state: &GameState) -> Option<[f32; 4]> {
-    if !learned_model_ready() {
+    if !learned_value_promoted() {
         return None;
     }
     let observer = state.actor();
@@ -97,7 +105,7 @@ pub fn learned_action_logit(state: &GameState, action: &Action) -> Option<f32> {
 }
 
 pub fn learned_action_logits(state: &GameState, actions: &[Action]) -> Option<Vec<f32>> {
-    if !learned_model_ready() {
+    if !learned_policy_promoted() {
         return None;
     }
     let observer = state.actor();
@@ -138,4 +146,25 @@ pub fn learned_action_logits(state: &GameState, actions: &[Action]) -> Option<Ve
             })
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use colonist_catan_core::{Action, GameState};
+
+    use super::{
+        learned_action_logits, learned_model_ready, learned_policy_promoted, learned_value,
+        learned_value_promoted,
+    };
+
+    #[test]
+    fn under_supported_checkpoint_cannot_supply_production_heads() {
+        let state = GameState::standard(229, 4);
+
+        assert!(learned_model_ready());
+        assert!(!learned_value_promoted());
+        assert!(!learned_policy_promoted());
+        assert!(learned_value(&state).is_none());
+        assert!(learned_action_logits(&state, &[Action::EndTurn]).is_none());
+    }
 }

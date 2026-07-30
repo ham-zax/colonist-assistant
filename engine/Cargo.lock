@@ -33,6 +33,7 @@ name = "colonist-catan-search"
 version = "0.1.0"
 dependencies = [
  "colonist-catan-core",
+ "js-sys",
 ]
 
 [[package]]

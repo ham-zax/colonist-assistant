@@ -5,9 +5,12 @@ games where all players agree to its use. It reads game data shown to the
 player, tracks known cards, keeps honest ranges for unknown cards, and marks
 one legal next step in the Colonist page.
 
-The main game engine runs as Rust and WebAssembly in the browser. Deep MaxN is
-the default. AlphaBeta is a more guarded peer. Belief PUCT is still an
-experiment. Older JavaScript and race models remain as test choices.
+The decision engine runs locally as Rust and WebAssembly in the browser.
+Strategist ★ is the single user-facing decision authority. It combines exact
+local solvers, a bounded setup search, and observation-safe weighted-belief
+Deep MaxN. Experimental belief PUCT, UCT, and AlphaBeta remain diagnostic
+comparison policies in the native arena; replay tooling also exposes selected
+diagnostic search budgets. They are not selectable live engines.
 
 This project is not affiliated with, endorsed by, or sponsored by Colonist or
 CATAN Studio. Use it only in games where every participant has agreed to
@@ -19,13 +22,15 @@ assistant use, and review the platform rules before playing.
 - Maintains possible opponent hands after unknown steals and discards.
 - Reconciles those beliefs with exact own cards, public hand totals, and
   visible bank counts.
-- Scores opening and normal settlements, connected road routes, city upgrades,
-  robber targets, discards, player trades, maritime trades, and development
-  card timing.
+- Uses a bounded snake-order search for both opening settlements and their
+  roads, then compares normal settlements, connected road routes, city
+  upgrades, compound robber/victim targets, discards, trades, and
+  development-card timing.
 - Shows live win estimates by player.
 - Highlights the next Colonist control or board location.
-- Can carry out the next step when the user turns on autopilot. Autopilot is
-  off by default.
+- Can carry out the next step in a confirmed private game or an all-bot match
+  when the user turns on autopilot. Autopilot is off by default and remains
+  unavailable when neither condition can be verified.
 - Resets its game state when Colonist publishes a new game identity.
 
 Before each automatic step, the extension checks that the board still matches
@@ -65,31 +70,38 @@ The unpacked extension is written to `dist/`. Load that directory from
 `chrome://extensions` with Developer mode enabled. After loading or updating
 the unpacked build, refresh every already-open Colonist tab; Chrome does not
 replace a running content script until its page reloads. The live panel’s
-settings screen shows the installed build number and active decision engine.
+settings screen shows the installed build number and Strategist runtime.
 
 For the Chrome Web Store field copy, test steps, and release package command,
 see [docs/CHROME_WEB_STORE.md](docs/CHROME_WEB_STORE.md).
 
-`Background WASM` means the packaged Rust engine is authoritative. Selected
-engines are never replaced by a local JavaScript policy. A decision that is
-still running after five seconds is labelled `WASM · 5s+` and continues in the
-same background request. A genuine service-worker or WASM failure is shown as
-`WASM error`; autopilot waits instead of executing a different algorithm.
+`Background WASM` means the packaged Rust Strategist is authoritative. A
+normal live request uses depth 4, a branch cap of 16, at most 4,000 strategic
+nodes, and a cooperative 350 ms strategic-search deadline. The generated-WASM
+cold-adapter regression must return a legal action in less than one second.
+The `WASM · 1s+` label and twelve-second client cutoff are failure-containment
+limits, not acceptable target latency. At the client cutoff the request is
+reported as an engine error and autopilot remains paused. A service-worker or
+WASM failure is also shown as `WASM error`; no JavaScript action policy
+substitutes for Strategist.
 
-## Decision engines
+## Decision engine
 
-- **Deep MaxN** — production default. Deterministic multiplayer search
-  aggregated over weighted hidden-card beliefs; currently the strongest
-  validated live policy.
-- **AlphaBeta** — a clean-room paranoid multiplayer AlphaBeta search. It is a
-  close simulator peer to MaxN but assumes the opponents collectively minimize
-  your result, so it generally plays more defensively.
-- **Belief PUCT** — experimental. Runs vector-valued shared
-  information-set search over weighted hidden-card particles, with exact
-  mandatory solving, whole-turn plans, progressive widening, and tree reuse.
-- **Hybrid** — the previous deterministic/rollout blend.
-- **Vector rollouts** — the previous JavaScript multiplayer simulation model.
-- **Race ETA** — fastest deterministic fallback.
+**Strategist** is the only live engine. Complete local enumeration handles
+mandatory and parameterized action families. Setup uses the dedicated
+belief-aggregated snake-order draft solver; normal play uses bounded,
+vector-valued weighted-belief Deep MaxN with structured action ordering. Each
+simulated player advances its own race value rather than being treated as part
+of a single hostile coalition.
+
+The bundled learned policy and value heads are both unpromoted and disabled
+because their grouped validation evidence did not pass the production gates.
+Structured action priors and the strategic evaluator remain authoritative.
+Experimental belief PUCT, UCT, and paranoid AlphaBeta are native-arena
+comparisons only. The public build-time estimate remains display-only and
+cannot choose or execute an action. Current Strategist strength is still being
+measured; this README does not claim that it is stronger than humans or every
+diagnostic baseline, and model estimates are not calibrated guarantees.
 
 This project does not copy or embed Catanatron, JSettlers, Monte Catano, or
 HexMachina code. The rules engine and search implementation are clean-room and
@@ -104,22 +116,29 @@ cutoff reporting, and board-blocked bootstrap confidence intervals.
 ```bash
 cd engine
 cargo run --release -p colonist-catan-arena -- \
-  --players 4 --blocks 250 --threads 16 --validate --quiet \
-  --candidate maxn --baseline alphabeta --seed 9100001
+  --players 4 --blocks 1 --threads 4 --validate --quiet \
+  --candidate maxn --baseline weighted \
+  --iterations 75 --belief-particles 32 \
+  --seed 9200001
 ```
+
+In the native arena, `maxn` (also accepted as `deep`) is the comparison closest
+to the packaged live core. `puct` selects experimental belief PUCT; the old
+`strategist` token remains only as a compatibility alias for `puct`. Neither
+PUCT name identifies the current live authority.
 
 See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for results and limitations.
 For the matrix runner, live Colonist Base-map harness, and pinned Catanatron
 reference runner, see [docs/BENCHMARK_TOOL.md](docs/BENCHMARK_TOOL.md).
-The current strategic architecture and promotion gates are documented in
+The current Strategist architecture and model gates are documented in
 [docs/STRATEGIC_ENGINE_V3.md](docs/STRATEGIC_ENGINE_V3.md).
 
 ## Scope
 
-The simulator targets standard base-game Catan for 2–4 players. The live
-extension degrades to its board heuristics when Colonist exposes a variant the
-rules core does not support. Benchmarks are bot-vs-bot simulator results, not a
-claim of a particular win rate against humans.
+The simulator targets standard base-game Catan for 2–4 players. Other Colonist
+variants are outside the validated strategy and benchmark scope; they do not
+inherit standard-base strength claims. Benchmarks are bot-vs-bot simulator
+results, not a claim of a particular win rate against humans.
 
 ## License and privacy
 

@@ -1,13 +1,15 @@
 use colonist_catan_core::{Action, GameState, NodeKind, Phase};
 
-use crate::eval::evaluate;
+use crate::eval::{evaluate, public_strategic_utility, robber_denial, strategic_utility};
 use crate::mcts::BeliefParticle;
 use crate::planner::{TurnPlanConfig, plan_current_turn};
 use crate::policy::trade_acceptance_probability;
+use crate::trade_safety::belief_domestic_trade_threat;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExactActionFamily {
     Mandatory,
+    Knight,
     Monopoly,
     YearOfPlenty,
     RoadBuilding,
@@ -15,6 +17,7 @@ pub enum ExactActionFamily {
 
 pub fn exact_family_for_action(action: &Action) -> Option<ExactActionFamily> {
     match action {
+        Action::PlayKnight { .. } => Some(ExactActionFamily::Knight),
         Action::PlayMonopoly { .. } => Some(ExactActionFamily::Monopoly),
         Action::PlayYearOfPlenty { .. } => Some(ExactActionFamily::YearOfPlenty),
         Action::PlayRoadBuilding { .. } => Some(ExactActionFamily::RoadBuilding),
@@ -54,6 +57,7 @@ fn matches_family(state: &GameState, action: &Action, family: ExactActionFamily)
             ),
             _ => false,
         },
+        ExactActionFamily::Knight => matches!(action, Action::PlayKnight { .. }),
         ExactActionFamily::Monopoly => matches!(action, Action::PlayMonopoly { .. }),
         ExactActionFamily::YearOfPlenty => {
             matches!(action, Action::PlayYearOfPlenty { .. })
@@ -168,12 +172,137 @@ fn action_value(state: &GameState, action: &Action) -> [f32; 4] {
     forced_tail_value(&next, 0)
 }
 
+fn accepted_trade_material_adjustment(state: &GameState, actor: usize) -> f32 {
+    let Some(trade) = state.trade else {
+        return 0.0;
+    };
+    if actor == trade.creator as usize
+        || !state.players[actor]
+            .resources
+            .iter()
+            .zip(trade.receive)
+            .all(|(available, required)| *available >= required)
+    {
+        return 0.0;
+    }
+    let mut accepted = state.clone();
+    for resource in 0..5 {
+        accepted.players[actor].resources[resource] = accepted.players[actor].resources[resource]
+            - trade.receive[resource]
+            + trade.give[resource];
+        accepted.players[trade.creator as usize].resources[resource] =
+            accepted.players[trade.creator as usize].resources[resource] - trade.give[resource]
+                + trade.receive[resource];
+    }
+    let own_gain =
+        strategic_utility(&accepted, actor as u8) - strategic_utility(state, actor as u8);
+    let creator = trade.creator as usize;
+    let creator_gain = (strategic_utility(&accepted, trade.creator)
+        - strategic_utility(state, trade.creator))
+    .max(0.0);
+    let points_remaining = state
+        .victory_target
+        .saturating_sub(state.players[creator].public_victory_points);
+    let threat = match points_remaining {
+        0 | 1 => 1.8,
+        2 => 1.25,
+        3 => 0.82,
+        _ => 0.45,
+    };
+    let selection_probability = 1.0 / trade.recipients.count_ones().max(1) as f32;
+    (own_gain * 0.045 - creator_gain * threat * 0.025) * selection_probability
+}
+
+fn forced_tail_actor_utility(state: &GameState, depth: u8, actor: usize) -> f32 {
+    if depth >= 5 {
+        return strategic_utility(state, actor as u8);
+    }
+    match state.node_kind() {
+        NodeKind::Chance => {
+            let actions = state.legal_actions();
+            if actions.is_empty() {
+                return strategic_utility(state, actor as u8);
+            }
+            let total = actions
+                .iter()
+                .map(|action| state.chance_weight(action) as f32)
+                .sum::<f32>()
+                .max(f32::EPSILON);
+            actions
+                .into_iter()
+                .filter_map(|action| {
+                    let probability = state.chance_weight(&action) as f32 / total;
+                    let mut next = state.clone();
+                    next.apply(&action).ok()?;
+                    Some(forced_tail_actor_utility(&next, depth + 1, actor) * probability)
+                })
+                .sum()
+        }
+        NodeKind::Decision { .. } | NodeKind::Terminal => strategic_utility(state, actor as u8),
+    }
+}
+
+fn robber_decision_score(state: &GameState, action: &Action, actor: usize) -> f32 {
+    let (hex, victim) = match action {
+        Action::MoveRobber { hex, victim } | Action::PlayKnight { hex, victim } => (*hex, *victim),
+        _ => return f32::NEG_INFINITY,
+    };
+    let actor_only = state
+        .buildings
+        .iter()
+        .enumerate()
+        .filter(|(vertex, _)| state.board.vertices[*vertex].adjacent_hexes.contains(&hex))
+        .filter_map(|(_, building)| *building)
+        .all(|building| building.player() == actor as u8);
+    let has_actor_building = state
+        .buildings
+        .iter()
+        .enumerate()
+        .any(|(vertex, building)| {
+            building.is_some_and(|building| building.player() == actor as u8)
+                && state.board.vertices[vertex].adjacent_hexes.contains(&hex)
+        });
+    if victim.is_none() && actor_only && has_actor_building {
+        // A self-only block is dominated by an empty hex, let alone any legal
+        // opponent denial/steal. Learned global values are intentionally not
+        // allowed to reverse this local protocol fact.
+        return -1_000.0;
+    }
+
+    let baseline = strategic_utility(state, actor as u8);
+    let mut next = state.clone();
+    if next.apply(action).is_err() {
+        return f32::NEG_INFINITY;
+    }
+    let expected_steal_gain = forced_tail_actor_utility(&next, 0, actor) - baseline;
+    let victim_pressure = victim.map_or(0.0, |victim| {
+        let values = (0..state.board.num_players)
+            .map(|player| public_strategic_utility(state, player))
+            .collect::<Vec<_>>();
+        let minimum = values.iter().copied().fold(f32::INFINITY, f32::min);
+        let maximum = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let threat = if maximum > minimum {
+            (values[victim as usize] - minimum) / (maximum - minimum)
+        } else {
+            0.5
+        };
+        0.35 + threat * 1.25 + state.players[victim as usize].resource_total() as f32 * 0.06
+    });
+    robber_denial(state, hex, actor as u8) + expected_steal_gain * 2.2 + victim_pressure
+}
+
 fn family_score(
     state: &GameState,
     action: &Action,
     family: ExactActionFamily,
     actor: usize,
 ) -> f32 {
+    if matches!(
+        action,
+        Action::MoveRobber { .. } | Action::PlayKnight { .. }
+    ) {
+        return robber_decision_score(state, action, actor);
+    }
     let mut next = state.clone();
     if next.apply(action).is_err() {
         return evaluate(state)[actor];
@@ -219,41 +348,51 @@ fn family_score(
         }
         return forced_tail_value(&next, 0)[actor];
     }
-    if matches!(
+    if let Some(score) = post_action_development_score(state, &next, family, actor) {
+        return score;
+    }
+    evaluate(&next)[actor]
+}
+
+fn post_action_development_score(
+    state: &GameState,
+    next: &GameState,
+    family: ExactActionFamily,
+    actor: usize,
+) -> Option<f32> {
+    if !matches!(
         family,
         ExactActionFamily::Monopoly
             | ExactActionFamily::YearOfPlenty
             | ExactActionFamily::RoadBuilding
-    ) && next.current_player as usize == actor
-        && matches!(next.phase, Phase::PreRoll | Phase::Main)
+    ) || next.current_player as usize != actor
+        || !matches!(next.phase, Phase::PreRoll | Phase::Main)
     {
-        // These compact parameter families are already reached *after* the
-        // bounded strategic search selected the card. Re-running a complete
-        // turn planner for every resource pair, every belief particle, and
-        // every Monopoly resource turned a 15-way Year of Plenty choice into
-        // a 45-second synchronous tail in live WASM.
-        //
-        // The race evaluator already prices contextual hand deficits,
-        // immediate build tempo, discard risk, expansion options, and trophy
-        // swings. Use that endpoint value here, just as Road Building does.
-        // We still enumerate every legal parameter and average its resulting
-        // value over the full weighted belief; only the redundant nested turn
-        // search is removed.
-        let endpoint = crate::eval::strategic_utility(&next, actor as u8);
-        if family == ExactActionFamily::Monopoly {
-            // A Monopoly hand is immediately spendable in the same turn.
-            // The static endpoint's nonlinear seven-risk otherwise treats a
-            // large steal as if the player had already ended the turn and can
-            // perversely prefer stealing zero cards. Preserve the belief-
-            // weighted quantity signal without reintroducing a nested planner.
-            let gained = next.players[actor]
-                .resource_total()
-                .saturating_sub(state.players[actor].resource_total());
-            return endpoint + gained as f32 * 1.4;
-        }
-        return endpoint;
+        return None;
     }
-    evaluate(&next)[actor]
+    // These compact parameter families are already reached *after* the
+    // bounded strategic search selected the card. Re-running a complete turn
+    // planner for every resource pair, every belief particle, and every
+    // Monopoly resource turned a 15-way Year of Plenty choice into a
+    // synchronous tail.
+    //
+    // The race evaluator already prices contextual hand deficits, immediate
+    // build tempo, discard risk, expansion options, and trophy swings. Reuse
+    // the already transitioned state so Road Building does not rebuild the
+    // same road graph twice per candidate and hidden world.
+    let endpoint = crate::eval::strategic_utility(next, actor as u8);
+    if family == ExactActionFamily::Monopoly {
+        // A Monopoly hand is immediately spendable in the same turn. The
+        // static endpoint's nonlinear seven-risk otherwise treats a large
+        // steal as if the player had already ended the turn and can perversely
+        // prefer stealing zero cards.
+        let gained = next.players[actor]
+            .resource_total()
+            .saturating_sub(state.players[actor].resource_total());
+        Some(endpoint + gained as f32 * 1.4)
+    } else {
+        Some(endpoint)
+    }
 }
 
 /// Exhaustively ranks every action in a compact parameter family over the full
@@ -319,19 +458,40 @@ pub fn solve_exact_belief(
                 continue;
             }
             let legal = legal_by_particle[particle_index].contains(&action);
+            let reused_development = if legal
+                && matches!(
+                    family,
+                    ExactActionFamily::Monopoly
+                        | ExactActionFamily::YearOfPlenty
+                        | ExactActionFamily::RoadBuilding
+                ) {
+                let mut next = particle.state.clone();
+                next.apply(&action).ok().and_then(|_| {
+                    post_action_development_score(&particle.state, &next, family, actor)
+                        .map(|score| (next, score))
+                })
+            } else {
+                None
+            };
             let value = if legal {
                 legal_mass += weight;
-                action_value(&particle.state, &action)
+                reused_development.as_ref().map_or_else(
+                    || action_value(&particle.state, &action),
+                    |(next, _)| forced_tail_value(next, 0),
+                )
             } else {
                 evaluate(&particle.state)
             };
-            let score = if legal {
+            let mut score = if legal {
                 // For a pending response, action_value has already resolved
                 // the bounded response/confirmation tail. Calling
                 // family_score used to traverse the same negotiation tree a
                 // second time for every counteroffer in every particle.
-                if family == ExactActionFamily::Mandatory
+                if let Some((_, score)) = reused_development {
+                    score
+                } else if family == ExactActionFamily::Mandatory
                     && !matches!(action, Action::ConfirmTrade { .. } | Action::CancelTrade)
+                    && !matches!(action, Action::MoveRobber { .. })
                 {
                     value[actor]
                 } else {
@@ -340,6 +500,15 @@ pub fn solve_exact_belief(
             } else {
                 evaluate(&particle.state)[actor]
             };
+            if matches!(action, Action::CounterTrade { .. }) {
+                // Counteroffers have real table-time and relationship cost.
+                // Require a material continuation-value gain over simply
+                // declining instead of countering every merely non-losing
+                // incoming proposal.
+                score -= 0.012;
+            } else if matches!(action, Action::RespondTrade { accept: true }) {
+                score += accepted_trade_material_adjustment(&particle.state, actor);
+            }
             decision_score += score * weight;
             lower_score = lower_score.min(score);
             for player in 0..4 {
@@ -347,13 +516,28 @@ pub fn solve_exact_belief(
                 lower[player] = lower[player].min(value[player]);
             }
         }
+        let hard_veto = belief_domestic_trade_threat(
+            particles
+                .iter()
+                .map(|particle| (&particle.state, particle.weight)),
+            &action,
+        )
+        .is_some();
         values.push(ExactActionValue {
             action,
             value: expected,
             lower_bound: lower,
             legal_weight: legal_mass,
-            decision_score,
-            lower_score,
+            decision_score: if hard_veto {
+                f32::NEG_INFINITY
+            } else {
+                decision_score
+            },
+            lower_score: if hard_veto {
+                f32::NEG_INFINITY
+            } else {
+                lower_score
+            },
         });
     }
     values.sort_by(|left, right| {
@@ -374,6 +558,8 @@ pub fn solve_exact_belief(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use colonist_catan_core::{Action, Building, GameState, Phase, Resource};
 
     use super::{ExactActionFamily, solve_exact_belief};
@@ -415,6 +601,111 @@ mod tests {
         assert!(result.actions.iter().all(|candidate| {
             !matches!(candidate.action, Action::MoveRobber { hex, .. } if hex == current)
         }));
+    }
+
+    #[test]
+    fn robber_never_blocks_only_the_actor_when_an_opponent_can_be_robbed() {
+        let mut state = GameState::standard(21, 3);
+        state.buildings.fill(None);
+        let (actor_vertex, opponent_vertex) = state
+            .board
+            .vertices
+            .iter()
+            .enumerate()
+            .find_map(|(actor_vertex, actor)| {
+                state
+                    .board
+                    .vertices
+                    .iter()
+                    .enumerate()
+                    .find(|(opponent_vertex, opponent)| {
+                        *opponent_vertex != actor_vertex
+                            && actor
+                                .adjacent_hexes
+                                .iter()
+                                .all(|hex| !opponent.adjacent_hexes.contains(hex))
+                    })
+                    .map(|(opponent_vertex, _)| (actor_vertex, opponent_vertex))
+            })
+            .expect("standard board has disjoint settlement vertices");
+        state.buildings[actor_vertex] = Some(Building::Settlement(0));
+        state.buildings[opponent_vertex] = Some(Building::Settlement(1));
+        state.players[1].resources[Resource::Grain.index()] = 3;
+        state.current_player = 0;
+        state.phase = Phase::MoveRobber;
+        state.robber_hex = (0..state.board.hexes.len())
+            .find(|hex| {
+                !state.board.vertices[actor_vertex]
+                    .adjacent_hexes
+                    .contains(&(*hex as u8))
+                    && !state.board.vertices[opponent_vertex]
+                        .adjacent_hexes
+                        .contains(&(*hex as u8))
+            })
+            .expect("standard board has an unrelated robber hex") as u8;
+        let actor_only_hexes = state.board.vertices[actor_vertex].adjacent_hexes.to_vec();
+
+        let result = solve_exact_belief(&particle(state), ExactActionFamily::Mandatory);
+
+        let Some(Action::MoveRobber { hex, victim }) = result.chosen else {
+            panic!("expected an exact robber move");
+        };
+        assert!(!actor_only_hexes.contains(&hex));
+        assert_eq!(victim, Some(1));
+    }
+
+    #[test]
+    fn robber_prefers_an_eight_over_a_five_for_the_same_victim() {
+        let mut state = GameState::standard(22, 3);
+        state.buildings.fill(None);
+        let (five_vertex, eight_vertex) = state
+            .board
+            .vertices
+            .iter()
+            .enumerate()
+            .find_map(|(five_vertex, five)| {
+                state
+                    .board
+                    .vertices
+                    .iter()
+                    .enumerate()
+                    .find(|(eight_vertex, eight)| {
+                        *eight_vertex != five_vertex
+                            && five
+                                .adjacent_hexes
+                                .iter()
+                                .all(|hex| !eight.adjacent_hexes.contains(hex))
+                    })
+                    .map(|(eight_vertex, _)| (five_vertex, eight_vertex))
+            })
+            .expect("standard board has disjoint settlement vertices");
+        let five_hex = state.board.vertices[five_vertex].adjacent_hexes[0];
+        let eight_hex = state.board.vertices[eight_vertex].adjacent_hexes[0];
+        let board = Arc::make_mut(&mut state.board);
+        for tile in &mut board.hexes {
+            tile.resource = Some(Resource::Grain);
+            tile.number = 2;
+        }
+        board.hexes[five_hex as usize].number = 5;
+        board.hexes[eight_hex as usize].number = 8;
+        state.buildings[five_vertex] = Some(Building::Settlement(1));
+        state.buildings[eight_vertex] = Some(Building::Settlement(1));
+        state.players[1].resources[Resource::Grain.index()] = 3;
+        state.current_player = 0;
+        state.phase = Phase::MoveRobber;
+        state.robber_hex = (0..state.board.hexes.len())
+            .find(|hex| *hex as u8 != five_hex && *hex as u8 != eight_hex)
+            .unwrap() as u8;
+
+        let result = solve_exact_belief(&particle(state), ExactActionFamily::Mandatory);
+
+        assert_eq!(
+            result.chosen,
+            Some(Action::MoveRobber {
+                hex: eight_hex,
+                victim: Some(1),
+            })
+        );
     }
 
     #[test]

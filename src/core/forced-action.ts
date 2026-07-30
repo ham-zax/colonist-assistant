@@ -1,4 +1,4 @@
-import type { BoardSnapshot } from "./placement";
+import type { BoardAction, BoardSnapshot } from "./placement";
 import {
   BUILD_COSTS,
   RESOURCE_ORDER,
@@ -53,6 +53,19 @@ const canTradeWithBank = (board: BoardSnapshot): boolean => {
         (!board.bankVisible || (board.bank?.[receive] ?? 0) > 0),
     );
   });
+};
+
+/**
+ * Colonist's global action state can report `discard` while a different player
+ * is resolving their seven. Only the local card-picker proves that this client
+ * owns the mandatory discard action.
+ */
+export const resolveLocalBoardAction = (
+  action: BoardAction,
+  localDiscardPromptVisible: boolean,
+): BoardAction => {
+  if (localDiscardPromptVisible) return "discard";
+  return action === "discard" ? "none" : action;
 };
 
 export const shouldFastTrackRoll = (

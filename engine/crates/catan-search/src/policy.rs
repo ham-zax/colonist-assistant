@@ -45,6 +45,32 @@ pub fn action_class(action: &Action) -> ActionClass {
     }
 }
 
+fn policy_family(action: &Action) -> usize {
+    match action {
+        Action::Roll => 0,
+        Action::ResolveRoll { .. } => 1,
+        Action::Discard { .. } => 2,
+        Action::MoveRobber { .. } => 3,
+        Action::ResolveSteal { .. } => 4,
+        Action::PlaceSettlement { .. } | Action::BuildSettlement { .. } => 5,
+        Action::PlaceRoad { .. } | Action::BuildRoad { .. } => 6,
+        Action::BuildCity { .. } => 7,
+        Action::BuyDevelopment => 8,
+        Action::PlayKnight { .. } => 9,
+        Action::PlayRoadBuilding { .. } => 10,
+        Action::PlayYearOfPlenty { .. } => 11,
+        Action::PlayMonopoly { .. } => 12,
+        Action::ResolveDevelopment { .. } => 13,
+        Action::MaritimeTrade { .. } => 14,
+        Action::OfferTrade { .. } => 15,
+        Action::RespondTrade { .. } => 16,
+        Action::CounterTrade { .. } => 17,
+        Action::ConfirmTrade { .. } => 18,
+        Action::CancelTrade => 19,
+        Action::EndTurn => 20,
+    }
+}
+
 /// Compact deterministic acceptance model. Its inputs are restricted to the
 /// recipient's exact sampled hand and public strategic state, so an opponent
 /// policy never reads third-party hidden identities.
@@ -228,7 +254,7 @@ pub fn action_prior(state: &GameState, action: &Action, actor: u8) -> f32 {
             3.0 + vertex_value(state, *vertex, actor)
         }
         Action::PlaceRoad { edge } | Action::BuildRoad { edge } => {
-            0.15 + road_frontier_value(state, *edge, actor)
+            0.02 + road_frontier_value(state, *edge, actor)
         }
         Action::Roll => 6.0,
         Action::ResolveRoll { .. } | Action::ResolveDevelopment { .. } => {
@@ -257,7 +283,15 @@ pub fn action_prior(state: &GameState, action: &Action, actor: u8) -> f32 {
         }
         Action::ResolveSteal { resource, .. } => [1.0, 1.0, 0.78, 1.25, 1.15][resource.index()],
         Action::BuildCity { vertex } => 4.0 + city_value(state, *vertex, actor),
-        Action::BuyDevelopment => 0.18 + observed_marginal_development_value(state, actor) * 2.2,
+        Action::BuyDevelopment => {
+            let player = &state.players[actor as usize];
+            let queued_actions = [0, 2, 3, 4]
+                .into_iter()
+                .map(|card| player.development[card])
+                .sum::<u8>() as f32;
+            let congestion = 1.0 / (1.0 + queued_actions * 0.28);
+            0.05 + observed_marginal_development_value(state, actor) * 1.15 * congestion
+        }
         Action::PlayRoadBuilding { first, second } => {
             1.0 + road_pair_coherence(state, *first, *second, actor)
         }
@@ -356,18 +390,17 @@ pub fn choose_rollout_action(
             .expect("chance state must expose a weighted outcome");
     }
     let actor = state.actor();
-    let mut ranked = actions
-        .iter()
-        .cloned()
-        .map(|action| {
-            let prior = action_prior(state, &action, actor).max(0.001);
-            (action, prior)
-        })
-        .collect::<Vec<_>>();
-    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
-    if ranked[0].1 >= 10_000.0 {
-        return ranked.remove(0).0;
+    if let Some(winning) = actions.iter().find(|action| {
+        let mut next = state.clone();
+        next.apply(action).is_ok() && next.winner() == Some(actor)
+    }) {
+        return winning.clone();
     }
+    // Rollouts operate on an exact sampled world, but the acting policy may
+    // condition only on that player's observation. Feeding the determinized
+    // state into the learned model made simulated players quietly omniscient.
+    let observed = state.observed_state(actor);
+    let ranked = normalize_priors(&observed, actions, actor);
     let sample_count = ranked.len().min(5);
     let total = ranked[..sample_count]
         .iter()
@@ -390,6 +423,10 @@ pub(crate) fn normalize_priors(
     actor: u8,
 ) -> Vec<(Action, f32)> {
     let learned = crate::model::learned_action_logits(state, actions);
+    let mut family_counts = [0_u16; 21];
+    for action in actions {
+        family_counts[policy_family(action)] += 1;
+    }
     let mut scored = actions
         .iter()
         .enumerate()
@@ -398,7 +435,12 @@ pub(crate) fn normalize_priors(
                 .as_ref()
                 .and_then(|values| values.get(index))
                 .map_or(1.0, |logit| logit.clamp(-4.0, 4.0).exp());
-            let score = (action_prior(state, action, actor) * learned_multiplier).max(0.0001);
+            // Parameter count is not strategic evidence. Without this family
+            // normalization, ten equivalent roads or ninety trade bundles get
+            // ten/ninety times the aggregate prior mass of EndTurn.
+            let family_size = family_counts[policy_family(action)].max(1) as f32;
+            let score =
+                (action_prior(state, action, actor) * learned_multiplier / family_size).max(0.0001);
             (action.clone(), score)
         })
         .collect::<Vec<_>>();
@@ -408,6 +450,20 @@ pub(crate) fn normalize_priors(
     }
     scored.sort_by(|a, b| b.1.total_cmp(&a.1));
     scored
+}
+
+/// Policy distribution for an actor inside a hidden-state simulation.
+///
+/// Legality comes from the exact particle because a player knows their own
+/// cards. Policy features come from the canonical observation so neither the
+/// hand-written prior nor the learned model can inspect anybody else's hidden
+/// resource/development identities.
+pub(crate) fn normalize_observed_priors(
+    state: &GameState,
+    actions: &[Action],
+    actor: u8,
+) -> Vec<(Action, f32)> {
+    normalize_priors(&state.observed_state(actor), actions, actor)
 }
 
 /// Preserves at least one candidate from every relevant strategic class before
@@ -457,6 +513,29 @@ pub(crate) fn order_scored_with_state_quotas(
             .iter()
             .find(|(action, _)| action_class(action) == class)
         {
+            push_unique(&mut selected, candidate);
+        }
+    }
+
+    // "Development" is a strategic class, but each playable card is a
+    // materially different action family. Preserve one representative of
+    // every family so a broad Knight or Year of Plenty parameter set cannot
+    // crowd Monopoly out before MaxN gets to compare it.
+    for development_family in [
+        0_u8, // BuyDevelopment
+        1_u8, // PlayKnight
+        2_u8, // PlayYearOfPlenty
+        3_u8, // PlayMonopoly
+    ] {
+        if let Some(candidate) = ranked.iter().find(|(action, _)| {
+            matches!(
+                (development_family, action),
+                (0, Action::BuyDevelopment)
+                    | (1, Action::PlayKnight { .. })
+                    | (2, Action::PlayYearOfPlenty { .. })
+                    | (3, Action::PlayMonopoly { .. })
+            )
+        }) {
             push_unique(&mut selected, candidate);
         }
     }
@@ -524,9 +603,52 @@ mod tests {
     use colonist_catan_core::{Action, GameState, Phase};
 
     use super::{
-        action_class, normalize_priors, order_scored_with_state_quotas, rank_with_class_quotas,
+        action_class, action_prior, normalize_observed_priors, normalize_priors,
+        order_scored_with_state_quotas, policy_family, rank_with_class_quotas,
         trade_acceptance_probability,
     };
+
+    #[test]
+    fn unpromoted_policy_weights_cannot_change_production_prior_scores() {
+        let mut state = GameState::standard(209, 4);
+        while matches!(
+            state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        ) {
+            let action = state.legal_actions()[0].clone();
+            state.apply(&action).unwrap();
+        }
+        state.phase = Phase::Main;
+        state.current_player = 0;
+        state.players[0].resources = [5, 5, 4, 5, 5];
+        let actions = state.legal_actions();
+
+        assert!(!crate::model::learned_policy_promoted());
+        assert!(crate::model::learned_action_logits(&state, &actions).is_none());
+
+        let mut family_counts = [0_u16; 21];
+        for action in &actions {
+            family_counts[policy_family(action)] += 1;
+        }
+        let expected_total = actions
+            .iter()
+            .map(|action| {
+                let family_size = family_counts[policy_family(action)].max(1) as f32;
+                (action_prior(&state, action, 0) / family_size).max(0.0001)
+            })
+            .sum::<f32>();
+        let ranked = normalize_priors(&state, &actions, 0);
+
+        for (action, actual) in ranked {
+            let family_size = family_counts[policy_family(&action)].max(1) as f32;
+            let expected =
+                (action_prior(&state, &action, 0) / family_size).max(0.0001) / expected_total;
+            assert!(
+                (actual - expected).abs() < 1e-6,
+                "{action:?} received {actual}, expected structured-only {expected}"
+            );
+        }
+    }
 
     #[test]
     fn root_cap_preserves_every_relevant_action_class() {
@@ -552,6 +674,42 @@ mod tests {
     }
 
     #[test]
+    fn root_cap_preserves_each_playable_development_family() {
+        let mut state = GameState::standard(215, 4);
+        while matches!(
+            state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        ) {
+            let action = state.legal_actions()[0].clone();
+            state.apply(&action).unwrap();
+        }
+        state.phase = Phase::Main;
+        state.current_player = 0;
+        state.players[0].resources = [5, 5, 4, 5, 5];
+        state.players[0].development[0] = 1;
+        state.players[0].development[3] = 1;
+        state.players[0].development[4] = 1;
+
+        let ranked = rank_with_class_quotas(&state, &state.legal_actions(), 0, 12);
+
+        assert!(
+            ranked
+                .iter()
+                .any(|(action, _)| matches!(action, Action::PlayKnight { .. }))
+        );
+        assert!(
+            ranked
+                .iter()
+                .any(|(action, _)| { matches!(action, Action::PlayYearOfPlenty { .. }) })
+        );
+        assert!(
+            ranked
+                .iter()
+                .any(|(action, _)| matches!(action, Action::PlayMonopoly { .. }))
+        );
+    }
+
+    #[test]
     fn state_quotas_preserve_a_real_hand_safety_conversion() {
         let mut state = GameState::standard(219, 3);
         while matches!(
@@ -571,6 +729,43 @@ mod tests {
             let mut next = state.clone();
             next.apply(action).is_ok() && next.players[0].resource_total() < held
         }));
+    }
+
+    #[test]
+    fn family_prior_mass_is_invariant_to_duplicate_parameters() {
+        let mut state = GameState::standard(221, 4);
+        while matches!(
+            state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        ) {
+            let action = state.legal_actions()[0].clone();
+            state.apply(&action).unwrap();
+        }
+        state.phase = Phase::Main;
+        state.current_player = 0;
+        state.players[0].resources = [1, 1, 0, 0, 0];
+        let road = state
+            .legal_actions()
+            .into_iter()
+            .find(|action| matches!(action, Action::BuildRoad { .. }))
+            .expect("fixture exposes a road");
+        let actions = vec![road.clone(), Action::EndTurn];
+        let duplicated = vec![road.clone(), road.clone(), Action::EndTurn];
+        let base = normalize_priors(&state, &actions, 0);
+        let expanded = normalize_priors(&state, &duplicated, 0);
+        let road_family = policy_family(&road);
+        let base_mass = base
+            .iter()
+            .filter(|(action, _)| policy_family(action) == road_family)
+            .map(|(_, prior)| prior)
+            .sum::<f32>();
+        let expanded_mass = expanded
+            .iter()
+            .filter(|(action, _)| policy_family(action) == road_family)
+            .map(|(_, prior)| prior)
+            .sum::<f32>();
+
+        assert!((base_mass - expanded_mass).abs() < 1e-5);
     }
 
     #[test]
@@ -630,8 +825,8 @@ mod tests {
         let first_actions = first.legal_actions();
         let second_actions = second.legal_actions();
         assert_eq!(first_actions, second_actions);
-        let first_priors = normalize_priors(&first, &first_actions, 1);
-        let second_priors = normalize_priors(&second, &second_actions, 1);
+        let first_priors = normalize_observed_priors(&first, &first_actions, 1);
+        let second_priors = normalize_observed_priors(&second, &second_actions, 1);
         assert_eq!(first_priors, second_priors);
     }
 }

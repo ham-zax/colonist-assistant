@@ -366,6 +366,8 @@ const validSnapshot = (value: unknown): value is BoardSnapshot => {
       typeof candidate.friendlyRobber === "boolean") &&
     (candidate.privateGame === undefined ||
       typeof candidate.privateGame === "boolean") &&
+    (candidate.botOnlyGame === undefined ||
+      typeof candidate.botOnlyGame === "boolean") &&
     (candidate.currentPlayer === undefined ||
       typeof candidate.currentPlayer === "string") &&
     optionalBoundedInteger(candidate.turn, 0, 100_000) &&

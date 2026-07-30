@@ -20,20 +20,14 @@ import {
   type PlayerBoardProfile,
 } from "./strategy";
 
-export type DecisionEngine =
-  | "deep-search"
-  | "deep-alpha-beta"
-  | "deep-puct"
-  | "hybrid"
-  | "race-eta"
-  | "vector-mcts";
+/** The product has one decision authority. Legacy engines remain only as
+ * explicitly named native-arena diagnostics and cannot enter live settings or
+ * worker requests. */
+export type DecisionEngine = "deep-search";
 
 export const isDeepDecisionEngine = (
   engine: DecisionEngine,
-): engine is "deep-search" | "deep-alpha-beta" | "deep-puct" =>
-  engine === "deep-search" ||
-  engine === "deep-alpha-beta" ||
-  engine === "deep-puct";
+): engine is "deep-search" => engine === "deep-search";
 
 export type DecisionRuntime =
   | "background-wasm"
@@ -84,6 +78,7 @@ export interface DeepSearchResult {
   rollouts: number;
   particles: number;
   effectiveParticleCount: number;
+  deadlineReached?: boolean;
   elapsedMs: number;
   seed: number;
 }
@@ -194,10 +189,9 @@ const sigmoid = (value: number): number => 1 / (1 + Math.exp(-value));
 const boardSignature = (
   state: TrackerState,
   board: BoardSnapshot,
-  engine: DecisionEngine,
 ): string =>
   JSON.stringify({
-    engine,
+    estimator: "strategist-public-prior",
     game: board.gameKey,
     turn: state.currentTurn.sequence,
     event: state.eventCount,
@@ -1283,13 +1277,12 @@ const rootBanditScores = (
   ) as Record<BuildKind, number>;
 };
 
-export const analyzeDecision = (
+export const analyzePublicEstimate = (
   state: TrackerState,
   board: BoardSnapshot,
   rootPlayer: string,
-  engine: DecisionEngine = "hybrid",
 ): DecisionAnalysis => {
-  const key = boardSignature(state, board, engine);
+  const key = boardSignature(state, board);
   const cached = analysisCache.get(key);
   if (cached) return cached;
   const etas = state.playerOrder.map((player) => ({
@@ -1298,62 +1291,16 @@ export const analyzeDecision = (
   }));
   const etaProbabilities = normalizeSoftmax(etas);
   const rootEta = etas.find((item) => item.player === rootPlayer);
-  const seed = hashString(key);
-  const simulationCount =
-    engine === "race-eta" ? 0 : state.playerOrder.length >= 3 ? 320 : 256;
-  const rollout =
-    simulationCount > 0
-      ? rolloutProbabilities(
-          state,
-          board,
-          rootPlayer,
-          simulationCount,
-          seed,
-        )
-      : etaProbabilities;
-  const blended = new Map(
-    state.playerOrder.map((player) => {
-      const eta = etaProbabilities.get(player) ?? 0;
-      const simulated = rollout.get(player) ?? 0;
-      return [
-        player,
-        engine === "race-eta"
-          ? eta
-          : engine === "vector-mcts" ||
-              isDeepDecisionEngine(engine)
-            ? simulated
-            : eta * 0.38 + simulated * 0.62,
-      ];
-    }),
-  );
+  const simulationCount = 0;
+  const blended = etaProbabilities;
   const probabilityTotal =
     [...blended.values()].reduce((sum, value) => sum + value, 0) || 1;
   const actionScores =
-    engine === "race-eta"
-      ? rootEta?.actionScores ??
-        ({ road: 0, settlement: 0, city: 0, development: 0 } as Record<
-          BuildKind,
-          number
-        >)
-      : rootBanditScores(
-          state,
-          board,
-          rootPlayer,
-          state.playerOrder.length >= 3 ? 192 : 160,
-          seed ^ 0x27d4eb2d,
-        );
-  if (engine === "hybrid" && rootEta) {
-    const etaValues = Object.values(rootEta.actionScores);
-    const etaMin = Math.min(...etaValues);
-    const etaMax = Math.max(...etaValues);
-    for (const kind of BUILD_KINDS) {
-      const normalizedEta =
-        etaMax > etaMin
-          ? ((rootEta.actionScores[kind] - etaMin) / (etaMax - etaMin)) * 100
-          : 50;
-      actionScores[kind] = actionScores[kind] * 0.62 + normalizedEta * 0.38;
-    }
-  }
+    rootEta?.actionScores ??
+    ({ road: 0, settlement: 0, city: 0, development: 0 } as Record<
+      BuildKind,
+      number
+    >);
   const playerEstimates = etas
     .map((item) => {
       const widthPenalty =
@@ -1376,16 +1323,10 @@ export const analyzeDecision = (
     })
     .sort((left, right) => right.probability - left.probability);
   return cacheResult(key, {
-    engine,
+    engine: "deep-search",
     players: playerEstimates,
     actionScores,
     simulations: simulationCount,
-    model:
-      engine === "race-eta"
-        ? "Deterministic build-time race"
-        : engine === "vector-mcts" ||
-            isDeepDecisionEngine(engine)
-          ? "Belief-sampled multiplayer rollouts with negotiated player trades"
-          : "Build-time race blended with negotiation-aware multiplayer rollouts",
+    model: "Public build-time prior (display only; Strategist chooses actions)",
   });
 };

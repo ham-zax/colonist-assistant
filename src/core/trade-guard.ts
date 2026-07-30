@@ -198,10 +198,20 @@ export const shouldConfirmAcceptedTradeImmediately = (
 
 export const tradeMemoryScopeChanged = (
   previous:
-    | { gameKey?: string; currentPlayer?: string; isMyTurn?: boolean }
+    | {
+        gameKey?: string;
+        currentPlayer?: string;
+        isMyTurn?: boolean;
+        turn?: number;
+      }
     | undefined,
   next:
-    | { gameKey?: string; currentPlayer?: string; isMyTurn?: boolean }
+    | {
+        gameKey?: string;
+        currentPlayer?: string;
+        isMyTurn?: boolean;
+        turn?: number;
+      }
     | undefined,
 ): boolean =>
   Boolean(
@@ -213,4 +223,17 @@ export const tradeMemoryScopeChanged = (
     previous?.currentPlayer &&
       next?.currentPlayer &&
       previous.currentPlayer !== next.currentPlayer,
+  ) ||
+  Boolean(
+    previous?.turn !== undefined &&
+      next?.turn !== undefined &&
+      previous.turn !== next.turn,
+  ) ||
+  Boolean(
+    previous?.isMyTurn === false &&
+      next?.isMyTurn === true &&
+      (
+        previous.turn === undefined ||
+        next.turn === undefined
+      ),
   );

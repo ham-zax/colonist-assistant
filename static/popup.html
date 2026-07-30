@@ -45,20 +45,13 @@
           <i></i>
         </label>
         <label>
-          <span><b>Autopilot</b><small>Play every high-confidence step automatically in the current match</small></span>
+          <span><b>Autopilot</b><small>Play high-confidence steps only in private or bot matches</small></span>
           <input type="checkbox" data-setting="autonomousPrivateGames" />
           <i></i>
         </label>
-        <div class="select-row">
-          <span><b>Decision engine</b><small>Choose how strategic actions and win odds are evaluated</small></span>
-          <select id="engine" aria-label="Decision engine">
-            <option value="deep-search">Deep MaxN ★</option>
-            <option value="deep-alpha-beta">AlphaBeta</option>
-            <option value="deep-puct">Belief PUCT 🧪</option>
-            <option value="hybrid">Hybrid</option>
-            <option value="race-eta">Race ETA</option>
-            <option value="vector-mcts">Vector rollouts</option>
-          </select>
+        <div class="engine-row">
+          <span><b>Decision engine</b><small>Weighted-belief Deep MaxN for tactics, trading, and multiplayer play</small></span>
+          <strong>Strategist ★</strong>
         </div>
       </section>
 

@@ -1,4 +1,5 @@
 import type { BoardSnapshot } from "./placement";
+import { DECISION_TRACE_STORAGE_KEY } from "./local-data";
 import { RESOURCE_ORDER } from "./resources";
 import type { DeepSearchAction, DecisionAnalysis } from "./engine";
 import type { TrackerState } from "./types";
@@ -51,7 +52,6 @@ export interface DecisionTrace {
   replayBoard?: BoardSnapshot;
 }
 
-const STORAGE_KEY = "colonist-assistant-decision-traces-v1";
 const MAX_TRACES = 120;
 
 const tuple = (
@@ -64,6 +64,7 @@ const tuple = (
 export class DecisionTraceRecorder {
   private readonly traces = new Map<string, DecisionTrace>();
   private persistTimer?: ReturnType<typeof globalThis.setTimeout>;
+  private storageOperations: Promise<void> = Promise.resolve();
 
   begin(
     stateHash: string,
@@ -125,9 +126,9 @@ export class DecisionTraceRecorder {
       trace.deepRequestStartedAt === undefined
         ? undefined
         : finishedAt - trace.deepRequestStartedAt;
-    // Interactive deadlines are diagnostic-only. The selected engine is
-    // never replaced by a timeout policy.
-    trace.deepTimedOut = false;
+    // A cooperative search deadline returns the best fully bounded report; it
+    // is diagnostic evidence, not permission to substitute another policy.
+    trace.deepTimedOut = analysis.deepSearch?.deadlineReached ?? false;
     trace.engine = analysis.engine;
     trace.runtime = analysis.runtime;
     trace.learnedModelVersion =
@@ -177,8 +178,15 @@ export class DecisionTraceRecorder {
     this.schedulePersist();
   }
 
-  reset(): void {
+  async reset(): Promise<void> {
+    if (this.persistTimer !== undefined) {
+      globalThis.clearTimeout(this.persistTimer);
+      this.persistTimer = undefined;
+    }
     this.traces.clear();
+    await this.enqueueStorage(() =>
+      chrome.storage.local.remove(DECISION_TRACE_STORAGE_KEY),
+    );
   }
 
   private schedulePersist(): void {
@@ -187,14 +195,22 @@ export class DecisionTraceRecorder {
     this.persistTimer = globalThis.setTimeout(() => {
       this.persistTimer = undefined;
       const traces = [...this.traces.values()].slice(-MAX_TRACES);
-      void storage.set({ [STORAGE_KEY]: traces });
+      void this.enqueueStorage(() =>
+        storage.set({ [DECISION_TRACE_STORAGE_KEY]: traces }),
+      );
     }, 200);
+  }
+
+  private enqueueStorage(operation: () => Promise<void>): Promise<void> {
+    const next = this.storageOperations.then(operation, operation);
+    this.storageOperations = next.catch(() => undefined);
+    return next;
   }
 }
 
 export const readDecisionTraces = async (): Promise<DecisionTrace[]> => {
-  const result = await chrome.storage.local.get(STORAGE_KEY);
-  return Array.isArray(result[STORAGE_KEY])
-    ? (result[STORAGE_KEY] as DecisionTrace[])
+  const result = await chrome.storage.local.get(DECISION_TRACE_STORAGE_KEY);
+  return Array.isArray(result[DECISION_TRACE_STORAGE_KEY])
+    ? (result[DECISION_TRACE_STORAGE_KEY] as DecisionTrace[])
     : [];
 };

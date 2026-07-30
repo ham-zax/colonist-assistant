@@ -173,7 +173,7 @@ label input:checked + i::after {
   transform: translateX(14px);
 }
 
-.select-row {
+.engine-row {
   display: flex;
   min-height: 66px;
   align-items: center;
@@ -181,36 +181,27 @@ label input:checked + i::after {
   border-bottom: 1px solid #2b404e;
 }
 
-.select-row > span {
+.engine-row > span {
   display: grid;
   flex: 1;
 }
 
-.select-row b {
+.engine-row b {
   font-size: 11.5px;
   font-weight: 670;
 }
 
-.select-row small {
+.engine-row small {
   margin-top: 2px;
   color: #6f8594;
   font-size: 10px;
 }
 
-.select-row select {
-  width: 104px;
-  min-height: 32px;
-  border: 1px solid #496171;
-  border-radius: 0;
-  color: #f1f4ef;
-  background: #101e28;
-  font: inherit;
+.engine-row strong {
+  flex: 0 0 auto;
+  color: #f1c84b;
   font-size: 10.5px;
-}
-
-.select-row select:focus-visible {
-  outline: 2px solid #f1c84b;
-  outline-offset: 2px;
+  letter-spacing: .025em;
 }
 
 .actions {
