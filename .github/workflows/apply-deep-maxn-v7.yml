@@ -1,0 +1,42 @@
+name: Apply Deep MaxN v7
+on:
+  push:
+    branches: [agent/deep-maxn-v7]
+permissions:
+  contents: write
+jobs:
+  apply-and-verify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/deep-maxn-v7
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - run: python scripts/apply-deep-maxn-v7-bootstrap.py
+      - run: rm -f scripts/apply-deep-maxn-v7-bootstrap.py .github/workflows/apply-deep-maxn-v7.yml
+      - run: cargo fmt --manifest-path engine/Cargo.toml --all
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run verify:rust
+      - run: npm run build:wasm
+      - run: npm test -- --run tests/deep-search-adapter.test.ts
+      - run: npm run build
+      - name: Commit verified v7
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "complete deep maxn v7 blockers"
+          git push origin HEAD:agent/deep-maxn-v7
