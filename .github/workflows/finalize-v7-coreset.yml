@@ -29,7 +29,8 @@ jobs:
         with:
           tool: wasm-bindgen-cli@0.2.126
       - run: python scripts/fix-v7-coreset.py
-      - run: rm scripts/fix-v7-coreset.py
+      - run: python scripts/fix-v7-coreset-imports.py
+      - run: rm -f scripts/fix-v7-coreset.py scripts/fix-v7-coreset-imports.py scripts/finalize-v7.trigger
       - run: cargo fmt --manifest-path engine/Cargo.toml --all
       - run: npm ci
       - run: npm run check
