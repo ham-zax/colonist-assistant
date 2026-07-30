@@ -104,3 +104,50 @@ Do not commit `dist/`, `release/`, `node_modules/`, `engine/target/`,
 Generated WASM bindings under `src/generated/wasm/` are source inputs for the
 packaged build and should remain versioned. Preserve third-party notices for
 fonts and other bundled assets.
+
+## Cursor Cloud specific instructions
+
+There is no `npm run dev` server. The runnable artifact is the unpacked
+extension in `dist/` after `npm run build` (or `npm run verify`).
+
+### Toolchain (one-time per VM image)
+
+- Node.js 22+ (preinstalled on the reference image).
+- Rust **1.90+** (`rustup update stable`). The workspace `rust-version` is
+  1.90; older stable toolchains fail `verify:rust`.
+- `rustup target add wasm32-unknown-unknown`
+- `wasm-bindgen-cli` (`cargo install wasm-bindgen-cli --locked`) when
+  `wasm-bindgen` is not already on `PATH`.
+
+### Build and test
+
+Use the standard commands from this file: `npm ci`, `npm run check`, `npm
+test`, `npm run verify:rust`, `npm run build`, `npm run verify`. The release
+extension lands in `dist/`.
+
+Quick native smoke (no browser): after a release build, `engine/target/release/colonist-arena`
+can run a 2-player block in under a second, e.g. `--candidate weighted --baseline
+random --players 2 --blocks 1 --threads 1 --validate --quiet`.
+
+### Manual Chrome testing in the cloud VM
+
+Load the unpacked build with Chrome/Chromium:
+
+```bash
+google-chrome-stable --no-sandbox --disable-dev-shm-usage --no-first-run \
+  --use-gl=angle --use-angle=swiftshader-webgl \
+  --user-data-dir=/tmp/chrome-colonist-dev \
+  --disable-extensions-except="$PWD/dist" \
+  --load-extension="$PWD/dist" \
+  https://colonist.io/
+```
+
+Without the WebGL flags, colonist.io shows a blocking “WebGL Inactive” modal.
+After each rebuild, reload the extension on `chrome://extensions` and refresh
+open colonist.io tabs.
+
+Automated live play: `CHROMIUM_PATH=/usr/bin/google-chrome-stable npm run
+benchmark:colonist -- --difficulties Easy --games 1 --jobs 1`. On Chrome 148,
+CDP may list the MV3 worker as `background.html` instead of `background.js`, so
+the harness can fail at launch even when the extension is loaded; unit tests and
+`npm run verify` remain the reliable gate in this environment.
