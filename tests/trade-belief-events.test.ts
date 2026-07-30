@@ -100,4 +100,25 @@ describe("trade negotiation belief events", () => {
     expect(state.players.Alice?.opponentModel.offersMade).toBe(1);
     expect(state.players.Bob?.opponentModel.tradeAccepts).toBe(2);
   });
+
+  it("counts the same bundle again on a later turn and applies posterior once per occurrence", () => {
+    let state = createTrackerState();
+    state = reduceTracker(state, { type: "discover", player: "Alice" });
+    state = reduceTracker(state, { type: "discover", player: "Bob" });
+    const give = { ...emptyResources(), lumber: 1 };
+    const receive = { ...emptyResources(), grain: 1 };
+    const run = () => {
+      state = reduceTracker(state, { type: "trade-offered", player: "Alice", recipients: ["Bob"], give, receive });
+      state = reduceTracker(state, { type: "trade-accepted", player: "Bob", creator: "Alice", give, receive });
+      const posteriorAfterPanel = state.players.Bob!.opponentModel.policyPosterior.tradeFlexible;
+      state = reduceTracker(state, { type: "trade", player: "Alice", acceptingPlayer: "Bob", given: give, received: receive, bank: false });
+      expect(state.players.Bob!.opponentModel.policyPosterior.tradeFlexible).toBe(posteriorAfterPanel);
+    };
+    run();
+    state = reduceTracker(state, { type: "roll", player: "Bob", dice: [3, 4] });
+    run();
+    expect(state.players.Alice!.opponentModel.offersMade).toBe(2);
+    expect(state.players.Bob!.opponentModel.tradeAccepts).toBe(3);
+  });
+
 });

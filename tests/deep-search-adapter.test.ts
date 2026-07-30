@@ -104,7 +104,7 @@ const state: TrackerState = {
   possibilitiesTruncated: false,
   warnings: [],
   recentEvents: [],
-  countedTradeBehaviour: {},
+  pendingTradeBehaviour: {},
 };
 
 const board: BoardSnapshot = {
@@ -428,7 +428,7 @@ describe("deep-search state adapter", () => {
     expect(built.request.tacticalNodes).toBe(900);
     expect(built.request.timeBudgetMs).toBe(350);
     expect(response.algorithm).toBe("maxn");
-    expect(response.engineRevision).toBe("deep-maxn-v5");
+    expect(response.engineRevision).toBe("deep-maxn-v7");
     expect(response.chosen).toBeDefined();
     expect(response.actions.length).toBeGreaterThan(0);
     expect(response.particles).toBe(built.request.state.worlds.length);

@@ -48,7 +48,29 @@ pub struct BeliefDepthResult {
     pub cutoffs: u32,
     pub depth: u8,
     pub particles: usize,
+    pub posterior_particles: usize,
     pub deadline_reached: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct BeliefDepthConfig {
+    pub maximum_depth: u8,
+    pub branch_cap: usize,
+    pub maximum_nodes: u32,
+    pub time_budget_ms: u32,
+    pub strategic_particle_limit: usize,
+}
+
+impl BeliefDepthConfig {
+    fn normalized(self) -> Self {
+        Self {
+            maximum_depth: self.maximum_depth,
+            branch_cap: self.branch_cap.max(1),
+            maximum_nodes: self.maximum_nodes.max(1),
+            time_budget_ms: self.time_budget_ms,
+            strategic_particle_limit: self.strategic_particle_limit.max(1),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -215,9 +237,7 @@ impl Searcher {
                 if ranked.is_empty() {
                     ranked = rank_with_class_quotas(state, &actions, actor, self.branch_cap);
                 }
-                let observation_safe = self
-                    .observation_safe_root
-                    .is_some_and(|root| root != actor);
+                let observation_safe = self.observation_safe_root.is_some_and(|root| root != actor);
                 // Observation-safe opponents evaluate a prior-weighted mixture
                 // over the top observation-ranked actions. The mixture depends
                 // only on the actor's observation, so indistinguishable worlds
@@ -239,8 +259,8 @@ impl Searcher {
                         let mut next = state.clone();
                         next.apply(action)
                             .expect("ranked depth-search action must transition");
-                        let completed_turn = next.turn != state.turn
-                            || next.current_player != state.current_player;
+                        let completed_turn =
+                            next.turn != state.turn || next.current_player != state.current_player;
                         let mut child = self.visit(
                             &next,
                             depth + u8::from(completed_turn),
@@ -358,7 +378,7 @@ impl Searcher {
         let ranked = order_scored_with_state_quotas(state, actor, ranked);
         // Threat forcing is disabled until it aggregates over the posterior and
         // verifies that a candidate actually removes a winning continuation.
-        let ranked = truncate_root_preserving_end_turn(ranked, self.branch_cap);
+        let mut ranked = truncate_root_preserving_end_turn(ranked, self.branch_cap);
         let safe_ranked = ranked
             .iter()
             .filter(|(action, _)| {
@@ -454,13 +474,14 @@ impl Searcher {
 
 fn belief_search(
     particles: &[BeliefParticle],
-    maximum_depth: u8,
-    branch_cap: usize,
-    maximum_nodes: u32,
-    time_budget_ms: u32,
+    config: BeliefDepthConfig,
     paranoid: bool,
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
-    let deadline = CooperativeDeadline::start(time_budget_ms);
+    let config = config.normalized();
+    let maximum_depth = config.maximum_depth;
+    let branch_cap = config.branch_cap;
+    let maximum_nodes = config.maximum_nodes;
+    let deadline = CooperativeDeadline::start(config.time_budget_ms);
     let Some(first_particle) = particles.first() else {
         return Err(DepthBeliefError::Empty);
     };
@@ -494,7 +515,7 @@ fn belief_search(
                 maximum_nodes: maximum_nodes.max(1),
                 root_width: 24,
                 opponent_width: 4,
-                time_budget_ms,
+                time_budget_ms: config.time_budget_ms,
                 opponent_maximizes: true,
                 ..OpeningConfig::default()
             },
@@ -566,15 +587,17 @@ fn belief_search(
                 .saturating_mul(2)
                 .saturating_sub(first.setup_step),
             particles: particles.len(),
+            posterior_particles: particles.len(),
             deadline_reached: report.deadline_reached,
         });
     }
     // Exact mandatory/tactical solvers in the WASM adapter see the full
     // posterior. Strategic MaxN deliberately searches a compact representative
     // subset so node budget is not diluted across near-duplicate worlds.
+    let posterior_particles = particles.len();
     let strategic_storage;
-    let particles = if particles.len() > STRATEGIC_PARTICLE_TARGET {
-        strategic_storage = select_strategic_particles(particles, STRATEGIC_PARTICLE_TARGET);
+    let particles = if particles.len() > config.strategic_particle_limit {
+        strategic_storage = select_strategic_particles(particles, config.strategic_particle_limit);
         strategic_storage.as_slice()
     } else {
         particles
@@ -796,6 +819,7 @@ fn belief_search(
         cutoffs,
         depth,
         particles: particles_searched,
+        posterior_particles,
         deadline_reached,
     })
 }
@@ -804,12 +828,70 @@ pub fn search_maxn(state: &GameState, depth: u8, branch_cap: usize) -> DepthSear
     search_maxn_bounded(state, depth, branch_cap, DEFAULT_DEPTH_NODE_BUDGET)
 }
 
+fn public_opening_result(
+    state: &GameState,
+    depth: u8,
+    branch_cap: usize,
+    maximum_nodes: u32,
+    time_budget_ms: u32,
+    paranoid: bool,
+) -> DepthSearchResult {
+    let particle = BeliefParticle {
+        state: state.clone(),
+        weight: 1.0,
+    };
+    let report = belief_search(
+        &[particle],
+        BeliefDepthConfig {
+            maximum_depth: depth,
+            branch_cap,
+            maximum_nodes,
+            time_budget_ms,
+            strategic_particle_limit: 1,
+        },
+        paranoid,
+    )
+    .expect("one public setup state is a valid belief");
+    DepthSearchResult {
+        chosen: report.chosen,
+        value: report.value,
+        actions: report.actions,
+        nodes: report.nodes,
+        cutoffs: report.cutoffs,
+        depth: report.depth,
+        deadline_reached: report.deadline_reached,
+    }
+}
+
 pub fn search_maxn_bounded(
     state: &GameState,
     depth: u8,
     branch_cap: usize,
     maximum_nodes: u32,
 ) -> DepthSearchResult {
+    search_maxn_bounded_timed(state, depth, branch_cap, maximum_nodes, 0)
+}
+
+pub fn search_maxn_bounded_timed(
+    state: &GameState,
+    depth: u8,
+    branch_cap: usize,
+    maximum_nodes: u32,
+    time_budget_ms: u32,
+) -> DepthSearchResult {
+    if matches!(
+        state.phase,
+        Phase::SetupSettlement | Phase::SetupRoad { .. }
+    ) {
+        return public_opening_result(
+            state,
+            depth,
+            branch_cap,
+            maximum_nodes,
+            time_budget_ms,
+            false,
+        );
+    }
     Searcher {
         algorithm: Algorithm::MaxN,
         maximum_depth: depth,
@@ -819,7 +901,7 @@ pub fn search_maxn_bounded(
         nodes: 0,
         cutoffs: 0,
         deepest_depth: 0,
-        deadline: CooperativeDeadline::start(0),
+        deadline: CooperativeDeadline::start(time_budget_ms),
         deadline_reached: false,
         observation_safe_root: None,
     }
@@ -842,6 +924,30 @@ pub fn search_paranoid_bounded(
     branch_cap: usize,
     maximum_nodes: u32,
 ) -> DepthSearchResult {
+    search_paranoid_bounded_timed(state, root, depth, branch_cap, maximum_nodes, 0)
+}
+
+pub fn search_paranoid_bounded_timed(
+    state: &GameState,
+    root: u8,
+    depth: u8,
+    branch_cap: usize,
+    maximum_nodes: u32,
+    time_budget_ms: u32,
+) -> DepthSearchResult {
+    if matches!(
+        state.phase,
+        Phase::SetupSettlement | Phase::SetupRoad { .. }
+    ) {
+        return public_opening_result(
+            state,
+            depth,
+            branch_cap,
+            maximum_nodes,
+            time_budget_ms,
+            true,
+        );
+    }
     Searcher {
         algorithm: Algorithm::Paranoid { root },
         maximum_depth: depth,
@@ -851,7 +957,7 @@ pub fn search_paranoid_bounded(
         nodes: 0,
         cutoffs: 0,
         deepest_depth: 0,
-        deadline: CooperativeDeadline::start(0),
+        deadline: CooperativeDeadline::start(time_budget_ms),
         deadline_reached: false,
         observation_safe_root: None,
     }
@@ -877,7 +983,23 @@ pub fn search_belief_maxn_bounded(
         .cloned()
         .map(|state| BeliefParticle { state, weight: 1.0 })
         .collect::<Vec<_>>();
-    belief_search(&weighted, depth, branch_cap, maximum_nodes.max(1), 0, false)
+    search_weighted_belief_maxn_with_config(
+        &weighted,
+        BeliefDepthConfig {
+            maximum_depth: depth,
+            branch_cap,
+            maximum_nodes,
+            time_budget_ms: 0,
+            strategic_particle_limit: STRATEGIC_PARTICLE_TARGET,
+        },
+    )
+}
+
+pub fn search_weighted_belief_maxn_with_config(
+    particles: &[BeliefParticle],
+    config: BeliefDepthConfig,
+) -> Result<BeliefDepthResult, DepthBeliefError> {
+    belief_search(particles, config, false)
 }
 
 pub fn search_weighted_belief_maxn_bounded(
@@ -886,7 +1008,16 @@ pub fn search_weighted_belief_maxn_bounded(
     branch_cap: usize,
     maximum_nodes: u32,
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
-    belief_search(particles, depth, branch_cap, maximum_nodes.max(1), 0, false)
+    search_weighted_belief_maxn_with_config(
+        particles,
+        BeliefDepthConfig {
+            maximum_depth: depth,
+            branch_cap,
+            maximum_nodes,
+            time_budget_ms: 0,
+            strategic_particle_limit: STRATEGIC_PARTICLE_TARGET,
+        },
+    )
 }
 
 pub fn search_weighted_belief_maxn_bounded_timed(
@@ -896,13 +1027,15 @@ pub fn search_weighted_belief_maxn_bounded_timed(
     maximum_nodes: u32,
     time_budget_ms: u32,
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
-    belief_search(
+    search_weighted_belief_maxn_with_config(
         particles,
-        depth,
-        branch_cap,
-        maximum_nodes.max(1),
-        time_budget_ms,
-        false,
+        BeliefDepthConfig {
+            maximum_depth: depth,
+            branch_cap,
+            maximum_nodes,
+            time_budget_ms,
+            strategic_particle_limit: STRATEGIC_PARTICLE_TARGET,
+        },
     )
 }
 
@@ -925,7 +1058,23 @@ pub fn search_belief_paranoid_bounded(
         .cloned()
         .map(|state| BeliefParticle { state, weight: 1.0 })
         .collect::<Vec<_>>();
-    belief_search(&weighted, depth, branch_cap, maximum_nodes.max(1), 0, true)
+    search_weighted_belief_paranoid_with_config(
+        &weighted,
+        BeliefDepthConfig {
+            maximum_depth: depth,
+            branch_cap,
+            maximum_nodes,
+            time_budget_ms: 0,
+            strategic_particle_limit: STRATEGIC_PARTICLE_TARGET,
+        },
+    )
+}
+
+pub fn search_weighted_belief_paranoid_with_config(
+    particles: &[BeliefParticle],
+    config: BeliefDepthConfig,
+) -> Result<BeliefDepthResult, DepthBeliefError> {
+    belief_search(particles, config, true)
 }
 
 pub fn search_weighted_belief_paranoid_bounded(
@@ -934,7 +1083,16 @@ pub fn search_weighted_belief_paranoid_bounded(
     branch_cap: usize,
     maximum_nodes: u32,
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
-    belief_search(particles, depth, branch_cap, maximum_nodes.max(1), 0, true)
+    search_weighted_belief_paranoid_with_config(
+        particles,
+        BeliefDepthConfig {
+            maximum_depth: depth,
+            branch_cap,
+            maximum_nodes,
+            time_budget_ms: 0,
+            strategic_particle_limit: STRATEGIC_PARTICLE_TARGET,
+        },
+    )
 }
 
 pub fn search_weighted_belief_paranoid_bounded_timed(
@@ -944,13 +1102,15 @@ pub fn search_weighted_belief_paranoid_bounded_timed(
     maximum_nodes: u32,
     time_budget_ms: u32,
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
-    belief_search(
+    search_weighted_belief_paranoid_with_config(
         particles,
-        depth,
-        branch_cap,
-        maximum_nodes.max(1),
-        time_budget_ms,
-        true,
+        BeliefDepthConfig {
+            maximum_depth: depth,
+            branch_cap,
+            maximum_nodes,
+            time_budget_ms,
+            strategic_particle_limit: STRATEGIC_PARTICLE_TARGET,
+        },
     )
 }
 
@@ -1288,5 +1448,71 @@ mod tests {
                 resource: Resource::Grain,
             })
         );
+    }
+
+    #[test]
+    fn configured_strategic_particle_limit_is_applied() {
+        let mut state = GameState::standard(151, 3);
+        while matches!(
+            state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        ) {
+            let action = state.legal_actions()[0].clone();
+            state.apply(&action).unwrap();
+        }
+        for player in 0..3 {
+            for resource in 0..5 {
+                state.bank[resource] += state.players[player].resources[resource];
+                state.players[player].resources[resource] = 0;
+            }
+        }
+        state.bank[Resource::Lumber.index()] -= 4;
+        state.bank[Resource::Brick.index()] -= 4;
+        let particles = (0..16)
+            .map(|index| {
+                let mut world = state.clone();
+                if index % 2 == 0 {
+                    world.players[1].resources = [4, 0, 0, 0, 0];
+                    world.players[2].resources = [0, 4, 0, 0, 0];
+                } else {
+                    world.players[1].resources = [0, 4, 0, 0, 0];
+                    world.players[2].resources = [4, 0, 0, 0, 0];
+                }
+                BeliefParticle {
+                    state: world,
+                    weight: 1.0,
+                }
+            })
+            .collect::<Vec<_>>();
+        let report = super::search_weighted_belief_maxn_with_config(
+            &particles,
+            super::BeliefDepthConfig {
+                maximum_depth: 1,
+                branch_cap: 4,
+                maximum_nodes: 500,
+                time_budget_ms: 0,
+                strategic_particle_limit: 4,
+            },
+        )
+        .unwrap();
+        assert_eq!(report.posterior_particles, 16);
+        assert_eq!(report.particles, 2);
+    }
+
+    #[test]
+    fn public_opening_is_identical_across_information_modes() {
+        let state = GameState::standard(153, 3);
+        let perfect = super::search_maxn_bounded(&state, 3, 12, 12_000);
+        let belief = super::search_weighted_belief_maxn_bounded(
+            &[BeliefParticle {
+                state: state.clone(),
+                weight: 1.0,
+            }],
+            3,
+            12,
+            12_000,
+        )
+        .unwrap();
+        assert_eq!(perfect.chosen, belief.chosen);
     }
 }

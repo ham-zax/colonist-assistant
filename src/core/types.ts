@@ -165,8 +165,8 @@ export interface TrackerState {
   possibilitiesTruncated: boolean;
   warnings: string[];
   recentEvents: StoredEvent[];
-  /** Offer/accept behaviour keys already counted so panel + log do not double-count. */
-  countedTradeBehaviour: Record<string, true>;
+  /** Panel observations waiting for a matching public-log completion. */
+  pendingTradeBehaviour: Record<string, number>;
 }
 
 export interface ResourceEstimate {
