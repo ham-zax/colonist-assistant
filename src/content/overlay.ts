@@ -79,6 +79,7 @@ import type { TrackerState } from "../core/types";
 import { WinPredictionStabilizer } from "../core/win-prediction";
 import type { GameSession } from "./session";
 import {
+  AUTOPILOT_DELAY_OPTIONS,
   normalizeAutopilotDelaySeconds,
   readPosition,
   saveSettings,
@@ -3707,9 +3708,10 @@ export class AssistantOverlay {
       <label class="settings-field">
         <span><b>Autopilot delay</b><small>Wait before each automatic click so play is easier to follow.</small></span>
         <select data-setting="autopilotDelaySeconds" aria-label="Autopilot delay">
-          <option value="1"${this.settings.autopilotDelaySeconds === 1 ? " selected" : ""}>1 second</option>
-          <option value="3"${this.settings.autopilotDelaySeconds === 3 ? " selected" : ""}>3 seconds</option>
-          <option value="5"${this.settings.autopilotDelaySeconds === 5 ? " selected" : ""}>5 seconds</option>
+          ${AUTOPILOT_DELAY_OPTIONS.map(
+            (seconds) =>
+              `<option value="${seconds}"${this.settings.autopilotDelaySeconds === seconds ? " selected" : ""}>${seconds} second${seconds === 1 ? "" : "s"}</option>`,
+          ).join("")}
         </select>
       </label>
       <div class="settings-version">
