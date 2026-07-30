@@ -27,10 +27,9 @@ jobs:
       - run: cargo fmt --manifest-path engine/Cargo.toml --all
       - run: npm ci
       - run: npm run check
-      - run: npm test
       - run: npm run verify:rust
       - run: npm run build:wasm
-      - run: npm test -- --run tests/deep-search-adapter.test.ts
+      - run: npm test
       - run: npm run build
       - name: Collect verified changes
         if: always()
