@@ -72,6 +72,12 @@ jobs:
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          # GitHub App tokens cannot create/delete workflow files without the
+          # separate workflows permission. Keep this bootstrap workflow and
+          # omit the permanent workflow from this commit; the connector installs
+          # the verified workflow after the source/binary push succeeds.
+          git restore --source=HEAD -- .github/workflows/apply-deep-maxn-v7.yml
+          rm -f .github/workflows/verify.yml
           git add -A
           git commit -m "complete deep maxn v7 blockers"
           git push origin HEAD:agent/deep-maxn-v7
