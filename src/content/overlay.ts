@@ -69,6 +69,11 @@ import {
   tradeOfferKey,
   unansweredIncomingTrades,
 } from "../core/trade-guard";
+import {
+  snapshotActiveTrades,
+  tradeBeliefEventsFromDiff,
+  type TradeOfferSnapshot,
+} from "../core/trade-beliefs";
 import type { TradeVerdict } from "../core/trades";
 import type {
   DecisionAnalysis,
@@ -248,6 +253,7 @@ export class AssistantOverlay {
   private collapsed: boolean;
   private session?: GameSession;
   private board?: BoardSnapshot;
+  private tradeOfferSnapshots = new Map<string, TradeOfferSnapshot>();
   private position: OverlayPosition = {};
   private drag?: { offsetX: number; offsetY: number };
   private roadPlan?: { gameKey?: string; targetId: string };
@@ -380,7 +386,21 @@ export class AssistantOverlay {
       this.failedTradeActions.clear();
       this.completedIncomingTradeIds.clear();
       this.outgoingTradeSeenAt.clear();
+      this.tradeOfferSnapshots.clear();
       this.clearOutgoingTradeWatchdogs();
+    }
+    if (this.session && nextBoard) {
+      const nextSnapshots = snapshotActiveTrades(nextBoard.activeTrades);
+      const tradeEvents = tradeBeliefEventsFromDiff(
+        this.tradeOfferSnapshots,
+        nextSnapshots,
+      );
+      this.tradeOfferSnapshots = nextSnapshots;
+      if (tradeEvents.length) {
+        this.session.ingestEvents(tradeEvents, "active-trade");
+      }
+    } else if (!nextBoard) {
+      this.tradeOfferSnapshots.clear();
     }
     const outgoingTrades =
       nextBoard?.activeTrades?.filter((trade) => !trade.incoming) ?? [];

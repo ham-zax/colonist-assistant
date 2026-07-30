@@ -20,6 +20,11 @@ Last updated: July 30, 2026.
   failure.
 - Cutoffs are reported separately. Wins, calibration, and the block bootstrap
   use terminal games only.
+- `--trajectory-output trajectory.jsonl` records per-turn trajectory samples
+  for every matched-block seat rotation: public and actual victory points,
+  production pips, expansion outlook, development-card queues, award holders,
+  offer/accept counts, and estimated win value. Use these to distinguish
+  concealed strength from weak early infrastructure plus late tactical rescue.
 - Reported confidence intervals are 95% block bootstraps. They become useful
   only with many independent matched blocks; a single block produces a
   degenerate interval.
@@ -100,9 +105,10 @@ The packaged cold-adapter test crosses the real generated WASM boundary,
 constructs the normal live request, and requires a legal weighted-belief Deep
 MaxN result in less than one second.
 
-The normal live configuration uses depth 4, a branch cap of 16, a 4,000-node
-bound, and a cooperative 350 ms strategic-search deadline. Setup uses the same
-deadline with its dedicated draft solver; trade responses and pondering use
+The normal live configuration uses depth 4, a branch cap of 8, a 4,000-node
+strategic limit, a cooperative 350 ms deadline, and a compact representative
+particle subset for MaxN. Exact solvers still see the fuller posterior. Setup
+uses a larger dedicated draft budget. Trade responses and pondering use
 separately bounded node profiles. The deadline is checked between bounded
 search slices. If it expires partway through a hidden-world action row, that
 entire row receives the same structured fallback so earlier actions cannot
@@ -260,7 +266,9 @@ held-out strength result yet. A promotion-quality comparison should freeze the
 source revision and untouched seed list, use hundreds of matched blocks in
 both three- and four-player games, rotate every seat, preserve a common
 information mode, and report terminal games, cutoffs, confidence intervals,
-rank, victory points, behavioral metrics, and latency. Native results must
-remain separate from live Colonist reliability and from claims about human
-opponents. Experimental belief-PUCT smoke runs cannot satisfy this requirement
-or be relabelled as live Strategist evidence.
+rank, victory points, behavioral metrics, and latency. Arena checkpoints and
+JSON summaries now record `gitSha`, `engineRevision`, MaxN depth/branch/nodes,
+and strategic particle limits so background runs can be tied to an executable.
+Native results must remain separate from live Colonist reliability and from
+claims about human opponents. Experimental belief-PUCT smoke runs cannot
+satisfy this requirement or be relabelled as live Strategist evidence.

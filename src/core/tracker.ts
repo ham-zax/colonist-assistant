@@ -62,6 +62,7 @@ export const createTrackerState = (): TrackerState => ({
   possibilitiesTruncated: false,
   warnings: [],
   recentEvents: [],
+  pendingTradeBehaviour: {},
 });
 
 const cloneState = (state: TrackerState): TrackerState => ({
@@ -92,7 +93,39 @@ const cloneState = (state: TrackerState): TrackerState => ({
   warnings: [...state.warnings],
   recentEvents: [...state.recentEvents],
   currentTurn: { ...state.currentTurn },
+  pendingTradeBehaviour: { ...(state.pendingTradeBehaviour ?? {}) },
 });
+
+const resourceBundleKey = (cards: ResourceVector): string =>
+  RESOURCE_ORDER.map((resource) => `${resource}:${cards[resource] ?? 0}`).join(",");
+
+const tradeBehaviourKey = (
+  kind: "offer" | "accept",
+  state: TrackerState,
+  creator: string,
+  give: ResourceVector,
+  receive: ResourceVector,
+  acceptingPlayer?: string,
+): string => [
+  kind,
+  state.currentTurn.sequence,
+  creator,
+  acceptingPlayer ?? "-",
+  resourceBundleKey(give),
+  resourceBundleKey(receive),
+].join(":");
+
+const addPendingTradeBehaviour = (state: TrackerState, key: string): void => {
+  state.pendingTradeBehaviour[key] = (state.pendingTradeBehaviour[key] ?? 0) + 1;
+};
+
+const consumePendingTradeBehaviour = (state: TrackerState, key: string): boolean => {
+  const count = state.pendingTradeBehaviour[key] ?? 0;
+  if (count <= 0) return false;
+  if (count === 1) delete state.pendingTradeBehaviour[key];
+  else state.pendingTradeBehaviour[key] = count - 1;
+  return true;
+};
 
 const ensurePlayer = (
   state: TrackerState,
@@ -475,9 +508,15 @@ export const reduceTracker = (
       ? [event.from, event.to]
       : event.type === "trade" && event.acceptingPlayer
         ? [event.player, event.acceptingPlayer]
-        : "player" in event
-          ? [event.player]
-          : [];
+        : event.type === "trade-accepted" ||
+            event.type === "trade-rejected" ||
+            event.type === "trade-countered"
+          ? [event.player, event.creator]
+          : event.type === "trade-offered"
+            ? [event.player, ...event.recipients]
+            : "player" in event
+              ? [event.player]
+              : [];
   for (const name of names) ensurePlayer(state, name);
   const actor =
     event.type === "transfer" || event.type === "unknown-transfer"
@@ -518,6 +557,77 @@ export const reduceTracker = (
       markResources(state.players[event.to]!, event.cards, "gained");
       break;
     }
+    case "trade-offered": {
+      const key = tradeBehaviourKey("offer", state, event.player, event.give, event.receive);
+      state.players[event.player]!.opponentModel.offersMade += 1;
+      updatePolicyPosterior(state.players[event.player]!, {
+        tradeFlexible: 1.18,
+        tradeResistant: 0.94,
+      });
+      addPendingTradeBehaviour(state, key);
+      const offered = reweightTradeEvidence(state, [{
+        id: `offer:${event.player}:${state.eventCount}`,
+        creator: event.player,
+        give: event.give,
+        receive: event.receive,
+      }]);
+      state.worlds = offered.worlds;
+      break;
+    }
+    case "trade-accepted": {
+      const key = tradeBehaviourKey(
+        "accept", state, event.creator, event.give, event.receive, event.player,
+      );
+      state.players[event.player]!.opponentModel.tradeAccepts += 1;
+      updatePolicyPosterior(state.players[event.player]!, {
+        tradeFlexible: 1.35,
+        tradeResistant: 0.82,
+      });
+      addPendingTradeBehaviour(state, key);
+      const accepted = reweightTradeEvidence(state, [{
+        id: `accept:${event.player}:${state.eventCount}`,
+        creator: event.creator,
+        give: event.give,
+        receive: event.receive,
+        acceptedPlayers: [event.player],
+      }]);
+      state.worlds = accepted.worlds;
+      break;
+    }
+    case "trade-rejected": {
+      const rejected = reweightTradeEvidence(state, [
+        {
+          id: `reject:${event.player}:${state.eventCount}`,
+          creator: event.creator,
+          give: event.give,
+          receive: event.receive,
+          rejectedPlayers: [event.player],
+        },
+      ]);
+      state.worlds = rejected.worlds;
+      state.players = rejected.players;
+      break;
+    }
+    case "trade-countered": {
+      const countered = reweightTradeEvidence(state, [
+        {
+          id: `counter:${event.player}:${state.eventCount}`,
+          creator: event.creator,
+          give: event.give,
+          receive: event.receive,
+          counteringPlayers: [event.player],
+        },
+      ]);
+      state.worlds = countered.worlds;
+      state.players = countered.players;
+      break;
+    }
+    case "trade-expired": {
+      const key = tradeBehaviourKey("offer", state, event.player, event.give, event.receive);
+      consumePendingTradeBehaviour(state, key);
+      updatePolicyPosterior(state.players[event.player]!, { tradeFlexible: 0.97 });
+      break;
+    }
     case "trade": {
       if (event.bank || !event.acceptingPlayer) {
         applySpend(state, event.player, event.given);
@@ -549,17 +659,27 @@ export const reduceTracker = (
       }
       markResources(state.players[event.player]!, event.given, "spent");
       markResources(state.players[event.player]!, event.received, "gained");
-      state.players[event.player]!.opponentModel.offersMade += 1;
-      updatePolicyPosterior(state.players[event.player]!, {
-        tradeFlexible: 1.28,
-        tradeResistant: 0.9,
-      });
-      if (event.acceptingPlayer) {
-        state.players[event.acceptingPlayer]!.opponentModel.tradeAccepts += 1;
-        updatePolicyPosterior(state.players[event.acceptingPlayer]!, {
-          tradeFlexible: 1.35,
-          tradeResistant: 0.82,
+      const offerKey = tradeBehaviourKey(
+        "offer", state, event.player, event.given, event.received,
+      );
+      if (!consumePendingTradeBehaviour(state, offerKey)) {
+        state.players[event.player]!.opponentModel.offersMade += 1;
+        updatePolicyPosterior(state.players[event.player]!, {
+          tradeFlexible: 1.28,
+          tradeResistant: 0.9,
         });
+      }
+      if (event.acceptingPlayer) {
+        const acceptKey = tradeBehaviourKey(
+          "accept", state, event.player, event.given, event.received, event.acceptingPlayer,
+        );
+        if (!consumePendingTradeBehaviour(state, acceptKey)) {
+          state.players[event.acceptingPlayer]!.opponentModel.tradeAccepts += 1;
+          updatePolicyPosterior(state.players[event.acceptingPlayer]!, {
+            tradeFlexible: 1.35,
+            tradeResistant: 0.82,
+          });
+        }
       }
       break;
     }

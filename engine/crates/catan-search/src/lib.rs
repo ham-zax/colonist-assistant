@@ -14,7 +14,9 @@ mod model;
 mod opening;
 mod planner;
 mod policy;
+mod shared;
 mod tactical;
+mod threats;
 mod trade_model;
 mod trade_safety;
 
@@ -42,8 +44,19 @@ pub use model::{
 };
 pub use opening::{OpeningActionValue, OpeningConfig, OpeningReport, solve_opening};
 pub use planner::{TurnPlan, TurnPlanConfig, plan_current_turn};
-pub use policy::{ActionClass, action_prior, choose_rollout_action, trade_acceptance_probability};
+pub use policy::{
+    ActionClass, action_prior, allocate_root_node_budgets, choose_rollout_action,
+    trade_acceptance_probability,
+};
+pub use shared::{
+    STRATEGIC_PARTICLE_TARGET, STRATEGIC_ROOT_WIDTH, group_particles_by_observation,
+    select_strategic_particles, shared_root_candidates,
+};
 pub use tactical::{TacticalResult, solve_belief_current_turn, solve_current_turn};
+pub use threats::{
+    OpponentThreat, OpponentThreatKind, action_blocks_threat, detect_opponent_threats,
+    force_threat_blocking_actions,
+};
 pub use trade_model::{
     TRADE_ACCEPTANCE_FEATURES, learned_trade_acceptance_probability, learned_trade_model_version,
     trade_acceptance_features,
@@ -52,11 +65,13 @@ pub use trade_safety::{
     DomesticTradeThreat, HARD_VETO_POSTERIOR, belief_domestic_trade_threat, domestic_trade_threat,
 };
 
-pub const ENGINE_REVISION: &str = "deep-maxn-v3";
+pub const ENGINE_REVISION: &str = "deep-maxn-v7";
 pub use depth::{
-    BeliefDepthResult, DepthActionValue, DepthBeliefError, DepthSearchResult, search_belief_maxn,
-    search_belief_maxn_bounded, search_belief_paranoid, search_belief_paranoid_bounded,
-    search_maxn, search_maxn_bounded, search_paranoid, search_paranoid_bounded,
+    BeliefDepthConfig, BeliefDepthResult, DepthActionValue, DepthBeliefError, DepthSearchResult,
+    search_belief_maxn, search_belief_maxn_bounded, search_belief_paranoid,
+    search_belief_paranoid_bounded, search_maxn, search_maxn_bounded, search_maxn_bounded_timed,
+    search_paranoid, search_paranoid_bounded, search_paranoid_bounded_timed,
     search_weighted_belief_maxn_bounded, search_weighted_belief_maxn_bounded_timed,
-    search_weighted_belief_paranoid_bounded, search_weighted_belief_paranoid_bounded_timed,
+    search_weighted_belief_maxn_with_config, search_weighted_belief_paranoid_bounded,
+    search_weighted_belief_paranoid_bounded_timed, search_weighted_belief_paranoid_with_config,
 };

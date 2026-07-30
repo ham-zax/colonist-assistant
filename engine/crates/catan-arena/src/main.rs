@@ -8,10 +8,11 @@ use std::time::{Duration, Instant};
 
 use colonist_catan_core::{Action, GameState, NodeKind, Phase, SplitMix64};
 use colonist_catan_search::{
-    BeliefParticle, Mcts, SearchConfig, SearchMode, SearchReport, action_prior,
-    choose_rollout_action, encode_action, encode_heterogeneous_graph, evaluate,
-    pool_heterogeneous_graph, search_maxn_bounded, search_paranoid_bounded,
-    search_weighted_belief_maxn_bounded, search_weighted_belief_paranoid_bounded,
+    BeliefDepthConfig, BeliefParticle, DepthActionValue, ENGINE_REVISION, Mcts, SearchConfig,
+    SearchMode, SearchReport, action_prior, choose_rollout_action, encode_action,
+    encode_heterogeneous_graph, evaluate, expansion_option_value, pool_heterogeneous_graph,
+    production_pips, search_maxn_bounded_timed, search_paranoid_bounded_timed,
+    search_weighted_belief_maxn_with_config, search_weighted_belief_paranoid_with_config,
     strategic_utility, trade_acceptance_features,
 };
 use serde::Serialize;
@@ -73,11 +74,23 @@ struct Config {
     checkpoint_output: Option<String>,
     expert_output: Option<String>,
     trade_output: Option<String>,
+    trajectory_output: Option<String>,
     expert_stride: u32,
     expert_iterations: u32,
     expert_rollout_actions: u16,
     belief_particles: usize,
+    strategic_particle_limit: usize,
+    maxn_depth: u8,
+    maxn_branch: usize,
+    maxn_nodes: Option<u32>,
+    maxn_time_ms: u32,
+    opening_nodes: u32,
+    opening_time_ms: u32,
+    trade_response_nodes: u32,
+    trade_response_time_ms: u32,
     perfect_information_search: bool,
+    build_git_sha: &'static str,
+    build_dirty: bool,
 }
 
 impl Default for Config {
@@ -102,11 +115,23 @@ impl Default for Config {
             checkpoint_output: None,
             expert_output: None,
             trade_output: None,
+            trajectory_output: None,
             expert_stride: 1,
             expert_iterations: 0,
             expert_rollout_actions: 0,
             belief_particles: 24,
+            strategic_particle_limit: 12,
+            maxn_depth: 3,
+            maxn_branch: 12,
+            maxn_nodes: None,
+            maxn_time_ms: 0,
+            opening_nodes: 12_000,
+            opening_time_ms: 1_200,
+            trade_response_nodes: 2_000,
+            trade_response_time_ms: 350,
             perfect_information_search: false,
+            build_git_sha: option_env!("COLONIST_BUILD_GIT_SHA").unwrap_or("unknown"),
+            build_dirty: option_env!("COLONIST_BUILD_DIRTY") == Some("1"),
         }
     }
 }
@@ -129,6 +154,7 @@ fn parse_config() -> Config {
             "--checkpoint-output" => config.checkpoint_output = value.map(str::to_string),
             "--expert-output" => config.expert_output = value.map(str::to_string),
             "--trade-output" => config.trade_output = value.map(str::to_string),
+            "--trajectory-output" => config.trajectory_output = value.map(str::to_string),
             "--expert-stride" => {
                 config.expert_stride = value.and_then(|v| v.parse().ok()).unwrap_or(1).max(1)
             }
@@ -143,6 +169,38 @@ fn parse_config() -> Config {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(24)
                     .clamp(1, 256)
+            }
+            "--strategic-particles" => {
+                config.strategic_particle_limit = value
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(12)
+                    .clamp(1, 256)
+            }
+            "--maxn-depth" => {
+                config.maxn_depth = value.and_then(|v| v.parse().ok()).unwrap_or(3).clamp(1, 8)
+            }
+            "--maxn-branch" => {
+                config.maxn_branch = value
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(12)
+                    .clamp(1, 64)
+            }
+            "--maxn-nodes" => config.maxn_nodes = value.and_then(|v| v.parse().ok()),
+            "--maxn-time-ms" => {
+                config.maxn_time_ms = value.and_then(|v| v.parse().ok()).unwrap_or(0)
+            }
+            "--opening-nodes" => {
+                config.opening_nodes = value.and_then(|v| v.parse().ok()).unwrap_or(12_000).max(1)
+            }
+            "--opening-time-ms" => {
+                config.opening_time_ms = value.and_then(|v| v.parse().ok()).unwrap_or(1_200)
+            }
+            "--trade-response-nodes" => {
+                config.trade_response_nodes =
+                    value.and_then(|v| v.parse().ok()).unwrap_or(2_000).max(1)
+            }
+            "--trade-response-time-ms" => {
+                config.trade_response_time_ms = value.and_then(|v| v.parse().ok()).unwrap_or(350)
             }
             "--threads" => config.threads = value.and_then(|v| v.parse().ok()).unwrap_or(1).max(1),
             "--candidate" => {
@@ -191,16 +249,20 @@ fn parse_config() -> Config {
                      [--candidate random|weighted|maxn|alphabeta|uct|puct] [--baseline ...] \\
                      [--lineup puct,puct,maxn,maxn] \\
                      [--iterations N] [--rollout-actions N] [--max-turns N] \\
-                     [--belief-particles N] [--perfect-information] \\
+                     [--belief-particles N] [--strategic-particles N] \\
+                     [--maxn-depth N] [--maxn-branch N] [--maxn-nodes N] [--maxn-time-ms N] \\
+                     [--perfect-information] \\
                      [--checkpoint-output progress.jsonl] \\
                      [--expert-output samples.jsonl] [--trade-output trades.jsonl] \\
+                     [--trajectory-output trajectory.jsonl] \\
                      [--expert-stride N] [--expert-iterations N] \\
                      [--expert-rollout-actions N] \\
                      [--threads N] [--validate] [--quiet] [--json]\n\
                      maxn (also deep) is the validated default; puct is experimental.\n\
                      strategist remains a compatibility alias for puct.\n\
                      Search engines use identical weighted beliefs unless --perfect-information\n\
-                     explicitly enables oracle access to hidden state."
+                     explicitly enables oracle access to hidden state.\n\
+                     Checkpoints record git SHA and ENGINE_REVISION for reproducibility."
                 );
                 std::process::exit(0);
             }
@@ -236,7 +298,30 @@ fn parse_config() -> Config {
 
 struct EngineChoice {
     action: Action,
+    root_value: Option<[f32; 4]>,
+    nodes: u32,
+    depth: u8,
+    posterior_particles: usize,
+    strategic_particles: usize,
+    deadline_reached: bool,
+    action_values: Vec<DepthActionValue>,
     search: Option<SearchReport>,
+}
+
+impl EngineChoice {
+    fn simple(action: Action) -> Self {
+        Self {
+            action,
+            root_value: None,
+            nodes: 0,
+            depth: 0,
+            posterior_particles: 0,
+            strategic_particles: 0,
+            deadline_reached: false,
+            action_values: Vec::new(),
+            search: None,
+        }
+    }
 }
 
 /// Deterministic observer-consistent determinizations for arena play.
@@ -396,59 +481,81 @@ fn choose_action(
         .uses_search_information()
         .then(|| search_belief_particles(state, config))
         .flatten();
-    let depth_nodes = (config.iterations * 160).clamp(4_000, 80_000);
-    if engine == Engine::Puct
-        && matches!(
-            state.phase,
-            Phase::SetupSettlement | Phase::SetupRoad { .. }
-        )
-    {
-        // Keep experimental PUCT setup comparable with the packaged engine:
-        // use the snake-order opening horizon rather than low-visit PUCT.
-        let opening_nodes = (config.iterations * 100).clamp(10_000, 30_000);
-        let chosen = match search_particles.as_deref() {
-            Some(particles) => {
-                search_weighted_belief_maxn_bounded(
-                    particles,
-                    config.players.clamp(2, 4),
-                    16,
-                    opening_nodes,
-                )
-                .expect("arena belief particles share one public observation")
-                .chosen
+    let ordinary_nodes = config
+        .maxn_nodes
+        .unwrap_or_else(|| (config.iterations * 160).clamp(4_000, 80_000));
+    let (nodes, time_ms) = if matches!(
+        state.phase,
+        Phase::SetupSettlement | Phase::SetupRoad { .. }
+    ) {
+        (config.opening_nodes, config.opening_time_ms)
+    } else if state.phase == Phase::TradeResponses {
+        (config.trade_response_nodes, config.trade_response_time_ms)
+    } else {
+        (ordinary_nodes, config.maxn_time_ms)
+    };
+    let depth_config = BeliefDepthConfig {
+        maximum_depth: config.maxn_depth,
+        branch_cap: config.maxn_branch,
+        maximum_nodes: nodes,
+        time_budget_ms: time_ms,
+        strategic_particle_limit: config.strategic_particle_limit,
+    };
+    match engine {
+        Engine::Random => EngineChoice::simple(actions[rng.range(actions.len())].clone()),
+        Engine::Weighted => EngineChoice::simple(choose_rollout_action(state, &actions, rng)),
+        Engine::MaxN | Engine::AlphaBeta => {
+            let paranoid = engine == Engine::AlphaBeta;
+            if let Some(particles) = search_particles.as_deref() {
+                let report = if paranoid {
+                    search_weighted_belief_paranoid_with_config(particles, depth_config)
+                } else {
+                    search_weighted_belief_maxn_with_config(particles, depth_config)
+                }
+                .expect("arena belief particles share one public observation");
+                EngineChoice {
+                    action: report.chosen.clone().unwrap_or_else(|| actions[0].clone()),
+                    root_value: Some(report.value),
+                    nodes: report.nodes,
+                    depth: report.depth,
+                    posterior_particles: report.posterior_particles,
+                    strategic_particles: report.particles,
+                    deadline_reached: report.deadline_reached,
+                    action_values: report.actions,
+                    search: None,
+                }
+            } else {
+                let report = if paranoid {
+                    search_paranoid_bounded_timed(
+                        state,
+                        state.actor(),
+                        config.maxn_depth,
+                        config.maxn_branch,
+                        nodes,
+                        time_ms,
+                    )
+                } else {
+                    search_maxn_bounded_timed(
+                        state,
+                        config.maxn_depth,
+                        config.maxn_branch,
+                        nodes,
+                        time_ms,
+                    )
+                };
+                EngineChoice {
+                    action: report.chosen.clone().unwrap_or_else(|| actions[0].clone()),
+                    root_value: Some(report.value),
+                    nodes: report.nodes,
+                    depth: report.depth,
+                    posterior_particles: 1,
+                    strategic_particles: 1,
+                    deadline_reached: report.deadline_reached,
+                    action_values: report.actions,
+                    search: None,
+                }
             }
-            None => {
-                search_maxn_bounded(state, config.players.clamp(2, 4), 16, opening_nodes).chosen
-            }
-        };
-        return EngineChoice {
-            action: chosen.unwrap_or_else(|| actions[0].clone()),
-            search: None,
-        };
-    }
-    let action = match engine {
-        Engine::Random => actions[rng.range(actions.len())].clone(),
-        Engine::Weighted => choose_rollout_action(state, &actions, rng),
-        Engine::MaxN => match search_particles.as_deref() {
-            Some(particles) => search_weighted_belief_maxn_bounded(particles, 3, 12, depth_nodes)
-                .expect("arena belief particles share one public observation")
-                .chosen
-                .unwrap_or_else(|| actions[0].clone()),
-            None => search_maxn_bounded(state, 3, 12, depth_nodes)
-                .chosen
-                .unwrap_or_else(|| actions[0].clone()),
-        },
-        Engine::AlphaBeta => match search_particles.as_deref() {
-            Some(particles) => {
-                search_weighted_belief_paranoid_bounded(particles, 3, 12, depth_nodes)
-                    .expect("arena belief particles share one public observation")
-                    .chosen
-                    .unwrap_or_else(|| actions[0].clone())
-            }
-            None => search_paranoid_bounded(state, state.actor(), 3, 12, depth_nodes)
-                .chosen
-                .unwrap_or_else(|| actions[0].clone()),
-        },
+        }
         Engine::Uct | Engine::Puct => {
             let actor = state.actor() as usize;
             let search = persistent_searches[actor]
@@ -466,16 +573,18 @@ fn choose_action(
                     SearchMode::Puct
                 },
             );
-            let action = report.chosen.clone().unwrap_or_else(|| actions[0].clone());
-            return EngineChoice {
-                action,
+            EngineChoice {
+                action: report.chosen.clone().unwrap_or_else(|| actions[0].clone()),
+                root_value: Some(report.root_value),
+                nodes: report.statistics.nodes as u32,
+                depth: 0,
+                posterior_particles: search_particles.as_ref().map_or(1, Vec::len),
+                strategic_particles: search_particles.as_ref().map_or(1, Vec::len),
+                deadline_reached: false,
+                action_values: Vec::new(),
                 search: Some(report),
-            };
+            }
         }
-    };
-    EngineChoice {
-        action,
-        search: None,
     }
 }
 
@@ -523,10 +632,120 @@ struct GameMetrics {
     robber_blocked_production: [u32; 4],
     decision_count: [u32; 4],
     decision_time: [Duration; 4],
+    search_decision_count: [u32; 4],
+    search_nodes: [u64; 4],
+    search_depth: [u64; 4],
+    posterior_particles: [u64; 4],
+    strategic_particles: [u64; 4],
+    search_deadlines: [u32; 4],
+    search_action_values: [u64; 4],
     trade_value_sum: [f32; 4],
     calibration_brier_sum: [f32; 4],
     calibration_log_loss_sum: [f32; 4],
     calibration_count: [u32; 4],
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrajectorySample {
+    schema_version: u8,
+    board_seed: u64,
+    chance_seed: u64,
+    block: u32,
+    seat_rotation: u8,
+    turn: u16,
+    phase: String,
+    actor: u8,
+    engines: Vec<&'static str>,
+    public_victory_points: Vec<u8>,
+    actual_victory_points: Vec<u8>,
+    production_pips: Vec<f32>,
+    best_settlement_roads: Vec<u8>,
+    expansion_value: Vec<f32>,
+    settlements: Vec<u8>,
+    cities: Vec<u8>,
+    roads_built: Vec<u8>,
+    development_hand: Vec<u8>,
+    unplayed_action_cards: Vec<u8>,
+    played_knights: Vec<u8>,
+    longest_road_holder: Option<u8>,
+    largest_army_holder: Option<u8>,
+    offers: Vec<u32>,
+    accepts: Vec<u32>,
+    estimated_win_value: Vec<f32>,
+}
+
+fn capture_trajectory_sample(
+    state: &GameState,
+    board_seed: u64,
+    chance_seed: u64,
+    engines: &[Engine],
+    metrics: &GameMetrics,
+) -> TrajectorySample {
+    let players = state.board.num_players as usize;
+    let win_values = evaluate(state);
+    TrajectorySample {
+        schema_version: 1,
+        board_seed,
+        chance_seed,
+        block: 0,
+        seat_rotation: 0,
+        turn: state.turn,
+        phase: format!("{:?}", state.phase),
+        actor: state.actor(),
+        engines: engines.iter().map(|engine| engine.as_str()).collect(),
+        public_victory_points: state.players[..players]
+            .iter()
+            .map(|player| player.public_victory_points)
+            .collect(),
+        actual_victory_points: state.players[..players]
+            .iter()
+            .map(|player| player.victory_points())
+            .collect(),
+        production_pips: (0..players)
+            .map(|player| production_pips(state, player as u8).iter().sum())
+            .collect(),
+        best_settlement_roads: (0..players)
+            .map(|player| expansion_option_value(state, player as u8).roads_required)
+            .collect(),
+        expansion_value: (0..players)
+            .map(|player| expansion_option_value(state, player as u8).portfolio_value)
+            .collect(),
+        settlements: state.players[..players]
+            .iter()
+            .map(|player| 5u8.saturating_sub(player.settlements_left))
+            .collect(),
+        cities: state.players[..players]
+            .iter()
+            .map(|player| 4u8.saturating_sub(player.cities_left))
+            .collect(),
+        roads_built: state.players[..players]
+            .iter()
+            .map(|player| 15u8.saturating_sub(player.roads_left))
+            .collect(),
+        development_hand: state.players[..players]
+            .iter()
+            .map(|player| player.development.iter().copied().sum())
+            .collect(),
+        unplayed_action_cards: state.players[..players]
+            .iter()
+            .map(|player| {
+                player.development[0].saturating_sub(player.bought_development[0])
+                    + player.development[2].saturating_sub(player.bought_development[2])
+                    + player.development[3].saturating_sub(player.bought_development[3])
+                    + player.development[4].saturating_sub(player.bought_development[4])
+            })
+            .collect(),
+        played_knights: state.players[..players]
+            .iter()
+            .map(|player| player.played_knights)
+            .collect(),
+        longest_road_holder: state.longest_road_holder,
+        largest_army_holder: state.largest_army_holder,
+        offers: metrics.offers[..players].to_vec(),
+        accepts: metrics.accepts[..players].to_vec(),
+        estimated_win_value: win_values[..players].to_vec(),
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -586,6 +805,7 @@ struct GameResult {
     metrics: GameMetrics,
     expert_samples: Vec<ExpertSample>,
     trade_samples: Vec<TradeSample>,
+    trajectory_samples: Vec<TrajectorySample>,
 }
 
 #[derive(Clone, Debug)]
@@ -614,6 +834,13 @@ struct CandidateMetrics {
     robber_blocked_production: u64,
     decisions: u64,
     decision_nanos: u128,
+    search_decisions: u64,
+    search_nodes: u64,
+    search_depth: u64,
+    posterior_particles: u64,
+    strategic_particles: u64,
+    search_deadlines: u64,
+    search_action_values: u64,
     trade_value_sum: f64,
     calibration_brier_sum: f64,
     calibration_log_loss_sum: f64,
@@ -684,6 +911,18 @@ struct ArenaCheckpoint {
     rollout_actions: u16,
     max_turns: u16,
     belief_particles: usize,
+    strategic_particle_limit: usize,
+    maxn_depth: u8,
+    maxn_branch: usize,
+    maxn_nodes: u32,
+    maxn_time_ms: u32,
+    opening_nodes: u32,
+    opening_time_ms: u32,
+    trade_response_nodes: u32,
+    trade_response_time_ms: u32,
+    engine_revision: &'static str,
+    build_git_sha: &'static str,
+    build_dirty: bool,
     information_mode: &'static str,
     perfect_information_search: bool,
     validate: bool,
@@ -782,6 +1021,20 @@ impl PartialArenaMetrics {
             rollout_actions: config.rollout_actions,
             max_turns: config.max_turns,
             belief_particles: config.belief_particles,
+            strategic_particle_limit: config.strategic_particle_limit,
+            maxn_depth: config.maxn_depth,
+            maxn_branch: config.maxn_branch,
+            maxn_nodes: config
+                .maxn_nodes
+                .unwrap_or_else(|| (config.iterations * 160).clamp(4_000, 80_000)),
+            maxn_time_ms: config.maxn_time_ms,
+            opening_nodes: config.opening_nodes,
+            opening_time_ms: config.opening_time_ms,
+            trade_response_nodes: config.trade_response_nodes,
+            trade_response_time_ms: config.trade_response_time_ms,
+            engine_revision: ENGINE_REVISION,
+            build_git_sha: config.build_git_sha,
+            build_dirty: config.build_dirty,
             information_mode: information_mode(config),
             perfect_information_search: config.perfect_information_search,
             validate: config.validate,
@@ -829,12 +1082,20 @@ fn compact_engine_metrics(metrics: &[CandidateMetrics; 6]) -> String {
     .map(|engine| {
         let metric = &metrics[engine as usize];
         let seats = metric.seats.max(1) as f64;
+        let searches = metric.search_decisions.max(1) as f64;
         format!(
-            "\"{}\":{{\"seatSamples\":{},\"meanRank\":{:.6},\"meanVictoryPoints\":{:.6}}}",
+            "\"{}\":{{\"seatSamples\":{},\"meanRank\":{:.6},\"meanVictoryPoints\":{:.6},\"searchSamples\":{},\"meanSearchNodes\":{:.3},\"meanSearchDepth\":{:.3},\"meanPosteriorParticles\":{:.3},\"meanStrategicParticles\":{:.3},\"searchDeadlineShare\":{:.6},\"meanRootActions\":{:.3}}}",
             engine.as_str(),
             metric.seats,
             metric.ranks / seats,
             metric.points as f64 / seats,
+            metric.search_decisions,
+            metric.search_nodes as f64 / searches,
+            metric.search_depth as f64 / searches,
+            metric.posterior_particles as f64 / searches,
+            metric.strategic_particles as f64 / searches,
+            metric.search_deadlines as f64 / searches,
+            metric.search_action_values as f64 / searches,
         )
     })
     .collect::<Vec<_>>()
@@ -869,6 +1130,8 @@ fn play_game(board_seed: u64, chance_seed: u64, engines: &[Engine], config: &Con
     let mut calibration = Vec::<(u8, f32)>::new();
     let mut expert_samples = Vec::<ExpertSample>::new();
     let mut trade_samples = Vec::<TradeSample>::new();
+    let mut trajectory_samples = Vec::<TrajectorySample>::new();
+    let mut last_trajectory_turn = u16::MAX;
     let mut persistent_searches = (0..config.players)
         .map(|_| None)
         .collect::<Vec<Option<Mcts>>>();
@@ -876,6 +1139,22 @@ fn play_game(board_seed: u64, chance_seed: u64, engines: &[Engine], config: &Con
         .map(|_| None)
         .collect::<Vec<Option<Mcts>>>();
     while !state.is_terminal() && state.turn <= config.max_turns {
+        if config.trajectory_output.is_some()
+            && state.turn != last_trajectory_turn
+            && matches!(
+                state.phase,
+                Phase::PreRoll | Phase::Main | Phase::SetupSettlement
+            )
+        {
+            trajectory_samples.push(capture_trajectory_sample(
+                &state,
+                board_seed,
+                chance_seed,
+                engines,
+                &metrics,
+            ));
+            last_trajectory_turn = state.turn;
+        }
         let action = if state.node_kind() == NodeKind::Chance {
             state
                 .sample_chance(&mut chance_rng)
@@ -892,6 +1171,15 @@ fn play_game(board_seed: u64, chance_seed: u64, engines: &[Engine], config: &Con
             );
             metrics.decision_time[actor] += started.elapsed();
             metrics.decision_count[actor] += 1;
+            if choice.root_value.is_some() {
+                metrics.search_decision_count[actor] += 1;
+                metrics.search_nodes[actor] += u64::from(choice.nodes);
+                metrics.search_depth[actor] += u64::from(choice.depth);
+                metrics.posterior_particles[actor] += choice.posterior_particles as u64;
+                metrics.strategic_particles[actor] += choice.strategic_particles as u64;
+                metrics.search_deadlines[actor] += u32::from(choice.deadline_reached);
+                metrics.search_action_values[actor] += choice.action_values.len() as u64;
+            }
             let should_record_expert = config.expert_output.is_some()
                 && metrics.decision_count[actor] % config.expert_stride == 0;
             let teacher_report = if should_record_expert && config.expert_iterations > 0 {
@@ -910,14 +1198,10 @@ fn play_game(board_seed: u64, chance_seed: u64, engines: &[Engine], config: &Con
             } else {
                 None
             };
-            if state.phase == Phase::PreRoll {
-                calibration.push((
-                    actor as u8,
-                    choice.search.as_ref().map_or_else(
-                        || evaluate(&state)[actor],
-                        |report| report.root_value[actor],
-                    ),
-                ));
+            if state.phase == Phase::PreRoll
+                && let Some(root_value) = choice.root_value
+            {
+                calibration.push((actor as u8, root_value[actor]));
             }
             if should_record_expert
                 && let Some(report) = teacher_report.as_ref().or(choice.search.as_ref())
@@ -1111,6 +1395,7 @@ fn play_game(board_seed: u64, chance_seed: u64, engines: &[Engine], config: &Con
         metrics,
         expert_samples,
         trade_samples,
+        trajectory_samples,
     }
 }
 
@@ -1259,6 +1544,13 @@ fn main() {
         )
     });
     let mut trade_sample_count = 0u64;
+    let mut trajectory_writer = config.trajectory_output.as_ref().map(|path| {
+        BufWriter::new(
+            File::create(path)
+                .unwrap_or_else(|error| panic!("failed to create trajectory data {path}: {error}")),
+        )
+    });
+    let mut trajectory_sample_count = 0u64;
     for result in results {
         if let Some(writer) = &mut expert_writer {
             for sample in &result.game.expert_samples {
@@ -1276,6 +1568,19 @@ fn main() {
                     .write_all(b"\n")
                     .expect("trade data must be writable");
                 trade_sample_count += 1;
+            }
+        }
+        if let Some(writer) = &mut trajectory_writer {
+            for sample in &result.game.trajectory_samples {
+                let mut annotated = sample.clone();
+                annotated.block = result.block;
+                annotated.seat_rotation = result.seat;
+                serde_json::to_writer(&mut *writer, &annotated)
+                    .expect("trajectory sample must serialize");
+                writer
+                    .write_all(b"\n")
+                    .expect("trajectory data must be writable");
+                trajectory_sample_count += 1;
             }
         }
         let winner_engine = result.engines[result.game.winner as usize];
@@ -1306,6 +1611,13 @@ fn main() {
                 metrics.robber_blocked_production[player] as u64;
             candidate_metrics.decisions += metrics.decision_count[player] as u64;
             candidate_metrics.decision_nanos += metrics.decision_time[player].as_nanos();
+            candidate_metrics.search_decisions += metrics.search_decision_count[player] as u64;
+            candidate_metrics.search_nodes += metrics.search_nodes[player];
+            candidate_metrics.search_depth += metrics.search_depth[player];
+            candidate_metrics.posterior_particles += metrics.posterior_particles[player];
+            candidate_metrics.strategic_particles += metrics.strategic_particles[player];
+            candidate_metrics.search_deadlines += metrics.search_deadlines[player] as u64;
+            candidate_metrics.search_action_values += metrics.search_action_values[player];
             candidate_metrics.trade_value_sum += metrics.trade_value_sum[player] as f64;
             candidate_metrics.calibration_brier_sum += metrics.calibration_brier_sum[player] as f64;
             candidate_metrics.calibration_log_loss_sum +=
@@ -1408,6 +1720,7 @@ fn main() {
                 "}},",
                 "\"expertSamples\":{},",
                 "\"tradeSamples\":{},",
+                "\"trajectorySamples\":{},",
                 "\"cutoffs\":{},",
                 "\"elapsedMs\":{},",
                 "\"gamesPerSecond\":{:.6},",
@@ -1416,6 +1729,12 @@ fn main() {
                 "\"rolloutActions\":{},",
                 "\"maxTurns\":{},",
                 "\"beliefParticles\":{},",
+                "\"strategicParticleLimit\":{},",
+                "\"maxnDepth\":{},",
+                "\"maxnBranch\":{},",
+                "\"maxnNodes\":{},",
+                "\"engineRevision\":\"{}\",",
+                "\"buildGitSha\":\"{}\",",
                 "\"informationMode\":\"{}\",",
                 "\"perfectInformationSearch\":{},",
                 "\"threads\":{},",
@@ -1479,6 +1798,7 @@ fn main() {
                 / candidate_metrics.calibration_count.max(1) as f64,
             expert_sample_count,
             trade_sample_count,
+            trajectory_sample_count,
             cutoffs,
             elapsed.as_millis(),
             games_per_second,
@@ -1487,6 +1807,14 @@ fn main() {
             config.rollout_actions,
             config.max_turns,
             config.belief_particles,
+            config.strategic_particle_limit,
+            config.maxn_depth,
+            config.maxn_branch,
+            config
+                .maxn_nodes
+                .unwrap_or_else(|| (config.iterations * 160).clamp(4_000, 80_000)),
+            ENGINE_REVISION,
+            config.build_git_sha,
             information_mode(&config),
             config.perfect_information_search,
             config.threads,
@@ -1634,6 +1962,7 @@ mod tests {
             metrics: GameMetrics::default(),
             expert_samples: Vec::new(),
             trade_samples: Vec::new(),
+            trajectory_samples: Vec::new(),
         };
         let mut partial = PartialArenaMetrics::new(config.blocks);
         let mut output = Vec::new();
@@ -1705,6 +2034,7 @@ mod tests {
                 metrics: GameMetrics::default(),
                 expert_samples: Vec::new(),
                 trade_samples: Vec::new(),
+                trajectory_samples: Vec::new(),
             },
         };
         let mut partial = PartialArenaMetrics::new(1);

@@ -6,8 +6,9 @@ Colonist Assistant uses one local decision pipeline:
 Colonist observations
   → weighted hidden-state filter
   → exact local mandatory and parameter solvers
-  → bounded whole-turn candidates and structured action ordering
-  → setup: belief-aggregated MaxN draft search
+  → relevance-conditional root candidates (EndTurn reserved)
+  → adaptive node allocation over a signature-aware particle subset
+  → setup: public snake-order opening oracle
   → normal play: bounded weighted-belief Deep MaxN
   → structured evaluator + opponent/trade signals
   → state-validated first-action executor
@@ -21,19 +22,32 @@ replay tooling also exposes selected diagnostic budgets. Users cannot select
 them as live action authorities. The bundled learned policy and value heads are
 unpromoted and disabled.
 
+Production MaxN evaluates particles after an observer-consistent root.
+Observation-safe opponent mixtures and shared observation-keyed trees remain
+scaffolding and are off by default until ablated. Experimental belief PUCT
+remains a diagnostic arena policy and is not the live action authority.
+
 ## Beliefs
 
 Every hidden world carries a posterior weight. Unknown steals branch in
 proportion to the victim's possible card counts; discard branches use a
 plan-aware discard policy. Public trades, offers, accepts, rejections,
-counters, development-card use, hand totals, the bank, and the user's exact
-visible cards update the posterior.
+counters, expirations, development-card use, hand totals, the bank, and the
+user's exact visible cards update the posterior.
+
+Durable tracker events include `trade-offered`, `trade-accepted`,
+`trade-rejected`, `trade-countered`, and `trade-expired` in addition to
+completed trades. Those events update hand feasibility, offer/reject propensity,
+and recipient-specific negotiation history. Live Colonist active-trade panel
+diffs emit them; the public game log alone does not reliably surface offers,
+rejects, counters, or expirations.
 
 The filter reports effective sample size and uses deterministic stratified
 resampling with support-preserving rejuvenation. Representative search
 particles preserve strategically different worlds, including city readiness,
 settlement races, trade feasibility, Monopoly totals, and hidden victory-point
-threats.
+threats. Exact mandatory and tactical solvers see the fuller posterior; the
+strategic MaxN layer then searches a compact representative subset.
 
 ## Exact decisions
 
@@ -46,7 +60,8 @@ The engine enumerates legal outcomes for:
 - coherent Road Building pairs;
 - incoming trade accept, reject, and counter continuations;
 - completed trades with multiple possible partners;
-- forced current-turn wins.
+- forced current-turn wins;
+- opponent immediate-win threats on their next main phase.
 
 Here, exact means that the bounded local action family is completely
 enumerated. Its strategic utility and forced continuation tail are still model
@@ -54,6 +69,11 @@ estimates; the result is not an exact solution of the full game. A line is
 reported as tactically proven only when the bounded solver establishes the same
 observable first action across every materially weighted world without
 exhausting its proof limit.
+
+Opponent threat detection exists as a module, but **root threat forcing is
+disabled** until it aggregates over the posterior and verifies that a candidate
+actually removes a winning continuation. Heuristic first-particle forcing is
+not used in production MaxN.
 
 Robber actions are compound `(hex, victim)` choices. Their exact comparison
 uses opponent production denial, public race threat, the belief-weighted
@@ -63,19 +83,21 @@ structured global value cannot override that local protocol score.
 
 ## Opening search
 
-Initial settlements and roads use a dedicated bounded snake-order solver rather
-than the normal turn-depth horizon. It follows the first settlement through a
-pruned set of opponent picks, the best surviving second settlement, its
-starting resource payout, and both settlement-anchored road directions.
+Initial settlements and roads use a dedicated public snake-order solver rather
+than the normal turn-depth horizon. Setup is board-driven; the live path no
+longer describes it as belief-aggregated particle search.
 
-The endpoint combines future road reach with the opening factors supported by
-Guhe and Lascarides' JSettlers ablation: total production, different roll
-numbers, an extra penalty for putting both settlements on the same hex, and
-weighted access to the road, settlement, city, and development-card resource
-combinations. Strategist routes setup through belief-aggregated MaxN with a
-separate node budget. Public board geometry dominates setup, but the
-implementation still preserves the weighted information set instead of
-silently switching to perfect information.
+The solver statically scores every legal first click, then spends the deep draft
+budget preferentially on the strongest candidates. Opposing seats greedily
+maximize their own opening features over a pruned candidate set. The endpoint
+combines multi-road expansion portfolio value, port flexibility, board-wide
+resource scarcity alignment, robber concentration, and the JSettlers-style
+production, number-diversity, shared-hex, and build-coverage terms.
+
+Live setup uses a larger cumulative budget than ordinary turns, and not-my-turn
+pondering can continue opening analysis while opponents place. A wall-clock
+cutoff preserves completed deep values for candidates that already finished a
+draft leaf instead of rewriting the entire root row to the same static score.
 
 ## Whole-turn plans
 
@@ -96,56 +118,54 @@ destination, block, trophy line, or hand-safety purpose has little value.
 Strategist is the sole production engine. During normal play it runs
 vector-valued Deep MaxN over observer-consistent weighted hidden-state
 particles. Root priors are averaged over the weighted posterior before
-action-class quotas are applied, so candidate survival cannot depend on which
-hidden particle happens to be listed first. Every retained root action receives
-a fair bounded slice in every materially weighted world; illegal hidden-world
-instances retain their no-action baseline rather than disappearing from the
-denominator. Posterior-weighted values and legal support are then aggregated
-at the observable root.
+relevance-conditional quotas are applied, so candidate survival cannot depend
+on which hidden particle happens to be listed first.
 
-Within a simulated world, each acting player maximizes its own component of the
-race-value vector. Chance nodes use their rules-engine probabilities. Depth
-advances on completed turns, while a separate in-turn action bound prevents
-unbounded trade/build sequences. This is preferable to paranoid AlphaBeta's
-assumption that every opponent forms one coalition against the root player, but
-it is still a bounded model of opponent behavior rather than a solved
-multiplayer equilibrium.
+Root ordering prefers spatial coverage over unconditional family quotas: two
+settlements, three route-distinct roads, two cities, material trades, one or
+two relevant development lines, trophy/hand-safety when active, and end turn.
+Threat-blocking actions are inserted first. The live branch cap is eight.
 
-Action-class quotas preserve representative settlements, expansion roads,
-cities, hand-safety conversions, trades, trophies, development-card families,
-and end-turn choices in the ordered candidate pool. Exact parameter solvers can
-replace a generic family representative, such as selecting Monopoly's resource
-over the complete belief before the strategic budget is divided. The normal
-live request uses depth 4, branch cap 16, a 4,000-node limit, and a cooperative
-350 ms strategic-search deadline. Setup uses the same deadline with its
-dedicated draft solver; trade responses and pondering use separate bounded
-node profiles.
+Node allocation is adaptive rather than uniform: about 70% of each particle's
+budget goes to the leading four root actions, 20% to challengers, and 10% to
+the remaining uncertainty-sensitive tail. Strategic MaxN also searches about
+twelve representative particles rather than diluting 4,000 nodes across thirty-
+two near-duplicate worlds. Exact safety checks still use the fuller posterior.
+
+Within a simulated world, the protected root still maximizes its private
+race-value component. Opposing actors follow a prior-weighted mixture over the
+top observation-ranked actions rather than privately maximizing over hidden
+cards, so worlds that look identical to an opponent share one strategy while
+still covering more than a single greedy line. Chance nodes use their
+rules-engine probabilities. Depth advances on completed turns, while a separate
+in-turn action bound prevents unbounded trade/build sequences.
+
+The normal live request uses depth 4, branch cap 8, a 4,000-node limit, and a
+cooperative 350 ms strategic-search deadline. Setup uses a larger dedicated
+draft budget and deadline; optional post-draft rollouts remain off by default
+until held-out opening regret justifies enabling them. Trade responses and
+pondering use separate bounded node profiles.
 
 The browser and native search share the same wall-clock deadline. Search checks
 it between bounded slices and once more before returning. If time expires in
 the middle of one hidden world's root-action row, the complete row is replaced
 with a uniform structured fallback, so action order cannot decide which
-candidates received deep values. Setup similarly falls back across the
-complete observable root. `deadlineReached` therefore describes the strategic
-MaxN or opening phase. Mandatory actions and exact tactical family solvers have
-their own small limits and deliberately remain outside that flag.
+candidates received deep values. Setup preserves completed deep values and
+falls back only for unevaluated candidates. `deadlineReached` therefore
+describes the strategic MaxN or opening phase. Mandatory actions and exact
+tactical family solvers have their own small limits and deliberately remain
+outside that flag.
 
 Domestic offers and counteroffers carry a small search-time negotiation cost
 so a superficially neutral exchange cannot consume a turn through repeated
 low-probability proposals. When an offer reduces an above-threshold hand, that
-cost is quartered to retain hand-safety conversions. In a same-seed seven-game
-behavioral smoke, this reduced offers from roughly 31–35 per candidate game to
-5–6 and increased observed acceptance from roughly 2–7% to 20–29%, without
-reducing the candidate's win count. This is a regression signal, not a
-statistically useful strength estimate.
+cost is quartered to retain hand-safety conversions.
 
 The packaged cold-adapter regression crosses the generated WASM boundary and
-must remain below one second. An archived-state pre-release ablation replayed
-366 requests at the 350 ms profile, returned every one in less than 410 ms on
-the reference machine, and matched the 600 ms profile's first action in 360
-cases. This is a release latency/stability regression, not a universal timing
-guarantee or strength result. The one-second UI warning and twelve-second
-client cutoff are fail-closed containment, not performance targets.
+must remain below one second. This is a release latency/stability regression,
+not a universal timing guarantee or strength result. The one-second UI warning
+and twelve-second client cutoff are fail-closed containment, not performance
+targets.
 
 Stable observation hashing, action ordering, and node allocation make the
 bounded MaxN path reproducible for the same build and request. Experimental
@@ -161,7 +181,9 @@ The value function combines:
 - current production and bank scarcity;
 - context-dependent resource deficits;
 - nonlinear expected loss to a seven before the next spend;
-- expansion-site survival and complete road-plus-settlement cost;
+- expansion-site survival plus a top-three expansion portfolio;
+- settlement/city readiness tails (probability ready within 1–2 own turns);
+- phase-conditioned weights for production, expansion, liquidity, and trophies;
 - marginal development-card utility and play congestion;
 - probability of acquiring and retaining Longest Road and Largest Army;
 - robber denial, ports, piece inventory, and opponent threat.
@@ -183,7 +205,8 @@ to enable a leader are suppressed.
 Acceptance is estimated per recipient from their observation, production,
 ports, hand size, threat, likely plan, history, and opponent profile. The
 creator waits for all responses and selects the accepting partner with the best
-resulting race value. Responses update the belief filter.
+resulting race value. Responses update the belief filter through durable
+offer/accept/reject/counter events as well as completed trades.
 
 Before accepting, countering, confirming, or offering a domestic exchange, a
 bounded safety proof checks whether the transferred cards newly enable an
