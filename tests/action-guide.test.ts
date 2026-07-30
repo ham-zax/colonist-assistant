@@ -82,6 +82,56 @@ describe("action guide autopilot", () => {
     expect(clicked).toHaveBeenCalledOnce();
   });
 
+  it("honors a configured autopilot start delay before the first click", async () => {
+    const roll = document.createElement("button");
+    roll.textContent = "Roll dice";
+    const clicked = vi.fn();
+    roll.addEventListener("click", clicked);
+    document.body.append(roll);
+
+    renderActionGuide(
+      {
+        kind: "turn-control",
+        control: "roll",
+        label: "Roll dice",
+        signature: "delayed-roll",
+        confidence: 1,
+      },
+      { highlight: true, autonomous: true, autopilotDelayMs: 3_000 },
+    );
+
+    await vi.advanceTimersByTimeAsync(2_999);
+    expect(clicked).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(clicked).toHaveBeenCalledOnce();
+  });
+
+  it("cancels a pending delayed click when autopilot turns off", async () => {
+    const roll = document.createElement("button");
+    roll.textContent = "Roll dice";
+    const clicked = vi.fn();
+    roll.addEventListener("click", clicked);
+    document.body.append(roll);
+    const action = {
+      kind: "turn-control" as const,
+      control: "roll" as const,
+      label: "Roll dice",
+      signature: "cancel-delayed-roll",
+      confidence: 1,
+    };
+
+    renderActionGuide(action, {
+      highlight: true,
+      autonomous: true,
+      autopilotDelayMs: 5_000,
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    renderActionGuide(action, { highlight: true, autonomous: false });
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(clicked).not.toHaveBeenCalled();
+  });
+
   it("retries the same ordinary control after its first validation fails", () => {
     const roll = document.createElement("button");
     roll.textContent = "Roll dice";

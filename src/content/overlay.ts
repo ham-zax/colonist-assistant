@@ -79,6 +79,7 @@ import type { TrackerState } from "../core/types";
 import { WinPredictionStabilizer } from "../core/win-prediction";
 import type { GameSession } from "./session";
 import {
+  normalizeAutopilotDelaySeconds,
   readPosition,
   saveSettings,
   type AssistantSettings,
@@ -110,12 +111,8 @@ type ViewName = "advice" | "cards" | "settings";
 
 const STRATEGIST_LABEL = "Strategist ★";
 
-export const autonomousExecutionAllowed = (
-  enabled: boolean,
-  board: Pick<BoardSnapshot, "privateGame" | "botOnlyGame"> | undefined,
-): boolean =>
-  enabled &&
-  (board?.privateGame === true || board?.botOnlyGame === true);
+export const autonomousExecutionAllowed = (enabled: boolean): boolean =>
+  enabled;
 
 const escapeHtml = (value: string): string =>
   value.replace(/[&<>"']/g, (character) => {
@@ -682,6 +679,18 @@ export class AssistantOverlay {
           ...this.settings,
           [key]: target.checked,
         });
+        return;
+      }
+      if (
+        target instanceof HTMLSelectElement &&
+        target.dataset.setting === "autopilotDelaySeconds"
+      ) {
+        this.applySettings({
+          ...this.settings,
+          autopilotDelaySeconds: normalizeAutopilotDelaySeconds(
+            Number(target.value),
+          ),
+        });
       }
     });
 
@@ -1074,8 +1083,8 @@ export class AssistantOverlay {
       highlight: this.settings.highlightNextAction,
       autonomous: autonomousExecutionAllowed(
         this.settings.autonomousPrivateGames,
-        this.board,
       ),
+      autopilotDelayMs: this.settings.autopilotDelaySeconds * 1_000,
       validate: () =>
         Boolean(next && nextSignature) &&
         stillInGuideGame() &&
@@ -3691,9 +3700,17 @@ export class AssistantOverlay {
         <i aria-hidden="true"></i>
       </label>
       <label class="settings-field">
-        <span><b>Autopilot</b><small>Play high-confidence steps only in private or bot matches.</small></span>
+        <span><b>Autopilot</b><small>Play recommended steps automatically in any Colonist game.</small></span>
         <input type="checkbox" data-setting="autonomousPrivateGames"${this.settings.autonomousPrivateGames ? " checked" : ""}>
         <i aria-hidden="true"></i>
+      </label>
+      <label class="settings-field">
+        <span><b>Autopilot delay</b><small>Wait before each automatic click so play is easier to follow.</small></span>
+        <select data-setting="autopilotDelaySeconds" aria-label="Autopilot delay">
+          <option value="1"${this.settings.autopilotDelaySeconds === 1 ? " selected" : ""}>1 second</option>
+          <option value="3"${this.settings.autopilotDelaySeconds === 3 ? " selected" : ""}>3 seconds</option>
+          <option value="5"${this.settings.autopilotDelaySeconds === 5 ? " selected" : ""}>5 seconds</option>
+        </select>
       </label>
       <div class="settings-version">
         <span>INSTALLED BUILD</span>

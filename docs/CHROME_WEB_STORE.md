@@ -57,13 +57,12 @@ It uses that data to:
 • suggest legal moves, builds, trades, robber targets, and discards
 • show model-based win estimates
 • mark the next Colonist control or board place
-• carry out moves in a verified private or all-bot game when you turn on
-  autopilot
+• carry out moves when you turn on autopilot
 
-Autopilot is off by default and remains unavailable unless the extension can
-verify a private game or an all-bot match. Before each step, it checks that the
-board still matches the state used to pick the move. If the state has changed,
-it stops and plans again.
+Autopilot is off by default. Settings can add a 1, 3, or 5 second delay before
+each automatic click. Before each step, it checks that the board still matches
+the state used to pick the move. If the state has changed, it stops and plans
+again.
 
 Game work runs in your browser. The extension has no server, ads, tracking, or
 usage reports. It does not send game data to the developer.
@@ -127,7 +126,7 @@ may sync settings when Chrome Sync is on.
 ```text
 Access to https://colonist.io/* lets the extension read game data shown to the
 player, add its help panel, mark legal controls, and carry out a step only when
-the user turns on autopilot in a verified private or all-bot game.
+the user turns on autopilot.
 ```
 
 ### Remote code
@@ -170,14 +169,13 @@ Paste:
 
 ```text
 1. Install the extension.
-2. Open https://colonist.io/ and start an all-bot base game, or join a private
-   base game where all players agreed to use the extension.
+2. Open https://colonist.io/ and start a base game where all players agreed to
+   use the extension.
 3. If the Colonist tab was open before install, refresh it.
 4. The Colonist Assistant panel appears during the game.
 5. Use the extension popup to turn hints on or off, confirm the single
-   Strategist engine status, or turn on autopilot. Autopilot is off by default;
-   it is available only after the extension verifies a private or all-bot
-   game. There is no engine selector.
+   Strategist engine status, turn on autopilot, or choose a 1, 3, or 5 second
+   autopilot delay. Autopilot is off by default. There is no engine selector.
 6. The panel reads shown game state and gives a legal next step.
 7. Use Reset session in the popup to clear the current game state.
 

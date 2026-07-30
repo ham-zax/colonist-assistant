@@ -173,6 +173,34 @@ label input:checked + i::after {
   transform: translateX(14px);
 }
 
+.delay-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 58px;
+  padding: 10px 0;
+  border-top: 1px solid #2b404e;
+  cursor: default;
+}
+
+.delay-row select {
+  width: 108px;
+  min-height: 32px;
+  flex: 0 0 108px;
+  padding: 0 8px;
+  border: 1px solid #496171;
+  border-radius: 0;
+  color: #f1f4ef;
+  background: #101e28;
+  font: inherit;
+  font-size: 11px;
+}
+
+.delay-row select:focus-visible {
+  outline: 2px solid #f1c84b;
+  outline-offset: 2px;
+}
+
 .engine-row {
   display: flex;
   min-height: 66px;

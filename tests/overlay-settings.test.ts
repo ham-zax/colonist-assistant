@@ -73,30 +73,40 @@ afterEach(() => {
 });
 
 describe("overlay settings interaction", () => {
-  it("allows autonomous clicks only in a confirmed private or all-bot game", () => {
-    expect(autonomousExecutionAllowed(true, undefined)).toBe(false);
-    expect(autonomousExecutionAllowed(true, {})).toBe(false);
+  it("allows autonomous clicks whenever autopilot is enabled", () => {
+    expect(autonomousExecutionAllowed(false)).toBe(false);
+    expect(autonomousExecutionAllowed(true)).toBe(true);
+  });
+
+  it("exposes an autopilot delay select with 1, 3, and 5 second options", () => {
+    const overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS, autonomousPrivateGames: true },
+      { reset: vi.fn() },
+    );
+    const root = document.querySelector<HTMLDivElement>(
+      "#colonist-assistant-root",
+    )!;
+    const shadow = root.shadowRoot!;
+    shadow
+      .querySelector<HTMLElement>("[data-action='view'][data-view='settings']")!
+      .click();
+    const select = shadow.querySelector<HTMLSelectElement>(
+      "select[data-setting='autopilotDelaySeconds']",
+    );
+    expect(select).not.toBeNull();
     expect(
-      autonomousExecutionAllowed(true, { privateGame: false }),
-    ).toBe(false);
-    expect(
-      autonomousExecutionAllowed(false, { privateGame: true }),
-    ).toBe(false);
-    expect(
-      autonomousExecutionAllowed(true, { privateGame: true }),
-    ).toBe(true);
-    expect(
-      autonomousExecutionAllowed(true, {
-        privateGame: false,
-        botOnlyGame: true,
-      }),
-    ).toBe(true);
-    expect(
-      autonomousExecutionAllowed(true, {
-        privateGame: false,
-        botOnlyGame: false,
-      }),
-    ).toBe(false);
+      [...(select?.options ?? [])].map((option) => option.value),
+    ).toEqual(["1", "3", "5"]);
+    expect(select?.value).toBe("1");
+    const autopilotLabel = shadow
+      .querySelector<HTMLInputElement>(
+        "input[data-setting='autonomousPrivateGames']",
+      )
+      ?.closest("label")
+      ?.textContent;
+    expect(autopilotLabel).toMatch(/any Colonist game/i);
+    expect(autopilotLabel).not.toMatch(/private or bot/i);
+    overlay.destroy();
   });
 
   it("does not recommend or execute a discard owned by another player", async () => {

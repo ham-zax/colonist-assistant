@@ -27,8 +27,7 @@ The extension uses this data to:
 - track known cards and honest ranges for unknown cards;
 - suggest legal moves, builds, trades, and other game steps;
 - show win estimates; and
-- carry out a move when you turn on autopilot in a verified private or all-bot
-  game.
+- carry out a move when you turn on autopilot.
 
 The extension uses the data only for these features.
 
@@ -48,7 +47,7 @@ settings.
 
 The extension stores:
 
-- settings, such as whether hints or private/all-bot autopilot are on;
+- settings, such as whether hints or autopilot are on and the autopilot delay;
 - the overlay place on screen;
 - events from the current game;
 - possible card states made from those events; and

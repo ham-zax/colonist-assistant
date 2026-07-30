@@ -1,12 +1,25 @@
 import type { DecisionEngine } from "../core/engine";
 import { isExtensionContextInvalidatedError } from "./extension-context";
 
+export type AutopilotDelaySeconds = 1 | 3 | 5;
+
+export const AUTOPILOT_DELAY_OPTIONS: readonly AutopilotDelaySeconds[] = [
+  1, 3, 5,
+];
+
+export const normalizeAutopilotDelaySeconds = (
+  value: unknown,
+): AutopilotDelaySeconds =>
+  value === 3 || value === 5 ? value : 1;
+
 export interface AssistantSettings {
   enabled: boolean;
   startCollapsed: boolean;
   engine: DecisionEngine;
   highlightNextAction: boolean;
+  /** Legacy key name; enables autopilot in any Colonist game. */
   autonomousPrivateGames: boolean;
+  autopilotDelaySeconds: AutopilotDelaySeconds;
 }
 
 export interface OverlayPosition {
@@ -20,6 +33,7 @@ export const DEFAULT_SETTINGS: AssistantSettings = {
   engine: "deep-search",
   highlightNextAction: true,
   autonomousPrivateGames: false,
+  autopilotDelaySeconds: 1,
 };
 
 export const SETTINGS_KEY = "colonistAssistantSettings";
@@ -44,10 +58,15 @@ export const readSettings = async (): Promise<AssistantSettings> => {
   };
   // Strategy selection is intentionally no longer a product setting. Migrate
   // every historical or invalid value to the one observation-safe authority.
+  const normalizedDelay = normalizeAutopilotDelaySeconds(
+    settings.autopilotDelaySeconds,
+  );
   const needsMigration =
     result[STRATEGIST_MIGRATION_KEY] !== true ||
-    settings.engine !== "deep-search";
+    settings.engine !== "deep-search" ||
+    settings.autopilotDelaySeconds !== normalizedDelay;
   settings.engine = "deep-search";
+  settings.autopilotDelaySeconds = normalizedDelay;
   if (needsMigration) {
     await chrome.storage.sync.set({
       [SETTINGS_KEY]: settings,
@@ -60,7 +79,13 @@ export const readSettings = async (): Promise<AssistantSettings> => {
 export const saveSettings = async (settings: AssistantSettings): Promise<void> => {
   try {
     await chrome.storage.sync.set({
-      [SETTINGS_KEY]: { ...settings, engine: "deep-search" },
+      [SETTINGS_KEY]: {
+        ...settings,
+        engine: "deep-search",
+        autopilotDelaySeconds: normalizeAutopilotDelaySeconds(
+          settings.autopilotDelaySeconds,
+        ),
+      },
     });
   } catch (error) {
     if (!isExtensionContextInvalidatedError(error)) throw error;

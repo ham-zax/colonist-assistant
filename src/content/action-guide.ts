@@ -108,6 +108,8 @@ export type NextClick =
 export interface ActionGuideOptions {
   highlight: boolean;
   autonomous: boolean;
+  /** Pause before the first automatic click for a recommendation. */
+  autopilotDelayMs?: number;
   validate?: () => boolean;
   /// Board placement commands can remain legal while the overlay temporarily
   /// renders a pending-search state. Keep their bounded commit retries tied to
@@ -137,6 +139,7 @@ const ROOT_ID = "colonist-assistant-action-guide";
 const FONT_STYLE_ID = "colonist-assistant-document-font";
 let lastClickSignature = "";
 const followupTimers = new Set<number>();
+let pendingAutopilotSignature = "";
 let boardFollowupCleanup: (() => void) | undefined;
 let workflowSignature = "";
 let workflowAction: NextClick | undefined;
@@ -946,9 +949,42 @@ const maybeAutoclick = (
   ) {
     return;
   }
-  if (action.signature === lastClickSignature) {
+  if (
+    action.signature === lastClickSignature ||
+    action.signature === pendingAutopilotSignature
+  ) {
     return;
   }
+  const delayMs = Math.max(0, options.autopilotDelayMs ?? 0);
+  if (delayMs > 0) {
+    pendingAutopilotSignature = action.signature;
+    later(() => {
+      if (pendingAutopilotSignature !== action.signature) return;
+      pendingAutopilotSignature = "";
+      const activeOptions = currentGuideOptions;
+      if (
+        !activeOptions?.autonomous ||
+        currentGuideAction?.signature !== action.signature
+      ) {
+        return;
+      }
+      if (action.signature === lastClickSignature) return;
+      dispatchAutoclick(
+        action,
+        resolveElement(action),
+        activeOptions,
+      );
+    }, delayMs);
+    return;
+  }
+  dispatchAutoclick(action, element, options);
+};
+
+const dispatchAutoclick = (
+  action: NextClick,
+  element: HTMLElement | undefined,
+  options: ActionGuideOptions,
+): void => {
   if (action.kind === "board") {
     lastClickSignature = action.signature;
     if (options.validate && !options.validate()) {
@@ -1072,7 +1108,11 @@ const maybeAutoclick = (
             return;
           }
           lastClickSignature = "";
-          maybeAutoclick(action, fresh, activeOptions);
+          // Retries already waited for Colonist; do not re-apply the user delay.
+          dispatchAutoclick(action, fresh, {
+            ...activeOptions,
+            autopilotDelayMs: 0,
+          });
         }, 900);
       }
     } else if (!element) {
@@ -1451,6 +1491,7 @@ const cancelWorkflow = (): void => {
 const cancelAutonomousContinuations = (): void => {
   for (const timer of followupTimers) window.clearTimeout(timer);
   followupTimers.clear();
+  pendingAutopilotSignature = "";
   clearBoardCommand();
   cancelWorkflow();
   tradePreflightSignature = "";
@@ -1685,6 +1726,8 @@ const startWorkflow = (
     };
     element.addEventListener("click", advance, { once: true });
     if (currentOptions.autonomous) {
+      const startDelay =
+        index === 0 ? Math.max(0, currentOptions.autopilotDelayMs ?? 0) : 0;
       later(() => {
         if (
           generation === workflowGeneration &&
@@ -1712,7 +1755,7 @@ const startWorkflow = (
           // click. Autopilot owns this click, so advance idempotently here too.
           advance();
         }
-      }, tradeTransaction ? 280 : 160);
+      }, startDelay + (tradeTransaction ? 280 : 160));
     }
   };
 
@@ -1915,7 +1958,7 @@ const renderTradePanelPreflight = (
       } else {
         finish();
       }
-    }, 280);
+    }, Math.max(0, options.autopilotDelayMs ?? 0) + 280);
   }
   return true;
 };
@@ -1932,6 +1975,12 @@ export const renderActionGuide = (
   currentGuideOptions = options;
   currentGuideAction = action;
   if (
+    pendingAutopilotSignature &&
+    pendingAutopilotSignature !== action?.signature
+  ) {
+    pendingAutopilotSignature = "";
+  }
+  if (
     activeBoardFollowupSignature &&
     (
       action?.kind !== "board" ||
@@ -1940,7 +1989,10 @@ export const renderActionGuide = (
   ) {
     activeBoardFollowupSignature = "";
   }
-  if (activatingAutopilot) lastClickSignature = "";
+  if (activatingAutopilot) {
+    lastClickSignature = "";
+    pendingAutopilotSignature = "";
+  }
   if (!action) {
     if (
       !activeBoardCommand ||
@@ -2043,6 +2095,7 @@ export const renderActionGuide = (
 export const destroyActionGuide = (): void => {
   document.getElementById(ROOT_ID)?.remove();
   lastClickSignature = "";
+  pendingAutopilotSignature = "";
   cancelWorkflow();
   currentGuideOptions = undefined;
   currentGuideAction = undefined;

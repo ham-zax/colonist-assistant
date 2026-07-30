@@ -1,6 +1,7 @@
 import type { SessionSummary } from "../content/session";
 import {
   DEFAULT_SETTINGS,
+  normalizeAutopilotDelaySeconds,
   RESET_NONCE_KEY,
   SETTINGS_KEY,
   type AssistantSettings,
@@ -32,6 +33,10 @@ const boot = async (): Promise<void> => {
     ...DEFAULT_SETTINGS,
     ...(sync[SETTINGS_KEY] as Partial<AssistantSettings> | undefined),
     engine: "deep-search",
+    autopilotDelaySeconds: normalizeAutopilotDelaySeconds(
+      (sync[SETTINGS_KEY] as Partial<AssistantSettings> | undefined)
+        ?.autopilotDelaySeconds,
+    ),
   };
   const summary = local[LATEST_SUMMARY_KEY] as SessionSummary | undefined;
 
@@ -43,11 +48,29 @@ const boot = async (): Promise<void> => {
     status.classList.toggle("active", Boolean(summary));
   }
 
-  for (const input of document.querySelectorAll<HTMLInputElement>("[data-setting]")) {
+  for (const input of document.querySelectorAll<HTMLInputElement>(
+    "input[data-setting]",
+  )) {
     const key = input.dataset.setting as keyof AssistantSettings;
     input.checked = Boolean(settings[key]);
     input.addEventListener("change", () => {
       settings = { ...settings, [key]: input.checked };
+      void chrome.storage.sync.set({ [SETTINGS_KEY]: settings });
+    });
+  }
+
+  for (const select of document.querySelectorAll<HTMLSelectElement>(
+    "select[data-setting]",
+  )) {
+    if (select.dataset.setting !== "autopilotDelaySeconds") continue;
+    select.value = String(settings.autopilotDelaySeconds);
+    select.addEventListener("change", () => {
+      settings = {
+        ...settings,
+        autopilotDelaySeconds: normalizeAutopilotDelaySeconds(
+          Number(select.value),
+        ),
+      };
       void chrome.storage.sync.set({ [SETTINGS_KEY]: settings });
     });
   }
