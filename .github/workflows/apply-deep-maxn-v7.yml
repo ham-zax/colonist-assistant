@@ -1,17 +1,16 @@
 name: Apply Deep MaxN v7
 on:
-  push:
-    branches: [agent/deep-maxn-v7]
+  pull_request:
+    branches: [cursor/strategist-architecture-upgrade-7f99]
 permissions:
-  contents: write
+  contents: read
 jobs:
   apply-and-verify:
-    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: agent/deep-maxn-v7
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
@@ -33,10 +32,36 @@ jobs:
       - run: npm run build:wasm
       - run: npm test -- --run tests/deep-search-adapter.test.ts
       - run: npm run build
-      - name: Commit verified v7
+      - name: Collect verified changes
+        if: always()
         run: |
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add -A
-          git commit -m "complete deep maxn v7 blockers"
-          git push origin HEAD:agent/deep-maxn-v7
+          python - <<'PY'
+          from pathlib import Path
+          import shutil, subprocess
+          out = Path('/tmp/deep-maxn-v7')
+          files = out / 'files'
+          files.mkdir(parents=True, exist_ok=True)
+          raw = subprocess.check_output(['git', 'status', '--porcelain=v1', '-z'])
+          entries = raw.decode().split('\0')
+          deleted = []
+          for entry in filter(None, entries):
+              status, path = entry[:2], entry[3:]
+              if ' -> ' in path:
+                  path = path.split(' -> ', 1)[1]
+              if 'D' in status:
+                  deleted.append(path)
+                  continue
+              source = Path(path)
+              if source.is_file():
+                  target = files / path
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copy2(source, target)
+          (out / 'deleted.txt').write_text('\n'.join(deleted) + ('\n' if deleted else ''))
+          (out / 'status.txt').write_bytes(raw.replace(b'\0', b'\n'))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: deep-maxn-v7-changes
+          path: /tmp/deep-maxn-v7
+          if-no-files-found: error
