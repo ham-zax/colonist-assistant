@@ -77,7 +77,6 @@ impl BeliefDepthConfig {
 pub enum DepthBeliefError {
     Empty,
     PublicStateMismatch,
-    RootObservationMismatch,
 }
 
 #[derive(Clone, Copy)]
@@ -488,18 +487,11 @@ fn belief_search(
     let first = &first_particle.state;
     let observer = first.actor();
     let public = first.public_hash();
-    let observation = first.observation_hash(observer);
     if particles
         .iter()
         .any(|particle| particle.state.public_hash() != public)
     {
         return Err(DepthBeliefError::PublicStateMismatch);
-    }
-    if particles
-        .iter()
-        .any(|particle| particle.state.observation_hash(observer) != observation)
-    {
-        return Err(DepthBeliefError::RootObservationMismatch);
     }
     if matches!(
         first.phase,
