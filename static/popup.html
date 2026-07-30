@@ -45,9 +45,17 @@
           <i></i>
         </label>
         <label>
-          <span><b>Autopilot</b><small>Play high-confidence steps only in private or bot matches</small></span>
+          <span><b>Autopilot</b><small>Play recommended steps automatically in any Colonist game</small></span>
           <input type="checkbox" data-setting="autonomousPrivateGames" />
           <i></i>
+        </label>
+        <label class="delay-row">
+          <span><b>Autopilot delay</b><small>Wait before each automatic click</small></span>
+          <select data-setting="autopilotDelaySeconds" aria-label="Autopilot delay">
+            <option value="1">1 second</option>
+            <option value="3">3 seconds</option>
+            <option value="5">5 seconds</option>
+          </select>
         </label>
         <div class="engine-row">
           <span><b>Decision engine</b><small>Weighted-belief Deep MaxN for tactics, trading, and multiplayer play</small></span>

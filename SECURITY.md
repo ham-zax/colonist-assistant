@@ -17,7 +17,6 @@ shows an engine error, and does not substitute a content-script action policy.
 Autonomous clicks require all of the following:
 
 - the user enabled autopilot;
-- the validated public board identifies a private game or an all-bot match;
 - the current game, turn, phase, state signature, and legal target set still
   match the state used to select the action;
 - the action signature has not already been completed; duplicate dispatches

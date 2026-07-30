@@ -28,9 +28,9 @@ assistant use, and review the platform rules before playing.
   development-card timing.
 - Shows live win estimates by player.
 - Highlights the next Colonist control or board location.
-- Can carry out the next step in a confirmed private game or an all-bot match
-  when the user turns on autopilot. Autopilot is off by default and remains
-  unavailable when neither condition can be verified.
+- Can carry out the next step when the user turns on autopilot. Autopilot is
+  off by default. A settings delay of 1, 3, or 5 seconds paces each automatic
+  click.
 - Resets its game state when Colonist publishes a new game identity.
 
 Before each automatic step, the extension checks that the board still matches
