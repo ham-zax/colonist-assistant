@@ -544,7 +544,12 @@ fn domestic_trade_material(state: &GameState, actor: u8, action: &Action, prior:
 }
 
 fn maritime_trade_material(state: &GameState, actor: u8, action: &Action, prior: f32) -> bool {
-    let Action::MaritimeTrade { give, receive, ratio } = action else {
+    let Action::MaritimeTrade {
+        give,
+        receive,
+        ratio,
+    } = action
+    else {
         return false;
     };
     if prior < 0.01 {
@@ -557,9 +562,7 @@ fn maritime_trade_material(state: &GameState, actor: u8, action: &Action, prior:
 fn development_action_relevant(state: &GameState, actor: u8, action: &Action, prior: f32) -> bool {
     match action {
         Action::BuyDevelopment => {
-            prior >= 0.02
-                && crate::eval::marginal_development_value(state, actor)
-                    >= 0.08
+            prior >= 0.02 && crate::eval::marginal_development_value(state, actor) >= 0.08
         }
         Action::PlayKnight { .. } => prior >= 0.015,
         Action::PlayYearOfPlenty { .. } | Action::PlayMonopoly { .. } => prior >= 0.02,
@@ -618,13 +621,18 @@ pub(crate) fn order_scored_with_state_quotas(
     }
 
     for candidate in ranked.iter().filter(|(action, prior)| {
-        matches!(action, Action::OfferTrade { .. } | Action::CounterTrade { .. })
-            && domestic_trade_material(state, actor, action, *prior)
+        matches!(
+            action,
+            Action::OfferTrade { .. } | Action::CounterTrade { .. }
+        ) && domestic_trade_material(state, actor, action, *prior)
     }) {
         if selected
             .iter()
             .filter(|(action, _)| {
-                matches!(action, Action::OfferTrade { .. } | Action::CounterTrade { .. })
+                matches!(
+                    action,
+                    Action::OfferTrade { .. } | Action::CounterTrade { .. }
+                )
             })
             .count()
             >= 2
@@ -734,16 +742,15 @@ pub(crate) fn truncate_root_preserving_end_turn(
         .find(|(action, _)| matches!(action, Action::EndTurn))
         .cloned();
     let mut truncated = ranked.into_iter().take(branch_cap).collect::<Vec<_>>();
-    if let Some(end_turn) = end_turn {
-        if !truncated
+    if let Some(end_turn) = end_turn
+        && !truncated
             .iter()
             .any(|(action, _)| matches!(action, Action::EndTurn))
-        {
-            if truncated.len() == branch_cap {
-                truncated.pop();
-            }
-            truncated.push(end_turn);
+    {
+        if truncated.len() == branch_cap {
+            truncated.pop();
         }
+        truncated.push(end_turn);
     }
     truncated
 }
@@ -785,11 +792,7 @@ pub fn allocate_root_node_budgets(action_count: usize, total_nodes: u32) -> Vec<
     if tail > 0 && tail_share > 0 {
         let each = tail_share / tail as u32;
         let mut leftover = tail_share % tail as u32;
-        for budget in budgets
-            .iter_mut()
-            .skip(leading + challengers)
-            .take(tail)
-        {
+        for budget in budgets.iter_mut().skip(leading + challengers).take(tail) {
             *budget += each + u32::from(leftover > 0);
             leftover = leftover.saturating_sub(1);
         }
@@ -930,7 +933,10 @@ mod tests {
                     .any(|action| matches!(action, Action::BuildSettlement { .. }))
         );
         assert!(
-            roads >= 1 || !legal.iter().any(|action| matches!(action, Action::BuildRoad { .. }))
+            roads >= 1
+                || !legal
+                    .iter()
+                    .any(|action| matches!(action, Action::BuildRoad { .. }))
         );
         assert!(
             ranked

@@ -215,20 +215,22 @@ fn production_enabled_win(state: &GameState, opponent: u8) -> Option<OpponentThr
         if hex.number == 0 || hex.number == 7 {
             continue;
         }
-        let touches = state.buildings.iter().enumerate().any(|(vertex, building)| {
-            building.is_some_and(|piece| piece.player() == opponent)
-                && state.board.vertices[vertex]
-                    .adjacent_hexes
-                    .contains(&(hex_index as u8))
-        });
+        let touches = state
+            .buildings
+            .iter()
+            .enumerate()
+            .any(|(vertex, building)| {
+                building.is_some_and(|piece| piece.player() == opponent)
+                    && state.board.vertices[vertex]
+                        .adjacent_hexes
+                        .contains(&(hex_index as u8))
+            });
         if !touches {
             continue;
         }
         let mut next = state.clone();
-        next.players[opponent as usize].resources[resource.index()] = next.players
-            [opponent as usize]
-            .resources[resource.index()]
-            .saturating_add(1);
+        next.players[opponent as usize].resources[resource.index()] =
+            next.players[opponent as usize].resources[resource.index()].saturating_add(1);
         if opponent_can_win_main_phase(&next, opponent).is_some() {
             blocking_hexes.push(hex_index as u8);
         }
@@ -255,10 +257,8 @@ fn trade_enabled_win(state: &GameState, opponent: u8) -> Option<OpponentThreat> 
     // Probe one-card gifts that complete a settlement or city recipe.
     for resource in 0..5u8 {
         let mut next = state.clone();
-        next.players[opponent as usize].resources[resource as usize] = next.players
-            [opponent as usize]
-            .resources[resource as usize]
-            .saturating_add(1);
+        next.players[opponent as usize].resources[resource as usize] =
+            next.players[opponent as usize].resources[resource as usize].saturating_add(1);
         if opponent_can_win_main_phase(&next, opponent).is_some() {
             let settlements = settlement_sites(state, opponent);
             let cities = city_sites(state, opponent);
@@ -318,9 +318,9 @@ pub fn action_blocks_threat(state: &GameState, action: &Action, threat: &Opponen
                         | OpponentThreatKind::HiddenVictoryPointWin
                 )
         }
-        Action::OfferTrade { .. } | Action::CounterTrade { .. } | Action::RespondTrade { accept: true } => {
-            false
-        }
+        Action::OfferTrade { .. }
+        | Action::CounterTrade { .. }
+        | Action::RespondTrade { accept: true } => false,
         Action::RespondTrade { accept: false } | Action::CancelTrade => {
             matches!(
                 threat.kind,

@@ -65,11 +65,13 @@ pub use trade_safety::{
     DomesticTradeThreat, HARD_VETO_POSTERIOR, belief_domestic_trade_threat, domestic_trade_threat,
 };
 
-pub const ENGINE_REVISION: &str = "deep-maxn-v6";
+pub const ENGINE_REVISION: &str = "deep-maxn-v7";
 pub use depth::{
-    BeliefDepthResult, DepthActionValue, DepthBeliefError, DepthSearchResult, search_belief_maxn,
-    search_belief_maxn_bounded, search_belief_paranoid, search_belief_paranoid_bounded,
-    search_maxn, search_maxn_bounded, search_paranoid, search_paranoid_bounded,
+    BeliefDepthConfig, BeliefDepthResult, DepthActionValue, DepthBeliefError, DepthSearchResult,
+    search_belief_maxn, search_belief_maxn_bounded, search_belief_paranoid,
+    search_belief_paranoid_bounded, search_maxn, search_maxn_bounded, search_maxn_bounded_timed,
+    search_paranoid, search_paranoid_bounded, search_paranoid_bounded_timed,
     search_weighted_belief_maxn_bounded, search_weighted_belief_maxn_bounded_timed,
-    search_weighted_belief_paranoid_bounded, search_weighted_belief_paranoid_bounded_timed,
+    search_weighted_belief_maxn_with_config, search_weighted_belief_paranoid_bounded,
+    search_weighted_belief_paranoid_bounded_timed, search_weighted_belief_paranoid_with_config,
 };

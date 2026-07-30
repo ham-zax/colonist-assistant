@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use colonist_catan_core::{
-    Action, CITY_COST, DEVELOPMENT_COST, GameState, Phase, ROAD_COST, ResourceHand, SETTLEMENT_COST,
-    SplitMix64,
+    Action, CITY_COST, DEVELOPMENT_COST, GameState, Phase, ROAD_COST, ResourceHand,
+    SETTLEMENT_COST, SplitMix64,
 };
 
 use crate::deadline::CooperativeDeadline;
@@ -283,8 +283,7 @@ impl OpeningSolver {
         for sample in 0..count {
             let mut cursor = state.clone();
             let mut rng = SplitMix64::new(
-                state.state_hash()
-                    ^ ((sample as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
+                state.state_hash() ^ ((sample as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
             );
             let mut steps = 0u8;
             while steps < self.config.rollout_horizon && !cursor.is_terminal() {
@@ -446,11 +445,7 @@ pub fn solve_opening(state: &GameState, root: u8, config: OpeningConfig) -> Open
         .filter_map(|(action, prior)| {
             let mut next = state.clone();
             next.apply(action).ok()?;
-            Some((
-                action.clone(),
-                *prior,
-                solver.value(&next),
-            ))
+            Some((action.clone(), *prior, solver.value(&next)))
         })
         .collect::<Vec<_>>();
     static_actions.sort_by(|left, right| {
@@ -459,13 +454,9 @@ pub fn solve_opening(state: &GameState, root: u8, config: OpeningConfig) -> Open
             .total_cmp(&left.2)
             .then_with(|| right.1.total_cmp(&left.1))
     });
-    let deep_count = static_actions
-        .len()
-        .min(solver.config.root_width.max(12));
-    let budgets = crate::policy::allocate_root_node_budgets(
-        deep_count,
-        solver.config.maximum_nodes,
-    );
+    let deep_count = static_actions.len().min(solver.config.root_width.max(12));
+    let budgets =
+        crate::policy::allocate_root_node_budgets(deep_count, solver.config.maximum_nodes);
     let mut actions = Vec::new();
     for (index, (action, _, static_value)) in static_actions.into_iter().enumerate() {
         let mut next = state.clone();

@@ -8,11 +8,12 @@ use std::time::{Duration, Instant};
 
 use colonist_catan_core::{Action, GameState, NodeKind, Phase, SplitMix64};
 use colonist_catan_search::{
-    BeliefParticle, ENGINE_REVISION, Mcts, SearchConfig, SearchMode, SearchReport, action_prior,
-    choose_rollout_action, encode_action, encode_heterogeneous_graph, evaluate,
-    expansion_option_value, pool_heterogeneous_graph, production_pips, search_maxn_bounded,
-    search_paranoid_bounded, search_weighted_belief_maxn_bounded,
-    search_weighted_belief_paranoid_bounded, strategic_utility, trade_acceptance_features,
+    BeliefDepthConfig, BeliefParticle, DepthActionValue, ENGINE_REVISION, Mcts, SearchConfig,
+    SearchMode, SearchReport, action_prior, choose_rollout_action, encode_action,
+    encode_heterogeneous_graph, evaluate, expansion_option_value, pool_heterogeneous_graph,
+    production_pips, search_maxn_bounded_timed, search_paranoid_bounded_timed,
+    search_weighted_belief_maxn_with_config, search_weighted_belief_paranoid_with_config,
+    strategic_utility, trade_acceptance_features,
 };
 use serde::Serialize;
 
@@ -82,8 +83,14 @@ struct Config {
     maxn_depth: u8,
     maxn_branch: usize,
     maxn_nodes: Option<u32>,
+    maxn_time_ms: u32,
+    opening_nodes: u32,
+    opening_time_ms: u32,
+    trade_response_nodes: u32,
+    trade_response_time_ms: u32,
     perfect_information_search: bool,
-    git_sha: String,
+    build_git_sha: &'static str,
+    build_dirty: bool,
 }
 
 impl Default for Config {
@@ -117,22 +124,16 @@ impl Default for Config {
             maxn_depth: 3,
             maxn_branch: 12,
             maxn_nodes: None,
+            maxn_time_ms: 0,
+            opening_nodes: 12_000,
+            opening_time_ms: 1_200,
+            trade_response_nodes: 2_000,
+            trade_response_time_ms: 350,
             perfect_information_search: false,
-            git_sha: detect_git_sha(),
+            build_git_sha: option_env!("COLONIST_BUILD_GIT_SHA").unwrap_or("unknown"),
+            build_dirty: option_env!("COLONIST_BUILD_DIRTY") == Some("1"),
         }
     }
-}
-
-fn detect_git_sha() -> String {
-    std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|sha| sha.trim().to_string())
-        .filter(|sha| !sha.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn parse_config() -> Config {
@@ -184,8 +185,22 @@ fn parse_config() -> Config {
                     .unwrap_or(12)
                     .clamp(1, 64)
             }
-            "--maxn-nodes" => {
-                config.maxn_nodes = value.and_then(|v| v.parse().ok());
+            "--maxn-nodes" => config.maxn_nodes = value.and_then(|v| v.parse().ok()),
+            "--maxn-time-ms" => {
+                config.maxn_time_ms = value.and_then(|v| v.parse().ok()).unwrap_or(0)
+            }
+            "--opening-nodes" => {
+                config.opening_nodes = value.and_then(|v| v.parse().ok()).unwrap_or(12_000).max(1)
+            }
+            "--opening-time-ms" => {
+                config.opening_time_ms = value.and_then(|v| v.parse().ok()).unwrap_or(1_200)
+            }
+            "--trade-response-nodes" => {
+                config.trade_response_nodes =
+                    value.and_then(|v| v.parse().ok()).unwrap_or(2_000).max(1)
+            }
+            "--trade-response-time-ms" => {
+                config.trade_response_time_ms = value.and_then(|v| v.parse().ok()).unwrap_or(350)
             }
             "--threads" => config.threads = value.and_then(|v| v.parse().ok()).unwrap_or(1).max(1),
             "--candidate" => {
@@ -235,7 +250,7 @@ fn parse_config() -> Config {
                      [--lineup puct,puct,maxn,maxn] \\
                      [--iterations N] [--rollout-actions N] [--max-turns N] \\
                      [--belief-particles N] [--strategic-particles N] \\
-                     [--maxn-depth N] [--maxn-branch N] [--maxn-nodes N] \\
+                     [--maxn-depth N] [--maxn-branch N] [--maxn-nodes N] [--maxn-time-ms N] \\
                      [--perfect-information] \\
                      [--checkpoint-output progress.jsonl] \\
                      [--expert-output samples.jsonl] [--trade-output trades.jsonl] \\
@@ -283,7 +298,30 @@ fn parse_config() -> Config {
 
 struct EngineChoice {
     action: Action,
+    root_value: Option<[f32; 4]>,
+    nodes: u32,
+    depth: u8,
+    posterior_particles: usize,
+    strategic_particles: usize,
+    deadline_reached: bool,
+    action_values: Vec<DepthActionValue>,
     search: Option<SearchReport>,
+}
+
+impl EngineChoice {
+    fn simple(action: Action) -> Self {
+        Self {
+            action,
+            root_value: None,
+            nodes: 0,
+            depth: 0,
+            posterior_particles: 0,
+            strategic_particles: 0,
+            deadline_reached: false,
+            action_values: Vec::new(),
+            search: None,
+        }
+    }
 }
 
 /// Deterministic observer-consistent determinizations for arena play.
@@ -443,78 +481,81 @@ fn choose_action(
         .uses_search_information()
         .then(|| search_belief_particles(state, config))
         .flatten();
-    let depth_nodes = config
+    let ordinary_nodes = config
         .maxn_nodes
         .unwrap_or_else(|| (config.iterations * 160).clamp(4_000, 80_000));
-    let maxn_depth = config.maxn_depth;
-    let maxn_branch = config.maxn_branch;
-    // Defaults remain the validated depth-3 / branch-12 peer shape. Live
-    // Strategist uses branch cap 8 via the WASM request; arena CLI can match it.
-    if engine == Engine::Puct
-        && matches!(
-            state.phase,
-            Phase::SetupSettlement | Phase::SetupRoad { .. }
-        )
-    {
-        // Keep experimental PUCT setup comparable with the packaged engine:
-        // use the snake-order opening horizon rather than low-visit PUCT.
-        let opening_nodes = (config.iterations * 100).clamp(10_000, 30_000);
-        let chosen = match search_particles.as_deref() {
-            Some(particles) => {
-                search_weighted_belief_maxn_bounded(
-                    particles,
-                    config.players.clamp(2, 4),
-                    16,
-                    opening_nodes,
-                )
-                .expect("arena belief particles share one public observation")
-                .chosen
+    let (nodes, time_ms) = if matches!(
+        state.phase,
+        Phase::SetupSettlement | Phase::SetupRoad { .. }
+    ) {
+        (config.opening_nodes, config.opening_time_ms)
+    } else if state.phase == Phase::TradeResponses {
+        (config.trade_response_nodes, config.trade_response_time_ms)
+    } else {
+        (ordinary_nodes, config.maxn_time_ms)
+    };
+    let depth_config = BeliefDepthConfig {
+        maximum_depth: config.maxn_depth,
+        branch_cap: config.maxn_branch,
+        maximum_nodes: nodes,
+        time_budget_ms: time_ms,
+        strategic_particle_limit: config.strategic_particle_limit,
+    };
+    match engine {
+        Engine::Random => EngineChoice::simple(actions[rng.range(actions.len())].clone()),
+        Engine::Weighted => EngineChoice::simple(choose_rollout_action(state, &actions, rng)),
+        Engine::MaxN | Engine::AlphaBeta => {
+            let paranoid = engine == Engine::AlphaBeta;
+            if let Some(particles) = search_particles.as_deref() {
+                let report = if paranoid {
+                    search_weighted_belief_paranoid_with_config(particles, depth_config)
+                } else {
+                    search_weighted_belief_maxn_with_config(particles, depth_config)
+                }
+                .expect("arena belief particles share one public observation");
+                EngineChoice {
+                    action: report.chosen.clone().unwrap_or_else(|| actions[0].clone()),
+                    root_value: Some(report.value),
+                    nodes: report.nodes,
+                    depth: report.depth,
+                    posterior_particles: report.posterior_particles,
+                    strategic_particles: report.particles,
+                    deadline_reached: report.deadline_reached,
+                    action_values: report.actions,
+                    search: None,
+                }
+            } else {
+                let report = if paranoid {
+                    search_paranoid_bounded_timed(
+                        state,
+                        state.actor(),
+                        config.maxn_depth,
+                        config.maxn_branch,
+                        nodes,
+                        time_ms,
+                    )
+                } else {
+                    search_maxn_bounded_timed(
+                        state,
+                        config.maxn_depth,
+                        config.maxn_branch,
+                        nodes,
+                        time_ms,
+                    )
+                };
+                EngineChoice {
+                    action: report.chosen.clone().unwrap_or_else(|| actions[0].clone()),
+                    root_value: Some(report.value),
+                    nodes: report.nodes,
+                    depth: report.depth,
+                    posterior_particles: 1,
+                    strategic_particles: 1,
+                    deadline_reached: report.deadline_reached,
+                    action_values: report.actions,
+                    search: None,
+                }
             }
-            None => {
-                search_maxn_bounded(state, config.players.clamp(2, 4), 16, opening_nodes).chosen
-            }
-        };
-        return EngineChoice {
-            action: chosen.unwrap_or_else(|| actions[0].clone()),
-            search: None,
-        };
-    }
-    let action = match engine {
-        Engine::Random => actions[rng.range(actions.len())].clone(),
-        Engine::Weighted => choose_rollout_action(state, &actions, rng),
-        Engine::MaxN => match search_particles.as_deref() {
-            Some(particles) => {
-                search_weighted_belief_maxn_bounded(particles, maxn_depth, maxn_branch, depth_nodes)
-                    .expect("arena belief particles share one public observation")
-                    .chosen
-                    .unwrap_or_else(|| actions[0].clone())
-            }
-            None => search_maxn_bounded(state, maxn_depth, maxn_branch, depth_nodes)
-                .chosen
-                .unwrap_or_else(|| actions[0].clone()),
-        },
-        Engine::AlphaBeta => match search_particles.as_deref() {
-            Some(particles) => {
-                search_weighted_belief_paranoid_bounded(
-                    particles,
-                    maxn_depth,
-                    maxn_branch,
-                    depth_nodes,
-                )
-                .expect("arena belief particles share one public observation")
-                .chosen
-                .unwrap_or_else(|| actions[0].clone())
-            }
-            None => search_paranoid_bounded(
-                state,
-                state.actor(),
-                maxn_depth,
-                maxn_branch,
-                depth_nodes,
-            )
-            .chosen
-            .unwrap_or_else(|| actions[0].clone()),
-        },
+        }
         Engine::Uct | Engine::Puct => {
             let actor = state.actor() as usize;
             let search = persistent_searches[actor]
@@ -532,16 +573,18 @@ fn choose_action(
                     SearchMode::Puct
                 },
             );
-            let action = report.chosen.clone().unwrap_or_else(|| actions[0].clone());
-            return EngineChoice {
-                action,
+            EngineChoice {
+                action: report.chosen.clone().unwrap_or_else(|| actions[0].clone()),
+                root_value: Some(report.root_value),
+                nodes: report.statistics.nodes as u32,
+                depth: 0,
+                posterior_particles: search_particles.as_ref().map_or(1, Vec::len),
+                strategic_particles: search_particles.as_ref().map_or(1, Vec::len),
+                deadline_reached: false,
+                action_values: Vec::new(),
                 search: Some(report),
-            };
+            }
         }
-    };
-    EngineChoice {
-        action,
-        search: None,
     }
 }
 
@@ -589,6 +632,13 @@ struct GameMetrics {
     robber_blocked_production: [u32; 4],
     decision_count: [u32; 4],
     decision_time: [Duration; 4],
+    search_decision_count: [u32; 4],
+    search_nodes: [u64; 4],
+    search_depth: [u64; 4],
+    posterior_particles: [u64; 4],
+    strategic_particles: [u64; 4],
+    search_deadlines: [u32; 4],
+    search_action_values: [u64; 4],
     trade_value_sum: [f32; 4],
     calibration_brier_sum: [f32; 4],
     calibration_log_loss_sum: [f32; 4],
@@ -784,6 +834,13 @@ struct CandidateMetrics {
     robber_blocked_production: u64,
     decisions: u64,
     decision_nanos: u128,
+    search_decisions: u64,
+    search_nodes: u64,
+    search_depth: u64,
+    posterior_particles: u64,
+    strategic_particles: u64,
+    search_deadlines: u64,
+    search_action_values: u64,
     trade_value_sum: f64,
     calibration_brier_sum: f64,
     calibration_log_loss_sum: f64,
@@ -858,8 +915,14 @@ struct ArenaCheckpoint {
     maxn_depth: u8,
     maxn_branch: usize,
     maxn_nodes: u32,
+    maxn_time_ms: u32,
+    opening_nodes: u32,
+    opening_time_ms: u32,
+    trade_response_nodes: u32,
+    trade_response_time_ms: u32,
     engine_revision: &'static str,
-    git_sha: String,
+    build_git_sha: &'static str,
+    build_dirty: bool,
     information_mode: &'static str,
     perfect_information_search: bool,
     validate: bool,
@@ -964,8 +1027,14 @@ impl PartialArenaMetrics {
             maxn_nodes: config
                 .maxn_nodes
                 .unwrap_or_else(|| (config.iterations * 160).clamp(4_000, 80_000)),
+            maxn_time_ms: config.maxn_time_ms,
+            opening_nodes: config.opening_nodes,
+            opening_time_ms: config.opening_time_ms,
+            trade_response_nodes: config.trade_response_nodes,
+            trade_response_time_ms: config.trade_response_time_ms,
             engine_revision: ENGINE_REVISION,
-            git_sha: config.git_sha.clone(),
+            build_git_sha: config.build_git_sha,
+            build_dirty: config.build_dirty,
             information_mode: information_mode(config),
             perfect_information_search: config.perfect_information_search,
             validate: config.validate,
@@ -1013,12 +1082,20 @@ fn compact_engine_metrics(metrics: &[CandidateMetrics; 6]) -> String {
     .map(|engine| {
         let metric = &metrics[engine as usize];
         let seats = metric.seats.max(1) as f64;
+        let searches = metric.search_decisions.max(1) as f64;
         format!(
-            "\"{}\":{{\"seatSamples\":{},\"meanRank\":{:.6},\"meanVictoryPoints\":{:.6}}}",
+            "\"{}\":{{\"seatSamples\":{},\"meanRank\":{:.6},\"meanVictoryPoints\":{:.6},\"searchSamples\":{},\"meanSearchNodes\":{:.3},\"meanSearchDepth\":{:.3},\"meanPosteriorParticles\":{:.3},\"meanStrategicParticles\":{:.3},\"searchDeadlineShare\":{:.6},\"meanRootActions\":{:.3}}}",
             engine.as_str(),
             metric.seats,
             metric.ranks / seats,
             metric.points as f64 / seats,
+            metric.search_decisions,
+            metric.search_nodes as f64 / searches,
+            metric.search_depth as f64 / searches,
+            metric.posterior_particles as f64 / searches,
+            metric.strategic_particles as f64 / searches,
+            metric.search_deadlines as f64 / searches,
+            metric.search_action_values as f64 / searches,
         )
     })
     .collect::<Vec<_>>()
@@ -1064,7 +1141,10 @@ fn play_game(board_seed: u64, chance_seed: u64, engines: &[Engine], config: &Con
     while !state.is_terminal() && state.turn <= config.max_turns {
         if config.trajectory_output.is_some()
             && state.turn != last_trajectory_turn
-            && matches!(state.phase, Phase::PreRoll | Phase::Main | Phase::SetupSettlement)
+            && matches!(
+                state.phase,
+                Phase::PreRoll | Phase::Main | Phase::SetupSettlement
+            )
         {
             trajectory_samples.push(capture_trajectory_sample(
                 &state,
@@ -1091,6 +1171,15 @@ fn play_game(board_seed: u64, chance_seed: u64, engines: &[Engine], config: &Con
             );
             metrics.decision_time[actor] += started.elapsed();
             metrics.decision_count[actor] += 1;
+            if choice.root_value.is_some() {
+                metrics.search_decision_count[actor] += 1;
+                metrics.search_nodes[actor] += u64::from(choice.nodes);
+                metrics.search_depth[actor] += u64::from(choice.depth);
+                metrics.posterior_particles[actor] += choice.posterior_particles as u64;
+                metrics.strategic_particles[actor] += choice.strategic_particles as u64;
+                metrics.search_deadlines[actor] += u32::from(choice.deadline_reached);
+                metrics.search_action_values[actor] += choice.action_values.len() as u64;
+            }
             let should_record_expert = config.expert_output.is_some()
                 && metrics.decision_count[actor] % config.expert_stride == 0;
             let teacher_report = if should_record_expert && config.expert_iterations > 0 {
@@ -1109,14 +1198,10 @@ fn play_game(board_seed: u64, chance_seed: u64, engines: &[Engine], config: &Con
             } else {
                 None
             };
-            if state.phase == Phase::PreRoll {
-                calibration.push((
-                    actor as u8,
-                    choice.search.as_ref().map_or_else(
-                        || evaluate(&state)[actor],
-                        |report| report.root_value[actor],
-                    ),
-                ));
+            if state.phase == Phase::PreRoll
+                && let Some(root_value) = choice.root_value
+            {
+                calibration.push((actor as u8, root_value[actor]));
             }
             if should_record_expert
                 && let Some(report) = teacher_report.as_ref().or(choice.search.as_ref())
@@ -1460,9 +1545,10 @@ fn main() {
     });
     let mut trade_sample_count = 0u64;
     let mut trajectory_writer = config.trajectory_output.as_ref().map(|path| {
-        BufWriter::new(File::create(path).unwrap_or_else(|error| {
-            panic!("failed to create trajectory data {path}: {error}")
-        }))
+        BufWriter::new(
+            File::create(path)
+                .unwrap_or_else(|error| panic!("failed to create trajectory data {path}: {error}")),
+        )
     });
     let mut trajectory_sample_count = 0u64;
     for result in results {
@@ -1525,6 +1611,13 @@ fn main() {
                 metrics.robber_blocked_production[player] as u64;
             candidate_metrics.decisions += metrics.decision_count[player] as u64;
             candidate_metrics.decision_nanos += metrics.decision_time[player].as_nanos();
+            candidate_metrics.search_decisions += metrics.search_decision_count[player] as u64;
+            candidate_metrics.search_nodes += metrics.search_nodes[player];
+            candidate_metrics.search_depth += metrics.search_depth[player];
+            candidate_metrics.posterior_particles += metrics.posterior_particles[player];
+            candidate_metrics.strategic_particles += metrics.strategic_particles[player];
+            candidate_metrics.search_deadlines += metrics.search_deadlines[player] as u64;
+            candidate_metrics.search_action_values += metrics.search_action_values[player];
             candidate_metrics.trade_value_sum += metrics.trade_value_sum[player] as f64;
             candidate_metrics.calibration_brier_sum += metrics.calibration_brier_sum[player] as f64;
             candidate_metrics.calibration_log_loss_sum +=
@@ -1641,7 +1734,7 @@ fn main() {
                 "\"maxnBranch\":{},",
                 "\"maxnNodes\":{},",
                 "\"engineRevision\":\"{}\",",
-                "\"gitSha\":\"{}\",",
+                "\"buildGitSha\":\"{}\",",
                 "\"informationMode\":\"{}\",",
                 "\"perfectInformationSearch\":{},",
                 "\"threads\":{},",
@@ -1721,7 +1814,7 @@ fn main() {
                 .maxn_nodes
                 .unwrap_or_else(|| (config.iterations * 160).clamp(4_000, 80_000)),
             ENGINE_REVISION,
-            config.git_sha,
+            config.build_git_sha,
             information_mode(&config),
             config.perfect_information_search,
             config.threads,
