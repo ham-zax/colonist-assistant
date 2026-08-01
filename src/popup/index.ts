@@ -32,7 +32,6 @@ const boot = async (): Promise<void> => {
   let settings: AssistantSettings = {
     ...DEFAULT_SETTINGS,
     ...(sync[SETTINGS_KEY] as Partial<AssistantSettings> | undefined),
-    engine: "deep-search",
     autopilotDelaySeconds: normalizeAutopilotDelaySeconds(
       (sync[SETTINGS_KEY] as Partial<AssistantSettings> | undefined)
         ?.autopilotDelaySeconds,

@@ -1,11 +1,12 @@
 {
   "name": "colonist-assistant",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "private": true,
   "type": "module",
   "description": "Explainable, board-aware guidance for friendly Colonist games.",
   "scripts": {
     "build": "node scripts/build.mjs",
+    "build:arena": "node scripts/build-arena.mjs",
     "build:wasm": "node scripts/build-wasm.mjs",
     "check": "tsc --noEmit",
     "test": "vitest run --maxWorkers=1",

@@ -123,6 +123,85 @@ describe("live trade guard", () => {
     expect(selected).toEqual(offer);
   });
 
+  it("replaces an illegal friendly-robber target with the best legal search alternative", () => {
+    const illegal: DeepSearchAction = {
+      kind: "move-robber",
+      targetId: "protected",
+      player: "Bot",
+    };
+    const legal: DeepSearchAction = {
+      kind: "move-robber",
+      targetId: "open",
+    };
+    const board: BoardSnapshot = {
+      hexes: [
+        { id: "protected", resource: "grain", number: 6 },
+        { id: "open", resource: "brick", number: 8 },
+      ],
+      vertices: [],
+      edges: [],
+      action: "robber",
+      legalHexIds: ["open"],
+    };
+
+    expect(
+      selectUsableDeepAction(
+        searchResult(illegal, legal),
+        stateWithBotOre(2),
+        "You",
+        new Set(),
+        board,
+      ),
+    ).toEqual(legal);
+  });
+
+  it("replaces a catastrophically weak opening search result", () => {
+    const weak: DeepSearchAction = {
+      kind: "place-settlement",
+      targetId: "weak-port",
+    };
+    const strong: DeepSearchAction = {
+      kind: "place-settlement",
+      targetId: "strong",
+    };
+    const board: BoardSnapshot = {
+      hexes: [
+        { id: "12-grain", resource: "grain", number: 12 },
+        { id: "9-wool", resource: "wool", number: 9 },
+        { id: "6-grain", resource: "grain", number: 6 },
+        { id: "9-wool-strong", resource: "wool", number: 9 },
+        { id: "5-ore", resource: "ore", number: 5 },
+      ],
+      vertices: [
+        {
+          id: "weak-port",
+          adjacentHexes: ["12-grain", "9-wool"],
+          adjacentVertices: [],
+          port: "generic",
+        },
+        {
+          id: "strong",
+          adjacentHexes: ["6-grain", "9-wool-strong", "5-ore"],
+          adjacentVertices: [],
+        },
+      ],
+      edges: [],
+      legalVertexIds: ["weak-port", "strong"],
+      action: "settlement",
+      initialPlacement: true,
+    };
+
+    expect(
+      selectUsableDeepAction(
+        searchResult(weak, strong),
+        stateWithBotOre(2),
+        "You",
+        new Set(),
+        board,
+      ),
+    ).toEqual(strong);
+  });
+
   it("trusts an exact bank count over a contradictory hidden-hand particle", () => {
     const bank = {
       lumber: 19,

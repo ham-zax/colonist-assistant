@@ -7,6 +7,7 @@ import initWasm, {
 } from "../generated/wasm/colonist_search.js";
 import {
   NUMBER_PIPS,
+  openingSettlementMeetsProductionFloor,
   type BoardSnapshot,
   type DevelopmentCardVector,
 } from "../core/placement";
@@ -23,6 +24,7 @@ import type {
   DeepSearchAction,
   DeepSearchResult,
   DecisionAnalysis,
+  EngineTuning,
 } from "../core/engine";
 
 const RESOURCE_CODE = new Map<Resource, number>(
@@ -37,7 +39,6 @@ const DEVELOPMENT_ORDER = [
 ] as const;
 const DEVELOPMENT_TOTAL = [14, 5, 2, 2, 2] as const;
 const MAX_PARTICLES = 96;
-const MAX_INTERACTIVE_PARTICLES = 24;
 
 let wasmReady: Promise<void> | undefined;
 
@@ -450,12 +451,29 @@ const matchingPrompt = (
     return action.kind === (board.initialPlacement ? "place-road" : "build-road");
   }
   if (board.action === "settlement") {
-    return action.kind ===
-      (board.initialPlacement ? "place-settlement" : "build-settlement");
+    if (
+      action.kind !==
+      (board.initialPlacement ? "place-settlement" : "build-settlement")
+    ) {
+      return false;
+    }
+    const targetId =
+      action.first === undefined ? undefined : board.vertices[action.first]?.id;
+    return Boolean(
+      targetId && openingSettlementMeetsProductionFloor(board, targetId),
+    );
   }
   if (board.action === "city") return action.kind === "build-city";
   if (board.action === "robber") {
-    return action.kind === "move-robber" || action.kind === "play-knight";
+    if (action.kind !== "move-robber" && action.kind !== "play-knight") {
+      return false;
+    }
+    const targetId =
+      action.first === undefined ? undefined : board.hexes[action.first]?.id;
+    return Boolean(
+      targetId &&
+      (!board.legalHexIds || board.legalHexIds.includes(targetId)),
+    );
   }
   if (board.action === "discard") return action.kind === "discard";
   return true;
@@ -561,7 +579,18 @@ export const buildDeepSearchRequest = (
   state: TrackerState,
   board: BoardSnapshot,
   rootPlayer: string,
+  tuning?: EngineTuning,
 ) => {
+  const searchTuning: EngineTuning = tuning ?? {
+    maxDepth: 3,
+    branchCap: 12,
+    maxNodes: 16_000,
+    beliefParticles: 48,
+    strategicParticleLimit: 24,
+    iterations: 384,
+    rolloutActions: 108,
+    maxThinkingTimeMs: 1_000,
+  };
   const players = playerNames(state, board);
   if (players.length < 2 || players.length > 4) {
     throw new Error("Deep Search supports standard 2–4 player games");
@@ -736,10 +765,15 @@ export const buildDeepSearchRequest = (
         : sum + (board.players?.[player]?.developmentCards ?? 0),
     0,
   );
+  const beliefParticleLimit = Math.max(1, Math.min(128, searchTuning.beliefParticles));
+  const strategicParticleLimit = Math.max(
+    1,
+    Math.min(64, searchTuning.strategicParticleLimit),
+  );
   const sourceWorldLimit =
     hiddenDevelopmentCards > 0
-      ? Math.floor(MAX_PARTICLES / 2)
-      : MAX_PARTICLES;
+      ? Math.max(strategicParticleLimit, Math.floor(beliefParticleLimit * 1.5))
+      : Math.max(strategicParticleLimit, beliefParticleLimit);
   const sourceWorlds = state.worlds.length
     ? selectRepresentativeWorlds(
         state.worlds,
@@ -758,7 +792,9 @@ export const buildDeepSearchRequest = (
           2,
           Math.min(
             8,
-            Math.floor(MAX_PARTICLES / Math.max(1, sourceWorlds.length)),
+            Math.floor(
+              beliefParticleLimit / Math.max(1, sourceWorlds.length),
+            ),
           ),
         )
       : 1;
@@ -858,7 +894,7 @@ export const buildDeepSearchRequest = (
     else mergedWorlds.set(key, world);
   }
   let worlds = [...mergedWorlds.values()];
-  if (worlds.length > MAX_INTERACTIVE_PARTICLES) {
+  if (worlds.length > beliefParticleLimit) {
     // Preserve the weighted posterior without sending dozens of near-duplicate
     // development-card determinizations through every interactive WASM call.
     // Deterministic systematic resampling covers the complete cumulative mass
@@ -867,11 +903,11 @@ export const buildDeepSearchRequest = (
       (sum, world) => sum + Math.max(0, world.weight),
       0,
     );
-    const quantum = totalWeight / MAX_INTERACTIVE_PARTICLES;
+    const quantum = totalWeight / beliefParticleLimit;
     const selected = new Map<number, (typeof worlds)[number]>();
     let cursor = 0;
     let cumulative = Math.max(0, worlds[0]?.weight ?? 0);
-    for (let sample = 0; sample < MAX_INTERACTIVE_PARTICLES; sample += 1) {
+    for (let sample = 0; sample < beliefParticleLimit; sample += 1) {
       const target = (sample + 0.5) * quantum;
       while (
         cursor < worlds.length - 1 &&
@@ -1015,16 +1051,16 @@ export const buildDeepSearchRequest = (
       // compact root and let the engine subsample representative belief
       // particles. Exact mandatory/tactical solvers still see the fuller
       // posterior sent in this request.
-      iterations: players.length >= 3 ? 320 : 384,
-      maxNodes: 4_000,
-      rolloutActions: players.length >= 3 ? 96 : 108,
+      iterations: searchTuning.iterations,
+      maxNodes: searchTuning.maxNodes,
+      rolloutActions: searchTuning.rolloutActions,
       tacticalDepth: 14,
       tacticalNodes: 900,
-      timeBudgetMs: 350,
+      timeBudgetMs: searchTuning.maxThinkingTimeMs,
       seed,
       mode: "maxn",
-      depth: 4,
-      branchCap: 8,
+      depth: searchTuning.maxDepth,
+      branchCap: searchTuning.branchCap,
       ponder: false,
     },
   };
@@ -1035,41 +1071,44 @@ export const analyzeDeepSearch = async (
   board: BoardSnapshot,
   rootPlayer: string,
   fallback: DecisionAnalysis,
+  algorithm: "maxn" | "alpha-beta" | "puct" = "maxn",
+  tuning?: EngineTuning,
 ): Promise<DecisionAnalysis> => {
   await ensureWasm();
   const { request, players, root } = buildDeepSearchRequest(
     state,
     board,
     rootPlayer,
+    tuning,
   );
-  request.mode = "maxn";
+  request.mode = algorithm;
   if (board.initialPlacement) {
     // Setup is a fully public sequential draft. Spend a larger cumulative
     // budget here than on an ordinary turn: setup occurs only a handful of
     // times and dominates long-horizon outcomes.
-    request.maxNodes = 12_000;
-    request.timeBudgetMs = 1_200;
-    request.depth = Math.min(4, Math.max(2, players.length));
-    request.branchCap = 12;
+    request.maxNodes = Math.min(request.maxNodes, 12_000);
+    request.timeBudgetMs = Math.min(request.timeBudgetMs, 1_200);
+    request.depth = Math.min(request.depth, 4, Math.max(2, players.length));
+    request.branchCap = Math.min(request.branchCap, 12);
   }
   request.branchCap = board.initialPlacement
     ? request.branchCap
-    : 8;
+    : request.branchCap;
   if (request.state.phase === "trade-responses") {
-    request.iterations = 64;
-    request.maxNodes = 2_000;
-    request.rolloutActions = 48;
+    request.iterations = Math.min(request.iterations, 64);
+    request.maxNodes = Math.min(request.maxNodes, 2_000);
+    request.rolloutActions = Math.min(request.rolloutActions, 48);
     request.tacticalNodes = 600;
   } else if (!board.isMyTurn) {
     request.ponder = true;
-    request.iterations = 96;
-    request.maxNodes = 3_000;
-    request.rolloutActions = 64;
+    request.iterations = Math.min(request.iterations, 96);
+    request.maxNodes = Math.min(request.maxNodes, 3_000);
+    request.rolloutActions = Math.min(request.rolloutActions, 64);
     request.tacticalNodes = 600;
     // Background opening/pondering can keep accumulating while opponents act.
     if (board.initialPlacement) {
-      request.maxNodes = 18_000;
-      request.timeBudgetMs = 2_500;
+      request.maxNodes = Math.min(request.maxNodes, 18_000);
+      request.timeBudgetMs = Math.min(request.timeBudgetMs, 2_500);
     }
   }
   const startedAt = performance.now();
@@ -1175,14 +1214,19 @@ export const analyzeDeepSearch = async (
       : fallback.players;
   return {
     ...fallback,
-    engine: "deep-search",
+    engine:
+      algorithm === "puct"
+        ? "deep-puct"
+        : algorithm === "alpha-beta"
+          ? "deep-alpha-beta"
+          : "deep-search",
     actionScores: {
       ...fallback.actionScores,
       ...deepActionScores(response.actions, root),
     },
     players: deepPlayers,
     simulations: response.rollouts,
-    model: `Observation-safe weighted-belief Deep MaxN (${response.particles} particles, ${response.nodes.toLocaleString()} nodes, depth ${response.deepestDecisionDepth})`,
+    model: `${response.algorithm === "maxn" ? "Observation-safe weighted-belief Deep MaxN" : `Observation-safe weighted-belief ${response.algorithm}`} (${response.particles} particles, ${response.nodes.toLocaleString()} nodes, depth ${response.deepestDecisionDepth})`,
     deepSearch: search,
   };
 };

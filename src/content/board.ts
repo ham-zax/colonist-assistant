@@ -274,6 +274,9 @@ const validSnapshot = (value: unknown): value is BoardSnapshot => {
     (candidate.legalEdgeIds === undefined ||
       (Array.isArray(candidate.legalEdgeIds) &&
         candidate.legalEdgeIds.every((id) => typeof id === "string"))) &&
+    (candidate.legalHexIds === undefined ||
+      (Array.isArray(candidate.legalHexIds) &&
+        candidate.legalHexIds.every((id) => typeof id === "string"))) &&
     (candidate.buildableSettlementIds === undefined ||
       (Array.isArray(candidate.buildableSettlementIds) &&
         candidate.buildableSettlementIds.every((id) => typeof id === "string"))) &&
@@ -403,6 +406,7 @@ const validSnapshot = (value: unknown): value is BoardSnapshot => {
     snapshot.edges.every((edge) => edge.vertices.every((id) => vertexIds.has(id))) &&
     (snapshot.legalVertexIds?.every((id) => vertexIds.has(id)) ?? true) &&
     (snapshot.legalEdgeIds?.every((id) => edgeIds.has(id)) ?? true) &&
+    (snapshot.legalHexIds?.every((id) => hexIds.has(id)) ?? true) &&
     (snapshot.buildableSettlementIds?.every((id) => vertexIds.has(id)) ?? true) &&
     (snapshot.buildableCityIds?.every((id) => vertexIds.has(id)) ?? true) &&
     (snapshot.buildableRoadIds?.every((id) => edgeIds.has(id)) ?? true)

@@ -1,6 +1,7 @@
 import type {
   DecisionAnalysis,
   DecisionEngine,
+  EngineTuning,
 } from "../core/engine";
 import type { BoardSnapshot } from "../core/placement";
 import type { TrackerState } from "../core/types";
@@ -94,6 +95,8 @@ export class DecisionWorkerClient {
     callback: (analysis: DecisionAnalysis) => void,
     slowCallback?: (elapsedMs: number) => void,
     failureCallback?: (detail: string) => void,
+    tuning?: EngineTuning,
+    fallbackEngine?: DecisionRequest["fallbackEngine"],
   ): boolean {
     if (
       this.destroyed ||
@@ -119,6 +122,8 @@ export class DecisionWorkerClient {
       board,
       rootPlayer,
       engine,
+      tuning,
+      fallbackEngine,
       callback,
       ...(slowCallback ? { slowCallback } : {}),
       ...(failureCallback ? { failureCallback } : {}),
@@ -141,6 +146,8 @@ export class DecisionWorkerClient {
       board: request.board,
       rootPlayer: request.rootPlayer,
       engine: request.engine,
+      tuning: request.tuning,
+      fallbackEngine: request.fallbackEngine,
     };
     const slowTimer = globalThis.setTimeout(() => {
       const elapsedMs = performance.now() - startedAt;

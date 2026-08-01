@@ -118,6 +118,7 @@ export interface BoardSnapshot {
   edges: BoardEdge[];
   legalVertexIds?: string[];
   legalEdgeIds?: string[];
+  legalHexIds?: string[];
   buildableSettlementIds?: string[];
   buildableCityIds?: string[];
   buildableRoadIds?: string[];
@@ -201,6 +202,8 @@ export const NUMBER_PIPS: Record<number, number> = {
   12: 1,
 };
 
+const MAX_OPENING_LOCAL_PIP_REGRET = 5;
+
 const byId = <T extends { id: string }>(items: T[]): Map<string, T> =>
   new Map(items.map((item) => [item.id, item]));
 
@@ -210,6 +213,60 @@ const vertexIsOpen = (
 ): boolean =>
   !vertex.building &&
   vertex.adjacentVertices.every((neighbor) => !vertices.get(neighbor)?.building);
+
+/**
+ * Colonist's Friendly Robber rule protects every player showing fewer than
+ * three public points. A robber destination is illegal if it touches any such
+ * player's building, even when another adjacent player would be a valid steal.
+ */
+export const legalRobberHexIds = (
+  board: Pick<
+    BoardSnapshot,
+    "hexes" | "vertices" | "players" | "friendlyRobber"
+  >,
+): string[] =>
+  board.hexes
+    .filter((hex) => !hex.blocked)
+    .filter(
+      (hex) =>
+        !board.friendlyRobber ||
+        !board.vertices.some(
+          (vertex) =>
+            vertex.adjacentHexes.includes(hex.id) &&
+            vertex.building &&
+            (board.players?.[vertex.building.player]?.visiblePoints ?? 0) < 3,
+        ),
+    )
+    .map((hex) => hex.id);
+
+/**
+ * Deep opening search remains authoritative, but a projected second site must
+ * not justify catastrophic production loss on the click in front of us. Five
+ * pips of local regret still leaves room for scarcity, ports, denial, roads,
+ * and snake-order lookahead; anything worse is an opening-data sanity failure.
+ */
+export const openingSettlementMeetsProductionFloor = (
+  board: BoardSnapshot,
+  targetId: string,
+): boolean => {
+  if (!board.initialPlacement || board.action !== "settlement") return true;
+  const legal = board.legalVertexIds
+    ? new Set(board.legalVertexIds)
+    : undefined;
+  const vertices = byId(board.vertices);
+  const pips = (vertex: BoardVertex): number =>
+    vertex.adjacentHexes.reduce((sum, hexId) => {
+      const number = board.hexes.find((hex) => hex.id === hexId)?.number;
+      return sum + (number ? NUMBER_PIPS[number] ?? 0 : 0);
+    }, 0);
+  const candidates = board.vertices.filter(
+    (vertex) => vertexIsOpen(vertex, vertices) && (!legal || legal.has(vertex.id)),
+  );
+  const target = candidates.find((vertex) => vertex.id === targetId);
+  if (!target) return false;
+  const bestPips = Math.max(0, ...candidates.map(pips));
+  return pips(target) + MAX_OPENING_LOCAL_PIP_REGRET >= bestPips;
+};
 
 /**
  * During each opening pair, Colonist only accepts a road adjacent to the
@@ -916,11 +973,14 @@ export const scoreRobberPlacements = (
 ): PlacementRecommendation[] => {
   const threat = context.opponentThreat ?? {};
   const stealPriority = context.stealPriority ?? {};
+  const legal = new Set(board.legalHexIds ?? legalRobberHexIds(board));
   return board.hexes
-    .filter((hex) => hex.resource && hex.number && !hex.blocked)
+    .filter((hex) => legal.has(hex.id))
     .map((hex) => {
-      const pips = NUMBER_PIPS[hex.number!] ?? 0;
-      const resourceWeight = RESOURCE_STRATEGIC_WEIGHTS[hex.resource!];
+      const pips = hex.number ? NUMBER_PIPS[hex.number] ?? 0 : 0;
+      const resourceWeight = hex.resource
+        ? RESOURCE_STRATEGIC_WEIGHTS[hex.resource]
+        : 1;
       const buildings = board.vertices
         .filter((vertex) => vertex.adjacentHexes.includes(hex.id) && vertex.building)
         .map((vertex) => vertex.building!);
@@ -976,7 +1036,10 @@ export const scoreRobberPlacements = (
       }
       return {
         id: hex.id,
-        label: `${hex.number} ${RESOURCE_LABELS[hex.resource!].toLowerCase()}`,
+        label:
+          hex.resource && hex.number
+            ? `${hex.number} ${RESOURCE_LABELS[hex.resource].toLowerCase()}`
+            : "Desert",
         score: Math.round(score * 10) / 10,
         reasons,
         ...(bestTarget ? { targetPlayer: bestTarget.player } : {}),

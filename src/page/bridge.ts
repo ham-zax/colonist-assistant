@@ -1,13 +1,16 @@
 import { resolveLocalBoardAction } from "../core/forced-action";
 import { isTerminalGameHeading } from "../core/game-over";
 import {
+  legalRobberHexIds,
   openingRoadEdgeIds,
   type BoardAction,
+  type BoardPlayerPublicState,
 } from "../core/placement";
+import type { Resource, ResourceVector } from "../core/resources";
 
 (() => {
   const SOURCE = "colonist-assistant-public-board";
-  const RESOURCE_BY_TILE_TYPE: Record<number, string | undefined> = {
+  const RESOURCE_BY_TILE_TYPE: Record<number, Resource | undefined> = {
     1: "lumber",
     2: "brick",
     3: "wool",
@@ -694,8 +697,10 @@ import {
         ? Math.max(0, 2 * (playOrder.length - 1 - myOrderIndex))
         : 0;
 
-    const resourceVector = (cards: Array<number> | Record<string, number>) => {
-      const result: Record<string, number> = {
+    const resourceVector = (
+      cards: Array<number> | Record<string, number>,
+    ): ResourceVector => {
+      const result: ResourceVector = {
         lumber: 0,
         brick: 0,
         wool: 0,
@@ -776,7 +781,7 @@ import {
         ) ?? {};
     const longestRoadStates =
       gameStoreState?.mechanicLongestRoadState ?? {};
-    const publicPlayers: Record<string, unknown> = {};
+    const publicPlayers: Record<string, BoardPlayerPublicState> = {};
     for (const [colorKey, playerState] of Object.entries<Record<string, any>>(
       playerStates,
     )) {
@@ -1000,6 +1005,24 @@ import {
     const victoryTarget = Number(
       rootStoreState?.gameSettings?.victoryPointsToWin ?? 10,
     );
+    const configuredFriendlyRobber = [
+      rootStoreState?.gameSettings?.friendlyRobber,
+      rootStoreState?.gameSettings?.isFriendlyRobber,
+      gameStoreState?.gameSettings?.friendlyRobber,
+      managerGameState?.gameSettings?.friendlyRobber,
+    ].find((candidate) => typeof candidate === "boolean") as
+      | boolean
+      | undefined;
+    // Ranked 1v1 enables Friendly Robber. Some Colonist builds omit the
+    // defaulted flag from gameSettings, so the two-player mode is the public
+    // fallback only when no explicit setting is available.
+    const friendlyRobber = configuredFriendlyRobber ?? (playOrder.length === 2);
+    const legalHexIds = legalRobberHexIds({
+      hexes,
+      vertices,
+      players: publicPlayers,
+      friendlyRobber,
+    });
     const visibleWinner = Object.entries(publicPlayers).find(
       ([, player]) =>
         Number(
@@ -1062,6 +1085,8 @@ import {
           }
         : action === "settlement" || action === "city"
           ? { legalVertexIds: exactLegal ?? fallbackLegalVertices }
+          : action === "robber"
+            ? { legalHexIds }
           : {}),
       buildableSettlementIds,
       buildableCityIds,
@@ -1099,7 +1124,7 @@ import {
       initialPlacement,
       picksUntilNext,
       victoryTarget,
-      friendlyRobber: Boolean(rootStoreState?.gameSettings?.friendlyRobber),
+      friendlyRobber,
       privateGame: Boolean(
         rootStoreState?.gameSettings?.isPrivateGame ??
           rootStoreState?.gameSettings?.privateGame ??
@@ -1182,6 +1207,7 @@ import {
             initialPlacement?: boolean;
             legalVertexIds?: string[];
             legalEdgeIds?: string[];
+            legalHexIds?: string[];
             hexes?: Array<{ id: string; blocked?: boolean }>;
           }
         | undefined;
@@ -1217,7 +1243,11 @@ import {
         const target = snapshot.hexes?.find(
           (hex) => hex.id === detail.targetId,
         );
-        if (!target || target.blocked) return;
+        if (
+          !target ||
+          target.blocked ||
+          !snapshot.legalHexIds?.includes(detail.targetId)
+        ) return;
         index =
           tileState?._tiles?.findIndex(
             (tile: Record<string, any>) =>

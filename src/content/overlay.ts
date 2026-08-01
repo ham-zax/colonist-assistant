@@ -77,15 +77,20 @@ import {
 import type { TradeVerdict } from "../core/trades";
 import type {
   DecisionAnalysis,
+  DecisionEngine,
   DecisionRuntime,
+  EngineTuning,
 } from "../core/engine";
 import { isDeepDecisionEngine } from "../core/engine";
 import type { TrackerState } from "../core/types";
 import { WinPredictionStabilizer } from "../core/win-prediction";
 import type { GameSession } from "./session";
 import {
-  AUTOPILOT_DELAY_OPTIONS,
+  getTuningProfile,
+  getEngineTuning,
+  normalizeEngineTuning,
   normalizeAutopilotDelaySeconds,
+  normalizeFallbackEngine,
   readPosition,
   saveSettings,
   type AssistantSettings,
@@ -116,6 +121,14 @@ import { InteractionRenderGate } from "./render-gate";
 type ViewName = "advice" | "cards" | "settings";
 
 const STRATEGIST_LABEL = "Strategist ★";
+const ENGINE_LABELS: Record<DecisionEngine, string> = {
+  "deep-search": "Deep MaxN ★",
+  "deep-alpha-beta": "AlphaBeta",
+  "deep-puct": "Belief PUCT 🧪",
+  hybrid: "Hybrid",
+  "race-eta": "Race ETA",
+  "vector-mcts": "Vector rollouts",
+};
 
 export const autonomousExecutionAllowed = (enabled: boolean): boolean =>
   enabled;
@@ -283,8 +296,10 @@ export class AssistantOverlay {
   private tradeRenderFrame?: number;
   private readonly decisionWorker = new DecisionWorkerClient();
   private readonly renderGate = new InteractionRenderGate();
+  private settingsScrollTop = 0;
   private readonly decisionTraces = new DecisionTraceRecorder();
   private readonly winPredictions = new WinPredictionStabilizer();
+  private destroyed = false;
   private decisionAnalysis?: DecisionAnalysis;
   private decisionKey = "";
   private decisionPendingKey = "";
@@ -585,7 +600,10 @@ export class AssistantOverlay {
   }
 
   setSettings(settings: AssistantSettings): void {
-    if (settings.engine !== this.settings.engine) {
+    const tuningChanged =
+      JSON.stringify(getEngineTuning(settings)) !==
+      JSON.stringify(getEngineTuning(this.settings));
+    if (settings.engine !== this.settings.engine || tuningChanged) {
       this.decisionAnalysis = undefined;
       this.decisionKey = "";
       this.decisionPendingKey = "";
@@ -630,6 +648,7 @@ export class AssistantOverlay {
   }
 
   destroy(): void {
+    this.destroyed = true;
     if (this.tradeRenderFrame !== undefined) {
       window.cancelAnimationFrame(this.tradeRenderFrame);
     }
@@ -688,6 +707,77 @@ export class AssistantOverlay {
 
     this.shadow.addEventListener("change", (rawEvent) => {
       const target = rawEvent.target;
+      if (target instanceof HTMLInputElement && target.dataset.tuning) {
+        const tuningKey = target.dataset.tuning as keyof EngineTuning;
+        const tuning = normalizeEngineTuning(this.settings.engine, {
+          ...getEngineTuning(this.settings),
+          [tuningKey]: Number(target.value),
+        });
+        this.applySettings({
+          ...this.settings,
+          engineTuning: {
+            ...this.settings.engineTuning,
+            [this.settings.engine]: tuning,
+          },
+        });
+        this.finishSettingsInteraction();
+        return;
+      }
+      if (
+        target instanceof HTMLInputElement &&
+        target.dataset.setting === "autopilotDelaySeconds"
+      ) {
+        const values = (target.dataset.stepValues ?? "0")
+          .split(",")
+          .map(Number);
+        this.applySettings({
+          ...this.settings,
+          autopilotDelaySeconds: normalizeAutopilotDelaySeconds(
+            values[Number(target.value)] ?? 0,
+          ),
+        });
+        this.finishSettingsInteraction();
+        return;
+      }
+      if (
+        target instanceof HTMLSelectElement &&
+        target.dataset.setting === "tuningProfile"
+      ) {
+        const profile = target.value;
+        if (profile !== "custom") {
+          this.applySettings({
+            ...this.settings,
+            engineTuning: {
+              ...this.settings.engineTuning,
+              [this.settings.engine]: getTuningProfile(this.settings.engine, profile as "heavy" | "high" | "medium" | "fast"),
+            },
+          });
+        }
+        this.finishSettingsInteraction();
+        return;
+      }
+      if (
+        target instanceof HTMLSelectElement &&
+        target.dataset.setting === "fallbackEngine"
+      ) {
+        this.applySettings({
+          ...this.settings,
+          fallbackEngine: normalizeFallbackEngine(target.value),
+        });
+        this.finishSettingsInteraction();
+        return;
+      }
+      if (
+        target instanceof HTMLSelectElement &&
+        target.dataset.setting === "engine"
+      ) {
+        this.applySettings({
+          ...this.settings,
+          engine: target.value as DecisionEngine,
+        });
+        this.finishSettingsInteraction();
+        return;
+      }
       if (
         target instanceof HTMLInputElement &&
         target.dataset.setting &&
@@ -702,46 +792,34 @@ export class AssistantOverlay {
         });
         return;
       }
-      if (
-        target instanceof HTMLSelectElement &&
-        target.dataset.setting === "autopilotDelaySeconds"
-      ) {
-        this.applySettings({
-          ...this.settings,
-          autopilotDelaySeconds: normalizeAutopilotDelaySeconds(
-            Number(target.value),
-          ),
-        });
-        this.renderGate.release("autopilot-delay");
+    });
+
+    this.shadow.addEventListener("input", (rawEvent) => {
+      const target = rawEvent.target;
+      if (!(target instanceof HTMLInputElement)) return;
+      const output = target.parentElement?.querySelector<HTMLOutputElement>(
+        `[data-tuning-value="${target.dataset.tuning ?? target.dataset.setting ?? ""}"]`,
+      );
+      if (output) {
+        const values = target.dataset.stepValues?.split(",").map(Number);
+        output.value = String(values?.[Number(target.value)] ?? target.value);
+        output.textContent = output.value;
       }
+      const dots = target.parentElement?.querySelectorAll<HTMLElement>(".range-dots i");
+      dots?.forEach((dot, index) => dot.classList.toggle("active", index === Number(target.value)));
     });
 
     this.shadow.addEventListener("pointerdown", (event) => {
       const target = event.composedPath?.()?.[0];
-      if (
-        target instanceof HTMLSelectElement &&
-        target.dataset.setting === "autopilotDelaySeconds"
-      ) {
-        this.renderGate.hold("autopilot-delay");
-      }
+      if (target instanceof HTMLSelectElement || (target instanceof HTMLInputElement && target.type === "range")) this.renderGate.hold("settings-interaction");
     });
     this.shadow.addEventListener("focusin", (event) => {
       const target = event.composedPath?.()?.[0];
-      if (
-        target instanceof HTMLSelectElement &&
-        target.dataset.setting === "autopilotDelaySeconds"
-      ) {
-        this.renderGate.hold("autopilot-delay");
-      }
+      if (target instanceof HTMLSelectElement || (target instanceof HTMLInputElement && target.type === "range")) this.renderGate.hold("settings-interaction");
     });
     this.shadow.addEventListener("focusout", (event) => {
       const target = event.composedPath?.()?.[0];
-      if (
-        target instanceof HTMLSelectElement &&
-        target.dataset.setting === "autopilotDelaySeconds"
-      ) {
-        this.renderGate.release("autopilot-delay");
-      }
+      if (target instanceof HTMLSelectElement || (target instanceof HTMLInputElement && target.type === "range")) this.finishSettingsInteraction();
     });
 
     this.shadow.addEventListener("pointerdown", (event) => {
@@ -962,6 +1040,14 @@ export class AssistantOverlay {
     void saveSettings(settings);
   }
 
+  private finishSettingsInteraction(): void {
+    globalThis.setTimeout(() => {
+      if (this.destroyed) return;
+      this.renderGate.release("settings-interaction");
+      this.render();
+    }, 0);
+  }
+
   private userPlayer(state?: TrackerState): string | undefined {
     if (this.board?.myPlayer && state?.players[this.board.myPlayer]) {
       return this.board.myPlayer;
@@ -988,6 +1074,10 @@ export class AssistantOverlay {
     if (!this.renderGate.tryRender()) return;
     const mount = this.shadow.querySelector("#mount");
     if (!mount) return;
+    const oldPanel = this.shadow.querySelector<HTMLElement>(".panel");
+    if (this.activeView === "settings" && oldPanel) {
+      this.settingsScrollTop = oldPanel.scrollTop;
+    }
     const state = this.reconciledState();
     const ready = Boolean(this.session || this.board);
     if (
@@ -1064,6 +1154,10 @@ export class AssistantOverlay {
           </main>
         </div>
       </section>`;
+    if (this.activeView === "settings") {
+      const newPanel = this.shadow.querySelector<HTMLElement>(".panel");
+      if (newPanel) newPanel.scrollTop = this.settingsScrollTop;
+    }
     this.scheduleTradeVerdicts(state);
     if (this.settings.enabled && !this.board?.gameOver) {
       renderWinOdds(displayedWinAnalysis, state);
@@ -1281,7 +1375,8 @@ export class AssistantOverlay {
           board.action === "robber" &&
           !board.hexes.some(
             (hex) => hex.id === next.targetId && Boolean(hex.blocked),
-          )
+          ) &&
+          (!board.legalHexIds || board.legalHexIds.includes(next.targetId))
         );
       }
       const legal = board.action === next.boardAction
@@ -1575,7 +1670,7 @@ export class AssistantOverlay {
     const runtime = this.runtimePresentation();
     return `<button class="model-strip engine-strip ${runtime.state}" data-action="view" data-view="settings" aria-label="Open decision engine settings. Runtime: ${escapeHtml(runtime.label.toLowerCase())}">
       <span>Decision engine <small>${escapeHtml(runtime.label.toUpperCase())}</small></span>
-      <b>${STRATEGIST_LABEL}</b>
+      <b>${escapeHtml(ENGINE_LABELS[this.settings.engine])}</b>
     </button>`;
   }
 
@@ -1744,6 +1839,8 @@ export class AssistantOverlay {
   ): string {
     return JSON.stringify({
       engine: this.settings.engine,
+      tuning: getEngineTuning(this.settings),
+      fallbackEngine: this.settings.fallbackEngine,
       game: board.gameKey,
       trackerTurn: state.currentTurn.sequence,
       boardTurn: board.turn,
@@ -1757,6 +1854,7 @@ export class AssistantOverlay {
       currentPlayer: board.currentPlayer,
       legalVertices: [...(board.legalVertexIds ?? [])].sort(),
       legalEdges: [...(board.legalEdgeIds ?? [])].sort(),
+      legalHexes: [...(board.legalHexIds ?? [])].sort(),
       buildableSettlements: [
         ...(board.buildableSettlementIds ?? []),
       ].sort(),
@@ -1994,6 +2092,8 @@ export class AssistantOverlay {
         });
         this.render();
       },
+      getEngineTuning(this.settings),
+      this.settings.fallbackEngine,
     );
     if (requested) {
       this.decisionPendingKey = key;
@@ -2408,6 +2508,7 @@ export class AssistantOverlay {
       ),
       legalVertices: [...(board.legalVertexIds ?? [])].sort(),
       legalEdges: [...(board.legalEdgeIds ?? [])].sort(),
+      legalHexes: [...(board.legalHexIds ?? [])].sort(),
       buildableSettlements: [
         ...(board.buildableSettlementIds ?? []),
       ].sort(),
@@ -2751,7 +2852,10 @@ export class AssistantOverlay {
           point: source.screen,
           label: `Place ${spatial.action} here`,
           signature: `${signatureBase}|board|${spatial.action}|${spatial.recommendation.id}`,
-          confidence: board.legalEdgeIds || board.legalVertexIds ? 0.96 : 0.86,
+          confidence:
+            board.legalEdgeIds || board.legalVertexIds || board.legalHexIds
+              ? 0.96
+              : 0.86,
           ...(spatial.action === "robber" &&
           spatial.recommendation.targetPlayer
             ? { followupPlayer: spatial.recommendation.targetPlayer }
@@ -3730,16 +3834,74 @@ export class AssistantOverlay {
   private renderSettings(): string {
     const version = chrome.runtime.getManifest().version;
     const runtime = this.runtimePresentation();
+    const tuning = getEngineTuning(this.settings);
+    const isDeep = isDeepDecisionEngine(this.settings.engine);
+    const selectedProfile = isDeep
+      ? (["heavy", "high", "medium", "fast"] as const).find(
+          (profile) =>
+            JSON.stringify(getTuningProfile(this.settings.engine, profile)) ===
+            JSON.stringify(tuning),
+        ) ?? "custom"
+      : "medium";
+    const estimatedMs = isDeep
+      ? Math.min(
+          tuning.maxThinkingTimeMs,
+          Math.round(
+            180 +
+              tuning.maxDepth * 120 +
+              Math.sqrt(tuning.maxNodes / 16_000) * 260 +
+              Math.sqrt(tuning.beliefParticles / 48) * 160,
+          ),
+        )
+      : Math.min(tuning.maxThinkingTimeMs, 250);
+    const tuningInput = (
+      key: keyof EngineTuning,
+      label: string,
+      detail: string,
+      min: number,
+      max: number,
+      step: number,
+    ): string => `<label class="settings-field tuning-field"><span><b>${label}</b><small>${detail}</small></span><span class="range-control"><input class="tuning-input" type="range" data-tuning="${key}" min="${min}" max="${max}" step="${step}" value="${tuning[key]}"><span class="range-dots" aria-hidden="true"></span><output data-tuning-value="${key}">${Number(tuning[key]).toLocaleString()}</output></span></label>`;
+    const stepPicker = (
+      key: string,
+      values: readonly number[],
+      value: number,
+      labels: readonly string[],
+    ): string => {
+      const selected = Math.max(0, values.indexOf(value));
+      return `<label class="settings-field step-field"><span><b>${key === "autopilotDelaySeconds" ? "Autopilot delay" : key}</b><small>${key === "autopilotDelaySeconds" ? "Pause before each automatic click." : ""}</small></span><span class="range-control"><input class="tuning-input" type="range" data-setting="${key}" data-step-values="${values.join(",")}" min="0" max="${values.length - 1}" step="1" value="${selected}" aria-label="${key}"><span class="range-dots" aria-hidden="true">${values.map((_, index) => `<i class="${index === selected ? "active" : ""}"></i>`).join("")}</span><output data-tuning-value="${key}">${escapeHtml(labels[selected] ?? String(value))}</output></span></label>`;
+    };
+    const tuningPanel = isDeep
+      ? `<section class="tuning-panel">
+          <div class="tuning-heading"><b>Search budget</b><small>These values are saved separately for each deep engine.</small></div>
+          <label class="settings-field tuning-field profile-field"><span><b>Performance profile</b><small>Start with a tested balance, then fine-tune the sliders.</small></span><select data-setting="tuningProfile" aria-label="Performance profile"><option value="heavy"${selectedProfile === "heavy" ? " selected" : ""}>Heavy</option><option value="high"${selectedProfile === "high" ? " selected" : ""}>High</option><option value="medium"${selectedProfile === "medium" ? " selected" : ""}>Medium</option><option value="fast"${selectedProfile === "fast" ? " selected" : ""}>Fast</option><option value="custom"${selectedProfile === "custom" ? " selected" : ""}>Custom</option></select></label>
+          ${tuningInput("maxDepth", "Search depth", "Turns of strategic look-ahead.", 1, 6, 1)}
+          ${tuningInput("branchCap", "Branch cap", "Legal actions considered at each node.", 4, 24, 1)}
+          ${tuningInput("maxNodes", "Node budget", "Maximum states searched per decision.", 2_000, 100_000, 1_000)}
+          ${tuningInput("beliefParticles", "Belief particles", "Hidden-hand worlds evaluated by the engine.", 1, 128, 1)}
+          ${tuningInput("strategicParticleLimit", "Strategic particle limit", "Distinct hidden-hand representatives kept.", 1, 64, 1)}
+          ${this.settings.engine === "deep-puct" ? `${tuningInput("iterations", "PUCT iterations", "Tree visits used by belief PUCT.", 16, 2_000, 16)}${tuningInput("rolloutActions", "Rollout actions", "Action samples used during rollouts.", 16, 300, 8)}` : ""}
+          ${tuningInput("maxThinkingTimeMs", "Max thinking time", "Hard upper bound for one engine request.", 100, 5_000, 100)}
+          <p class="tuning-estimate">Estimated thinking time: ~${estimatedMs.toLocaleString()} ms · hard cap ${tuning.maxThinkingTimeMs.toLocaleString()} ms. Actual time varies by board.</p>
+        </section>`
+      : `<section class="tuning-panel tuning-disabled"><b>No search budget for this policy</b><small>${ENGINE_LABELS[this.settings.engine]} uses the public estimate path; switch to a deep engine to tune WASM search.</small></section>`;
     return `<section class="settings-panel">
       <header class="settings-heading">
         <span>ASSISTANT SETTINGS</span>
         <h1>How it thinks</h1>
         <p>Changes apply immediately to this game.</p>
       </header>
-      <div class="runtime-field engine-field">
-        <span><b>Decision engine</b><small>Weighted-belief Deep MaxN handles tactics, trading, and multiplayer strategy.</small></span>
-        <strong>${STRATEGIST_LABEL}</strong>
-      </div>
+      <label class="settings-field engine-field">
+        <span><b>Decision engine</b><small>MaxN is the strongest validated default. AlphaBeta is a defensive peer; PUCT remains experimental.</small></span>
+        <select data-setting="engine" aria-label="Decision engine">${(
+          Object.entries(ENGINE_LABELS) as Array<[DecisionEngine, string]>
+        ).map(([engine, label]) => `<option value="${engine}"${this.settings.engine === engine ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select>
+      </label>
+      <label class="settings-field">
+        <span><b>Fallback model</b><small>Used only if the selected engine fails. Quick AlphaBeta can still return an action; weighted estimate is advice-only.</small></span>
+        <select data-setting="fallbackEngine" aria-label="Fallback model"><option value="none"${this.settings.fallbackEngine === "none" ? " selected" : ""}>None</option><option value="alpha-beta-fast"${this.settings.fallbackEngine === "alpha-beta-fast" ? " selected" : ""}>Quick AlphaBeta</option><option value="weighted"${this.settings.fallbackEngine === "weighted" ? " selected" : ""}>Weighted estimate</option></select>
+      </label>
+      ${tuningPanel}
       <div class="runtime-field" data-runtime="${runtime.state}">
         <span><b>Engine runtime</b><small>${escapeHtml(runtime.detail)}</small></span>
         <strong><i></i>${escapeHtml(runtime.label)}</strong>
@@ -3754,15 +3916,7 @@ export class AssistantOverlay {
         <input type="checkbox" data-setting="autonomousPrivateGames"${this.settings.autonomousPrivateGames ? " checked" : ""}>
         <i aria-hidden="true"></i>
       </label>
-      <label class="settings-field">
-        <span><b>Autopilot delay</b><small>Wait before each automatic click so play is easier to follow.</small></span>
-        <select data-setting="autopilotDelaySeconds" aria-label="Autopilot delay">
-          ${AUTOPILOT_DELAY_OPTIONS.map(
-            (seconds) =>
-              `<option value="${seconds}"${this.settings.autopilotDelaySeconds === seconds ? " selected" : ""}>${seconds === 0 ? "None" : `${seconds} second${seconds === 1 ? "" : "s"}`}</option>`,
-          ).join("")}
-        </select>
-      </label>
+      ${stepPicker("autopilotDelaySeconds", [0, 1, 3, 5], this.settings.autopilotDelaySeconds, ["None", "1 second", "3 seconds", "5 seconds"])}
       <div class="settings-version">
         <span>INSTALLED BUILD</span>
         <strong>v${escapeHtml(version)}</strong>

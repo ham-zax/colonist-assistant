@@ -14,9 +14,12 @@ Colonist observations
   → state-validated first-action executor
 ```
 
-The Rust rules engine remains the source of truth for legality. TypeScript
-extracts the live board, maintains evidence, renders advice, and executes only
-the first validated action of Strategist's authoritative result. Experimental
+The Rust rules engine remains the source of truth for base-game legality. The
+live boundary intersects those actions with Colonist's public variant target
+restrictions, including Friendly Robber protection in 1v1, before selection
+and again before execution. TypeScript extracts the live board, maintains
+evidence, renders advice, and executes only the first validated action of
+Strategist's authoritative result. Experimental
 belief PUCT, AlphaBeta, and UCT remain diagnostic policies in the native arena;
 replay tooling also exposes selected diagnostic budgets. Users cannot select
 them as live action authorities. The bundled learned policy and value heads are
@@ -80,6 +83,10 @@ uses opponent production denial, public race threat, the belief-weighted
 stolen-card tail, and the acting player's blocked production. A self-only hex
 is treated as dominated when an empty or opponent target is legal; the
 structured global value cannot override that local protocol score.
+Colonist's Friendly Robber target set is applied after enumeration: any hex
+touching a player below three visible points is removed, and the best remaining
+deep candidate is used. Empty legal destinations, including the desert, remain
+available so a mandatory robber move cannot deadlock.
 
 ## Opening search
 
@@ -93,6 +100,10 @@ maximize their own opening features over a pruned candidate set. The endpoint
 combines multi-road expansion portfolio value, port flexibility, board-wide
 resource scarcity alignment, robber concentration, and the JSettlers-style
 production, number-diversity, shared-hex, and build-coverage terms.
+The live adapter retains that snake-draft ranking but rejects a settlement more
+than five local production pips behind the best currently legal site. This is a
+narrow sanity bound: ports, scarcity, denial, roads, and second-pick lookahead
+still decide among every non-catastrophic candidate.
 
 Live setup uses a larger cumulative budget than ordinary turns, and not-my-turn
 pondering can continue opening analysis while opponents place. A wall-clock

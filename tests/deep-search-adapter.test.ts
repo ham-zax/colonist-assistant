@@ -200,7 +200,7 @@ describe("deep-search state adapter", () => {
     expect(request.state.players[0].resources).toEqual([1, 1, 1, 1, 0]);
     expect(request.state.players[0].development).toEqual([1, 0, 0, 0, 0]);
     expect(request.state.worlds.length).toBeGreaterThan(2);
-    expect(request.state.worlds.length).toBeLessThanOrEqual(32);
+    expect(request.state.worlds.length).toBeLessThanOrEqual(48);
     expect(
       request.state.worlds.reduce(
         (sum: number, world: any) => sum + world.weight,
@@ -292,7 +292,7 @@ describe("deep-search state adapter", () => {
     ).request as any;
 
     expect(request.state.worlds.length).toBeGreaterThanOrEqual(24);
-    expect(request.state.worlds.length).toBeLessThanOrEqual(32);
+    expect(request.state.worlds.length).toBeLessThanOrEqual(48);
     expect(
       request.state.worlds.every(
         (world: any) =>
@@ -422,11 +422,11 @@ describe("deep-search state adapter", () => {
     const elapsed = performance.now() - started;
 
     expect(built.request.mode).toBe("maxn");
-    expect(built.request.depth).toBe(4);
-    expect(built.request.maxNodes).toBe(4_000);
-    expect(built.request.branchCap).toBe(8);
+    expect(built.request.depth).toBe(3);
+    expect(built.request.maxNodes).toBe(16_000);
+    expect(built.request.branchCap).toBe(12);
     expect(built.request.tacticalNodes).toBe(900);
-    expect(built.request.timeBudgetMs).toBe(350);
+    expect(built.request.timeBudgetMs).toBe(1_000);
     expect(response.algorithm).toBe("maxn");
     expect(response.engineRevision).toBe("deep-maxn-v7");
     expect(response.chosen).toBeDefined();

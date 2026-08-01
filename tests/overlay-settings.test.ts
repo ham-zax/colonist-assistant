@@ -78,7 +78,7 @@ describe("overlay settings interaction", () => {
     expect(autonomousExecutionAllowed(true)).toBe(true);
   });
 
-  it("exposes an autopilot delay select with 0, 1, 3, and 5 second options", () => {
+  it("exposes an autopilot delay step picker with 0, 1, 3, and 5 second options", () => {
     const overlay = new AssistantOverlay(
       { ...DEFAULT_SETTINGS, autonomousPrivateGames: true },
       { reset: vi.fn() },
@@ -90,14 +90,20 @@ describe("overlay settings interaction", () => {
     shadow
       .querySelector<HTMLElement>("[data-action='view'][data-view='settings']")!
       .click();
-    const select = shadow.querySelector<HTMLSelectElement>(
-      "select[data-setting='autopilotDelaySeconds']",
+    const picker = shadow.querySelector<HTMLInputElement>(
+      "input[type='range'][data-setting='autopilotDelaySeconds']",
     );
-    expect(select).not.toBeNull();
+    expect(picker).not.toBeNull();
+    expect(picker?.dataset.stepValues).toBe("0,1,3,5");
+    expect(picker?.value).toBe("0");
+    if (!picker) throw new Error("Autopilot delay picker was not rendered");
+    picker.value = "1";
+    picker.dispatchEvent(new Event("change", { bubbles: true }));
     expect(
-      [...(select?.options ?? [])].map((option) => option.value),
-    ).toEqual(["0", "1", "3", "5"]);
-    expect(select?.value).toBe("0");
+      shadow.querySelector<HTMLInputElement>(
+        "input[data-setting='autopilotDelaySeconds']",
+      )?.value,
+    ).toBe("1");
     const autopilotLabel = shadow
       .querySelector<HTMLInputElement>(
         "input[data-setting='autonomousPrivateGames']",
@@ -283,7 +289,7 @@ describe("overlay settings interaction", () => {
     overlay.destroy();
   });
 
-  it("presents Strategist as the single decision authority", () => {
+  it("restores the selectable decision algorithms", () => {
     const overlay = new AssistantOverlay(
       { ...DEFAULT_SETTINGS },
       { reset: vi.fn() },
@@ -295,10 +301,18 @@ describe("overlay settings interaction", () => {
     shadow
       .querySelector<HTMLElement>("[data-action='view'][data-view='settings']")!
       .click();
-    expect(shadow.querySelector("select[data-setting='engine']")).toBeNull();
-    expect(
-      shadow.querySelector<HTMLElement>(".engine-field strong")?.textContent,
-    ).toContain("Strategist");
+    const select = shadow.querySelector<HTMLSelectElement>(
+      "select[data-setting='engine']",
+    );
+    expect(select).not.toBeNull();
+    expect([...select!.options].map((option) => option.value)).toEqual([
+      "deep-search",
+      "deep-alpha-beta",
+      "deep-puct",
+      "hybrid",
+      "race-eta",
+      "vector-mcts",
+    ]);
     overlay.destroy();
   });
 

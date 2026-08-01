@@ -6,11 +6,10 @@ player, tracks known cards, keeps honest ranges for unknown cards, and marks
 one legal next step in the Colonist page.
 
 The decision engine runs locally as Rust and WebAssembly in the browser.
-Strategist ★ is the single user-facing decision authority. It combines exact
-local solvers, a bounded setup search, and observation-safe weighted-belief
-Deep MaxN. Experimental belief PUCT, UCT, and AlphaBeta remain diagnostic
-comparison policies in the native arena; replay tooling also exposes selected
-diagnostic search budgets. They are not selectable live engines.
+Strategist ★ is the default user-facing decision engine. The settings panel
+also exposes the historical comparison algorithms: defensive AlphaBeta and
+experimental belief PUCT for WASM search, plus the Hybrid, Race ETA, and
+Vector rollouts display policies. MaxN remains the strongest validated default.
 
 This project is not affiliated with, endorsed by, or sponsored by Colonist or
 CATAN Studio. Use it only in games where every participant has agreed to
@@ -28,9 +27,12 @@ Install from the
 - Reconciles those beliefs with exact own cards, public hand totals, and
   visible bank counts.
 - Uses a bounded snake-order search for both opening settlements and their
-  roads, then compares normal settlements, connected road routes, city
+  roads, with a production floor that rejects catastrophically weak local
+  opening clicks, then compares normal settlements, connected road routes, city
   upgrades, compound robber/victim targets, discards, trades, and
   development-card timing.
+- Applies Colonist's Friendly Robber restriction to recommendations and every
+  click validation, including the default rule in 1v1 games.
 - Shows live win estimates by player.
 - Highlights the next Colonist control or board location.
 - Can carry out the next step when the user turns on autopilot. Autopilot is
@@ -92,21 +94,46 @@ substitutes for Strategist.
 
 ## Decision engine
 
-**Strategist** is the only live engine. Complete local enumeration handles
+**Deep MaxN / Strategist** is the default live engine. Complete local enumeration handles
 mandatory and parameterized action families. Setup uses the dedicated
 belief-aggregated snake-order draft solver; normal play uses bounded,
 vector-valued weighted-belief Deep MaxN with structured action ordering. Each
 simulated player advances its own race value rather than being treated as part
 of a single hostile coalition.
 
+The extension ships with a live-search budget of depth 3, a 16,000-node limit,
+48 belief particles, and a 1-second hard thinking-time cap for Deep MaxN.
+AlphaBeta defaults to the Catanatron-inspired depth 2 profile with 12,000
+nodes, 32 belief particles, pruning, and the same cap. Open **How it thinks**
+to customize depth, branch cap, node budget, belief particles, PUCT
+iterations/rollouts, and maximum thinking time independently for each deep
+engine; the panel also shows an estimate for the selected budget.
+
 The bundled learned policy and value heads are both unpromoted and disabled
 because their grouped validation evidence did not pass the production gates.
 Structured action priors and the strategic evaluator remain authoritative.
-Experimental belief PUCT, UCT, and paranoid AlphaBeta are native-arena
-comparisons only. The public build-time estimate remains display-only and
-cannot choose or execute an action. Current Strategist strength is still being
-measured; this README does not claim that it is stronger than humans or every
-diagnostic baseline, and model estimates are not calibrated guarantees.
+The selected AlphaBeta and belief PUCT modes use the same observation-safe
+WASM boundary and weighted beliefs; Hybrid, Race ETA, and Vector rollouts are
+display-only comparison policies and do not replace the state-validated click
+harness. The public build-time estimate remains display-only. Current strength
+is still being measured; this README does not claim that any mode is stronger
+than humans or every baseline, and model estimates are not calibrated
+guarantees.
+
+### Win percentages
+
+The displayed percentages are normalized relative race estimates and always
+sum to 100% across the players in the current game. Deep search contributes
+the Rust evaluator's normalized strategic-value vector; the display also
+blends public ETA/evidence and smooths abrupt changes between materially
+similar board states. These are not calibrated win probabilities.
+
+The Rust evaluator is inspired by the same broad features as Catanatron's
+reference value function—public points, production, expansion, hand safety,
+development cards, and awards—but it is not a verbatim port of Catanatron's
+Python weights or hidden-state assumptions. Benchmark win shares should not be
+used as calibration data for the live percentage display without a separate
+held-out calibration run.
 
 This project does not copy or embed Catanatron, JSettlers, Monte Catano, or
 HexMachina code. The rules engine and search implementation are clean-room and

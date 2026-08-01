@@ -2,9 +2,10 @@ import type {
   DeepSearchAction,
   DeepSearchResult,
 } from "./engine";
-import type {
-  ActiveTradeOffer,
-  BoardSnapshot,
+import {
+  openingSettlementMeetsProductionFloor,
+  type ActiveTradeOffer,
+  type BoardSnapshot,
 } from "./placement";
 import {
   RESOURCE_ORDER,
@@ -86,6 +87,29 @@ export const selectUsableDeepAction = (
   const chosen = search?.chosen;
   if (!search || !chosen) return chosen;
   const usable = (action: DeepSearchAction): boolean => {
+    if (
+      (action.kind === "move-robber" || action.kind === "play-knight") &&
+      board?.action === "robber" &&
+      (
+        !action.targetId ||
+        Boolean(
+          board.legalHexIds &&
+          !board.legalHexIds.includes(action.targetId),
+        )
+      )
+    ) {
+      return false;
+    }
+    if (
+      action.kind === "place-settlement" &&
+      board?.initialPlacement &&
+      (
+        !action.targetId ||
+        !openingSettlementMeetsProductionFloor(board, action.targetId)
+      )
+    ) {
+      return false;
+    }
     if (
       (
         action.kind !== "offer-trade" &&

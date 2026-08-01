@@ -7,7 +7,13 @@ import {
   placementIsAwaitingSync,
   type PendingBoardPlacement,
 } from "../src/core/board-progress";
-import { openingRoadEdgeIds, type BoardSnapshot } from "../src/core/placement";
+import {
+  legalRobberHexIds,
+  openingRoadEdgeIds,
+  openingSettlementMeetsProductionFloor,
+  scoreRobberPlacements,
+  type BoardSnapshot,
+} from "../src/core/placement";
 import { parseLogSnapshot } from "../src/core/parser";
 import { createTrackerState, reduceTracker } from "../src/core/tracker";
 
@@ -73,6 +79,107 @@ describe("opening road legality", () => {
     } satisfies BoardSnapshot;
 
     expect(openingRoadEdgeIds(board, "You")).toBeUndefined();
+  });
+});
+
+describe("Colonist spatial legality and opening sanity", () => {
+  it("excludes every friendly-robber hex touching a protected player", () => {
+    const board = {
+      hexes: [
+        { id: "current", resource: "ore", number: 5, blocked: true },
+        { id: "protected", resource: "grain", number: 6 },
+        { id: "mixed", resource: "brick", number: 8 },
+        { id: "open", resource: "lumber", number: 10 },
+        { id: "desert" },
+      ],
+      vertices: [
+        {
+          id: "rival-low",
+          adjacentHexes: ["protected", "mixed"],
+          adjacentVertices: [],
+          building: { player: "Rival", kind: "settlement" },
+        },
+        {
+          id: "rival-high",
+          adjacentHexes: ["mixed"],
+          adjacentVertices: [],
+          building: { player: "Leader", kind: "city" },
+        },
+      ],
+      players: {
+        Rival: {
+          handSize: 3,
+          tradeRatios: { lumber: 4, brick: 4, wool: 4, grain: 4, ore: 4 },
+          cardDiscardLimit: 9,
+          visiblePoints: 2,
+        },
+        Leader: {
+          handSize: 5,
+          tradeRatios: { lumber: 4, brick: 4, wool: 4, grain: 4, ore: 4 },
+          cardDiscardLimit: 9,
+          visiblePoints: 4,
+        },
+      },
+      friendlyRobber: true,
+    } satisfies Pick<
+      BoardSnapshot,
+      "hexes" | "vertices" | "players" | "friendlyRobber"
+    >;
+
+    expect(legalRobberHexIds(board)).toEqual(["open", "desert"]);
+    expect(
+      scoreRobberPlacements(
+        { ...board, edges: [], legalHexIds: ["open", "desert"] },
+        { player: "You" },
+      ).map((choice) => choice.id),
+    ).toEqual(["open", "desert"]);
+  });
+
+  it("rejects a 5-pip generic-port opener when 12- and 13-pip sites are legal", () => {
+    const board = {
+      hexes: [
+        { id: "weak-12", resource: "grain", number: 12 },
+        { id: "weak-9", resource: "wool", number: 9 },
+        { id: "strong-6", resource: "grain", number: 6 },
+        { id: "strong-9", resource: "wool", number: 9 },
+        { id: "strong-5", resource: "ore", number: 5 },
+        { id: "brick-8", resource: "brick", number: 8 },
+        { id: "brick-10", resource: "brick", number: 10 },
+        { id: "wood-5", resource: "lumber", number: 5 },
+      ],
+      vertices: [
+        {
+          id: "weak-port",
+          adjacentHexes: ["weak-12", "weak-9"],
+          adjacentVertices: [],
+          port: "generic",
+        },
+        {
+          id: "grain-wool-ore",
+          adjacentHexes: ["strong-6", "strong-9", "strong-5"],
+          adjacentVertices: [],
+        },
+        {
+          id: "brick-brick-wood",
+          adjacentHexes: ["brick-8", "brick-10", "wood-5"],
+          adjacentVertices: [],
+        },
+      ],
+      edges: [],
+      legalVertexIds: ["weak-port", "grain-wool-ore", "brick-brick-wood"],
+      action: "settlement",
+      initialPlacement: true,
+    } satisfies BoardSnapshot;
+
+    expect(openingSettlementMeetsProductionFloor(board, "weak-port")).toBe(
+      false,
+    );
+    expect(
+      openingSettlementMeetsProductionFloor(board, "grain-wool-ore"),
+    ).toBe(true);
+    expect(
+      openingSettlementMeetsProductionFloor(board, "brick-brick-wood"),
+    ).toBe(true);
   });
 });
 

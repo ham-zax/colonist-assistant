@@ -20,14 +20,33 @@ import {
   type PlayerBoardProfile,
 } from "./strategy";
 
-/** The product has one decision authority. Legacy engines remain only as
- * explicitly named native-arena diagnostics and cannot enter live settings or
- * worker requests. */
-export type DecisionEngine = "deep-search";
+export type DecisionEngine =
+  | "deep-search"
+  | "deep-alpha-beta"
+  | "deep-puct"
+  | "hybrid"
+  | "race-eta"
+  | "vector-mcts";
+
+export type FallbackEngine = "none" | "weighted" | "alpha-beta-fast";
+
+export interface EngineTuning {
+  maxDepth: number;
+  branchCap: number;
+  maxNodes: number;
+  beliefParticles: number;
+  strategicParticleLimit: number;
+  iterations: number;
+  rolloutActions: number;
+  maxThinkingTimeMs: number;
+}
 
 export const isDeepDecisionEngine = (
   engine: DecisionEngine,
-): engine is "deep-search" => engine === "deep-search";
+): engine is "deep-search" | "deep-alpha-beta" | "deep-puct" =>
+  engine === "deep-search" ||
+  engine === "deep-alpha-beta" ||
+  engine === "deep-puct";
 
 export type DecisionRuntime =
   | "background-wasm"
