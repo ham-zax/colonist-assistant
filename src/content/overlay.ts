@@ -1956,13 +1956,12 @@ export class AssistantOverlay {
       return;
     }
     if (
-      board.botOnlyGame &&
       !board.isMyTurn &&
       !hasPendingIncomingTrade
     ) {
-      // Fast Colonist bots often complete a turn before a synchronous WASM
-      // ponder finishes. Do not let a now-stale opponent search occupy the
-      // service worker and add several seconds of queueing to our next move.
+      // Opponent-turn Deep Search runs synchronously inside the background
+      // worker and cannot be cancelled once WASM starts. Skip speculative
+      // pondering so stale work cannot block the next authoritative decision.
       if (
         this.decisionKey ||
         this.decisionPendingKey ||
