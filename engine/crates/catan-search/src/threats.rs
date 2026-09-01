@@ -296,6 +296,69 @@ pub fn detect_opponent_threats(state: &GameState, protected: u8) -> Vec<Opponent
     threats
 }
 
+/// A verified immediate loss is stricter than the broader strategic threat
+/// list: an opponent can already win from a Main-phase hand/board state in
+/// this exact particle without assuming another production roll or trade.
+pub fn has_verified_immediate_opponent_win(state: &GameState, protected: u8) -> bool {
+    (0..state.board.num_players).any(|opponent| {
+        opponent != protected && opponent_can_win_main_phase(state, opponent).is_some()
+    })
+}
+
+pub fn posterior_immediate_threat_weight<'a>(
+    worlds: impl IntoIterator<Item = (&'a GameState, f32)>,
+    protected: u8,
+) -> f32 {
+    let worlds = worlds
+        .into_iter()
+        .filter(|(_, weight)| *weight > f32::EPSILON)
+        .collect::<Vec<_>>();
+    let total = worlds
+        .iter()
+        .map(|(_, weight)| *weight)
+        .sum::<f32>()
+        .max(f32::EPSILON);
+    worlds
+        .into_iter()
+        .filter(|(state, _)| has_verified_immediate_opponent_win(state, protected))
+        .map(|(_, weight)| weight / total)
+        .sum::<f32>()
+        .clamp(0.0, 1.0)
+}
+
+/// Posterior mass in which this root action still leaves a verified immediate
+/// opponent win. The action is verified after transition in every world where
+/// it is legal. If it is unavailable in one world, it cannot count as an escape
+/// from a threat already present in that world.
+pub fn forced_loss_weight<'a>(
+    worlds: impl IntoIterator<Item = (&'a GameState, f32)>,
+    protected: u8,
+    action: &Action,
+) -> f32 {
+    let worlds = worlds
+        .into_iter()
+        .filter(|(_, weight)| *weight > f32::EPSILON)
+        .collect::<Vec<_>>();
+    let total = worlds
+        .iter()
+        .map(|(_, weight)| *weight)
+        .sum::<f32>()
+        .max(f32::EPSILON);
+    worlds
+        .into_iter()
+        .map(|(state, weight)| {
+            let mut next = state.clone();
+            let loses = if next.apply(action).is_ok() {
+                has_verified_immediate_opponent_win(&next, protected)
+            } else {
+                has_verified_immediate_opponent_win(state, protected)
+            };
+            if loses { weight / total } else { 0.0 }
+        })
+        .sum::<f32>()
+        .clamp(0.0, 1.0)
+}
+
 /// Prefer root actions that deny an active opponent win threat.
 pub fn action_blocks_threat(state: &GameState, action: &Action, threat: &OpponentThreat) -> bool {
     match action {
@@ -363,10 +426,120 @@ pub fn force_threat_blocking_actions(
 }
 
 #[cfg(test)]
+pub(crate) fn forced_blocker_fixture() -> (GameState, Action) {
+    let mut state = GameState::standard(419, 3);
+    while matches!(
+        state.phase,
+        Phase::SetupSettlement | Phase::SetupRoad { .. }
+    ) {
+        let action = state.legal_actions()[0].clone();
+        state.apply(&action).unwrap();
+    }
+    state.phase = Phase::Main;
+    state.current_player = 0;
+    state.victory_target = 10;
+    state.roads.fill(None);
+    state.longest_road_holder = None;
+    state.largest_army_holder = None;
+    for player in &mut state.players {
+        player.has_longest_road = false;
+        player.has_largest_army = false;
+        player.development = [0; 5];
+        player.resources = [0; 5];
+    }
+    state.players[0].resources = [1, 1, 1, 1, 0];
+    state.players[1].resources = [1, 1, 1, 1, 0];
+    state.players[1].public_victory_points = 9;
+    state.players[0].settlements_left = state.players[0].settlements_left.max(1);
+    state.players[1].settlements_left = state.players[1].settlements_left.max(1);
+
+    for vertex in 0..state.board.vertices.len() as u8 {
+        if state.buildings[vertex as usize].is_some() {
+            continue;
+        }
+        let incident = state
+            .board
+            .edges
+            .iter()
+            .enumerate()
+            .filter_map(|(edge, topology)| topology.vertices.contains(&vertex).then_some(edge as u8))
+            .collect::<Vec<_>>();
+        if incident.len() < 2 {
+            continue;
+        }
+        for root_edge_index in 0..incident.len() {
+            for opponent_edge_index in 0..incident.len() {
+                if root_edge_index == opponent_edge_index {
+                    continue;
+                }
+                state.roads.fill(None);
+                state.roads[incident[root_edge_index] as usize] = Some(0);
+                state.roads[incident[opponent_edge_index] as usize] = Some(1);
+                let blocker = Action::BuildSettlement { vertex };
+                if !state.legal_actions().contains(&blocker) {
+                    continue;
+                }
+                let opponent_sites = settlement_sites(&state, 1);
+                if opponent_sites != [vertex] {
+                    continue;
+                }
+                if !has_verified_immediate_opponent_win(&state, 0) {
+                    continue;
+                }
+                let mut blocked = state.clone();
+                blocked.apply(&blocker).unwrap();
+                if !has_verified_immediate_opponent_win(&blocked, 0) {
+                    return (state, blocker);
+                }
+            }
+        }
+    }
+    panic!("standard board must expose one contested settlement blocker fixture");
+}
+
+#[cfg(test)]
 mod tests {
     use colonist_catan_core::{Action, GameState, Phase};
 
-    use super::{OpponentThreatKind, detect_opponent_threats, main_phase_for};
+    use super::{
+        OpponentThreatKind, detect_opponent_threats, forced_blocker_fixture,
+        forced_loss_weight, main_phase_for, posterior_immediate_threat_weight,
+    };
+
+    #[test]
+    fn threat_posterior_verifies_f8_blocker_after_transition() {
+        let (state, blocker) = forced_blocker_fixture();
+        let worlds = std::iter::once((&state, 1.0));
+        assert_eq!(posterior_immediate_threat_weight(worlds, 0), 1.0);
+        assert_eq!(
+            forced_loss_weight(std::iter::once((&state, 1.0)), 0, &Action::EndTurn),
+            1.0,
+        );
+        assert_eq!(
+            forced_loss_weight(std::iter::once((&state, 1.0)), 0, &blocker),
+            0.0,
+        );
+    }
+
+    #[test]
+    fn threat_uncertainty_remains_probability_mass_not_a_hard_veto() {
+        let (threatened, blocker) = forced_blocker_fixture();
+        let mut safe = threatened.clone();
+        safe.players[1].public_victory_points = 8;
+        let end_risk = forced_loss_weight(
+            [(&threatened, 0.5), (&safe, 0.5)],
+            0,
+            &Action::EndTurn,
+        );
+        let block_risk = forced_loss_weight(
+            [(&threatened, 0.5), (&safe, 0.5)],
+            0,
+            &blocker,
+        );
+        assert!((end_risk - 0.5).abs() <= 1e-6);
+        assert_eq!(block_risk, 0.0);
+        assert!(end_risk < 1.0 - 1e-6);
+    }
 
     #[test]
     fn detects_opponent_settlement_win_threat_when_site_exists() {

@@ -11,7 +11,8 @@ use crate::policy::{
     allocate_root_node_budgets, normalize_observed_priors, normalize_priors,
     order_scored_with_state_quotas, rank_with_class_quotas, truncate_root_preserving_end_turn,
 };
-use crate::shared::{STRATEGIC_PARTICLE_TARGET, select_strategic_particles};
+use crate::shared::{coalesce_identical_particles, select_experimental_strategic_particles};
+use crate::threats::{forced_loss_weight, posterior_immediate_threat_weight};
 use crate::trade_safety::belief_domestic_trade_threat;
 
 // Convenience APIs must remain safe in UI/tests. Production callers that
@@ -47,7 +48,9 @@ pub struct BeliefDepthResult {
     pub nodes: u32,
     pub cutoffs: u32,
     pub depth: u8,
+    /// Exact-distinct states actually searched after lossless coalescing.
     pub particles: usize,
+    /// Weighted particles supplied to this Rust belief search before coalescing.
     pub posterior_particles: usize,
     pub deadline_reached: bool,
 }
@@ -58,6 +61,9 @@ pub struct BeliefDepthConfig {
     pub branch_cap: usize,
     pub maximum_nodes: u32,
     pub time_budget_ms: u32,
+    /// Finite values opt into the legacy lossy coreset for arena/benchmark
+    /// experiments. Production bounded-search entry points always use
+    /// `usize::MAX`, leaving only exact-identical coalescing active.
     pub strategic_particle_limit: usize,
 }
 
@@ -107,6 +113,99 @@ fn apply_action_friction(value: &mut [f32; 4], state: &GameState, action: &Actio
     value[actor as usize] = (value[actor as usize] - friction).max(0.0);
 }
 
+fn allocate_weighted_node_budgets(weights: &[f32], total_nodes: u32) -> Vec<u32> {
+    if weights.is_empty() {
+        return Vec::new();
+    }
+    let mut budgets = vec![0_u32; weights.len()];
+    if total_nodes == 0 {
+        return budgets;
+    }
+    let mut order = (0..weights.len()).collect::<Vec<_>>();
+    order.sort_by(|left, right| {
+        weights[*right]
+            .max(0.0)
+            .total_cmp(&weights[*left].max(0.0))
+            .then_with(|| left.cmp(right))
+    });
+    let guaranteed = (total_nodes as usize).min(weights.len());
+    for index in order.iter().take(guaranteed) {
+        budgets[*index] = 1;
+    }
+    let mut remaining = total_nodes.saturating_sub(guaranteed as u32);
+    if remaining == 0 {
+        return budgets;
+    }
+    let total_weight = weights
+        .iter()
+        .map(|weight| weight.max(0.0))
+        .sum::<f32>()
+        .max(f32::EPSILON);
+    let distributable = remaining;
+    for (index, weight) in weights.iter().enumerate() {
+        if remaining == 0 {
+            break;
+        }
+        let share = ((distributable as f32) * weight.max(0.0) / total_weight).floor() as u32;
+        let granted = share.min(remaining);
+        budgets[index] = budgets[index].saturating_add(granted);
+        remaining -= granted;
+    }
+    let mut cursor = 0usize;
+    while remaining > 0 {
+        let index = order[cursor % order.len()];
+        budgets[index] = budgets[index].saturating_add(1);
+        remaining -= 1;
+        cursor += 1;
+    }
+    budgets
+}
+
+fn canonicalize_equal_prior_siblings(ranked: &mut [(Action, f32)]) {
+    let mut start = 0usize;
+    while start < ranked.len() {
+        let prior = ranked[start].1;
+        let mut end = start + 1;
+        while end < ranked.len() && (ranked[end].1 - prior).abs() <= 1e-9 {
+            end += 1;
+        }
+        ranked[start..end].sort_by(|left, right| {
+            format!("{:?}", left.0).cmp(&format!("{:?}", right.0))
+        });
+        start = end;
+    }
+}
+
+fn recursive_observation_policy(
+    state: &GameState,
+    actions: &[Action],
+    actor: u8,
+    branch_cap: usize,
+) -> Vec<(Action, f32)> {
+    let observed = state.observed_state(actor);
+    let observed_ranked = normalize_observed_priors(state, actions, actor);
+    let mut ranked = order_scored_with_state_quotas(&observed, actor, observed_ranked);
+    ranked = truncate_root_preserving_end_turn(ranked, branch_cap.max(1));
+    if ranked.is_empty() {
+        ranked = actions
+            .iter()
+            .cloned()
+            .map(|action| (action, 1.0))
+            .collect();
+    }
+    canonicalize_equal_prior_siblings(&mut ranked);
+    ranked.truncate(3.min(ranked.len()));
+    let mass = ranked
+        .iter()
+        .map(|(_, prior)| prior.max(0.0))
+        .sum::<f32>()
+        .max(f32::EPSILON);
+    for (_, prior) in &mut ranked {
+        *prior = prior.max(0.0) / mass;
+    }
+    ranked
+}
+
 struct Searcher {
     algorithm: Algorithm,
     maximum_depth: u8,
@@ -118,11 +217,10 @@ struct Searcher {
     deepest_depth: u8,
     deadline: CooperativeDeadline,
     deadline_reached: bool,
-    /// When true, non-root actors use a prior-weighted mixture of their top
-    /// observation-ranked actions. Disabled by default: the mixture fixes one
-    /// fusion source but dilutes strategic opponent MaxN under thin budgets.
-    /// Enable only behind arena ablation flags until held-out evidence exists.
-    observation_safe_root: Option<u8>,
+    /// Weighted-belief production search must select every recursive action
+    /// distribution from the acting player's information set. Perfect-
+    /// information diagnostic search keeps this false intentionally.
+    observation_safe_recursive: bool,
 }
 
 fn normalize_belief_root_priors(
@@ -199,15 +297,119 @@ fn normalize_belief_root_priors(
 }
 
 impl Searcher {
+    fn visit_ranked_decision(
+        &mut self,
+        state: &GameState,
+        actor: u8,
+        mut ranked: Vec<(Action, f32)>,
+        depth: u8,
+        actions_in_turn: u8,
+        mut alpha: f32,
+        mut beta: f32,
+        subtree_limit: u32,
+    ) -> ([f32; 4], Option<Action>) {
+        canonicalize_equal_prior_siblings(&mut ranked);
+        let remaining = subtree_limit.saturating_sub(self.nodes);
+        if remaining == 0 || ranked.is_empty() {
+            return (evaluate(state), None);
+        }
+        ranked.truncate(ranked.len().min(remaining as usize));
+        let maximize_root = match self.algorithm {
+            Algorithm::MaxN => true,
+            Algorithm::Paranoid { root } => actor == root,
+        };
+        let component = match self.algorithm {
+            Algorithm::MaxN => actor as usize,
+            Algorithm::Paranoid { root } => root as usize,
+        };
+        let mut best = [0.0; 4];
+        let mut chosen = None;
+        let mut best_scalar = if maximize_root {
+            f32::NEG_INFINITY
+        } else {
+            f32::INFINITY
+        };
+        let budgets = allocate_root_node_budgets(ranked.len(), remaining);
+        let mut carry = 0_u32;
+        for (index, (action, _)) in ranked.into_iter().enumerate() {
+            let allowance = budgets
+                .get(index)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(carry);
+            let before = self.nodes;
+            let child_limit = self
+                .nodes
+                .saturating_add(allowance)
+                .min(subtree_limit);
+            let mut next = state.clone();
+            next.apply(&action)
+                .expect("ranked depth-search action must transition");
+            let completed_turn =
+                next.turn != state.turn || next.current_player != state.current_player;
+            let mut child = if allowance > 0 && self.nodes < child_limit {
+                self.visit(
+                    &next,
+                    depth + u8::from(completed_turn),
+                    if completed_turn {
+                        0
+                    } else {
+                        actions_in_turn.saturating_add(1)
+                    },
+                    alpha,
+                    beta,
+                    child_limit,
+                )
+            } else {
+                evaluate(&next)
+            };
+            let used = self.nodes.saturating_sub(before);
+            carry = allowance.saturating_sub(used);
+            if self.deadline_reached {
+                return (evaluate(state), None);
+            }
+            apply_action_friction(&mut child, state, &action, actor);
+            let scalar = child[component];
+            let improves = if maximize_root {
+                scalar > best_scalar
+            } else {
+                scalar < best_scalar
+            };
+            if improves {
+                best_scalar = scalar;
+                best = child;
+                chosen = Some(action);
+            }
+            if let Algorithm::Paranoid { .. } = self.algorithm {
+                if maximize_root {
+                    alpha = alpha.max(best_scalar);
+                } else {
+                    beta = beta.min(best_scalar);
+                }
+                if beta <= alpha {
+                    self.cutoffs += 1;
+                    break;
+                }
+            }
+        }
+        if best_scalar.is_finite() {
+            (best, chosen)
+        } else {
+            (evaluate(state), None)
+        }
+    }
+
     fn visit(
         &mut self,
         state: &GameState,
         depth: u8,
         actions_in_turn: u8,
-        mut alpha: f32,
-        mut beta: f32,
+        alpha: f32,
+        beta: f32,
+        subtree_limit: u32,
     ) -> [f32; 4] {
-        if self.nodes >= self.node_limit {
+        let subtree_limit = subtree_limit.min(self.node_limit).min(self.maximum_nodes);
+        if self.nodes >= subtree_limit {
             return evaluate(state);
         }
         if self.deadline.expired_at_checkpoint(self.nodes, 8) {
@@ -229,18 +431,47 @@ impl Searcher {
                 let total = actions
                     .iter()
                     .map(|action| state.chance_weight(action) as f32)
-                    .sum::<f32>();
+                    .sum::<f32>()
+                    .max(f32::EPSILON);
+                let weighted_actions = actions
+                    .into_iter()
+                    .filter_map(|action| {
+                        let weight = state.chance_weight(&action) as f32 / total;
+                        (weight > 0.0).then_some((action, weight))
+                    })
+                    .collect::<Vec<_>>();
+                let remaining = subtree_limit.saturating_sub(self.nodes);
+                let weights = weighted_actions
+                    .iter()
+                    .map(|(_, weight)| *weight)
+                    .collect::<Vec<_>>();
+                let budgets = allocate_weighted_node_budgets(&weights, remaining);
+                let mut carry = 0_u32;
                 let mut expected = [0.0; 4];
-                for action in actions {
-                    let weight = state.chance_weight(&action) as f32 / total;
+                for (index, (action, weight)) in weighted_actions.into_iter().enumerate() {
+                    let allowance = budgets.get(index).copied().unwrap_or(0).saturating_add(carry);
+                    let before = self.nodes;
+                    let child_limit = self
+                        .nodes
+                        .saturating_add(allowance)
+                        .min(subtree_limit);
                     let mut next = state.clone();
                     next.apply(&action)
                         .expect("legal chance action must transition");
-                    let child = if self.nodes < self.node_limit {
-                        self.visit(&next, depth, actions_in_turn.saturating_add(1), alpha, beta)
+                    let child = if allowance > 0 && self.nodes < child_limit {
+                        self.visit(
+                            &next,
+                            depth,
+                            actions_in_turn.saturating_add(1),
+                            alpha,
+                            beta,
+                            child_limit,
+                        )
                     } else {
                         evaluate(&next)
                     };
+                    let used = self.nodes.saturating_sub(before);
+                    carry = allowance.saturating_sub(used);
                     if self.deadline_reached {
                         return evaluate(state);
                     }
@@ -255,126 +486,94 @@ impl Searcher {
                 // acting player's observation only. Determinized MaxN still
                 // evaluates leaves with exact hands, but opponents no longer
                 // prioritize actions using third-party hidden identities.
-                let observed_ranked = normalize_observed_priors(state, &actions, actor);
-                let mut ranked = order_scored_with_state_quotas(
-                    &state.observed_state(actor),
-                    actor,
-                    observed_ranked,
-                );
-                ranked = truncate_root_preserving_end_turn(ranked, self.branch_cap);
-                if ranked.is_empty() {
-                    ranked = rank_with_class_quotas(state, &actions, actor, self.branch_cap);
+                let remaining = subtree_limit.saturating_sub(self.nodes);
+                if remaining == 0 {
+                    return evaluate(state);
                 }
-                let observation_safe = self.observation_safe_root.is_some_and(|root| root != actor);
+                let observation_safe = self.observation_safe_recursive;
+                let mut ranked = if observation_safe {
+                    recursive_observation_policy(state, &actions, actor, self.branch_cap)
+                } else {
+                    let observed_ranked = normalize_observed_priors(state, &actions, actor);
+                    let mut ranked = order_scored_with_state_quotas(
+                        &state.observed_state(actor),
+                        actor,
+                        observed_ranked,
+                    );
+                    ranked = truncate_root_preserving_end_turn(ranked, self.branch_cap);
+                    if ranked.is_empty() {
+                        ranked = rank_with_class_quotas(state, &actions, actor, self.branch_cap);
+                    }
+                    ranked
+                };
+                ranked.truncate(ranked.len().min(remaining as usize));
                 // Observation-safe opponents evaluate a prior-weighted mixture
                 // over the top observation-ranked actions. The mixture depends
                 // only on the actor's observation, so indistinguishable worlds
                 // share one strategy while still covering more than a single
                 // greedy prior line.
                 if observation_safe {
-                    let mixture = ranked.iter().take(3.min(ranked.len())).collect::<Vec<_>>();
-                    let mass = mixture
-                        .iter()
-                        .map(|(_, prior)| prior.max(0.0))
-                        .sum::<f32>()
-                        .max(f32::EPSILON);
+                    let budgets = allocate_root_node_budgets(ranked.len(), remaining);
+                    let mut carry = 0_u32;
                     let mut expected = [0.0_f32; 4];
-                    for (action, prior) in mixture {
-                        let weight = prior.max(0.0) / mass;
-                        if weight <= 0.0 {
+                    for (index, (action, weight)) in ranked.iter().enumerate() {
+                        if *weight <= 0.0 {
                             continue;
                         }
+                        let allowance = budgets
+                            .get(index)
+                            .copied()
+                            .unwrap_or(0)
+                            .saturating_add(carry);
+                        let before = self.nodes;
+                        let child_limit = self
+                            .nodes
+                            .saturating_add(allowance)
+                            .min(subtree_limit);
                         let mut next = state.clone();
                         next.apply(action)
-                            .expect("ranked depth-search action must transition");
+                            .expect("observation-policy action must transition");
                         let completed_turn =
                             next.turn != state.turn || next.current_player != state.current_player;
-                        let mut child = self.visit(
-                            &next,
-                            depth + u8::from(completed_turn),
-                            if completed_turn {
-                                0
-                            } else {
-                                actions_in_turn.saturating_add(1)
-                            },
-                            alpha,
-                            beta,
-                        );
+                        let mut child = if allowance > 0 && self.nodes < child_limit {
+                            self.visit(
+                                &next,
+                                depth + u8::from(completed_turn),
+                                if completed_turn {
+                                    0
+                                } else {
+                                    actions_in_turn.saturating_add(1)
+                                },
+                                alpha,
+                                beta,
+                                child_limit,
+                            )
+                        } else {
+                            evaluate(&next)
+                        };
+                        let used = self.nodes.saturating_sub(before);
+                        carry = allowance.saturating_sub(used);
                         if self.deadline_reached {
                             return evaluate(state);
                         }
                         apply_action_friction(&mut child, state, action, actor);
                         for player in 0..4 {
-                            expected[player] += child[player] * weight;
+                            expected[player] += child[player] * *weight;
                         }
                     }
                     return expected;
                 }
-                let mut best = [0.0; 4];
-                let maximize_root = match self.algorithm {
-                    Algorithm::MaxN => true,
-                    Algorithm::Paranoid { root } => actor == root,
-                };
-                let component = match self.algorithm {
-                    Algorithm::MaxN => actor as usize,
-                    Algorithm::Paranoid { root } => root as usize,
-                };
-                let mut best_scalar = if maximize_root {
-                    f32::NEG_INFINITY
-                } else {
-                    f32::INFINITY
-                };
-                for (action, _) in ranked {
-                    if self.nodes >= self.node_limit {
-                        break;
-                    }
-                    let mut next = state.clone();
-                    next.apply(&action)
-                        .expect("ranked depth-search action must transition");
-                    let completed_turn =
-                        next.turn != state.turn || next.current_player != state.current_player;
-                    let mut child = self.visit(
-                        &next,
-                        depth + u8::from(completed_turn),
-                        if completed_turn {
-                            0
-                        } else {
-                            actions_in_turn.saturating_add(1)
-                        },
-                        alpha,
-                        beta,
-                    );
-                    if self.deadline_reached {
-                        return evaluate(state);
-                    }
-                    apply_action_friction(&mut child, state, &action, actor);
-                    let scalar = child[component];
-                    let improves = if maximize_root {
-                        scalar > best_scalar
-                    } else {
-                        scalar < best_scalar
-                    };
-                    if improves {
-                        best_scalar = scalar;
-                        best = child;
-                    }
-                    if let Algorithm::Paranoid { .. } = self.algorithm {
-                        if maximize_root {
-                            alpha = alpha.max(best_scalar);
-                        } else {
-                            beta = beta.min(best_scalar);
-                        }
-                        if beta <= alpha {
-                            self.cutoffs += 1;
-                            break;
-                        }
-                    }
-                }
-                if best_scalar.is_finite() {
-                    best
-                } else {
-                    evaluate(state)
-                }
+                self.visit_ranked_decision(
+                    state,
+                    actor,
+                    ranked,
+                    depth,
+                    actions_in_turn,
+                    alpha,
+                    beta,
+                    subtree_limit,
+                )
+                .0
             }
         }
     }
@@ -460,6 +659,7 @@ impl Searcher {
                     if completed_turn { 0 } else { 1 },
                     alpha,
                     beta,
+                    self.node_limit,
                 )
             };
             apply_action_friction(&mut child, state, &action, actor);
@@ -613,16 +813,22 @@ fn belief_search(
             deadline_reached: report.deadline_reached,
         });
     }
-    // Exact mandatory/tactical solvers in the WASM adapter see the full
-    // posterior. Strategic MaxN deliberately searches a compact representative
-    // subset so node budget is not diluted across near-duplicate worlds.
+    // Preserve every distinct WASM world in production. Exact-identical states
+    // may be merged losslessly by summing their weights; finite configured
+    // limits are reserved for explicit arena/benchmark experiments.
     let posterior_particles = particles.len();
+    let posterior = particles;
+    let coalesced_storage = coalesce_identical_particles(particles);
+    let coalesced = coalesced_storage.as_slice();
     let strategic_storage;
-    let particles = if particles.len() > config.strategic_particle_limit {
-        strategic_storage = select_strategic_particles(particles, config.strategic_particle_limit);
+    let particles = if coalesced.len() > config.strategic_particle_limit {
+        strategic_storage = select_experimental_strategic_particles(
+            coalesced,
+            config.strategic_particle_limit,
+        );
         strategic_storage.as_slice()
     } else {
-        particles
+        coalesced
     };
     struct Aggregate {
         action: Action,
@@ -650,8 +856,41 @@ fn belief_search(
     let planner_nodes = (maximum_nodes / 12).clamp(300, 4_000);
     let mut root_scored = normalize_belief_root_priors(particles, observer, planner_nodes);
     root_scored.retain(|(action, _)| !root_exclusions.contains(action));
-    // Threat forcing disabled until posterior-aggregated and post-apply verified.
-    let mut root_actions = truncate_root_preserving_end_turn(root_scored, branch_cap)
+    let immediate_threat_weight = posterior_immediate_threat_weight(
+        posterior
+            .iter()
+            .map(|particle| (&particle.state, particle.weight)),
+        observer,
+    );
+    let verified_blockers = if immediate_threat_weight > f32::EPSILON {
+        root_scored
+            .iter()
+            .filter(|(action, _)| {
+                forced_loss_weight(
+                    posterior
+                        .iter()
+                        .map(|particle| (&particle.state, particle.weight)),
+                    observer,
+                    action,
+                ) + 1e-6
+                    < immediate_threat_weight
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let ordinarily_retained = truncate_root_preserving_end_turn(root_scored, branch_cap);
+    let mut retained = Vec::with_capacity(branch_cap.max(1));
+    for candidate in verified_blockers.into_iter().chain(ordinarily_retained) {
+        if retained.len() >= branch_cap.max(1) {
+            break;
+        }
+        if !retained.iter().any(|(action, _)| action == &candidate.0) {
+            retained.push(candidate);
+        }
+    }
+    let mut root_actions = retained
         .into_iter()
         .map(|(action, _)| action)
         .collect::<Vec<_>>();
@@ -659,22 +898,41 @@ fn belief_search(
     // Pick that representative over the complete posterior before MaxN spends
     // its root budget; a production-based public prior cannot know which
     // accumulated resource the opponents are actually holding.
-    if root_actions
+    if let Some(monopoly_slot) = root_actions
         .iter()
-        .any(|action| matches!(action, Action::PlayMonopoly { .. }))
+        .position(|action| matches!(action, Action::PlayMonopoly { .. }))
     {
-        let exact_monopoly = solve_exact_belief(particles, ExactActionFamily::Monopoly);
-        if let Some(best_monopoly) = exact_monopoly.chosen {
-            if let Some(candidate) = root_actions
-                .iter_mut()
-                .find(|action| matches!(action, Action::PlayMonopoly { .. }))
-            {
-                *candidate = best_monopoly;
-            } else if root_actions.len() < branch_cap {
-                root_actions.push(best_monopoly);
-            }
+        let fallback = root_actions[monopoly_slot].clone();
+        let replacement = solve_exact_belief(particles, ExactActionFamily::Monopoly)
+            .chosen
+            .unwrap_or(fallback);
+        root_actions.retain(|action| !matches!(action, Action::PlayMonopoly { .. }));
+        root_actions.insert(monopoly_slot.min(root_actions.len()), replacement);
+    }
+    let mut unique_root_actions = Vec::with_capacity(root_actions.len());
+    for action in root_actions {
+        if !unique_root_actions.contains(&action) {
+            unique_root_actions.push(action);
         }
     }
+    let mut root_actions = unique_root_actions;
+    debug_assert!(root_actions.iter().enumerate().all(|(index, action)| {
+        root_actions
+            .iter()
+            .skip(index + 1)
+            .all(|other| other != action)
+    }));
+    debug_assert_eq!(
+        root_actions
+            .iter()
+            .filter(|action| matches!(action, Action::PlayMonopoly { .. }))
+            .count(),
+        usize::from(
+            root_actions
+                .iter()
+                .any(|action| matches!(action, Action::PlayMonopoly { .. }))
+        ),
+    );
     let safe_root_actions = root_actions
         .iter()
         .filter(|action| {
@@ -741,8 +999,7 @@ fn belief_search(
                 deepest_depth: 0,
                 deadline: deadline.clone(),
                 deadline_reached: false,
-                // Observation-safe opponent mixtures stay off until ablated.
-                observation_safe_root: None,
+                observation_safe_recursive: true,
             };
             let mut candidate_value = if row_deadline {
                 evaluate(&next)
@@ -753,6 +1010,7 @@ fn belief_search(
                     if completed_turn { 0 } else { 1 },
                     0.0,
                     1.0,
+                    searcher.node_limit,
                 )
             } else {
                 evaluate(&next)
@@ -823,14 +1081,39 @@ fn belief_search(
             value: entry
                 .value
                 .map(|value| value / entry.covered_weight.max(f32::EPSILON)),
-            legal_weight: entry.legal_weight,
+            legal_weight: entry.legal_weight.clamp(0.0, 1.0),
             lower_confidence_value: entry.lower_bound,
         })
         .collect::<Vec<_>>();
     actions.sort_by(|left, right| right.value[actor].total_cmp(&left.value[actor]));
-    let chosen = actions.first().map(|entry| entry.action.clone());
+    let mut chosen_index = 0usize;
+    if let Some(leading) = actions.first() {
+        let leading_loss = forced_loss_weight(
+            posterior
+                .iter()
+                .map(|particle| (&particle.state, particle.weight)),
+            observer,
+            &leading.action,
+        );
+        if leading_loss >= 1.0 - 1e-6
+            && let Some(escape_index) = actions.iter().position(|candidate| {
+                forced_loss_weight(
+                    posterior
+                        .iter()
+                        .map(|particle| (&particle.state, particle.weight)),
+                    observer,
+                    &candidate.action,
+                ) <= 1e-6
+            })
+        {
+            chosen_index = escape_index;
+        }
+    }
+    let chosen = actions
+        .get(chosen_index)
+        .map(|entry| entry.action.clone());
     let value = actions
-        .first()
+        .get(chosen_index)
         .map(|entry| entry.value)
         .unwrap_or_else(|| evaluate(first));
     Ok(BeliefDepthResult {
@@ -926,7 +1209,7 @@ pub fn search_maxn_bounded_timed(
         deepest_depth: 0,
         deadline: CooperativeDeadline::start(time_budget_ms),
         deadline_reached: false,
-        observation_safe_root: None,
+        observation_safe_recursive: false,
     }
     .root(state)
 }
@@ -982,7 +1265,7 @@ pub fn search_paranoid_bounded_timed(
         deepest_depth: 0,
         deadline: CooperativeDeadline::start(time_budget_ms),
         deadline_reached: false,
-        observation_safe_root: None,
+        observation_safe_recursive: false,
     }
     .root(state)
 }
@@ -1013,7 +1296,7 @@ pub fn search_belief_maxn_bounded(
             branch_cap,
             maximum_nodes,
             time_budget_ms: 0,
-            strategic_particle_limit: STRATEGIC_PARTICLE_TARGET,
+            strategic_particle_limit: usize::MAX,
         },
     )
 }
@@ -1038,7 +1321,7 @@ pub fn search_weighted_belief_maxn_bounded(
             branch_cap,
             maximum_nodes,
             time_budget_ms: 0,
-            strategic_particle_limit: STRATEGIC_PARTICLE_TARGET,
+            strategic_particle_limit: usize::MAX,
         },
     )
 }
@@ -1075,7 +1358,7 @@ pub fn search_weighted_belief_maxn_bounded_timed_excluding(
             branch_cap,
             maximum_nodes,
             time_budget_ms,
-            strategic_particle_limit: STRATEGIC_PARTICLE_TARGET,
+            strategic_particle_limit: usize::MAX,
         },
         false,
         root_exclusions,
@@ -1108,7 +1391,7 @@ pub fn search_belief_paranoid_bounded(
             branch_cap,
             maximum_nodes,
             time_budget_ms: 0,
-            strategic_particle_limit: STRATEGIC_PARTICLE_TARGET,
+            strategic_particle_limit: usize::MAX,
         },
     )
 }
@@ -1133,7 +1416,7 @@ pub fn search_weighted_belief_paranoid_bounded(
             branch_cap,
             maximum_nodes,
             time_budget_ms: 0,
-            strategic_particle_limit: STRATEGIC_PARTICLE_TARGET,
+            strategic_particle_limit: usize::MAX,
         },
     )
 }
@@ -1170,7 +1453,7 @@ pub fn search_weighted_belief_paranoid_bounded_timed_excluding(
             branch_cap,
             maximum_nodes,
             time_budget_ms,
-            strategic_particle_limit: STRATEGIC_PARTICLE_TARGET,
+            strategic_particle_limit: usize::MAX,
         },
         true,
         root_exclusions,
@@ -1181,7 +1464,9 @@ pub fn search_weighted_belief_paranoid_bounded_timed_excluding(
 mod tests {
     use std::sync::Arc;
 
-    use colonist_catan_core::{Action, GameState, NodeKind, Phase, Resource, SplitMix64};
+    use colonist_catan_core::{
+        Action, DevCard, GameState, NodeKind, Phase, Resource, SplitMix64,
+    };
 
     use super::{
         apply_action_friction, normalize_belief_root_priors, search_belief_maxn,
@@ -1215,6 +1500,61 @@ mod tests {
                 state.apply(&steal).unwrap();
             }
         }
+    }
+
+    fn recovered_turn_54_control() -> GameState {
+        let mut state = GameState::standard(54, 4);
+        while matches!(
+            state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        ) {
+            let action = state.legal_actions()[0].clone();
+            state.apply(&action).unwrap();
+        }
+        state.phase = Phase::Main;
+        state.current_player = 0;
+        state.turn = 54;
+        state.bank_is_public = true;
+        // Recovered public bank [lumber, brick, wool, grain, ore].
+        state.bank = [13, 15, 9, 13, 13];
+        // Recovered hand sizes 9, 8, 8, 7. The opponent compositions below
+        // are one conservation-exact completion of the public evidence; the
+        // historical hidden identities were not retained in the repository.
+        state.players[0].resources = [0, 4, 1, 3, 1];
+        state.players[1].resources = [2, 0, 3, 1, 2];
+        state.players[2].resources = [2, 0, 3, 1, 2];
+        state.players[3].resources = [2, 0, 3, 1, 1];
+        state.players[0].public_victory_points = 2;
+        state.players[1].public_victory_points = 4;
+        state.players[2].public_victory_points = 3;
+        state.players[3].public_victory_points = 2;
+        state
+    }
+
+    fn observation_swap_control(actor: u8) -> (GameState, GameState) {
+        let mut left = GameState::standard(77, 4);
+        while matches!(
+            left.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        ) {
+            let action = left.legal_actions()[0].clone();
+            left.apply(&action).unwrap();
+        }
+        left.phase = Phase::Main;
+        left.current_player = actor;
+        left.bank = [19; 5];
+        for player in &mut left.players {
+            player.resources = [0; 5];
+        }
+        left.players[actor as usize].resources = [0, 0, 0, 0, 4];
+        left.players[1].resources = [3, 0, 0, 0, 0];
+        left.players[2].resources = [0, 3, 0, 0, 0];
+        left.bank = [16, 16, 19, 19, 15];
+
+        let mut right = left.clone();
+        right.players[1].resources = [0, 3, 0, 0, 0];
+        right.players[2].resources = [3, 0, 0, 0, 0];
+        (left, right)
     }
 
     fn winning_position(players: u8) -> GameState {
@@ -1459,6 +1799,191 @@ mod tests {
     }
 
     #[test]
+    fn turn_54_fair_budget_does_not_prefer_maritime_before_information_gain() {
+        let state = recovered_turn_54_control();
+        let maritime = Action::MaritimeTrade {
+            give: Resource::Brick,
+            receive: Resource::Lumber,
+            ratio: 4,
+        };
+        assert!(state.legal_actions().contains(&Action::BuyDevelopment));
+        assert!(state.legal_actions().contains(&maritime));
+
+        let report = search_weighted_belief_maxn_bounded(
+            &[BeliefParticle { state, weight: 1.0 }],
+            4,
+            8,
+            4_000,
+        )
+        .unwrap();
+        assert!(report.nodes <= 4_000);
+        assert_ne!(report.chosen, Some(maritime.clone()));
+        let buy = report
+            .actions
+            .iter()
+            .find(|candidate| candidate.action == Action::BuyDevelopment)
+            .expect("BuyDevelopment must survive the production-width root");
+        let trade = report
+            .actions
+            .iter()
+            .find(|candidate| candidate.action == maritime)
+            .expect("recovered maritime action must survive the production-width root");
+        assert!(buy.value[0] + 1e-6 >= trade.value[0]);
+    }
+
+    #[test]
+    fn node_budget_allocator_reserves_positive_work_for_positive_chance_outcomes() {
+        let budgets = super::allocate_weighted_node_budgets(&[14.0, 5.0, 2.0, 2.0, 2.0], 11);
+        assert_eq!(budgets.iter().sum::<u32>(), 11);
+        assert!(budgets.iter().all(|budget| *budget > 0));
+    }
+
+    #[test]
+    fn threat_f8_verified_blocker_beats_end_turn_at_production_and_wider_limits() {
+        let (state, blocker) = crate::threats::forced_blocker_fixture();
+        for (depth, branch_cap, maximum_nodes) in [(4, 8, 4_000), (6, 32, 16_000)] {
+            let report = search_weighted_belief_maxn_bounded(
+                &[BeliefParticle {
+                    state: state.clone(),
+                    weight: 1.0,
+                }],
+                depth,
+                branch_cap,
+                maximum_nodes,
+            )
+            .unwrap();
+            assert_eq!(report.chosen, Some(blocker.clone()));
+            assert!(report.nodes <= maximum_nodes);
+            assert!(report.actions.iter().any(|candidate| {
+                candidate.action == blocker && candidate.legal_weight >= 1.0 - 1e-6
+            }));
+        }
+    }
+
+    #[test]
+    fn observation_policy_ignores_third_party_hidden_resource_swap() {
+        let (left, right) = observation_swap_control(3);
+        assert_eq!(left.observation_hash(3), right.observation_hash(3));
+        assert_eq!(left.legal_actions(), right.legal_actions());
+        let left_policy = super::recursive_observation_policy(
+            &left,
+            &left.legal_actions(),
+            3,
+            8,
+        );
+        let right_policy = super::recursive_observation_policy(
+            &right,
+            &right.legal_actions(),
+            3,
+            8,
+        );
+        assert_eq!(left_policy, right_policy);
+    }
+
+    #[test]
+    fn observation_policy_is_safe_for_root_actor_after_same_turn_development_draw() {
+        let mut left = recovered_turn_54_control();
+        let mut right = left.clone();
+        right.players[1].resources = left.players[2].resources;
+        right.players[2].resources = left.players[1].resources;
+        assert_eq!(left.observation_hash(0), right.observation_hash(0));
+
+        for state in [&mut left, &mut right] {
+            state.apply(&Action::BuyDevelopment).unwrap();
+            state
+                .apply(&Action::ResolveDevelopment { card: DevCard::Knight })
+                .unwrap();
+        }
+        assert_eq!(left.observation_hash(0), right.observation_hash(0));
+        assert_eq!(left.legal_actions(), right.legal_actions());
+        let left_policy = super::recursive_observation_policy(
+            &left,
+            &left.legal_actions(),
+            0,
+            8,
+        );
+        let right_policy = super::recursive_observation_policy(
+            &right,
+            &right.legal_actions(),
+            0,
+            8,
+        );
+        assert_eq!(left_policy, right_policy);
+    }
+
+    #[test]
+    fn node_budget_turn_54_buy_and_maritime_orders_are_state_identical() {
+        let state = recovered_turn_54_control();
+        let maritime = Action::MaritimeTrade {
+            give: Resource::Brick,
+            receive: Resource::Lumber,
+            ratio: 4,
+        };
+        for card in DevCard::ALL {
+            if state.development_deck[card.index()] == 0 {
+                continue;
+            }
+            let mut maritime_first = state.clone();
+            maritime_first.apply(&maritime).unwrap();
+            maritime_first.apply(&Action::BuyDevelopment).unwrap();
+            maritime_first
+                .apply(&Action::ResolveDevelopment { card })
+                .unwrap();
+
+            let mut buy_first = state.clone();
+            buy_first.apply(&Action::BuyDevelopment).unwrap();
+            buy_first
+                .apply(&Action::ResolveDevelopment { card })
+                .unwrap();
+            buy_first.apply(&maritime).unwrap();
+
+            assert_eq!(maritime_first.state_hash(), buy_first.state_hash());
+            let left = crate::eval::evaluate(&maritime_first);
+            let right = crate::eval::evaluate(&buy_first);
+            for player in 0..4 {
+                assert!((left[player] - right[player]).abs() <= 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn node_budget_equal_ranked_sibling_permutation_is_value_stable() {
+        let state = recovered_turn_54_control();
+        let maritime = Action::MaritimeTrade {
+            give: Resource::Brick,
+            receive: Resource::Lumber,
+            ratio: 4,
+        };
+        let forward = vec![(Action::BuyDevelopment, 0.5), (maritime.clone(), 0.5)];
+        let reverse = vec![(maritime, 0.5), (Action::BuyDevelopment, 0.5)];
+        let make_searcher = || super::Searcher {
+            algorithm: super::Algorithm::MaxN,
+            maximum_depth: 4,
+            maximum_nodes: 400,
+            node_limit: 400,
+            branch_cap: 8,
+            nodes: 0,
+            cutoffs: 0,
+            deepest_depth: 0,
+            deadline: crate::deadline::CooperativeDeadline::start(0),
+            deadline_reached: false,
+            observation_safe_recursive: false,
+        };
+        let mut left = make_searcher();
+        let (left_value, left_chosen) =
+            left.visit_ranked_decision(&state, 0, forward, 0, 0, 0.0, 1.0, 400);
+        let mut right = make_searcher();
+        let (right_value, right_chosen) =
+            right.visit_ranked_decision(&state, 0, reverse, 0, 0, 0.0, 1.0, 400);
+
+        assert_eq!(left_chosen, right_chosen);
+        assert_eq!(left.nodes, right.nodes);
+        for player in 0..4 {
+            assert!((left_value[player] - right_value[player]).abs() <= 1e-6);
+        }
+    }
+
+    #[test]
     fn bounded_belief_maxn_respects_one_global_node_budget() {
         let mut first = GameState::standard(201, 4);
         advance_setup_and_roll(&mut first, &mut SplitMix64::new(202));
@@ -1467,7 +1992,8 @@ mod tests {
         let report = search_belief_maxn_bounded(&particles, 3, 12, 4_000).unwrap();
 
         assert!(report.nodes <= 4_000);
-        assert_eq!(report.particles, particles.len());
+        assert_eq!(report.posterior_particles, particles.len());
+        assert_eq!(report.particles, 1);
         assert!(!report.actions.is_empty());
     }
 
@@ -1495,7 +2021,8 @@ mod tests {
 
         assert!(report.deadline_reached);
         assert!(report.nodes < 250_000);
-        assert_eq!(report.particles, particles.len());
+        assert_eq!(report.posterior_particles, particles.len());
+        assert_eq!(report.particles, 1);
         assert_eq!(report.actions.len(), fallback.actions.len());
         for candidate in &report.actions {
             let expected = fallback
@@ -1601,6 +2128,154 @@ mod tests {
                 resource: Resource::Grain,
             })
         );
+        let monopoly_roots = report
+            .actions
+            .iter()
+            .filter(|candidate| matches!(candidate.action, Action::PlayMonopoly { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(monopoly_roots.len(), 1);
+        assert_eq!(
+            monopoly_roots[0].action,
+            Action::PlayMonopoly {
+                resource: Resource::Grain,
+            }
+        );
+        assert!(monopoly_roots[0].legal_weight <= 1.0);
+    }
+
+    #[test]
+    fn strategic_particle_f14_full_posterior_preserves_monopoly_family() {
+        let mut base = GameState::standard(907, 4);
+        while matches!(
+            base.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        ) {
+            let action = base.legal_actions()[0].clone();
+            base.apply(&action).unwrap();
+        }
+        base.phase = Phase::Main;
+        base.current_player = 0;
+        base.bank_is_public = false;
+        let board = Arc::make_mut(&mut base.board);
+        for tile in &mut board.hexes {
+            if tile.resource.is_some() {
+                tile.resource = Some(Resource::Ore);
+            }
+        }
+        for player in 0..4 {
+            for resource in 0..5 {
+                base.bank[resource] += base.players[player].resources[resource];
+                base.players[player].resources[resource] = 0;
+            }
+        }
+        base.players[0].resources[Resource::Ore.index()] = 3;
+        base.bank[Resource::Ore.index()] -= 3;
+        base.players[0].development[DevCard::Monopoly.index()] += 1;
+        base.development_deck[DevCard::Monopoly.index()] -= 1;
+
+        const F14_GRAIN_COUNTS: [[u8; 3]; 24] = [
+            [1, 2, 1],
+            [2, 2, 1],
+            [0, 1, 4],
+            [3, 1, 1],
+            [3, 0, 4],
+            [1, 1, 0],
+            [0, 2, 4],
+            [4, 2, 1],
+            [0, 4, 2],
+            [3, 3, 0],
+            [0, 2, 1],
+            [1, 0, 3],
+            [3, 1, 2],
+            [1, 4, 0],
+            [1, 0, 0],
+            [4, 3, 2],
+            [0, 0, 0],
+            [0, 0, 2],
+            [0, 4, 1],
+            [0, 2, 2],
+            [4, 1, 3],
+            [0, 1, 1],
+            [4, 3, 3],
+            [0, 4, 4],
+        ];
+        let particles = F14_GRAIN_COUNTS
+            .iter()
+            .map(|grains| {
+                let mut world = base.clone();
+                for (offset, grain) in grains.iter().copied().enumerate() {
+                    let player = offset + 1;
+                    let ore = 4 - grain;
+                    world.players[player].resources[Resource::Grain.index()] = grain;
+                    world.players[player].resources[Resource::Ore.index()] = ore;
+                    world.bank[Resource::Grain.index()] -= grain;
+                    world.bank[Resource::Ore.index()] -= ore;
+                }
+                world.validate().unwrap();
+                BeliefParticle {
+                    state: world,
+                    weight: 1.0 / 24.0,
+                }
+            })
+            .collect::<Vec<_>>();
+        let observation = particles[0].state.observation_hash(0);
+        assert!(
+            particles
+                .iter()
+                .all(|particle| particle.state.observation_hash(0) == observation)
+        );
+        assert_eq!(
+            crate::shared::coalesce_identical_particles(&particles).len(),
+            24,
+        );
+
+        let compressed = crate::shared::select_experimental_strategic_particles(&particles, 12);
+        assert_eq!(compressed.len(), 12);
+        let full_exact = crate::exact::solve_exact_belief(
+            &particles,
+            crate::exact::ExactActionFamily::Monopoly,
+        );
+        let compressed_exact = crate::exact::solve_exact_belief(
+            &compressed,
+            crate::exact::ExactActionFamily::Monopoly,
+        );
+        assert_eq!(
+            full_exact.chosen,
+            Some(Action::PlayMonopoly {
+                resource: Resource::Grain,
+            })
+        );
+        assert_eq!(
+            compressed_exact.chosen,
+            Some(Action::PlayMonopoly {
+                resource: Resource::Ore,
+            })
+        );
+
+        let production = super::search_weighted_belief_maxn_bounded(&particles, 4, 8, 4_000)
+            .unwrap();
+        let experimental_compressed = super::search_weighted_belief_maxn_with_config(
+            &particles,
+            super::BeliefDepthConfig {
+                maximum_depth: 4,
+                branch_cap: 8,
+                maximum_nodes: 4_000,
+                time_budget_ms: 0,
+                strategic_particle_limit: 12,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            production.chosen,
+            Some(Action::PlayMonopoly {
+                resource: Resource::Grain,
+            })
+        );
+        assert_eq!(experimental_compressed.chosen, Some(Action::EndTurn));
+        assert_eq!(production.posterior_particles, 24);
+        assert_eq!(production.particles, 24);
+        assert_eq!(experimental_compressed.posterior_particles, 24);
+        assert_eq!(experimental_compressed.particles, 12);
     }
 
     #[test]

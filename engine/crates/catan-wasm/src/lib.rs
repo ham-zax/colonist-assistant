@@ -926,16 +926,6 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
         } else {
             depth_report.chosen
         };
-        if chosen == Some(Action::EndTurn)
-            && let Some(safer) = safer_end_turn_alternative(
-                &particles[0].state,
-                particles[0].state.actor() as usize,
-                &actions,
-            )
-        {
-            chosen = Some(safer);
-            authority = DecisionAuthority::SafetyOverride;
-        }
         if !exact.applicable
             && !tactical.proven
             && let Some(family) = chosen.as_ref().and_then(exact_family_for_action)
@@ -945,6 +935,20 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
                 chosen = exact.chosen.clone();
                 authority = DecisionAuthority::ExactFamily;
             }
+        }
+        // This is the final arbitration gate: when it changes the selected
+        // action, downstream telemetry/execution must retain safety-override
+        // authority rather than being relabeled by an earlier family solver.
+        if chosen == Some(Action::EndTurn)
+            && let Some(safer) = safer_end_turn_alternative(
+                &particles[0].state,
+                particles[0].state.actor() as usize,
+                &actions,
+                Some(&particles),
+            )
+        {
+            chosen = Some(safer);
+            authority = DecisionAuthority::SafetyOverride;
         }
         (SearchReport {
             chosen,

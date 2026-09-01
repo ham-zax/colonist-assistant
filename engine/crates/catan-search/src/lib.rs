@@ -49,8 +49,9 @@ pub use policy::{
     trade_acceptance_probability,
 };
 pub use shared::{
-    STRATEGIC_PARTICLE_TARGET, STRATEGIC_ROOT_WIDTH, group_particles_by_observation,
-    select_strategic_particles, shared_root_candidates,
+    EXPERIMENTAL_STRATEGIC_PARTICLE_TARGET, STRATEGIC_ROOT_WIDTH,
+    coalesce_identical_particles, group_particles_by_observation,
+    select_experimental_strategic_particles, shared_root_candidates,
 };
 pub use tactical::{TacticalResult, solve_belief_current_turn, solve_current_turn};
 pub use threats::{
