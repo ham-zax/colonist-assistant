@@ -323,7 +323,10 @@ const validSnapshot = (value: unknown): value is BoardSnapshot => {
             player.cardDiscardLimit >= 0 &&
             player.cardDiscardLimit <= 200 &&
             optionalBoundedInteger(player.developmentCards, 0, 100) &&
-            optionalBoundedInteger(player.playedKnights, 0, 100) &&
+            (player.playedDevelopmentCards === undefined ||
+              validDevelopmentCardVector(player.playedDevelopmentCards)) &&
+            (player.hasPlayedDevelopmentThisTurn === undefined ||
+              typeof player.hasPlayedDevelopmentThisTurn === "boolean") &&
             optionalBoundedInteger(player.visiblePoints, 0, 100) &&
             optionalBoundedInteger(player.longestRoad, 0, 100) &&
             (player.hasLongestRoad === undefined ||

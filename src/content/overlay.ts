@@ -2107,8 +2107,10 @@ export class AssistantOverlay {
         { length: meta.builds.development },
         () => ({ boughtOnTurn: 0 }),
       );
-      meta.playedDevCards.knight =
-        board.players[player]?.playedKnights ?? 0;
+      Object.assign(
+        meta.playedDevCards,
+        board.players[player]?.playedDevelopmentCards ?? {},
+      );
     }
     state.currentTurn = {
       player: board.currentPlayer,

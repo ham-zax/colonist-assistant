@@ -18,7 +18,7 @@ import {
   type Resource,
   type ResourceVector,
 } from "../core/resources";
-import type { DevCardKind, TrackerState } from "../core/types";
+import type { TrackerState } from "../core/types";
 import type {
   DeepSearchAction,
   DeepSearchResult,
@@ -267,35 +267,24 @@ const publicDevelopmentEvidence = (
     number,
     number,
   ];
-  const indexByCard: Record<DevCardKind, number | undefined> = {
-    knight: 0,
-    "victory-point": 1,
-    "road-building": 2,
-    "year-of-plenty": 3,
-    monopoly: 4,
-    unknown: undefined,
-  };
   const playerNames = new Set([
     ...Object.keys(state.players),
     ...Object.keys(board?.players ?? {}),
   ]);
   for (const playerName of playerNames) {
     const tracked = state.players[playerName]?.playedDevCards;
-    for (const [card, index] of Object.entries(indexByCard) as Array<
-      [DevCardKind, number | undefined]
-    >) {
-      if (index === undefined) continue;
-      const trackedCount = tracked?.[card] ?? 0;
-      const publicCount =
-        card === "knight"
-          ? board?.players?.[playerName]?.playedKnights ?? 0
-          : 0;
+    const publicPlayed = board?.players?.[playerName]?.playedDevelopmentCards;
+    DEVELOPMENT_ORDER.forEach((card, index) => {
       result[index] =
-        (result[index] ?? 0) + clampCard(Math.max(trackedCount, publicCount));
-    }
+        (result[index] ?? 0) +
+        Math.max(tracked?.[card] ?? 0, publicPlayed?.[card] ?? 0);
+    });
   }
   return result;
 };
+
+const developmentStateIntegrityError = (detail: string): Error =>
+  new Error(`Deep Search development-card state integrity error: ${detail}`);
 
 const sampledDevelopmentWorld = (
   state: TrackerState,
@@ -308,9 +297,16 @@ const sampledDevelopmentWorld = (
   deck: [number, number, number, number, number];
 } => {
   const played = publicDevelopmentEvidence(state, board);
-  const remaining = DEVELOPMENT_TOTAL.map((total, index) =>
-    Math.max(0, total - (played[index] ?? 0)),
-  );
+  const remaining = DEVELOPMENT_TOTAL.map((total, index) => {
+    const playedCount = played[index] ?? 0;
+    const available = total - playedCount;
+    if (available < 0) {
+      throw developmentStateIntegrityError(
+        `${DEVELOPMENT_ORDER[index]} public plays (${playedCount}) exceed the base-deck count (${total})`,
+      );
+    }
+    return available;
+  });
   const hands = players.map(
     () => [0, 0, 0, 0, 0] as [number, number, number, number, number],
   );
@@ -325,22 +321,48 @@ const sampledDevelopmentWorld = (
       board.ownDevelopmentCards?.boughtThisTurn,
     );
     for (let index = 0; index < exact.length; index += 1) {
-      remaining[index] = Math.max(
-        0,
-        (remaining[index] ?? 0) - (exact[index] ?? 0),
+      const exactCount = exact[index] ?? 0;
+      const available = remaining[index] ?? 0;
+      if (exactCount > available) {
+        throw developmentStateIntegrityError(
+          `exact local ${DEVELOPMENT_ORDER[index]} holdings (${exactCount}) exceed the ${available} cards left after public plays`,
+        );
+      }
+      remaining[index] = available - exactCount;
+    }
+  }
+  const hiddenDevelopmentCounts = players.map((playerName, player) => {
+    if (player === ownIndex) return 0;
+    const count = board.players?.[playerName]?.developmentCards ?? 0;
+    if (!Number.isInteger(count) || count < 0) {
+      throw developmentStateIntegrityError(
+        `${playerName} has invalid public hidden-card count ${count}`,
       );
     }
+    return count;
+  });
+  const hiddenRequired = hiddenDevelopmentCounts.reduce(
+    (sum, count) => sum + count,
+    0,
+  );
+  const hiddenAvailable = remaining.reduce((sum, count) => sum + count, 0);
+  if (hiddenRequired > hiddenAvailable) {
+    throw developmentStateIntegrityError(
+      `${hiddenRequired} hidden opponent cards are required but only ${hiddenAvailable} development cards remain after public plays and the exact local hand`,
+    );
   }
   for (let player = 0; player < players.length; player += 1) {
     if (player === ownIndex) continue;
     const playerName = players[player]!;
-    const count = clampCard(
-      board.players?.[playerName]?.developmentCards ?? 0,
-    );
+    const count = hiddenDevelopmentCounts[player] ?? 0;
     const sampledCards: number[] = [];
     for (let card = 0; card < count; card += 1) {
       const index = sampleIndex(remaining, random);
-      if ((remaining[index] ?? 0) <= 0) break;
+      if ((remaining[index] ?? 0) <= 0) {
+        throw developmentStateIntegrityError(
+          `sampler exhausted the development deck while assigning ${playerName}`,
+        );
+      }
       hands[player]![index] = (hands[player]![index] ?? 0) + 1;
       remaining[index] = (remaining[index] ?? 0) - 1;
       sampledCards.push(index);
@@ -743,7 +765,7 @@ export const buildDeepSearchRequest = (
       ),
       playedKnights: clampCard(
         Math.max(
-          publicState?.playedKnights ?? 0,
+          publicState?.playedDevelopmentCards?.knight ?? 0,
           state.players[player]?.playedDevCards.knight ?? 0,
         ),
       ),
@@ -753,7 +775,9 @@ export const buildDeepSearchRequest = (
       hasLongestRoad: Boolean(publicState?.hasLongestRoad),
       hasLargestArmy: Boolean(publicState?.hasLargestArmy),
       playedDevelopmentThisTurn:
-        isOwn && Boolean(board.ownDevelopmentCards?.hasPlayedThisTurn),
+        isOwn && board.ownDevelopmentCards
+          ? Boolean(board.ownDevelopmentCards.hasPlayedThisTurn)
+          : Boolean(publicState?.hasPlayedDevelopmentThisTurn),
       policyProfile: (() => {
         const posterior = state.players[player]?.opponentModel.policyPosterior;
         const probabilities = posterior

@@ -85,7 +85,8 @@ export interface BoardPlayerPublicState {
   tradeRatios: ResourceVector;
   cardDiscardLimit: number;
   developmentCards?: number;
-  playedKnights?: number;
+  playedDevelopmentCards?: DevelopmentCardVector;
+  hasPlayedDevelopmentThisTurn?: boolean;
   visiblePoints?: number;
   longestRoad?: number;
   hasLongestRoad?: boolean;

@@ -323,53 +323,53 @@ const developmentDeckFor = (
   board?: BoardSnapshot,
 ): DevelopmentDeckEstimate => {
   const players = Object.values(state.players);
+  const playedCount = (
+    player: (typeof players)[number],
+    card: "knight" | "monopoly" | "road-building" | "year-of-plenty" | "victory-point",
+  ): number =>
+    Math.max(
+      player.playedDevCards[card],
+      board?.players?.[player.name]?.playedDevelopmentCards?.[card] ?? 0,
+    );
   return estimateDevelopmentDeck({
-    purchased: players.reduce(
-      (sum, player) => {
-        const trackedPlayed = Object.values(player.playedDevCards).reduce(
-          (total, count) => total + count,
-          0,
-        );
-        const publicPlayedKnights =
-          board?.players?.[player.name]?.playedKnights ?? 0;
-        const publicHeld =
-          board?.players?.[player.name]?.developmentCards ?? 0;
-        return (
-          sum +
-          Math.max(
-            player.devCards.length + trackedPlayed,
-            publicHeld +
-              Math.max(player.playedDevCards.knight, publicPlayedKnights) +
-              trackedPlayed -
-              player.playedDevCards.knight,
-          )
-        );
-      },
-      0,
-    ),
-    playedKnights: players.reduce(
-      (sum, player) =>
+    purchased: players.reduce((sum, player) => {
+      const trackedPlayed = Object.values(player.playedDevCards).reduce(
+        (total, count) => total + count,
+        0,
+      );
+      const publicHeld = board?.players?.[player.name]?.developmentCards ?? 0;
+      const mergedPlayed =
+        playedCount(player, "knight") +
+        playedCount(player, "monopoly") +
+        playedCount(player, "road-building") +
+        playedCount(player, "year-of-plenty") +
+        playedCount(player, "victory-point");
+      return (
         sum +
         Math.max(
-          player.playedDevCards.knight,
-          board?.players?.[player.name]?.playedKnights ?? 0,
-        ),
+          player.devCards.length + trackedPlayed,
+          publicHeld + mergedPlayed,
+        )
+      );
+    }, 0),
+    playedKnights: players.reduce(
+      (sum, player) => sum + playedCount(player, "knight"),
       0,
     ),
     playedMonopoly: players.reduce(
-      (sum, player) => sum + player.playedDevCards.monopoly,
+      (sum, player) => sum + playedCount(player, "monopoly"),
       0,
     ),
     playedRoadBuilding: players.reduce(
-      (sum, player) => sum + player.playedDevCards["road-building"],
+      (sum, player) => sum + playedCount(player, "road-building"),
       0,
     ),
     playedYearOfPlenty: players.reduce(
-      (sum, player) => sum + player.playedDevCards["year-of-plenty"],
+      (sum, player) => sum + playedCount(player, "year-of-plenty"),
       0,
     ),
     revealedVictoryPoints: players.reduce(
-      (sum, player) => sum + player.playedDevCards["victory-point"],
+      (sum, player) => sum + playedCount(player, "victory-point"),
       0,
     ),
   });
@@ -595,7 +595,8 @@ const visibleThreat = (
       player,
       getPlayerEstimate(state, player).average,
       board.players?.[player]?.developmentCards ?? meta.devCards.length,
-      board.players?.[player]?.playedKnights ?? meta.playedDevCards.knight,
+      board.players?.[player]?.playedDevelopmentCards?.knight ??
+        meta.playedDevCards.knight,
     );
   }
   const visiblePoints = Math.max(2, meta.builds.settlement + meta.builds.city);

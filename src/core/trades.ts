@@ -527,7 +527,7 @@ const opponentBenefit = (
     opponent,
     before,
     board.players?.[opponent]?.developmentCards ?? 0,
-    board.players?.[opponent]?.playedKnights ?? 0,
+    board.players?.[opponent]?.playedDevelopmentCards?.knight ?? 0,
   );
   const directBuild =
     !beforePath.affordable && afterPath.affordable

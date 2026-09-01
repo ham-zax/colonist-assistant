@@ -354,7 +354,7 @@ const knightRecommendation = (
           candidate,
           getPlayerEstimate(state, candidate).average,
           board.players?.[candidate]?.developmentCards ?? 0,
-          board.players?.[candidate]?.playedKnights ?? 0,
+          board.players?.[candidate]?.playedDevelopmentCards?.knight ?? 0,
         ),
       ]),
   );

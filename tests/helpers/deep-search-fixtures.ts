@@ -30,7 +30,8 @@ export const publicPlayer = (
   tradeRatios: resources({ lumber: 4, brick: 4, wool: 4, grain: 4, ore: 4 }),
   cardDiscardLimit: 7,
   developmentCards: 0,
-  playedKnights: 0,
+  playedDevelopmentCards: development(),
+  hasPlayedDevelopmentThisTurn: false,
   visiblePoints: 0,
   ...overrides,
 });

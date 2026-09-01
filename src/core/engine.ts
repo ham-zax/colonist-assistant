@@ -225,40 +225,56 @@ const cacheResult = (key: string, value: DecisionAnalysis): DecisionAnalysis => 
 
 const developmentEvidence = (state: TrackerState, board: BoardSnapshot) => {
   const players = state.playerOrder.map((player) => state.players[player]!);
-  const played = (card: keyof (typeof players)[number]["playedDevCards"]) =>
-    players.reduce((sum, player) => sum + player.playedDevCards[card], 0);
+  const playedCount = (
+    player: (typeof players)[number],
+    card: "knight" | "monopoly" | "road-building" | "year-of-plenty" | "victory-point",
+  ): number =>
+    Math.max(
+      player.playedDevCards[card],
+      board.players?.[player.name]?.playedDevelopmentCards?.[card] ?? 0,
+    );
   const purchased = players.reduce((sum, player) => {
     const publicState = board.players?.[player.name];
     const trackedPlayed = Object.values(player.playedDevCards).reduce(
       (total, count) => total + count,
       0,
     );
+    const mergedPlayed =
+      playedCount(player, "knight") +
+      playedCount(player, "monopoly") +
+      playedCount(player, "road-building") +
+      playedCount(player, "year-of-plenty") +
+      playedCount(player, "victory-point");
     return (
       sum +
       Math.max(
         player.devCards.length + trackedPlayed,
-        (publicState?.developmentCards ?? 0) +
-          Math.max(publicState?.playedKnights ?? 0, player.playedDevCards.knight) +
-          trackedPlayed -
-          player.playedDevCards.knight,
+        (publicState?.developmentCards ?? 0) + mergedPlayed,
       )
     );
   }, 0);
   return {
     purchased,
     playedKnights: players.reduce(
-      (sum, player) =>
-        sum +
-        Math.max(
-          player.playedDevCards.knight,
-          board.players?.[player.name]?.playedKnights ?? 0,
-        ),
+      (sum, player) => sum + playedCount(player, "knight"),
       0,
     ),
-    playedMonopoly: played("monopoly"),
-    playedRoadBuilding: played("road-building"),
-    playedYearOfPlenty: played("year-of-plenty"),
-    revealedVictoryPoints: played("victory-point"),
+    playedMonopoly: players.reduce(
+      (sum, player) => sum + playedCount(player, "monopoly"),
+      0,
+    ),
+    playedRoadBuilding: players.reduce(
+      (sum, player) => sum + playedCount(player, "road-building"),
+      0,
+    ),
+    playedYearOfPlenty: players.reduce(
+      (sum, player) => sum + playedCount(player, "year-of-plenty"),
+      0,
+    ),
+    revealedVictoryPoints: players.reduce(
+      (sum, player) => sum + playedCount(player, "victory-point"),
+      0,
+    ),
   };
 };
 

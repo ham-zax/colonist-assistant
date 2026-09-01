@@ -3,7 +3,10 @@ import { readFile } from "node:fs/promises";
 
 import { emptyResources } from "../src/core/resources";
 import type { TrackerState } from "../src/core/types";
-import type { BoardSnapshot } from "../src/core/placement";
+import type {
+  BoardSnapshot,
+  DevelopmentCardVector,
+} from "../src/core/placement";
 import { reweightTradeEvidence } from "../src/core/tracker";
 import { buildDeepSearchRequest } from "../src/worker/deep-search";
 import initWasm, {
@@ -17,6 +20,17 @@ const resources = (
   grain: number,
   ore: number,
 ) => ({ lumber, brick, wool, grain, ore });
+
+const development = (
+  values: Partial<DevelopmentCardVector> = {},
+): DevelopmentCardVector => ({
+  knight: 0,
+  monopoly: 0,
+  "road-building": 0,
+  "year-of-plenty": 0,
+  "victory-point": 0,
+  ...values,
+});
 
 const state: TrackerState = {
   worlds: [
@@ -176,7 +190,8 @@ const board: BoardSnapshot = {
       tradeRatios: resources(4, 4, 4, 4, 4),
       cardDiscardLimit: 7,
       developmentCards: 1,
-      playedKnights: 1,
+      playedDevelopmentCards: development({ knight: 1 }),
+      hasPlayedDevelopmentThisTurn: false,
       visiblePoints: 1,
     },
   },
@@ -273,6 +288,115 @@ describe("deep-search state adapter", () => {
       ),
     ).toBe(true);
   });
+
+  it("conserves full public development history and rejects a phantom deck remainder", async () => {
+    const affordableHand = resources(0, 0, 1, 1, 1);
+    const exhaustionState: TrackerState = {
+      ...state,
+      worlds: state.worlds.map((world) => ({
+        ...world,
+        hands: { ...world.hands, You: affordableHand },
+      })),
+    };
+    const exhaustedBoard: BoardSnapshot = {
+      ...board,
+      ownHand: affordableHand,
+      ownDevelopmentCards: {
+        cards: development(),
+        playable: development(),
+        boughtThisTurn: development(),
+        hasPlayedThisTurn: false,
+      },
+      players: {
+        You: {
+          ...board.players!.You!,
+          handSize: 3,
+          developmentCards: 0,
+          playedDevelopmentCards: development(),
+          hasPlayedDevelopmentThisTurn: false,
+        },
+        Rival: {
+          ...board.players!.Rival!,
+          developmentCards: 9,
+          playedDevelopmentCards: development({
+            knight: 10,
+            monopoly: 2,
+            "road-building": 2,
+            "year-of-plenty": 2,
+          }),
+          hasPlayedDevelopmentThisTurn: true,
+        },
+      },
+    };
+    const built = buildDeepSearchRequest(exhaustionState, exhaustedBoard, "You");
+    const request = built.request as any;
+
+    expect(request.state.playedDevelopment).toEqual([10, 0, 2, 2, 2]);
+    expect(request.state.players[1].playedDevelopmentThisTurn).toBe(true);
+    expect(
+      request.state.worlds.every((world: any) =>
+        world.developmentDeck.every((count: number) => count === 0),
+      ),
+    ).toBe(true);
+    expect(
+      request.state.worlds.every((world: any) => {
+        const held = world.development.flat().reduce(
+          (sum: number, count: number) => sum + count,
+          0,
+        );
+        const deck = world.developmentDeck.reduce(
+          (sum: number, count: number) => sum + count,
+          0,
+        );
+        const played = request.state.playedDevelopment.reduce(
+          (sum: number, count: number) => sum + count,
+          0,
+        );
+        return held + deck + played === 25;
+      }),
+    ).toBe(true);
+
+    const bytes = await readFile(
+      new URL(
+        "../src/generated/wasm/colonist_search_bg.wasm",
+        import.meta.url,
+      ),
+    );
+    await initWasm({ module_or_path: bytes });
+    const response = analyzeWasm(built.request);
+    expect(
+      response.actions.every((entry) => entry.action.kind !== "buy-development"),
+    ).toBe(true);
+
+    const impossibleBoard: BoardSnapshot = {
+      ...exhaustedBoard,
+      players: {
+        ...exhaustedBoard.players,
+        Rival: {
+          ...exhaustedBoard.players!.Rival!,
+          developmentCards: 10,
+        },
+      },
+    };
+    expect(() =>
+      buildDeepSearchRequest(exhaustionState, impossibleBoard, "You"),
+    ).toThrow(/development-card state integrity error/i);
+
+    const impossiblePublicBoard: BoardSnapshot = {
+      ...exhaustedBoard,
+      players: {
+        ...exhaustedBoard.players,
+        Rival: {
+          ...exhaustedBoard.players!.Rival!,
+          developmentCards: 0,
+          playedDevelopmentCards: development({ knight: 15 }),
+        },
+      },
+    };
+    expect(() =>
+      buildDeepSearchRequest(exhaustionState, impossiblePublicBoard, "You"),
+    ).toThrow(/knight public plays/i);
+  }, 20_000);
 
   it("bootstraps hidden hands from public card counts before the log is ready", () => {
     const publicOnlyState: TrackerState = {

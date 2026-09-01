@@ -289,9 +289,9 @@ export const playerBoardProfile = (
     0,
     ...Object.entries(board.players ?? {})
       .filter(([candidate]) => candidate !== player)
-      .map(([, candidate]) => candidate.playedKnights ?? 0),
+      .map(([, candidate]) => candidate.playedDevelopmentCards?.knight ?? 0),
   );
-  const playedKnights = publicState?.playedKnights ?? 0;
+  const playedKnights = publicState?.playedDevelopmentCards?.knight ?? 0;
 
   return {
     player,

@@ -804,9 +804,10 @@ import {
             ? playerState.cardDiscardLimit
             : rootStoreState?.gameSettings?.cardDiscardLimit ?? 7,
         developmentCards,
-        playedKnights: developmentCardsUsed.filter(
-          (card: unknown) => card === 11,
-        ).length,
+        playedDevelopmentCards: developmentCardVector(developmentCardsUsed),
+        hasPlayedDevelopmentThisTurn: Boolean(
+          developmentStates[colorKey]?.hasUsedDevelopmentCardThisTurn,
+        ),
         visiblePoints:
           Number(victoryPointsState[0] ?? 0) +
           Number(victoryPointsState[1] ?? 0) * 2 +

@@ -92,3 +92,43 @@ green
 ```
 
 **Task boundary:** implementation and focused validation complete. Independent integration review reproduced the focused validation and found no blocking Task 2 defect; this ledger entry is included with the dedicated Task 2 commit.
+
+## Task 3 - Migrate public development history to one authoritative vector
+
+**Status:** PASS - F3 and F10 closed
+
+**Canonical contract:** `BoardPlayerPublicState` stores public development-card history only as `playedDevelopmentCards` and exposes `hasPlayedDevelopmentThisTurn` per player. Knight counts used by strategy/evaluation and the Rust request are derived from `playedDevelopmentCards.knight`; no public `playedKnights` authority remains.
+
+**Change:**
+
+- `bridge.ts` maps every Colonist `developmentCardsUsed` entry through the existing development-card identity mapping and captures every player's `hasUsedDevelopmentCardThisTurn`;
+- public development evidence is merged per player and per card by taking the maximum of tracker history and the public snapshot;
+- `basePlayers` propagates opponent development-play turn state while preserving the exact local flag when available;
+- development-world reconstruction subtracts public plays and the exact local held cards from the physical 25-card deck before assigning hidden opponent cards;
+- impossible public plays, exact local holdings, or hidden-card totals now throw an explicit development-card state-integrity error instead of clamping or silently underfilling the deck;
+- coach, engine, strategy, development, trade, overlay, validators, and fixtures derive Knight/history values from the authoritative public vector.
+
+**Acceptance evidence:**
+
+- 10 public Knights + 2 Monopoly + 2 Road Building + 2 Year of Plenty + 9 hidden held development cards produces `playedDevelopment = [10, 0, 2, 2, 2]` and an empty deck in every generated world: PASS;
+- packaged WASM exposes no `buy-development` action when the real deck is empty: PASS;
+- opponent `hasPlayedDevelopmentThisTurn = true` reaches Rust as `playedDevelopmentThisTurn = true`: PASS;
+- generated development worlds conserve all 25 physical cards: PASS;
+- an impossible extra hidden card fails with an explicit state-integrity error: PASS;
+- public per-type counts above physical deck composition fail explicitly: PASS;
+- stale-field sweep found no remaining `BoardPlayerPublicState.playedKnights` consumer: PASS. Remaining `playedKnights` symbols are derived metrics or the existing Rust/WASM wire field.
+
+**Focused validation:**
+
+```text
+npm test -- tests/deep-search-adapter.test.ts
+16 tests passed
+
+npm run check
+green
+
+git diff --check
+green
+```
+
+**Task boundary:** implementation and focused validation complete. Integration review found no blocking Task 3 defect and confirmed no Task 4 implementation was included; this ledger entry is included with the dedicated Task 3 commit.
