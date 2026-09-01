@@ -16,6 +16,7 @@
     "benchmark:no-player-trades": "node scripts/benchmark-no-player-trades.mjs",
     "benchmark:gpu": "uv run --with torch --with numpy python scripts/benchmark-gpu-zoom.py",
     "benchmark:gpu:parity": "node scripts/benchmark-gpu-parity.mjs",
+    "benchmark:gpu:exact-feasibility": "node scripts/benchmark-exact-gpu-feasibility.mjs",
     "benchmark:checkpoint": "node scripts/read-arena-checkpoint.mjs",
     "train:model": "python3 scripts/train-strategic-model.py",
     "train:trade": "python3 scripts/train-trade-model.py",

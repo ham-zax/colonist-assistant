@@ -8,6 +8,9 @@ rust-version.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[features]
+benchmark-profile = []
+
 [dependencies]
 colonist-catan-core = { path = "../catan-core" }
 

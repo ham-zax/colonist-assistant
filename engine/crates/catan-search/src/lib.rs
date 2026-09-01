@@ -25,6 +25,8 @@ pub use eval::{
     largest_army_outlook, longest_road_outlook, marginal_development_value, production_pips,
     strategic_utility,
 };
+#[cfg(feature = "benchmark-profile")]
+pub use eval::{EvaluateProfile, evaluate_profiled};
 pub use exact::{
     ExactActionFamily, ExactActionValue, ExactDecisionResult, exact_family_for_action,
     solve_exact_belief, solve_exact_belief_excluding,
