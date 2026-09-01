@@ -14,7 +14,7 @@ export interface DecisionRequest {
   rootPlayer: string;
   engine: DecisionEngine;
   searchConstraints?: DecisionSearchConstraints;
-  /** Engine-level seam for the future no-player-trades UI toggle. */
+  /** Live rule seam: false forbids player negotiation while preserving maritime trades. */
   playerTradesEnabled?: boolean;
 }
 

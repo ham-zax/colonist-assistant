@@ -126,3 +126,17 @@ These are the causal groups used by the separate implementation plan:
 4. **Auditability:** F13 and the missing decision-trace provenance described in the detailed report.
 
 The implementation plan turns these groups into six ordered waves, with state correctness first and search calibration deferred until the confirmed correctness defects are closed.
+
+## Verified v10 closure status
+
+This section is an additive closure record; the original audit evidence above is intentionally preserved.
+
+Task 16 packaged/release verification completed against the repaired `deep-maxn-v10` implementation. The focused reproductions for the confirmed defects are green at their relevant TypeScript/Rust/WASM boundaries, F9 has the Task 15 evidence-backed disposition of no material live-width omission with root width 8 retained, and the repository-wide `npm run verify` completed with exit 0.
+
+The release proof also exercised the real extension in Windows Edge. Midgame attachment initially exposed an additional F12 release-path manifestation where a partially reconstructed tracker could reconcile to zero worlds despite a physically consistent public board; the recovery path now reseeds from the authoritative public snapshot and the live game proceeds into WASM search. Accepted outgoing-trade proof then exposed a content-side executor defect where `CancelTrade` could resolve to a rejected player's inert X; that resolver now selects the active cancel control, while `ConfirmTrade` continues to select the enabled accepted-player check. The user confirmed the rebuilt live workflow works.
+
+A targeted packaged replay of only the recovered turn-54 fixture selected `BuyDevelopment` under `deep-maxn`. The live run reported 102 ranked roots, 8 retained roots, the selected root at rank 4 with prior `0.41727426648139954`, and consistent source/WASM/Rust particle counts of `1/1/1/1`. The targeted Task 14 gate passed and Task 15 still reported no material F9 omission.
+
+The intentionally interrupted expensive whole-corpus CPU medium/max replay was not restarted and produced no result to reinterpret. The committed Task 15 calibration remains authoritative; future high-throughput reference sweeps belong on the GPU path after parity.
+
+As a release-adjacent user control requested during Task 16, the packaged extension also includes `Disable player trades` with a default of off. It maps to the existing engine `player_trades_enabled` rule seam, invalidates stale decisions on toggle, prohibits assistant offer/accept/counter/confirm behavior while allowing rejection/cancellation cleanup, and preserves bank/port maritime trades. This control does not change the audit's search weights or strategy semantics.

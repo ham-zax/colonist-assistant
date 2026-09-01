@@ -872,6 +872,7 @@ struct ChallengeSnapshot {
     game_state: GameStateSnapshot,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn capture_challenge_snapshot(
     state: &GameState,
     board_seed: u64,
@@ -1640,6 +1641,7 @@ fn play_game(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn play_game_from_state(
     board_seed: u64,
     chance_seed: u64,

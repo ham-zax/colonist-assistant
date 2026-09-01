@@ -17,6 +17,33 @@ afterEach(() => {
 });
 
 describe("assistant settings", () => {
+  it("keeps player trading enabled for existing settings that predate the checkbox", async () => {
+    const set = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("chrome", {
+      storage: {
+        sync: {
+          get: vi.fn().mockResolvedValue({
+            [SETTINGS_KEY]: {
+              enabled: true,
+              startCollapsed: false,
+              engine: "deep-search",
+              highlightNextAction: true,
+              autonomousPrivateGames: false,
+              autopilotDelaySeconds: 0,
+            },
+            colonistAssistantStrategistDefaultV1: true,
+          }),
+          set,
+        },
+      },
+    });
+
+    const settings = await readSettings();
+
+    expect(settings.disablePlayerTrades).toBe(false);
+    expect(set).not.toHaveBeenCalled();
+  });
+
   it("migrates every retired engine to Strategist", async () => {
     const set = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("chrome", {

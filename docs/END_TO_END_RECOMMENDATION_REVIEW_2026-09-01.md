@@ -1560,3 +1560,34 @@ Rust says CancelTrade while UI can execute ConfirmTrade.
 Those failures identify where incorrect preferences originate. They are not generic algorithm weakness.
 
 No implementation code was changed as part of this review.
+
+---
+
+## 15. Post-review v10 closure record
+
+This section records verified implementation closure without rewriting the reproduction evidence above.
+
+Recommendation Engine v10 reached the packaged release-proof boundary under Task 16 with runtime revision `deep-maxn-v10`. Repository-wide `npm run verify` passed with exit 0. The recovered turn-54 state was rerun through the packaged path using a temporary corpus containing only that fixture: `BuyDevelopment` remained the selected action under `deep-maxn`, with 102 pre-truncation roots, 8 retained roots, selected rank 4/prior `0.41727426648139954`, and source/WASM/Rust-posterior/Rust-search particle counts of `1/1/1/1`.
+
+Live Windows Edge verification exercised the actual extension on Colonist. The release pass found and repaired two browser-boundary defects that were not safe to infer from native search alone:
+
+1. a partially reconstructed midgame tracker could retain discovered players while public reconciliation collapsed its resource posterior to zero; the public board now reseeds the posterior at that boundary, and the live reload proceeds into WASM search;
+2. an authoritative `CancelTrade` recommendation on a completed outgoing offer could resolve to an inert rejected-player X; the content resolver now requires the active cancel/close control, while `ConfirmTrade` continues to target the enabled accepted-player check. The rebuilt live workflow was confirmed working by the user.
+
+The execution path therefore retains the intended authority ordering:
+
+```text
+Colonist public state
+-> canonical public snapshot
+-> reconciled weighted beliefs / public fallback posterior
+-> packaged WASM validation
+-> Rust exact/proven/deep authority
+-> explicit root/particle provenance
+-> TypeScript action mapping without strategic substitution
+-> displayed recommendation
+-> fresh-state validated execution
+```
+
+The packaged build additionally exposes the user-requested `Disable player trades` setting. Default-off behavior preserves the historical game mode. When enabled, the decision request carries `playerTradesEnabled = false`; player offers, accepts, counters, and confirmations are excluded while bank/port maritime trades remain legal, and only reject/cancel cleanup is retained for already-open negotiations. Changing the setting changes the decision identity and resets pending/completed decision reuse.
+
+The expensive final whole-corpus CPU medium/max replay that had previously been interrupted was not restarted. It produced no report and is not cited as evidence. Task 15's committed calibration is the authoritative corpus result; future high-throughput reference sweeps should use GPU execution after parity.

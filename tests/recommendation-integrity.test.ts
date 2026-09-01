@@ -26,24 +26,27 @@ const decisionSignature = (
   state: TrackerState,
   board: BoardSnapshot,
   player: string,
+  disablePlayerTrades = false,
 ): string => {
   const method = (AssistantOverlay.prototype as unknown as {
     decisionSignature: (
       state: TrackerState,
       board: BoardSnapshot,
       player: string,
+      searchConstraints: Record<string, never>,
     ) => string;
   }).decisionSignature;
   return method.call(
-    { settings: { engine: "deep-search" } },
+    { settings: { engine: "deep-search", disablePlayerTrades } },
     state,
     board,
     player,
+    {},
   );
 };
 
 describe("recommendation state integrity", () => {
-  it("fills every requested representative-world slot", () => {
+  it("keeps sampled representative worlds on the exact source support", () => {
     const worlds = [
       { weight: 0.6, hands: { a: resources({ lumber: 3 }) } },
       { weight: 0.2, hands: { a: resources({ lumber: 3, brick: 1 }) } },
@@ -52,7 +55,19 @@ describe("recommendation state integrity", () => {
       { weight: 0.02, hands: { a: resources({ wool: 1 }) } },
     ];
 
-    expect(selectRepresentativeWorlds(worlds, ["a"], 4)).toHaveLength(4);
+    const selected = selectRepresentativeWorlds(worlds, ["a"], 4);
+    const sourceHands = new Set(
+      worlds.map((world) => JSON.stringify(world.hands.a)),
+    );
+
+    expect(selected.length).toBeLessThanOrEqual(4);
+    expect(selected.length).toBeGreaterThan(0);
+    expect(
+      selected.reduce((sum, world) => sum + world.weight, 0),
+    ).toBeCloseTo(1, 8);
+    expect(
+      selected.every((world) => sourceHands.has(JSON.stringify(world.hands.a))),
+    ).toBe(true);
   });
 
   it("rejects an unresolved root player instead of optimizing seat zero", () => {
@@ -258,6 +273,61 @@ describe("recommendation state integrity", () => {
     expect(built.request.state.discardRemaining.slice(0, 3)).toEqual([0, 4, 5]);
   });
 
+  it("reseeds a Deep Search-valid public posterior when a partial midgame tracker collapses", () => {
+    const names = ["Odessa#4915", "Mook", "Sayers", "Packer"];
+    const trackerNames = ["Game Pa", ...names];
+    const ownHand = resources({ lumber: 3, wool: 2, grain: 1 });
+    const state = makeState(trackerNames, {
+      worlds: [
+        {
+          weight: 1,
+          hands: Object.fromEntries(trackerNames.map((name) => [name, resources()])),
+        },
+      ],
+    });
+    const board = makeBoard(names, {
+      gameKey: "/|game5570|1",
+      turn: 24,
+      ownHand,
+      bankVisible: true,
+      bank: resources({ lumber: 15, brick: 19, wool: 13, grain: 14, ore: 14 }),
+      players: {
+        "Odessa#4915": publicPlayer({ handSize: 6 }),
+        Mook: publicPlayer({ handSize: 1 }),
+        Sayers: publicPlayer({ handSize: 7 }),
+        Packer: publicPlayer({ handSize: 6 }),
+      },
+    });
+    const prototype = AssistantOverlay.prototype as unknown as {
+      reconciledState: () => TrackerState | undefined;
+      stateFromPublicBoard: (board?: BoardSnapshot) => TrackerState | undefined;
+    };
+    const reconciled = prototype.reconciledState.call({
+      board,
+      session: { state },
+      confirmedPlacementSpend: undefined,
+      stateFromPublicBoard: prototype.stateFromPublicBoard,
+    });
+
+    expect(reconciled?.worlds.length).toBeGreaterThan(0);
+    expect(
+      reconciled?.worlds.every(
+        (world) =>
+          JSON.stringify(world.hands["Odessa#4915"]) === JSON.stringify(ownHand) &&
+          Object.entries(board.players!).every(
+            ([player, publicState]) =>
+              Object.values(world.hands[player] ?? {}).reduce(
+                (sum, count) => sum + count,
+                0,
+              ) === publicState.handSize,
+          ),
+      ),
+    ).toBe(true);
+    expect(() =>
+      buildDeepSearchRequest(reconciled!, board, "Odessa#4915"),
+    ).not.toThrow();
+  });
+
   it("rejects public resource evidence that cannot conserve a visible bank", () => {
     const names = ["a", "b"];
     const board = makeBoard(names, {
@@ -271,6 +341,16 @@ describe("recommendation state integrity", () => {
 
     expect(() => buildDeepSearchRequest(makeState(names), board, "a")).toThrow(
       /resource|world|conservation|public evidence/iu,
+    );
+  });
+
+  it("changes the decision cache key when player-trade legality changes", () => {
+    const names = ["a", "b"];
+    const state = makeState(names);
+    const board = makeBoard(names);
+
+    expect(decisionSignature(state, board, "a", false)).not.toBe(
+      decisionSignature(state, board, "a", true),
     );
   });
 

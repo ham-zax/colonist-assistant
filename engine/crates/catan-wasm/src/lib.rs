@@ -743,9 +743,7 @@ fn root_provenance_output(provenance: BeliefSearchProvenance) -> RootProvenanceO
                 reason: root_prune_reason(candidate.reason),
             })
             .collect(),
-        exact_family_replacement: provenance
-            .exact_family_replacement
-            .map(replacement_output),
+        exact_family_replacement: provenance.exact_family_replacement.map(replacement_output),
         safety_replacement: provenance.safety_replacement.map(replacement_output),
     }
 }
@@ -909,11 +907,8 @@ fn exact_mandatory_report(
     particles: &[BeliefParticle],
     root_exclusions: &[Action],
 ) -> Option<SearchReport> {
-    let mandatory = solve_exact_belief_excluding(
-        particles,
-        ExactActionFamily::Mandatory,
-        root_exclusions,
-    );
+    let mandatory =
+        solve_exact_belief_excluding(particles, ExactActionFamily::Mandatory, root_exclusions);
     let exact = if mandatory.applicable {
         mandatory
     } else {
@@ -999,9 +994,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
     let particles = game_states(request.state, request.last_rejected_trade)?;
     let root_exclusions = root_exclusion_actions(&request.root_exclusions, &particles[0].state)?;
     let algorithm = mode.label();
-    if !ponder
-        && let Some(report) = exact_mandatory_report(&particles, &root_exclusions)
-    {
+    if !ponder && let Some(report) = exact_mandatory_report(&particles, &root_exclusions) {
         return serde_wasm_bindgen::to_value(&response(
             report,
             particles.len(),
@@ -1026,224 +1019,230 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
         particles[0].state.phase,
         Phase::SetupSettlement | Phase::SetupRoad { .. }
     );
-    let (report, authority, diagnostics) = if matches!(mode, RequestedMode::Maxn | RequestedMode::AlphaBeta) || opening {
-        let depth = request.depth.unwrap_or(3).clamp(1, 6);
-        let branch_cap = request.branch_cap.unwrap_or(12).clamp(2, 32);
-        let maximum_nodes = request.max_nodes.unwrap_or(48_000).clamp(1_000, 250_000) as u32;
-        let depth_report = if mode == RequestedMode::AlphaBeta {
-            search_weighted_belief_paranoid_bounded_timed_excluding(
-                &particles,
-                depth,
-                branch_cap,
-                maximum_nodes,
-                config.time_budget_ms,
-                &root_exclusions,
-            )
-        } else {
-            search_weighted_belief_maxn_bounded_timed_excluding(
-                &particles,
-                depth,
-                branch_cap,
-                maximum_nodes,
-                config.time_budget_ms,
-                &root_exclusions,
-            )
-        }
-        .map_err(|error| JsValue::from_str(&format!("{error:?}")))?;
-        let rust_posterior_particles = depth_report.posterior_particles;
-        let rust_search_particles = depth_report.particles;
-        let depth_safety_replacement = depth_report.provenance.safety_replacement.clone();
-        let retained_root_priors = depth_report.provenance.retained_roots.clone();
-        let root_provenance = root_provenance_output(depth_report.provenance.clone());
-        let tactical_particles = particles
-            .iter()
-            .map(|particle| (&particle.state, particle.weight))
-            .collect::<Vec<_>>();
-        let tactical = solve_belief_current_turn(
-            &tactical_particles,
-            request.tactical_depth.unwrap_or(18).clamp(4, 32),
-            request.tactical_nodes.unwrap_or(12_000).clamp(100, 100_000),
-        );
-        let actions = depth_report
-            .actions
-            .into_iter()
-            .map(|candidate| {
-                let prior = retained_root_priors
-                    .iter()
-                    .find(|root| root.action == candidate.action)
-                    .map_or(0.0, |root| root.prior);
-                ActionStats {
-                    action: candidate.action,
-                    visits: particles.len() as u32,
-                    availability: (candidate.legal_weight * particles.len() as f32).round() as u32,
-                    availability_weight: candidate.legal_weight,
-                    legal_weight: candidate.legal_weight,
-                    prior,
-                    value: candidate.value,
-                    lower_confidence_value: candidate.lower_confidence_value,
-                }
-            })
-            .collect::<Vec<_>>();
-        let mut exact = solve_exact_belief_excluding(
-            &particles,
-            ExactActionFamily::Mandatory,
-            &root_exclusions,
-        );
-        let mut authority = if exact.applicable {
-            DecisionAuthority::ExactMandatory
-        } else if tactical.proven {
-            DecisionAuthority::TacticalProven
-        } else if depth_safety_replacement.is_some() {
-            DecisionAuthority::SafetyOverride
-        } else {
-            DecisionAuthority::DeepMaxn
-        };
-        let initial_authority = authority;
-        let mut exact_family = None;
-        let mut exact_family_replacement = None;
-        let mut safety_replacement = depth_safety_replacement.map(replacement_output);
-        let mut chosen = if exact.applicable {
-            exact.chosen.clone()
-        } else if tactical.proven {
-            tactical.principal_line.first().cloned()
-        } else {
-            depth_report.chosen
-        };
-        if !exact.applicable
-            && !tactical.proven
-            && let Some(family) = chosen.as_ref().and_then(exact_family_for_action)
-        {
-            exact_family = Some(exact_family_label(family));
-            let before = chosen.clone();
-            exact = solve_exact_belief_excluding(&particles, family, &root_exclusions);
-            if let Some(exact_chosen) = exact.chosen.clone() {
-                if before.as_ref() != Some(&exact_chosen)
-                    && let Some(previous) = before
-                {
-                    exact_family_replacement = Some(ActionReplacementOutput {
-                        from: action(previous),
-                        to: action(exact_chosen.clone()),
-                    });
-                }
-                chosen = Some(exact_chosen);
-                authority = DecisionAuthority::ExactFamily;
-            }
-        }
-        // This is the final arbitration gate: when it changes the selected
-        // action, downstream telemetry/execution must retain safety-override
-        // authority rather than being relabeled by an earlier family solver.
-        if chosen == Some(Action::EndTurn)
-            && let Some(safer) = safer_end_turn_alternative(
-                &particles[0].state,
-                particles[0].state.actor() as usize,
-                &actions,
-                Some(&particles),
-            )
-        {
-            if safer != Action::EndTurn {
-                safety_replacement = Some(ActionReplacementOutput {
-                    from: action(Action::EndTurn),
-                    to: action(safer.clone()),
-                });
-            }
-            chosen = Some(safer);
-            authority = DecisionAuthority::SafetyOverride;
-        }
-        let diagnostics = ResponseDiagnostics {
-            rust_posterior_particles,
-            rust_search_particles,
-            root_provenance,
-            authority_trace: AuthorityTraceOutput {
-                initial_authority,
-                exact_family,
-                exact_family_replacement,
-                safety_replacement,
-            },
-        };
-        (SearchReport {
-            chosen,
-            root_value: depth_report.value,
-            actions,
-            tactical,
-            exact,
-            statistics: SearchStatistics {
-                iterations: particles.len() as u32,
-                nodes: depth_report.nodes as usize,
-                deepest_decision_depth: depth_report.depth as u16,
-                rollouts: 0,
-                effective_particle_count: effective_particle_count(&particles),
-                deadline_reached: depth_report.deadline_reached,
-            },
-        }, authority, diagnostics)
-    } else {
-        let mut groups = Vec::<(u64, Vec<BeliefParticle>)>::new();
-        for particle in &particles {
-            let identity = particle.state.observation_hash(particle.state.actor());
-            if let Some((_, members)) = groups
-                .iter_mut()
-                .find(|(candidate, _)| *candidate == identity)
-            {
-                members.push(particle.clone());
+    let (report, authority, diagnostics) =
+        if matches!(mode, RequestedMode::Maxn | RequestedMode::AlphaBeta) || opening {
+            let depth = request.depth.unwrap_or(3).clamp(1, 6);
+            let branch_cap = request.branch_cap.unwrap_or(12).clamp(2, 32);
+            let maximum_nodes = request.max_nodes.unwrap_or(48_000).clamp(1_000, 250_000) as u32;
+            let depth_report = if mode == RequestedMode::AlphaBeta {
+                search_weighted_belief_paranoid_bounded_timed_excluding(
+                    &particles,
+                    depth,
+                    branch_cap,
+                    maximum_nodes,
+                    config.time_budget_ms,
+                    &root_exclusions,
+                )
             } else {
-                groups.push((identity, vec![particle.clone()]));
+                search_weighted_belief_maxn_bounded_timed_excluding(
+                    &particles,
+                    depth,
+                    branch_cap,
+                    maximum_nodes,
+                    config.time_budget_ms,
+                    &root_exclusions,
+                )
             }
-        }
-        if !ponder && groups.len() > 1 {
-            return Err(JsValue::from_str(
-                "root observation mismatch outside pondering mode",
-            ));
-        }
-        let report = PERSISTENT_SEARCH.with(|slot| {
-            let mut forest = slot.borrow_mut();
-            let group_count = groups.len().max(1) as u32;
-            let mut selected: Option<(f32, SearchReport)> = None;
-            for (identity, group) in groups {
-                let group_weight = group
-                    .iter()
-                    .map(|particle| particle.weight.max(0.0))
-                    .sum::<f32>();
-                let mut group_config = config.clone();
-                if ponder {
-                    group_config.iterations = (group_config.iterations / group_count).max(16);
-                    group_config.max_nodes =
-                        (group_config.max_nodes / group_count as usize).max(1_000);
-                    group_config.tactical_nodes =
-                        (group_config.tactical_nodes / group_count).max(100);
+            .map_err(|error| JsValue::from_str(&format!("{error:?}")))?;
+            let rust_posterior_particles = depth_report.posterior_particles;
+            let rust_search_particles = depth_report.particles;
+            let depth_safety_replacement = depth_report.provenance.safety_replacement.clone();
+            let retained_root_priors = depth_report.provenance.retained_roots.clone();
+            let root_provenance = root_provenance_output(depth_report.provenance.clone());
+            let tactical_particles = particles
+                .iter()
+                .map(|particle| (&particle.state, particle.weight))
+                .collect::<Vec<_>>();
+            let tactical = solve_belief_current_turn(
+                &tactical_particles,
+                request.tactical_depth.unwrap_or(18).clamp(4, 32),
+                request.tactical_nodes.unwrap_or(12_000).clamp(100, 100_000),
+            );
+            let actions = depth_report
+                .actions
+                .into_iter()
+                .map(|candidate| {
+                    let prior = retained_root_priors
+                        .iter()
+                        .find(|root| root.action == candidate.action)
+                        .map_or(0.0, |root| root.prior);
+                    ActionStats {
+                        action: candidate.action,
+                        visits: particles.len() as u32,
+                        availability: (candidate.legal_weight * particles.len() as f32).round()
+                            as u32,
+                        availability_weight: candidate.legal_weight,
+                        legal_weight: candidate.legal_weight,
+                        prior,
+                        value: candidate.value,
+                        lower_confidence_value: candidate.lower_confidence_value,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let mut exact = solve_exact_belief_excluding(
+                &particles,
+                ExactActionFamily::Mandatory,
+                &root_exclusions,
+            );
+            let mut authority = if exact.applicable {
+                DecisionAuthority::ExactMandatory
+            } else if tactical.proven {
+                DecisionAuthority::TacticalProven
+            } else if depth_safety_replacement.is_some() {
+                DecisionAuthority::SafetyOverride
+            } else {
+                DecisionAuthority::DeepMaxn
+            };
+            let initial_authority = authority;
+            let mut exact_family = None;
+            let mut exact_family_replacement = None;
+            let mut safety_replacement = depth_safety_replacement.map(replacement_output);
+            let mut chosen = if exact.applicable {
+                exact.chosen.clone()
+            } else if tactical.proven {
+                tactical.principal_line.first().cloned()
+            } else {
+                depth_report.chosen
+            };
+            if !exact.applicable
+                && !tactical.proven
+                && let Some(family) = chosen.as_ref().and_then(exact_family_for_action)
+            {
+                exact_family = Some(exact_family_label(family));
+                let before = chosen.clone();
+                exact = solve_exact_belief_excluding(&particles, family, &root_exclusions);
+                if let Some(exact_chosen) = exact.chosen.clone() {
+                    if before.as_ref() != Some(&exact_chosen)
+                        && let Some(previous) = before
+                    {
+                        exact_family_replacement = Some(ActionReplacementOutput {
+                            from: action(previous),
+                            to: action(exact_chosen.clone()),
+                        });
+                    }
+                    chosen = Some(exact_chosen);
+                    authority = DecisionAuthority::ExactFamily;
                 }
-                let search_index = forest
-                    .iter()
-                    .position(|search| search.contains_identity(identity))
-                    .unwrap_or_else(|| {
-                        if forest.len() >= 12 {
-                            forest.remove(0);
-                        }
-                        forest.push(Mcts::new(group_config.clone(), &group[0].state));
-                        forest.len() - 1
+            }
+            // This is the final arbitration gate: when it changes the selected
+            // action, downstream telemetry/execution must retain safety-override
+            // authority rather than being relabeled by an earlier family solver.
+            if chosen == Some(Action::EndTurn)
+                && let Some(safer) = safer_end_turn_alternative(
+                    &particles[0].state,
+                    particles[0].state.actor() as usize,
+                    &actions,
+                    Some(&particles),
+                )
+            {
+                if safer != Action::EndTurn {
+                    safety_replacement = Some(ActionReplacementOutput {
+                        from: action(Action::EndTurn),
+                        to: action(safer.clone()),
                     });
-                let search = &mut forest[search_index];
-                search.reconfigure(group_config);
-                let report = if group.len() == 1 {
-                    search.search(&group[0].state)
-                } else {
-                    search
-                        .search_weighted_belief(&group)
-                        .map_err(|error| JsValue::from_str(&format!("{error:?}")))?
-                };
-                if selected
-                    .as_ref()
-                    .is_none_or(|(weight, _)| group_weight > *weight)
+                }
+                chosen = Some(safer);
+                authority = DecisionAuthority::SafetyOverride;
+            }
+            let diagnostics = ResponseDiagnostics {
+                rust_posterior_particles,
+                rust_search_particles,
+                root_provenance,
+                authority_trace: AuthorityTraceOutput {
+                    initial_authority,
+                    exact_family,
+                    exact_family_replacement,
+                    safety_replacement,
+                },
+            };
+            (
+                SearchReport {
+                    chosen,
+                    root_value: depth_report.value,
+                    actions,
+                    tactical,
+                    exact,
+                    statistics: SearchStatistics {
+                        iterations: particles.len() as u32,
+                        nodes: depth_report.nodes as usize,
+                        deepest_decision_depth: depth_report.depth as u16,
+                        rollouts: 0,
+                        effective_particle_count: effective_particle_count(&particles),
+                        deadline_reached: depth_report.deadline_reached,
+                    },
+                },
+                authority,
+                diagnostics,
+            )
+        } else {
+            let mut groups = Vec::<(u64, Vec<BeliefParticle>)>::new();
+            for particle in &particles {
+                let identity = particle.state.observation_hash(particle.state.actor());
+                if let Some((_, members)) = groups
+                    .iter_mut()
+                    .find(|(candidate, _)| *candidate == identity)
                 {
-                    selected = Some((group_weight, report));
+                    members.push(particle.clone());
+                } else {
+                    groups.push((identity, vec![particle.clone()]));
                 }
             }
-            selected
-                .map(|(_, report)| report)
-                .ok_or_else(|| JsValue::from_str("pondering produced no search group"))
-        })?;
-        let authority = DecisionAuthority::DeepMaxn;
-        let diagnostics = basic_response_diagnostics(particles.len(), authority);
-        (report, authority, diagnostics)
-    };
+            if !ponder && groups.len() > 1 {
+                return Err(JsValue::from_str(
+                    "root observation mismatch outside pondering mode",
+                ));
+            }
+            let report = PERSISTENT_SEARCH.with(|slot| {
+                let mut forest = slot.borrow_mut();
+                let group_count = groups.len().max(1) as u32;
+                let mut selected: Option<(f32, SearchReport)> = None;
+                for (identity, group) in groups {
+                    let group_weight = group
+                        .iter()
+                        .map(|particle| particle.weight.max(0.0))
+                        .sum::<f32>();
+                    let mut group_config = config.clone();
+                    if ponder {
+                        group_config.iterations = (group_config.iterations / group_count).max(16);
+                        group_config.max_nodes =
+                            (group_config.max_nodes / group_count as usize).max(1_000);
+                        group_config.tactical_nodes =
+                            (group_config.tactical_nodes / group_count).max(100);
+                    }
+                    let search_index = forest
+                        .iter()
+                        .position(|search| search.contains_identity(identity))
+                        .unwrap_or_else(|| {
+                            if forest.len() >= 12 {
+                                forest.remove(0);
+                            }
+                            forest.push(Mcts::new(group_config.clone(), &group[0].state));
+                            forest.len() - 1
+                        });
+                    let search = &mut forest[search_index];
+                    search.reconfigure(group_config);
+                    let report = if group.len() == 1 {
+                        search.search(&group[0].state)
+                    } else {
+                        search
+                            .search_weighted_belief(&group)
+                            .map_err(|error| JsValue::from_str(&format!("{error:?}")))?
+                    };
+                    if selected
+                        .as_ref()
+                        .is_none_or(|(weight, _)| group_weight > *weight)
+                    {
+                        selected = Some((group_weight, report));
+                    }
+                }
+                selected
+                    .map(|(_, report)| report)
+                    .ok_or_else(|| JsValue::from_str("pondering produced no search group"))
+            })?;
+            let authority = DecisionAuthority::DeepMaxn;
+            let diagnostics = basic_response_diagnostics(particles.len(), authority);
+            (report, authority, diagnostics)
+        };
     serde_wasm_bindgen::to_value(&response(
         report,
         particles.len(),
@@ -1251,7 +1250,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
         authority,
         diagnostics,
     ))
-        .map_err(|error| JsValue::from_str(&error.to_string()))
+    .map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
 #[wasm_bindgen]

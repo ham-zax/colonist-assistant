@@ -44,6 +44,21 @@ const boot = async (): Promise<void> => {
     ),
   };
   const summary = local[LATEST_SUMMARY_KEY] as SessionSummary | undefined;
+  const syncSettingControls = (): void => {
+    for (const input of document.querySelectorAll<HTMLInputElement>(
+      "input[data-setting]",
+    )) {
+      const key = input.dataset.setting as keyof AssistantSettings;
+      input.checked = Boolean(settings[key]);
+    }
+    for (const select of document.querySelectorAll<HTMLSelectElement>(
+      "select[data-setting]",
+    )) {
+      if (select.dataset.setting === "autopilotDelaySeconds") {
+        select.value = String(settings.autopilotDelaySeconds);
+      }
+    }
+  };
 
   const status = document.querySelector("#status");
   if (status) {
@@ -53,11 +68,11 @@ const boot = async (): Promise<void> => {
     status.classList.toggle("active", Boolean(summary));
   }
 
+  syncSettingControls();
   for (const input of document.querySelectorAll<HTMLInputElement>(
     "input[data-setting]",
   )) {
     const key = input.dataset.setting as keyof AssistantSettings;
-    input.checked = Boolean(settings[key]);
     input.addEventListener("change", () => {
       settings = { ...settings, [key]: input.checked };
       void chrome.storage.sync.set({ [SETTINGS_KEY]: settings });
@@ -68,7 +83,6 @@ const boot = async (): Promise<void> => {
     "select[data-setting]",
   )) {
     if (select.dataset.setting !== "autopilotDelaySeconds") continue;
-    select.value = String(settings.autopilotDelaySeconds);
     select.addEventListener("change", () => {
       settings = {
         ...settings,
@@ -79,6 +93,21 @@ const boot = async (): Promise<void> => {
       void chrome.storage.sync.set({ [SETTINGS_KEY]: settings });
     });
   }
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "sync" || !changes[SETTINGS_KEY]?.newValue) return;
+    const changed = changes[SETTINGS_KEY].newValue as Partial<AssistantSettings>;
+    settings = {
+      ...DEFAULT_SETTINGS,
+      ...settings,
+      ...changed,
+      engine: "deep-search",
+      autopilotDelaySeconds: normalizeAutopilotDelaySeconds(
+        changed.autopilotDelaySeconds ?? settings.autopilotDelaySeconds,
+      ),
+    };
+    syncSettingControls();
+  });
 
   document.querySelector("#reset")?.addEventListener("click", () => {
     void (async () => {

@@ -949,7 +949,7 @@ describe("deep-search state adapter", () => {
     expect(built.request.tacticalNodes).toBe(900);
     expect(built.request.timeBudgetMs).toBe(350);
     expect(response.algorithm).toBe("maxn");
-    expect(response.engineRevision).toBe("deep-maxn-v9");
+    expect(response.engineRevision).toBe("deep-maxn-v10");
     expect([
       "exact-mandatory",
       "tactical-proven",
@@ -1157,6 +1157,143 @@ describe("deep-search state adapter", () => {
     expect(response.iterations).toBe(0);
     expect(response.rollouts).toBe(0);
     expect(elapsed).toBeLessThan(1_000);
+  });
+
+  it("disables player negotiations while keeping bank and port trades legal across packaged WASM", async () => {
+    const bytes = await readFile(
+      new URL(
+        "../src/generated/wasm/colonist_search_bg.wasm",
+        import.meta.url,
+      ),
+    );
+    await initWasm({ module_or_path: bytes });
+
+    const maritimeHand = resources(0, 0, 0, 4, 0);
+    const disabledState: TrackerState = {
+      ...state,
+      worlds: [
+        {
+          weight: 1,
+          hands: {
+            You: maritimeHand,
+            Rival: resources(1, 0, 0, 0, 0),
+          },
+        },
+      ],
+    };
+    const disabledBoard: BoardSnapshot = {
+      ...board,
+      ownHand: maritimeHand,
+      players: {
+        You: {
+          ...board.players!.You!,
+          handSize: 4,
+          tradeRatios: resources(4, 4, 4, 2, 4),
+        },
+        Rival: {
+          ...board.players!.Rival!,
+          handSize: 1,
+        },
+      },
+      activeTrades: [],
+    };
+    const main = buildDeepSearchRequest(
+      disabledState,
+      disabledBoard,
+      "You",
+      {},
+      false,
+    );
+    expect((main.request as any).state.playerTradesEnabled).toBe(false);
+    main.request.branchCap = 32;
+    const mainResponse = analyzeWasm(main.request);
+    expect(
+      mainResponse.actions.some(
+        (candidate) => candidate.action.kind === "offer-trade",
+      ),
+    ).toBe(false);
+    expect(
+      mainResponse.actions.some(
+        (candidate) => candidate.action.kind === "maritime-trade",
+      ),
+    ).toBe(true);
+
+    const incomingBoard: BoardSnapshot = {
+      ...disabledBoard,
+      isMyTurn: false,
+      currentPlayer: "Rival",
+      activeTrades: [
+        {
+          id: "disabled-incoming",
+          creator: "Rival",
+          tradeExecutor: "Rival",
+          creatorGive: resources(1, 0, 0, 0, 0),
+          creatorReceive: resources(0, 0, 0, 1, 0),
+          incoming: true,
+          counterOffer: false,
+          canAccept: true,
+          acceptedPlayers: [],
+          pendingPlayers: ["You"],
+          rejectedPlayers: [],
+          responsesComplete: false,
+          myResponse: "pending",
+        },
+      ],
+    };
+    const incoming = buildDeepSearchRequest(
+      disabledState,
+      incomingBoard,
+      "You",
+      {},
+      false,
+    );
+    const incomingResponse = analyzeWasm(incoming.request);
+    expect(incomingResponse.chosen).toMatchObject({
+      kind: "respond-trade",
+      accept: false,
+    });
+    expect(
+      incomingResponse.actions.some(
+        (candidate) =>
+          candidate.action.kind === "counter-trade" ||
+          (candidate.action.kind === "respond-trade" &&
+            candidate.action.accept === true),
+      ),
+    ).toBe(false);
+
+    const acceptedBoard: BoardSnapshot = {
+      ...disabledBoard,
+      activeTrades: [
+        {
+          id: "disabled-accepted",
+          creator: "You",
+          tradeExecutor: "You",
+          creatorGive: resources(0, 0, 0, 1, 0),
+          creatorReceive: resources(1, 0, 0, 0, 0),
+          incoming: false,
+          counterOffer: false,
+          canAccept: false,
+          acceptedPlayers: ["Rival"],
+          pendingPlayers: [],
+          rejectedPlayers: [],
+          responsesComplete: true,
+        },
+      ],
+    };
+    const accepted = buildDeepSearchRequest(
+      disabledState,
+      acceptedBoard,
+      "You",
+      {},
+      false,
+    );
+    const acceptedResponse = analyzeWasm(accepted.request);
+    expect(acceptedResponse.chosen?.kind).toBe("cancel-trade");
+    expect(
+      acceptedResponse.actions.some(
+        (candidate) => candidate.action.kind === "confirm-trade",
+      ),
+    ).toBe(false);
   });
 
   it("returns a universally forced end turn without strategic search", async () => {

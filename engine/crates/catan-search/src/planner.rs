@@ -264,7 +264,10 @@ impl Planner {
 }
 
 fn is_domestic_trade(action: &Action) -> bool {
-    matches!(action, Action::OfferTrade { .. } | Action::CounterTrade { .. })
+    matches!(
+        action,
+        Action::OfferTrade { .. } | Action::CounterTrade { .. }
+    )
 }
 
 fn retained_planner_roots(
@@ -278,10 +281,9 @@ fn retained_planner_roots(
         return Vec::new();
     }
     let per_root_floor = state.board.num_players as u32 + 1;
-    let planner_root_cap = quota_ranked.len().min(
-        (config.maximum_nodes / per_root_floor.max(1))
-            .max(1) as usize,
-    );
+    let planner_root_cap = quota_ranked
+        .len()
+        .min((config.maximum_nodes / per_root_floor.max(1)).max(1) as usize);
     let mut retained = Vec::with_capacity(planner_root_cap);
     if let Some(trade) = quota_ranked
         .iter()
@@ -315,10 +317,7 @@ fn planner_root_budgets(
     if remaining == 0 {
         return budgets;
     }
-    let total_prior = ranked
-        .iter()
-        .map(|(_, prior)| prior.max(0.0))
-        .sum::<f32>();
+    let total_prior = ranked.iter().map(|(_, prior)| prior.max(0.0)).sum::<f32>();
     if total_prior > f32::EPSILON {
         for (index, (_, prior)) in ranked.iter().enumerate() {
             if remaining == 0 {

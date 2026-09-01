@@ -109,6 +109,153 @@ describe("overlay settings interaction", () => {
     overlay.destroy();
   });
 
+  it("exposes Disable player trades unchecked by default", () => {
+    const overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS },
+      { reset: vi.fn() },
+    );
+    const root = document.querySelector<HTMLDivElement>(
+      "#colonist-assistant-root",
+    )!;
+    const shadow = root.shadowRoot!;
+    shadow
+      .querySelector<HTMLElement>("[data-action='view'][data-view='settings']")!
+      .click();
+    const input = shadow.querySelector<HTMLInputElement>(
+      "input[data-setting='disablePlayerTrades']",
+    );
+    expect(input).not.toBeNull();
+    expect(input?.checked).toBe(false);
+    expect(input?.closest("label")?.textContent).toMatch(
+      /Only bank and port trades are allowed/i,
+    );
+    overlay.destroy();
+  });
+
+  it("blocks player exchange execution while leaving bank trade execution legal", () => {
+    const overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS, disablePlayerTrades: true },
+      { reset: vi.fn() },
+    );
+    const internals = overlay as unknown as {
+      board: {
+        hexes: [];
+        vertices: [];
+        edges: [];
+        isMyTurn: boolean;
+        action: "none";
+        activeTrades: Array<{
+          id: string;
+          creator: string;
+          tradeExecutor: string;
+          creatorGive: ReturnType<typeof emptyResources>;
+          creatorReceive: ReturnType<typeof emptyResources>;
+          incoming: boolean;
+          counterOffer: boolean;
+          canAccept: boolean;
+          acceptedPlayers?: string[];
+        }>;
+      };
+      nextClickStillLegal: (next: NextClick) => boolean;
+    };
+    internals.board = {
+      hexes: [],
+      vertices: [],
+      edges: [],
+      isMyTurn: true,
+      action: "none",
+      activeTrades: [
+        {
+          id: "incoming",
+          creator: "Rival",
+          tradeExecutor: "Rival",
+          creatorGive: emptyResources(),
+          creatorReceive: emptyResources(),
+          incoming: true,
+          counterOffer: false,
+          canAccept: true,
+        },
+        {
+          id: "outgoing",
+          creator: "You",
+          tradeExecutor: "You",
+          creatorGive: emptyResources(),
+          creatorReceive: emptyResources(),
+          incoming: false,
+          counterOffer: false,
+          canAccept: false,
+          acceptedPlayers: ["Rival"],
+        },
+      ],
+    };
+
+    const common = { label: "trade", signature: "trade", confidence: 1 };
+    expect(
+      internals.nextClickStillLegal({
+        ...common,
+        kind: "trade",
+        offerIndex: 0,
+        tradeId: "incoming",
+        verdict: "accept",
+      }),
+    ).toBe(false);
+    expect(
+      internals.nextClickStillLegal({
+        ...common,
+        kind: "trade",
+        offerIndex: 0,
+        tradeId: "incoming",
+        verdict: "counter",
+      }),
+    ).toBe(false);
+    expect(
+      internals.nextClickStillLegal({
+        ...common,
+        kind: "trade-partner",
+        offerIndex: 1,
+        tradeId: "outgoing",
+        acceptedIndex: 0,
+        player: "Rival",
+      }),
+    ).toBe(false);
+    expect(
+      internals.nextClickStillLegal({
+        ...common,
+        kind: "trade-builder",
+        mode: "player",
+        give: emptyResources(),
+        receive: emptyResources(),
+      }),
+    ).toBe(false);
+    expect(
+      internals.nextClickStillLegal({
+        ...common,
+        kind: "trade-builder",
+        mode: "bank",
+        give: emptyResources(),
+        receive: emptyResources(),
+      }),
+    ).toBe(true);
+    expect(
+      internals.nextClickStillLegal({
+        ...common,
+        kind: "trade",
+        offerIndex: 0,
+        tradeId: "incoming",
+        verdict: "decline",
+      }),
+    ).toBe(true);
+    expect(
+      internals.nextClickStillLegal({
+        ...common,
+        kind: "trade-cancel",
+        offerIndex: 1,
+        tradeId: "outgoing",
+      }),
+    ).toBe(true);
+    overlay.destroy();
+  });
+
   it("does not recommend or execute a discard owned by another player", async () => {
     const overlay = new AssistantOverlay(
       { ...DEFAULT_SETTINGS },

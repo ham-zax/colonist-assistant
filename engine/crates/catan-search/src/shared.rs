@@ -346,12 +346,19 @@ mod tests {
         let coalesced = coalesce_identical_particles(&particles);
         assert_eq!(coalesced.len(), 2);
         assert!(
-            (coalesced.iter().map(|particle| particle.weight).sum::<f32>() - 1.0).abs()
+            (coalesced
+                .iter()
+                .map(|particle| particle.weight)
+                .sum::<f32>()
+                - 1.0)
+                .abs()
                 < 1e-6
         );
-        assert!(coalesced.iter().any(|particle| {
-            particle.state == base && (particle.weight - 0.5).abs() < 1e-6
-        }));
+        assert!(
+            coalesced
+                .iter()
+                .any(|particle| { particle.state == base && (particle.weight - 0.5).abs() < 1e-6 })
+        );
         assert!(coalesced.iter().any(|particle| {
             particle.state == distinct && (particle.weight - 0.5).abs() < 1e-6
         }));

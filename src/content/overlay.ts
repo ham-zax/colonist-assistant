@@ -600,10 +600,15 @@ export class AssistantOverlay {
   }
 
   setSettings(settings: AssistantSettings): void {
-    if (settings.engine !== this.settings.engine) {
+    if (
+      settings.engine !== this.settings.engine ||
+      settings.disablePlayerTrades !== this.settings.disablePlayerTrades
+    ) {
       this.decisionAnalysis = undefined;
       this.decisionKey = "";
       this.decisionPendingKey = "";
+      this.decisionSlowKey = "";
+      this.decisionRuntimeError = "";
       this.decisionWorker.reset();
       this.winPredictions.reset();
     }
@@ -710,6 +715,7 @@ export class AssistantOverlay {
       ) {
         const key = target.dataset.setting as
           | "highlightNextAction"
+          | "disablePlayerTrades"
           | "autonomousPrivateGames";
         this.applySettings({
           ...this.settings,
@@ -1321,6 +1327,9 @@ export class AssistantOverlay {
       );
     }
     if (next.kind === "trade") {
+      if (this.settings.disablePlayerTrades && next.verdict !== "decline") {
+        return false;
+      }
       const trade = board.activeTrades?.[next.offerIndex];
       return Boolean(
         trade?.incoming &&
@@ -1329,6 +1338,7 @@ export class AssistantOverlay {
       );
     }
     if (next.kind === "trade-partner") {
+      if (this.settings.disablePlayerTrades) return false;
       const trade = board.activeTrades?.[next.offerIndex];
       return Boolean(
         trade &&
@@ -1356,7 +1366,13 @@ export class AssistantOverlay {
         (board.ownDevelopmentCards?.playable[next.card] ?? 0) > 0,
       );
     }
-    if (next.kind === "build" || next.kind === "trade-builder") {
+    if (next.kind === "trade-builder") {
+      if (this.settings.disablePlayerTrades && next.mode === "player") {
+        return false;
+      }
+      return Boolean(board.isMyTurn) && board.action === "none";
+    }
+    if (next.kind === "build") {
       return Boolean(board.isMyTurn) && board.action === "none";
     }
     if (next.kind === "resource") return Boolean(board.isMyTurn);
@@ -1408,6 +1424,9 @@ export class AssistantOverlay {
       );
     }
     if (next.kind === "trade-builder") {
+      if (this.settings.disablePlayerTrades && next.mode === "player") {
+        return false;
+      }
       return Boolean(
         board.isMyTurn &&
         (
@@ -1417,6 +1436,7 @@ export class AssistantOverlay {
       );
     }
     if (next.kind === "trade" && next.verdict === "counter") {
+      if (this.settings.disablePlayerTrades) return false;
       const trade = board.activeTrades?.[next.offerIndex];
       return Boolean(
         trade?.incoming &&
@@ -1700,15 +1720,34 @@ export class AssistantOverlay {
         renderTradeVerdicts([], new Map());
         return;
       }
+      const pendingIncoming = unansweredIncomingTrades(
+        activeTrades,
+        this.completedIncomingTradeIds,
+      );
+      if (this.settings.disablePlayerTrades) {
+        renderTradeVerdicts(
+          activeTrades,
+          new Map(
+            pendingIncoming.map((trade) => [
+              trade.id,
+              {
+                tradeId: trade.id,
+                kind: "decline" as const,
+                score: 0,
+                label: "DECLINE",
+                reason: "Player trades are disabled",
+                detail: "Only bank and port trades are allowed.",
+              },
+            ]),
+          ),
+        );
+        return;
+      }
       const report = this.coachReport(state, player);
       if (!report) {
         renderTradeVerdicts([], new Map());
         return;
       }
-      const pendingIncoming = unansweredIncomingTrades(
-        activeTrades,
-        this.completedIncomingTradeIds,
-      );
       if (
         this.decisionPendingKey &&
         isDeepDecisionEngine(this.settings.engine)
@@ -1801,6 +1840,7 @@ export class AssistantOverlay {
   ): string {
     return JSON.stringify({
       engine: this.settings.engine,
+      playerTradesEnabled: !this.settings.disablePlayerTrades,
       game: board.gameKey,
       trackerTurn: state.currentTurn.sequence,
       eventCount: state.eventCount,
@@ -2065,6 +2105,7 @@ export class AssistantOverlay {
         this.render();
       },
       searchConstraints,
+      !this.settings.disablePlayerTrades,
     );
     if (requested) {
       this.decisionPendingKey = key;
@@ -2100,10 +2141,10 @@ export class AssistantOverlay {
   private reconciledState(): TrackerState | undefined {
     const board = this.board;
     const sessionState = this.session?.state;
-    const state =
-      sessionState?.playerOrder.length
-        ? sessionState
-        : this.stateFromPublicBoard(board);
+    const hasTrackedPlayers = Boolean(sessionState?.playerOrder.length);
+    const state = hasTrackedPlayers
+      ? sessionState
+      : this.stateFromPublicBoard(board);
     if (!state || !board) return state;
     const playerCount = Object.keys(board.players ?? {}).length;
     const resourceSupply = resourceSupplyForPlayerCount(playerCount);
@@ -2130,7 +2171,17 @@ export class AssistantOverlay {
         ? { bank: board.bank, resourceSupply }
         : {}),
     });
-    return resources;
+    if (resources.worlds.length || !hasTrackedPlayers) return resources;
+
+    // A midgame attach can recover enough public log history to discover the
+    // players while still leaving its hidden-resource worlds incompatible with
+    // the exact hand sizes/bank Colonist currently exposes. The public board is
+    // authoritative at that boundary, so reuse the existing physical-card
+    // fallback posterior instead of leaving the selected engine with no worlds.
+    const publicFallback = this.stateFromPublicBoard(board);
+    return publicFallback?.worlds.length
+      ? { ...resources, worlds: publicFallback.worlds }
+      : resources;
   }
 
   private stateFromPublicBoard(
@@ -2558,7 +2609,7 @@ export class AssistantOverlay {
       };
     }
 
-    if (state && report && board.activeTrades?.length) {
+    if (state && board.activeTrades?.length) {
       for (let index = 0; index < board.activeTrades.length; index += 1) {
         const trade = board.activeTrades[index]!;
         if (
@@ -2571,6 +2622,18 @@ export class AssistantOverlay {
         ) {
           continue;
         }
+        if (this.settings.disablePlayerTrades) {
+          return {
+            kind: "trade",
+            offerIndex: index,
+            tradeId: trade.id,
+            verdict: "decline",
+            label: "Decline this trade",
+            signature: `${signatureBase}|trade|${trade.id}|decline|player-trades-disabled`,
+            confidence: 1,
+          };
+        }
+        if (!report) continue;
         const deepAction = this.preferredDeepAction(state, report.player);
         const deepVerdict =
           deepAction?.kind === "respond-trade"
@@ -2660,6 +2723,16 @@ export class AssistantOverlay {
       (trade) => !trade.incoming,
     );
     for (const trade of outgoingTrades) {
+      if (this.settings.disablePlayerTrades) {
+        return {
+          kind: "trade-cancel",
+          offerIndex: board.activeTrades!.indexOf(trade),
+          tradeId: trade.id,
+          label: "Cancel player trade",
+          signature: `${signatureBase}|cancel-trade|${trade.id}|player-trades-disabled`,
+          confidence: 1,
+        };
+      }
       if (trade.acceptedPlayers?.length) {
         const deepSearch = this.decisionAnalysis?.deepSearch;
         if (!deepSearch || this.decisionPendingKey) return undefined;
@@ -2905,6 +2978,13 @@ export class AssistantOverlay {
         };
       }
       if (deepAction.kind === "offer-trade") {
+        if (this.settings.disablePlayerTrades) {
+          this.decisionTraces.mappingFailure(
+            this.decisionKey,
+            "rust-offer-trade-returned-while-player-trades-disabled",
+          );
+          return undefined;
+        }
         if (!deepAction.cards || !deepAction.receiveCards) {
           this.decisionTraces.mappingFailure(
             this.decisionKey,
@@ -3830,6 +3910,11 @@ export class AssistantOverlay {
       <label class="settings-field">
         <span><b>Highlight next click</b><small>Circle the exact board location or Colonist control.</small></span>
         <input type="checkbox" data-setting="highlightNextAction"${this.settings.highlightNextAction ? " checked" : ""}>
+        <i aria-hidden="true"></i>
+      </label>
+      <label class="settings-field">
+        <span><b>Disable player trades</b><small>Only bank and port trades are allowed.</small></span>
+        <input type="checkbox" data-setting="disablePlayerTrades"${this.settings.disablePlayerTrades ? " checked" : ""}>
         <i aria-hidden="true"></i>
       </label>
       <label class="settings-field">

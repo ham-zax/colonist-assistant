@@ -434,6 +434,49 @@ const findTradeControl = (
   );
 };
 
+const findTradeCancelControl = (offerIndex: number): HTMLElement | undefined => {
+  const nestedOffers = [
+    ...document.querySelectorAll<HTMLElement>(
+      "[class*='gameTradeOffersWrapper-'] [class*='tradeContainer-']",
+    ),
+  ].filter(visible);
+  const offers = nestedOffers.length
+    ? nestedOffers
+    : [
+        ...document.querySelectorAll<HTMLElement>(
+          "[class*='tradeContainer-']",
+        ),
+      ].filter(visible);
+  const offer = offers[offerIndex];
+  if (!offer) return undefined;
+
+  const explicit = findControl(
+    ["cancel offer", "cancel trade", "close offer", "cancel", "close"],
+    ["accept", "counter"],
+    offer,
+  );
+  const activeExplicit = activeColonistControl(explicit);
+  if (activeExplicit) return activeExplicit;
+
+  // Completed outgoing offers render one enabled X for cancelling alongside
+  // per-player response buttons. Rejected responses also show X icons, but
+  // those controls are inert and carry Colonist's nested disabled foreground.
+  // Only select an X that resolves to an active trade control; if more than
+  // one remains, do not guess which destructive control the site currently
+  // means.
+  const activeXControls = [
+    ...offer.querySelectorAll<HTMLImageElement>("img[src*='icon_x']"),
+  ]
+    .map((image) =>
+      activeColonistControl(
+        image.closest<HTMLElement>("[class*='tradeButton-']") ?? undefined,
+      ),
+    )
+    .filter((element): element is HTMLElement => Boolean(element))
+    .filter((element, index, all) => all.indexOf(element) === index);
+  return activeXControls.length === 1 ? activeXControls[0] : undefined;
+};
+
 const findResourceCard = (resource: Resource): HTMLElement | undefined => {
   const images = [...document.querySelectorAll<HTMLImageElement>("img[src]")].filter(
     (image) =>
@@ -692,7 +735,7 @@ const resolveElement = (action: NextClick): HTMLElement | undefined => {
     );
   }
   if (action.kind === "trade-cancel") {
-    return findTradeControl(action.offerIndex, "decline");
+    return findTradeCancelControl(action.offerIndex);
   }
   if (action.kind === "discard") {
     const resource = (Object.keys(action.cards) as Resource[]).find(

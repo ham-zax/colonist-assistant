@@ -1269,7 +1269,10 @@ mod tests {
     fn threat_certain_end_turn_loss_uses_verified_escape_even_when_score_is_lower() {
         let (state, blocker) = crate::threats::forced_blocker_fixture();
         let actor = state.actor() as usize;
-        let actions = vec![root_stats(Action::EndTurn, 0.95), root_stats(blocker.clone(), 0.05)];
+        let actions = vec![
+            root_stats(Action::EndTurn, 0.95),
+            root_stats(blocker.clone(), 0.05),
+        ];
         assert_eq!(
             safer_end_turn_alternative(&state, actor, &actions, None),
             Some(blocker),

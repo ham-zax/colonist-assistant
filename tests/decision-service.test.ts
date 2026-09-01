@@ -84,6 +84,49 @@ describe("decision service client", () => {
     client.destroy();
   });
 
+  it("sends the player-trade legality setting to the background decision service", async () => {
+    const analysis: DecisionAnalysis = {
+      engine: "deep-search",
+      players: [],
+      actionScores: {
+        road: 0,
+        settlement: 0,
+        city: 0,
+        development: 0,
+      },
+      simulations: 1,
+      model: "test",
+    };
+    const sendMessage = vi.fn(async (message: { id: number }) => ({
+      id: message.id,
+      analysis,
+    }));
+    vi.stubGlobal("chrome", { runtime: { sendMessage } });
+    const client = new DecisionWorkerClient();
+
+    client.request(
+      "player-trades-disabled",
+      {} as TrackerState,
+      {} as BoardSnapshot,
+      "You",
+      "deep-search",
+      vi.fn(),
+      undefined,
+      undefined,
+      undefined,
+      false,
+    );
+
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledOnce());
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "colonist-assistant:decision",
+        playerTradesEnabled: false,
+      }),
+    );
+    client.destroy();
+  });
+
   it("does not block a position on the independent warm-up status request", async () => {
     const analysis: DecisionAnalysis = {
       engine: "deep-search",

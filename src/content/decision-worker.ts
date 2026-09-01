@@ -96,6 +96,7 @@ export class DecisionWorkerClient {
     slowCallback?: (elapsedMs: number) => void,
     failureCallback?: (detail: string) => void,
     searchConstraints?: DecisionSearchConstraints,
+    playerTradesEnabled = true,
   ): boolean {
     if (
       this.destroyed ||
@@ -125,6 +126,7 @@ export class DecisionWorkerClient {
       ...(slowCallback ? { slowCallback } : {}),
       ...(failureCallback ? { failureCallback } : {}),
       ...(searchConstraints ? { searchConstraints } : {}),
+      playerTradesEnabled,
     };
     this.desiredKey = key;
     this.pump();
@@ -147,6 +149,7 @@ export class DecisionWorkerClient {
       ...(request.searchConstraints
         ? { searchConstraints: request.searchConstraints }
         : {}),
+      playerTradesEnabled: request.playerTradesEnabled ?? true,
     };
     const slowTimer = globalThis.setTimeout(() => {
       const elapsedMs = performance.now() - startedAt;

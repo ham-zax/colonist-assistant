@@ -1006,6 +1006,49 @@ describe("action guide autopilot", () => {
     expect(clicks[3]).not.toHaveBeenCalled();
   });
 
+  it("cancels a completed outgoing offer through the enabled cancel X instead of an inert response", async () => {
+    const wrapper = document.createElement("div");
+    wrapper.className = "gameTradeOffersWrapper-fixture";
+    const offer = document.createElement("div");
+    offer.className = "tradeContainer-fixture";
+    const clicks = [vi.fn(), vi.fn(), vi.fn(), vi.fn()];
+    for (const [index, clicked] of clicks.entries()) {
+      const button = document.createElement("div");
+      button.className = "tradeButton-fixture";
+      const foreground = document.createElement("div");
+      if (index < 2) foreground.className = "foregroundDisabled-fixture";
+      const icon = document.createElement("img");
+      icon.src =
+        index === 2
+          ? "https://cdn.colonist.io/dist/assets/icon_check.fixture.svg"
+          : "https://cdn.colonist.io/dist/assets/icon_x.fixture.svg";
+      foreground.append(icon);
+      button.append(foreground);
+      button.addEventListener("click", clicked);
+      offer.append(button);
+    }
+    wrapper.append(offer);
+    document.body.append(wrapper);
+
+    renderActionGuide(
+      {
+        kind: "trade-cancel",
+        offerIndex: 0,
+        tradeId: "completed-outgoing-offer",
+        label: "Cancel this accepted trade",
+        signature: "cancel-completed-outgoing",
+        confidence: 1,
+      },
+      { highlight: true, autonomous: true },
+    );
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect(clicks[3]).toHaveBeenCalledOnce();
+    expect(clicks[0]).not.toHaveBeenCalled();
+    expect(clicks[1]).not.toHaveBeenCalled();
+    expect(clicks[2]).not.toHaveBeenCalled();
+  });
+
   it("cancels an unanswered outgoing offer through its exact offer control", async () => {
     const wrapper = document.createElement("div");
     wrapper.className = "gameTradeOffersWrapper-fixture";

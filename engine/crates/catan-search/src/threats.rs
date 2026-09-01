@@ -308,10 +308,7 @@ pub fn has_verified_immediate_opponent_win(state: &GameState, protected: u8) -> 
     })
 }
 
-fn has_verified_immediate_opponent_win_after_transition(
-    state: &GameState,
-    protected: u8,
-) -> bool {
+fn has_verified_immediate_opponent_win_after_transition(state: &GameState, protected: u8) -> bool {
     if state.is_terminal() {
         return false;
     }
@@ -480,7 +477,9 @@ pub(crate) fn forced_blocker_fixture() -> (GameState, Action) {
             .edges
             .iter()
             .enumerate()
-            .filter_map(|(edge, topology)| topology.vertices.contains(&vertex).then_some(edge as u8))
+            .filter_map(|(edge, topology)| {
+                topology.vertices.contains(&vertex).then_some(edge as u8)
+            })
             .collect::<Vec<_>>();
         if incident.len() < 2 {
             continue;
@@ -548,13 +547,7 @@ pub(crate) fn winning_road_over_blocker_fixture() -> (GameState, Action, Action)
             }
             path.push(edge);
             seen_vertices[next_vertex as usize] = true;
-            if extend_path(
-                state,
-                next_vertex,
-                forbidden_vertices,
-                seen_vertices,
-                path,
-            ) {
+            if extend_path(state, next_vertex, forbidden_vertices, seen_vertices, path) {
                 return true;
             }
             seen_vertices[next_vertex as usize] = false;
@@ -587,7 +580,10 @@ pub(crate) fn winning_road_over_blocker_fixture() -> (GameState, Action, Action)
         {
             continue;
         }
-        for [start, current] in [topology.vertices, [topology.vertices[1], topology.vertices[0]]] {
+        for [start, current] in [
+            topology.vertices,
+            [topology.vertices[1], topology.vertices[0]],
+        ] {
             let mut path = vec![first_edge as u8];
             let mut seen_vertices = vec![false; state.board.vertices.len()];
             seen_vertices[start as usize] = true;
@@ -658,8 +654,7 @@ pub(crate) fn winning_road_over_blocker_fixture() -> (GameState, Action, Action)
                 continue;
             }
             let mut blocked = candidate_state.clone();
-            if blocked.apply(&blocker).is_err()
-                || has_verified_immediate_opponent_win(&blocked, 0)
+            if blocked.apply(&blocker).is_err() || has_verified_immediate_opponent_win(&blocked, 0)
             {
                 continue;
             }
@@ -674,9 +669,9 @@ mod tests {
     use colonist_catan_core::{Action, GameState, Phase};
 
     use super::{
-        OpponentThreatKind, detect_opponent_threats, forced_blocker_fixture,
-        forced_loss_weight, has_verified_immediate_opponent_win, main_phase_for,
-        posterior_immediate_threat_weight, winning_road_over_blocker_fixture,
+        OpponentThreatKind, detect_opponent_threats, forced_blocker_fixture, forced_loss_weight,
+        has_verified_immediate_opponent_win, main_phase_for, posterior_immediate_threat_weight,
+        winning_road_over_blocker_fixture,
     };
 
     #[test]
@@ -713,16 +708,8 @@ mod tests {
         let (threatened, blocker) = forced_blocker_fixture();
         let mut safe = threatened.clone();
         safe.players[1].public_victory_points = 8;
-        let end_risk = forced_loss_weight(
-            [(&threatened, 0.5), (&safe, 0.5)],
-            0,
-            &Action::EndTurn,
-        );
-        let block_risk = forced_loss_weight(
-            [(&threatened, 0.5), (&safe, 0.5)],
-            0,
-            &blocker,
-        );
+        let end_risk = forced_loss_weight([(&threatened, 0.5), (&safe, 0.5)], 0, &Action::EndTurn);
+        let block_risk = forced_loss_weight([(&threatened, 0.5), (&safe, 0.5)], 0, &blocker);
         assert!((end_risk - 0.5).abs() <= 1e-6);
         assert_eq!(block_risk, 0.0);
         assert!(end_risk < 1.0 - 1e-6);

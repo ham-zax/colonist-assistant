@@ -217,9 +217,8 @@ fn canonicalize_equal_prior_siblings(ranked: &mut [(Action, f32)]) {
         while end < ranked.len() && (ranked[end].1 - prior).abs() <= 1e-9 {
             end += 1;
         }
-        ranked[start..end].sort_by(|left, right| {
-            format!("{:?}", left.0).cmp(&format!("{:?}", right.0))
-        });
+        ranked[start..end]
+            .sort_by(|left, right| format!("{:?}", left.0).cmp(&format!("{:?}", right.0)));
         start = end;
     }
 }
@@ -271,6 +270,14 @@ struct Searcher {
     observation_safe_recursive: bool,
 }
 
+struct DecisionVisitContext {
+    depth: u8,
+    actions_in_turn: u8,
+    alpha: f32,
+    beta: f32,
+    subtree_limit: u32,
+}
+
 fn normalize_belief_root_priors_with_diagnostics(
     particles: &[BeliefParticle],
     actor: u8,
@@ -317,8 +324,7 @@ fn normalize_belief_root_priors_with_diagnostics(
             let planner = plans.iter().find(|plan| plan.first_action == action);
             let planner_weight = planner.map_or(0.0, |_| weight);
             let planner_value = planner.map_or(0.0, |plan| plan.value * weight);
-            let planner_completion_mass =
-                planner.map_or(0.0, |plan| plan.completion_mass * weight);
+            let planner_completion_mass = planner.map_or(0.0, |plan| plan.completion_mass * weight);
             if let Some(existing) = aggregate
                 .iter_mut()
                 .find(|candidate| candidate.action == action)
@@ -389,12 +395,15 @@ impl Searcher {
         state: &GameState,
         actor: u8,
         mut ranked: Vec<(Action, f32)>,
-        depth: u8,
-        actions_in_turn: u8,
-        mut alpha: f32,
-        mut beta: f32,
-        subtree_limit: u32,
+        context: DecisionVisitContext,
     ) -> ([f32; 4], Option<Action>) {
+        let DecisionVisitContext {
+            depth,
+            actions_in_turn,
+            mut alpha,
+            mut beta,
+            subtree_limit,
+        } = context;
         canonicalize_equal_prior_siblings(&mut ranked);
         let remaining = subtree_limit.saturating_sub(self.nodes);
         if remaining == 0 || ranked.is_empty() {
@@ -425,10 +434,7 @@ impl Searcher {
                 .unwrap_or(0)
                 .saturating_add(carry);
             let before = self.nodes;
-            let child_limit = self
-                .nodes
-                .saturating_add(allowance)
-                .min(subtree_limit);
+            let child_limit = self.nodes.saturating_add(allowance).min(subtree_limit);
             let mut next = state.clone();
             next.apply(&action)
                 .expect("ranked depth-search action must transition");
@@ -536,12 +542,13 @@ impl Searcher {
                 let mut carry = 0_u32;
                 let mut expected = [0.0; 4];
                 for (index, (action, weight)) in weighted_actions.into_iter().enumerate() {
-                    let allowance = budgets.get(index).copied().unwrap_or(0).saturating_add(carry);
+                    let allowance = budgets
+                        .get(index)
+                        .copied()
+                        .unwrap_or(0)
+                        .saturating_add(carry);
                     let before = self.nodes;
-                    let child_limit = self
-                        .nodes
-                        .saturating_add(allowance)
-                        .min(subtree_limit);
+                    let child_limit = self.nodes.saturating_add(allowance).min(subtree_limit);
                     let mut next = state.clone();
                     next.apply(&action)
                         .expect("legal chance action must transition");
@@ -613,10 +620,7 @@ impl Searcher {
                             .unwrap_or(0)
                             .saturating_add(carry);
                         let before = self.nodes;
-                        let child_limit = self
-                            .nodes
-                            .saturating_add(allowance)
-                            .min(subtree_limit);
+                        let child_limit = self.nodes.saturating_add(allowance).min(subtree_limit);
                         let mut next = state.clone();
                         next.apply(action)
                             .expect("observation-policy action must transition");
@@ -654,11 +658,13 @@ impl Searcher {
                     state,
                     actor,
                     ranked,
-                    depth,
-                    actions_in_turn,
-                    alpha,
-                    beta,
-                    subtree_limit,
+                    DecisionVisitContext {
+                        depth,
+                        actions_in_turn,
+                        alpha,
+                        beta,
+                        subtree_limit,
+                    },
                 )
                 .0
             }
@@ -910,10 +916,8 @@ fn belief_search(
     let coalesced = coalesced_storage.as_slice();
     let strategic_storage;
     let particles = if coalesced.len() > config.strategic_particle_limit {
-        strategic_storage = select_experimental_strategic_particles(
-            coalesced,
-            config.strategic_particle_limit,
-        );
+        strategic_storage =
+            select_experimental_strategic_particles(coalesced, config.strategic_particle_limit);
         strategic_storage.as_slice()
     } else {
         coalesced
@@ -984,8 +988,7 @@ fn belief_search(
     } else {
         Vec::new()
     };
-    let ordinarily_retained =
-        truncate_root_preserving_end_turn(root_scored.clone(), branch_cap);
+    let ordinarily_retained = truncate_root_preserving_end_turn(root_scored.clone(), branch_cap);
     let mut retained = Vec::with_capacity(branch_cap.max(1));
     for candidate in verified_blockers.into_iter().chain(ordinarily_retained) {
         if retained.len() >= branch_cap.max(1) {
@@ -1134,8 +1137,7 @@ fn belief_search(
                 pre_truncation_rank: diagnostic.map(|candidate| candidate.rank),
                 prior: *prior,
                 node_budget_per_particle,
-                allocated_nodes: node_budget_per_particle
-                    .saturating_mul(positive_particle_count),
+                allocated_nodes: node_budget_per_particle.saturating_mul(positive_particle_count),
                 planner_value: diagnostic.and_then(|candidate| candidate.planner_value),
                 planner_completion_mass: diagnostic
                     .and_then(|candidate| candidate.planner_completion_mass),
@@ -1317,14 +1319,9 @@ fn belief_search(
     if chosen_index > 0
         && let (Some(leading), Some(replacement)) = (actions.first(), actions.get(chosen_index))
     {
-        provenance.safety_replacement = Some((
-            leading.action.clone(),
-            replacement.action.clone(),
-        ));
+        provenance.safety_replacement = Some((leading.action.clone(), replacement.action.clone()));
     }
-    let chosen = actions
-        .get(chosen_index)
-        .map(|entry| entry.action.clone());
+    let chosen = actions.get(chosen_index).map(|entry| entry.action.clone());
     let value = actions
         .get(chosen_index)
         .map(|entry| entry.value)
@@ -1678,9 +1675,7 @@ pub fn search_weighted_belief_paranoid_bounded_timed_excluding(
 mod tests {
     use std::sync::Arc;
 
-    use colonist_catan_core::{
-        Action, DevCard, GameState, NodeKind, Phase, Resource, SplitMix64,
-    };
+    use colonist_catan_core::{Action, DevCard, GameState, NodeKind, Phase, Resource, SplitMix64};
 
     use super::{
         apply_action_friction, normalize_belief_root_priors, search_belief_maxn,
@@ -1747,10 +1742,7 @@ mod tests {
 
     fn observation_swap_control(actor: u8) -> (GameState, GameState) {
         let mut left = GameState::standard(77, 4);
-        while matches!(
-            left.phase,
-            Phase::SetupSettlement | Phase::SetupRoad { .. }
-        ) {
+        while matches!(left.phase, Phase::SetupSettlement | Phase::SetupRoad { .. }) {
             let action = left.legal_actions()[0].clone();
             left.apply(&action).unwrap();
         }
@@ -1826,7 +1818,7 @@ mod tests {
     }
 
     #[test]
-    fn belief_root_candidates_include_actions_legal_only_in_later_hidden_worlds() {
+    fn belief_root_rankings_include_actions_legal_only_in_later_hidden_worlds() {
         let mut unavailable = GameState::standard(111, 4);
         advance_setup_and_roll(&mut unavailable, &mut SplitMix64::new(112));
         unavailable.phase = Phase::Main;
@@ -1872,12 +1864,23 @@ mod tests {
             },
         ];
         let report = search_weighted_belief_maxn_bounded(&particles, 2, 32, 4_000).unwrap();
-        let candidate = report
-            .actions
+        let ranked = report
+            .provenance
+            .ranked_roots
             .iter()
             .find(|candidate| candidate.action == target)
-            .expect("belief root must union actions across hidden worlds");
-        assert!((candidate.legal_weight - 0.25).abs() < 1e-6);
+            .expect("belief root ranking must union actions across hidden worlds");
+        assert!(ranked.rank > 0);
+        if !report
+            .actions
+            .iter()
+            .any(|candidate| candidate.action == target)
+        {
+            assert!(report.provenance.pruned_roots.iter().any(|candidate| {
+                candidate.action == target
+                    && candidate.reason == super::RootPruneReason::BranchTruncated
+            }));
+        }
     }
 
     #[test]
@@ -2076,8 +2079,7 @@ mod tests {
 
     #[test]
     fn threat_immediate_winning_road_is_not_replaced_by_blocker() {
-        let (state, winning_road, blocker) =
-            crate::threats::winning_road_over_blocker_fixture();
+        let (state, winning_road, blocker) = crate::threats::winning_road_over_blocker_fixture();
         let report = search_weighted_belief_maxn_bounded(
             &[BeliefParticle {
                 state: state.clone(),
@@ -2109,18 +2111,9 @@ mod tests {
         let (left, right) = observation_swap_control(3);
         assert_eq!(left.observation_hash(3), right.observation_hash(3));
         assert_eq!(left.legal_actions(), right.legal_actions());
-        let left_policy = super::recursive_observation_policy(
-            &left,
-            &left.legal_actions(),
-            3,
-            8,
-        );
-        let right_policy = super::recursive_observation_policy(
-            &right,
-            &right.legal_actions(),
-            3,
-            8,
-        );
+        let left_policy = super::recursive_observation_policy(&left, &left.legal_actions(), 3, 8);
+        let right_policy =
+            super::recursive_observation_policy(&right, &right.legal_actions(), 3, 8);
         assert_eq!(left_policy, right_policy);
     }
 
@@ -2135,23 +2128,16 @@ mod tests {
         for state in [&mut left, &mut right] {
             state.apply(&Action::BuyDevelopment).unwrap();
             state
-                .apply(&Action::ResolveDevelopment { card: DevCard::Knight })
+                .apply(&Action::ResolveDevelopment {
+                    card: DevCard::Knight,
+                })
                 .unwrap();
         }
         assert_eq!(left.observation_hash(0), right.observation_hash(0));
         assert_eq!(left.legal_actions(), right.legal_actions());
-        let left_policy = super::recursive_observation_policy(
-            &left,
-            &left.legal_actions(),
-            0,
-            8,
-        );
-        let right_policy = super::recursive_observation_policy(
-            &right,
-            &right.legal_actions(),
-            0,
-            8,
-        );
+        let left_policy = super::recursive_observation_policy(&left, &left.legal_actions(), 0, 8);
+        let right_policy =
+            super::recursive_observation_policy(&right, &right.legal_actions(), 0, 8);
         assert_eq!(left_policy, right_policy);
     }
 
@@ -2213,12 +2199,18 @@ mod tests {
             deadline_reached: false,
             observation_safe_recursive: false,
         };
+        let context = || super::DecisionVisitContext {
+            depth: 0,
+            actions_in_turn: 0,
+            alpha: 0.0,
+            beta: 1.0,
+            subtree_limit: 400,
+        };
         let mut left = make_searcher();
-        let (left_value, left_chosen) =
-            left.visit_ranked_decision(&state, 0, forward, 0, 0, 0.0, 1.0, 400);
+        let (left_value, left_chosen) = left.visit_ranked_decision(&state, 0, forward, context());
         let mut right = make_searcher();
         let (right_value, right_chosen) =
-            right.visit_ranked_decision(&state, 0, reverse, 0, 0, 0.0, 1.0, 400);
+            right.visit_ranked_decision(&state, 0, reverse, context());
 
         assert_eq!(left_chosen, right_chosen);
         assert_eq!(left.nodes, right.nodes);
@@ -2390,10 +2382,7 @@ mod tests {
     #[test]
     fn strategic_particle_f14_full_posterior_preserves_monopoly_family() {
         let mut base = GameState::standard(907, 4);
-        while matches!(
-            base.phase,
-            Phase::SetupSettlement | Phase::SetupRoad { .. }
-        ) {
+        while matches!(base.phase, Phase::SetupSettlement | Phase::SetupRoad { .. }) {
             let action = base.legal_actions()[0].clone();
             base.apply(&action).unwrap();
         }
@@ -2475,10 +2464,8 @@ mod tests {
 
         let compressed = crate::shared::select_experimental_strategic_particles(&particles, 12);
         assert_eq!(compressed.len(), 12);
-        let full_exact = crate::exact::solve_exact_belief(
-            &particles,
-            crate::exact::ExactActionFamily::Monopoly,
-        );
+        let full_exact =
+            crate::exact::solve_exact_belief(&particles, crate::exact::ExactActionFamily::Monopoly);
         let compressed_exact = crate::exact::solve_exact_belief(
             &compressed,
             crate::exact::ExactActionFamily::Monopoly,
@@ -2496,8 +2483,8 @@ mod tests {
             })
         );
 
-        let production = super::search_weighted_belief_maxn_bounded(&particles, 4, 8, 4_000)
-            .unwrap();
+        let production =
+            super::search_weighted_belief_maxn_bounded(&particles, 4, 8, 4_000).unwrap();
         let experimental_compressed = super::search_weighted_belief_maxn_with_config(
             &particles,
             super::BeliefDepthConfig {

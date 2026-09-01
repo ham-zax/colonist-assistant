@@ -49,9 +49,9 @@ pub use policy::{
     trade_acceptance_probability,
 };
 pub use shared::{
-    EXPERIMENTAL_STRATEGIC_PARTICLE_TARGET, STRATEGIC_ROOT_WIDTH,
-    coalesce_identical_particles, group_particles_by_observation,
-    select_experimental_strategic_particles, shared_root_candidates,
+    EXPERIMENTAL_STRATEGIC_PARTICLE_TARGET, STRATEGIC_ROOT_WIDTH, coalesce_identical_particles,
+    group_particles_by_observation, select_experimental_strategic_particles,
+    shared_root_candidates,
 };
 pub use tactical::{TacticalResult, solve_belief_current_turn, solve_current_turn};
 pub use threats::{
@@ -66,17 +66,17 @@ pub use trade_safety::{
     DomesticTradeThreat, HARD_VETO_POSTERIOR, belief_domestic_trade_threat, domestic_trade_threat,
 };
 
-pub const ENGINE_REVISION: &str = "deep-maxn-v9";
+pub const ENGINE_REVISION: &str = "deep-maxn-v10";
 pub use depth::{
     BeliefDepthConfig, BeliefDepthResult, BeliefSearchProvenance, DepthActionValue,
     DepthBeliefError, DepthSearchResult, PrunedRootDiagnostic, RankedRootDiagnostic,
-    RetainedRootDiagnostic, RootPruneReason,
-    search_belief_maxn, search_belief_maxn_bounded, search_belief_paranoid,
-    search_belief_paranoid_bounded, search_maxn, search_maxn_bounded, search_maxn_bounded_timed,
-    search_paranoid, search_paranoid_bounded, search_paranoid_bounded_timed,
-    search_weighted_belief_maxn_bounded, search_weighted_belief_maxn_bounded_timed,
-    search_weighted_belief_maxn_bounded_timed_excluding, search_weighted_belief_maxn_with_config,
-    search_weighted_belief_paranoid_bounded, search_weighted_belief_paranoid_bounded_timed,
+    RetainedRootDiagnostic, RootPruneReason, search_belief_maxn, search_belief_maxn_bounded,
+    search_belief_paranoid, search_belief_paranoid_bounded, search_maxn, search_maxn_bounded,
+    search_maxn_bounded_timed, search_paranoid, search_paranoid_bounded,
+    search_paranoid_bounded_timed, search_weighted_belief_maxn_bounded,
+    search_weighted_belief_maxn_bounded_timed, search_weighted_belief_maxn_bounded_timed_excluding,
+    search_weighted_belief_maxn_with_config, search_weighted_belief_paranoid_bounded,
+    search_weighted_belief_paranoid_bounded_timed,
     search_weighted_belief_paranoid_bounded_timed_excluding,
     search_weighted_belief_paranoid_with_config,
 };

@@ -150,4 +150,50 @@ Validation:
 
 ## Task 16 - Packaged integration
 
-Status: Pending Task 15 checkpoint.
+Status: **Passed.**
+
+Task 16 integrated the v10 correctness waves into the packaged extension and closed the browser/runtime authority path.
+
+### Packaged/runtime identity
+
+- Search engine revision: `deep-maxn-v10`.
+- Windows Edge loaded the unpacked extension from `/home/hamza/repo/colonist-assistant-v10-b/dist` and displayed the Agent B build identity.
+- Live Edge evidence showed the in-game Colonist Assistant attached to a real game and executing the packaged background WASM path.
+- The midgame attach regression discovered during release proof (`worlds: []` after public reconciliation) was repaired at the public-board recovery boundary. A live reload subsequently reached WASM search instead of either `Deep Search has no resource worlds consistent with public evidence` or `Deep Search could not construct a resource world consistent with public evidence`.
+- Accepted outgoing-trade execution was revalidated after repairing the content control resolver that could otherwise target a rejected player's inert X instead of the active cancel control. The user confirmed the rebuilt Edge package completed that workflow correctly.
+- The release build also exposes `Disable player trades` (default off). When enabled it maps to `playerTradesEnabled = false`, invalidates stale decision identity, preserves decline/cancel cleanup, blocks player offer/accept/counter/confirm execution, and leaves bank/port maritime trades legal.
+
+### Targeted packaged turn-54 replay
+
+The replay script has no fixture filter, so Task 16 extracted only `recovered-turn-54` into a temporary one-fixture corpus and ran the packaged rerun against that file. This is not the prohibited whole-corpus medium/max CPU replay.
+
+Result:
+
+- chosen action: `buy-development`;
+- authority: `deep-maxn`;
+- source worlds: `1`;
+- constructed/WASM/Rust-posterior/Rust-search particles: `1 / 1 / 1 / 1`;
+- pre-truncation roots: `102`;
+- retained roots: `8`;
+- selected root rank/prior: rank `4`, prior `0.41727426648139954`;
+- selected root node allocation: `699` nodes in the live run;
+- selected root planner completion mass: `0.034596070647239685`;
+- Task 14 bounded-regret gate: passed at 24/48/96;
+- Task 15 disposition: no material F9 omission, root width 8 retained.
+
+The single-fixture reference-medium and reference-max controls also chose `buy-development`; they were bounded to this one captured state and did not restart the expensive corpus sweep.
+
+### Final verification
+
+| Command / evidence | Result |
+| --- | --- |
+| Focused Task 16 TypeScript/WASM regressions, including midgame recovery, accepted-trade control resolution, and no-player-trades legality | **Passed** |
+| `npm run verify` on the final implementation tree | **Passed (exit 0)** |
+| Targeted packaged `recovered-turn-54` rerun | **Passed; `buy-development`, `deep-maxn`** |
+| Live Edge midgame attach/reload | **Passed** |
+| Live Edge accepted outgoing-trade workflow after resolver repair | **Passed by user confirmation** |
+| Fresh-state action validation | **Retained; player-trade toggle is also part of decision identity and execution legality** |
+
+### CPU/GPU replay note
+
+The previously attempted expensive final whole-corpus CPU replay was intentionally interrupted before producing a report. It was **not** restarted for Task 16. Task 15's committed calibration evidence remains authoritative. Future high-throughput reference sweeps should use the GPU path after parity is established; Task 16 used only the bounded one-fixture turn-54 replay described above.
