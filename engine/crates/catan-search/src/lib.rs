@@ -27,7 +27,7 @@ pub use eval::{
 };
 pub use exact::{
     ExactActionFamily, ExactActionValue, ExactDecisionResult, exact_family_for_action,
-    solve_exact_belief,
+    solve_exact_belief, solve_exact_belief_excluding,
 };
 pub use features::{
     ACTION_FEATURES, EDGE_FEATURES, GLOBAL_FEATURES, HEX_FEATURES, HeterogeneousGraphFeatures,
@@ -49,8 +49,9 @@ pub use policy::{
     trade_acceptance_probability,
 };
 pub use shared::{
-    STRATEGIC_PARTICLE_TARGET, STRATEGIC_ROOT_WIDTH, group_particles_by_observation,
-    select_strategic_particles, shared_root_candidates,
+    EXPERIMENTAL_STRATEGIC_PARTICLE_TARGET, STRATEGIC_ROOT_WIDTH,
+    coalesce_identical_particles, group_particles_by_observation,
+    select_experimental_strategic_particles, shared_root_candidates,
 };
 pub use tactical::{TacticalResult, solve_belief_current_turn, solve_current_turn};
 pub use threats::{
@@ -72,6 +73,8 @@ pub use depth::{
     search_belief_paranoid_bounded, search_maxn, search_maxn_bounded, search_maxn_bounded_timed,
     search_paranoid, search_paranoid_bounded, search_paranoid_bounded_timed,
     search_weighted_belief_maxn_bounded, search_weighted_belief_maxn_bounded_timed,
-    search_weighted_belief_maxn_with_config, search_weighted_belief_paranoid_bounded,
-    search_weighted_belief_paranoid_bounded_timed, search_weighted_belief_paranoid_with_config,
+    search_weighted_belief_maxn_bounded_timed_excluding, search_weighted_belief_maxn_with_config,
+    search_weighted_belief_paranoid_bounded, search_weighted_belief_paranoid_bounded_timed,
+    search_weighted_belief_paranoid_bounded_timed_excluding,
+    search_weighted_belief_paranoid_with_config,
 };

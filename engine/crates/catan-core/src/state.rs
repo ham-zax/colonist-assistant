@@ -1013,11 +1013,9 @@ impl GameState {
             for index in 0..5 {
                 missing[index] = cost[index].saturating_sub(player.resources[index]);
                 if missing[index] > 0 {
-                    let mut request = [0; 5];
-                    request[index] = 1;
-                    requests.push(request);
-                    if missing[index] >= 2 {
-                        request[index] = 2;
+                    for amount in 1..=missing[index] {
+                        let mut request = [0; 5];
+                        request[index] = amount;
                         requests.push(request);
                     }
                 }
@@ -1035,6 +1033,9 @@ impl GameState {
                     request[second] = 1;
                     requests.push(request);
                 }
+            }
+            if missing.iter().copied().sum::<u8>() > 1 {
+                requests.push(missing);
             }
         }
         requests.sort_unstable();
@@ -1054,27 +1055,73 @@ impl GameState {
         }
 
         let mut offers = Vec::<ResourceHand>::new();
-        for first in 0..5 {
-            if player.resources[first] == 0 {
-                continue;
-            }
-            let mut offer = [0; 5];
-            offer[first] = 1;
-            offers.push(offer);
-            if player.resources[first] >= 2 {
-                offer[first] = 2;
+        for resource in 0..5 {
+            for amount in 1..=player.resources[resource] {
+                let mut offer = [0; 5];
+                offer[resource] = amount;
                 offers.push(offer);
             }
-            for second in first + 1..5 {
-                if player.resources[second] == 0 {
+        }
+
+        // Mixed gives are expanded best-first from the hand's cheapest surplus
+        // cards. Keep this frontier bounded rather than enumerating the full
+        // Cartesian product of every held-card count.
+        let nearest_cost = costs
+            .iter()
+            .min_by_key(|cost| {
+                cost.iter()
+                    .enumerate()
+                    .map(|(resource, required)| {
+                        required.saturating_sub(player.resources[resource]) as u16
+                    })
+                    .sum::<u16>()
+            })
+            .copied()
+            .unwrap_or([0; 5]);
+        let opportunity_cost = |give: &ResourceHand| -> f32 {
+            (0..5)
+                .map(|resource| {
+                    let surplus = player.resources[resource].saturating_sub(nearest_cost[resource]);
+                    let cheap = give[resource].min(surplus) as f32;
+                    let protected = give[resource].saturating_sub(surplus) as f32;
+                    cheap * 0.08 + protected * 1.0
+                })
+                .sum::<f32>()
+                + give.iter().copied().sum::<u8>() as f32 * 0.01
+        };
+        let mut frontier = vec![[0; 5]];
+        let mut mixed = Vec::<ResourceHand>::new();
+        let mut expansions = 0usize;
+        while !frontier.is_empty() && expansions < 96 && mixed.len() < 48 {
+            frontier.sort_by(|left, right| {
+                opportunity_cost(left)
+                    .total_cmp(&opportunity_cost(right))
+                    .then_with(|| left.cmp(right))
+            });
+            let current = frontier.remove(0);
+            expansions += 1;
+            let total = current.iter().copied().sum::<u8>();
+            let kinds = current.iter().filter(|count| **count > 0).count();
+            if total >= 2 && kinds >= 2 {
+                mixed.push(current);
+            }
+            if total >= 4 {
+                continue;
+            }
+            for resource in 0..5 {
+                if current[resource] >= player.resources[resource] {
                     continue;
                 }
-                let mut mixed = [0; 5];
-                mixed[first] = 1;
-                mixed[second] = 1;
-                offers.push(mixed);
+                let mut next = current;
+                next[resource] += 1;
+                if !frontier.contains(&next) && !mixed.contains(&next) {
+                    frontier.push(next);
+                }
             }
         }
+        offers.extend(mixed);
+        offers.sort_unstable();
+        offers.dedup();
 
         let ratios = self.trade_ratios(self.current_player);
         let mut actions = Vec::new();
@@ -1094,11 +1141,21 @@ impl GameState {
                 }
                 let give_total = give.iter().copied().sum::<u8>();
                 let receive_total = receive.iter().copied().sum::<u8>();
-                let maritime_dominated = receive_total == 1
-                    && Resource::ALL
-                        .iter()
-                        .any(|resource| give[resource.index()] >= ratios[resource.index()]);
-                if maritime_dominated || give_total == 0 || give_total > 2 || receive_total > 2 {
+                let requested_resource = (receive_total == 1)
+                    .then(|| {
+                        Resource::ALL
+                            .iter()
+                            .copied()
+                            .find(|resource| receive[resource.index()] == 1)
+                    })
+                    .flatten();
+                let maritime_dominated = requested_resource.is_some_and(|requested| {
+                    self.bank[requested.index()] > 0
+                        && Resource::ALL
+                            .iter()
+                            .any(|resource| give[resource.index()] >= ratios[resource.index()])
+                });
+                if maritime_dominated || give_total == 0 || receive_total == 0 {
                     continue;
                 }
                 actions.push(Action::OfferTrade {
@@ -1970,8 +2027,8 @@ fn subtract(hand: &mut ResourceHand, cards: &ResourceHand) {
 #[cfg(test)]
 mod tests {
     use crate::{
-        Action, Building, DevCard, GameState, NodeKind, Phase, PlayerState, Resource, SplitMix64,
-        TradeOffer,
+        Action, Building, DevCard, GameState, NodeKind, Phase, PlayerState, Resource, RuleError,
+        SplitMix64, TradeOffer,
     };
 
     fn play_setup(state: &mut GameState) {
@@ -2086,6 +2143,60 @@ mod tests {
         state.apply(&Action::EndTurn).unwrap();
         assert!(!state.domestic_trade_used);
         assert_eq!(state.domestic_trade_count, 0);
+    }
+
+    #[test]
+    fn domestic_trade_generates_and_accepts_large_colonist_bundles() {
+        let mut state = GameState::standard(18, 4);
+        play_setup(&mut state);
+        state.phase = Phase::Main;
+        state.current_player = 0;
+        state.players[0].resources = [4, 0, 0, 0, 0];
+        // A bank shortage keeps the 4-for-1 player proposal distinct from a
+        // maritime conversion while the 3-for-1 proposal is always distinct
+        // at the default ratio.
+        state.bank[Resource::Brick.index()] = 0;
+        let recipients = ((1u8 << state.board.num_players) - 1) & !1u8;
+        let three_for_one = Action::OfferTrade {
+            recipients,
+            give: [3, 0, 0, 0, 0],
+            receive: [0, 1, 0, 0, 0],
+        };
+        let four_for_one = Action::OfferTrade {
+            recipients,
+            give: [4, 0, 0, 0, 0],
+            receive: [0, 1, 0, 0, 0],
+        };
+        let offers = state
+            .legal_actions()
+            .into_iter()
+            .filter(|action| matches!(action, Action::OfferTrade { .. }))
+            .collect::<Vec<_>>();
+        assert!(offers.contains(&three_for_one));
+        assert!(offers.contains(&four_for_one));
+        assert!(offers.len() <= 96);
+
+        let mut applied = state.clone();
+        applied.apply(&three_for_one).unwrap();
+        assert_eq!(applied.phase, Phase::TradeResponses);
+
+        let mut invalid = state.clone();
+        assert_eq!(
+            invalid.apply(&Action::OfferTrade {
+                recipients,
+                give: [5, 0, 0, 0, 0],
+                receive: [0, 1, 0, 0, 0],
+            }),
+            Err(RuleError::InvalidTrade),
+        );
+        assert_eq!(
+            state.clone().apply(&Action::OfferTrade {
+                recipients,
+                give: [1, 0, 0, 0, 0],
+                receive: [1, 0, 0, 0, 0],
+            }),
+            Err(RuleError::InvalidTrade),
+        );
     }
 
     #[test]

@@ -11,6 +11,7 @@ import {
   reconcilePublicResourceEvidence,
   reduceTracker,
   reweightTradeEvidence,
+  seedPublicResourceWorlds,
 } from "../src/core/tracker";
 
 const resources = (
@@ -152,6 +153,112 @@ describe("tracker posterior integrity", () => {
 
     expect(duplicateEvents).toEqual([]);
     expect(state.worlds.map((world) => world.weight)).toEqual(once);
+  });
+
+  it("seeds deterministic midgame public-resource worlds without replacement", () => {
+    const playerOrder = ["You", "Rival A", "Rival B", "Rival C"];
+    const handSizes = {
+      You: 9,
+      "Rival A": 8,
+      "Rival B": 8,
+      "Rival C": 7,
+    };
+    const ownHand = resources(2, 2, 1, 2, 2);
+    const input = {
+      playerOrder,
+      ownPlayer: "You",
+      exactOwnHand: ownHand,
+      handSizes,
+      resourceSupply: 19,
+      seed: 54,
+      sampleCount: 24,
+    };
+
+    const first = seedPublicResourceWorlds(input);
+    const second = seedPublicResourceWorlds(input);
+
+    expect(first).toEqual(second);
+    expect(first.length).toBeGreaterThan(0);
+    expect(first.length).toBeLessThanOrEqual(24);
+    expect(first.reduce((sum, world) => sum + world.weight, 0)).toBeCloseTo(1, 10);
+    for (const world of first) {
+      expect(world.hands.You).toEqual(ownHand);
+      for (const player of playerOrder) {
+        expect(
+          Object.values(world.hands[player] ?? {}).reduce(
+            (sum, count) => sum + count,
+            0,
+          ),
+        ).toBe(handSizes[player as keyof typeof handSizes]);
+      }
+      for (const resource of ["lumber", "brick", "wool", "grain", "ore"] as const) {
+        const held = playerOrder.reduce(
+          (sum, player) => sum + (world.hands[player]?.[resource] ?? 0),
+          0,
+        );
+        expect(held).toBeLessThanOrEqual(19);
+      }
+    }
+  });
+
+  it("matches the enumerable public-bank conditional within the sample budget", () => {
+    const worlds = seedPublicResourceWorlds({
+      playerOrder: ["You", "A", "B"],
+      ownPlayer: "You",
+      exactOwnHand: resources(1, 0, 0, 0, 0),
+      handSizes: { You: 1, A: 1, B: 1 },
+      bank: resources(0, 0, 1, 0, 1),
+      resourceSupply: 1,
+      seed: 17,
+      sampleCount: 200,
+    });
+    const aHasBrick = worlds
+      .filter((world) => (world.hands.A?.brick ?? 0) === 1)
+      .reduce((sum, world) => sum + world.weight, 0);
+    const aHasGrain = worlds
+      .filter((world) => (world.hands.A?.grain ?? 0) === 1)
+      .reduce((sum, world) => sum + world.weight, 0);
+
+    expect(aHasBrick).toBeCloseTo(0.5, 2);
+    expect(aHasGrain).toBeCloseTo(0.5, 2);
+    expect(worlds.reduce((sum, world) => sum + world.weight, 0)).toBeCloseTo(1, 10);
+  });
+
+  it("matches the enumerable joint hand-composition conditional", () => {
+    const worlds = seedPublicResourceWorlds({
+      playerOrder: ["You", "A", "B"],
+      ownPlayer: "You",
+      exactOwnHand: resources(0, 0, 0, 0, 0),
+      handSizes: { You: 0, A: 2, B: 2 },
+      bank: resources(2, 0, 2, 0, 2),
+      resourceSupply: 2,
+      seed: 17,
+      sampleCount: 600,
+    });
+    const massForBrickCount = (brick: number) =>
+      worlds
+        .filter((world) => (world.hands.A?.brick ?? 0) === brick)
+        .reduce((sum, world) => sum + world.weight, 0);
+
+    expect(Math.abs(massForBrickCount(2) - 1 / 6)).toBeLessThan(0.02);
+    expect(Math.abs(massForBrickCount(1) - 2 / 3)).toBeLessThan(0.02);
+    expect(Math.abs(massForBrickCount(0) - 1 / 6)).toBeLessThan(0.02);
+    expect(worlds.reduce((sum, world) => sum + world.weight, 0)).toBeCloseTo(1, 10);
+  });
+
+  it("rejects fallback snapshots whose public slots exceed physical supply", () => {
+    expect(() =>
+      seedPublicResourceWorlds({
+        playerOrder: ["You", "Rival"],
+        ownPlayer: "You",
+        exactOwnHand: resources(1, 0, 0, 0, 0),
+        handSizes: { You: 1, Rival: 5 },
+        bank: resources(0, 0, 0, 0, 0),
+        resourceSupply: 1,
+        seed: 1,
+        sampleCount: 16,
+      }),
+    ).toThrow(/physical resource supply/i);
   });
 
   it("systematically compacts more than MAX_WORLDS without injecting tail support", () => {

@@ -1,14 +1,12 @@
 //! Shared observation-keyed belief search scaffolding.
 //!
-//! Production Deep MaxN still evaluates particles after an observer-consistent
-//! root. Observation-safe opponent mixtures and a shared observation-keyed tree
-//! remain experimental scaffolding and are not enabled by default.
+//! Production Deep MaxN evaluates the complete exact-distinct posterior after
+//! an observer-consistent root. Observation-safe recursive mixtures are live;
+//! the shared observation-keyed PUCT tree remains a diagnostic path.
 //!
-//! Exact safety checks still see the full posterior. Strategic MaxN searches a
-//! compact representative particle subset that preserves high-mass worlds and
-//! strategically distinct signatures (affordability, hidden VP, monopoly
-//! concentration). The experimental PUCT tree remains available in the arena as
-//! a diagnostic path and is not the live authority.
+//! Lossy strategic coresets remain available only for explicit experiments.
+//! Production may merge exact identical `GameState`s by summing their weights,
+//! but it never moves one distinct world's mass onto another state.
 
 use colonist_catan_core::{Action, CITY_COST, DevCard, GameState, Resource, SETTLEMENT_COST};
 
@@ -17,11 +15,9 @@ use crate::policy::{
     normalize_observed_priors, order_scored_with_state_quotas, truncate_root_preserving_end_turn,
 };
 
-/// Representative particle count for ordinary strategic search. Exact safety
-/// checks still see the full posterior; strategic MaxN should not spend its
-/// entire node budget repeating the same shallow tree in 32 near-duplicate
-/// worlds.
-pub const STRATEGIC_PARTICLE_TARGET: usize = 12;
+/// Historical lossy coreset size retained only for explicit benchmark/ablation
+/// code. Production strategic search does not use this limit.
+pub const EXPERIMENTAL_STRATEGIC_PARTICLE_TARGET: usize = 12;
 
 /// Live root width after relevance-conditional quotas. Spatial coverage of
 /// eight strong candidates beats categorical coverage of sixteen families.
@@ -55,6 +51,25 @@ pub fn shared_root_candidates(
     let ranked = normalize_observed_priors(state, actions, actor);
     let ordered = order_scored_with_state_quotas(&state.observed_state(actor), actor, ranked);
     truncate_root_preserving_end_turn(ordered, cap.max(1))
+}
+
+/// Losslessly merge particles whose complete game states are exactly equal.
+/// State hashes are only a lookup accelerator; equality is checked before mass
+/// is combined, so a hash collision cannot merge distinct worlds.
+pub fn coalesce_identical_particles(particles: &[BeliefParticle]) -> Vec<BeliefParticle> {
+    let mut coalesced = Vec::<BeliefParticle>::new();
+    for particle in particles {
+        if let Some(existing) = coalesced.iter_mut().find(|candidate| {
+            candidate.state.state_hash() == particle.state.state_hash()
+                && candidate.state == particle.state
+        }) {
+            existing.weight += particle.weight;
+        } else {
+            coalesced.push(particle.clone());
+        }
+    }
+    coalesced.sort_by_key(|particle| particle.state.state_hash());
+    coalesced
 }
 
 fn hand_covers(hand: &[u8; 5], cost: &[u8; 5]) -> bool {
@@ -128,7 +143,7 @@ fn particle_distance(left: &GameState, right: &GameState, observer: u8) -> u32 {
 /// Distinct high-impact signatures receive representatives, remaining slots are
 /// filled by deterministic systematic sampling, and every original world's
 /// normalized mass is assigned to its nearest representative.
-pub fn select_strategic_particles(
+pub fn select_experimental_strategic_particles(
     particles: &[BeliefParticle],
     limit: usize,
 ) -> Vec<BeliefParticle> {
@@ -303,10 +318,44 @@ mod tests {
     use colonist_catan_core::{CITY_COST, DevCard, GameState, Resource, SETTLEMENT_COST};
 
     use super::{
-        STRATEGIC_PARTICLE_TARGET, group_particles_by_observation, particle_signature,
-        select_strategic_particles, shared_root_candidates,
+        EXPERIMENTAL_STRATEGIC_PARTICLE_TARGET, coalesce_identical_particles,
+        group_particles_by_observation, particle_signature,
+        select_experimental_strategic_particles, shared_root_candidates,
     };
     use crate::mcts::BeliefParticle;
+
+    #[test]
+    fn strategic_particle_coalescing_is_lossless_and_exact() {
+        let base = GameState::standard(76, 3);
+        let mut distinct = base.clone();
+        distinct.players[1].resources[Resource::Grain.index()] = 1;
+        let particles = vec![
+            BeliefParticle {
+                state: base.clone(),
+                weight: 0.2,
+            },
+            BeliefParticle {
+                state: base.clone(),
+                weight: 0.3,
+            },
+            BeliefParticle {
+                state: distinct.clone(),
+                weight: 0.5,
+            },
+        ];
+        let coalesced = coalesce_identical_particles(&particles);
+        assert_eq!(coalesced.len(), 2);
+        assert!(
+            (coalesced.iter().map(|particle| particle.weight).sum::<f32>() - 1.0).abs()
+                < 1e-6
+        );
+        assert!(coalesced.iter().any(|particle| {
+            particle.state == base && (particle.weight - 0.5).abs() < 1e-6
+        }));
+        assert!(coalesced.iter().any(|particle| {
+            particle.state == distinct && (particle.weight - 0.5).abs() < 1e-6
+        }));
+    }
 
     #[test]
     fn strategic_particle_subset_preserves_total_mass_shape() {
@@ -317,7 +366,10 @@ mod tests {
                 weight: 1.0 + (index % 5) as f32 * 0.1,
             })
             .collect::<Vec<_>>();
-        let selected = select_strategic_particles(&particles, STRATEGIC_PARTICLE_TARGET);
+        let selected = select_experimental_strategic_particles(
+            &particles,
+            EXPERIMENTAL_STRATEGIC_PARTICLE_TARGET,
+        );
         assert_eq!(selected.len(), 1, "identical worlds should coalesce");
         let selected_mass = selected.iter().map(|particle| particle.weight).sum::<f32>();
         assert!((selected_mass - 1.0).abs() < 1e-6);
@@ -350,7 +402,7 @@ mod tests {
             weight: 0.05,
         });
 
-        let selected = select_strategic_particles(&particles, 8);
+        let selected = select_experimental_strategic_particles(&particles, 8);
         let observer = base.actor();
         let rich_signature = particle_signature(&rich, observer);
         assert!(
@@ -376,7 +428,7 @@ mod tests {
             state: rare.clone(),
             weight: 0.05,
         });
-        let selected = select_strategic_particles(&particles, 8);
+        let selected = select_experimental_strategic_particles(&particles, 8);
         assert!((selected.iter().map(|particle| particle.weight).sum::<f32>() - 1.0).abs() < 1e-6);
         let observer = base.actor();
         let rare_mass = selected
@@ -444,7 +496,7 @@ mod tests {
             weight: 0.001,
         });
 
-        let selected = select_strategic_particles(&particles, 6);
+        let selected = select_experimental_strategic_particles(&particles, 6);
         assert!(
             selected.iter().any(|particle| {
                 particle_signature(&particle.state, base.actor()) == decisive_signature
@@ -462,7 +514,7 @@ mod tests {
                 weight: 1.0,
             })
             .collect::<Vec<_>>();
-        let selected = select_strategic_particles(&particles, 12);
+        let selected = select_experimental_strategic_particles(&particles, 12);
         assert_eq!(selected.len(), 1);
         assert!((selected[0].weight - 1.0).abs() < 1e-6);
     }
@@ -480,9 +532,9 @@ mod tests {
                 }
             })
             .collect::<Vec<_>>();
-        let forward = select_strategic_particles(&particles, 8);
+        let forward = select_experimental_strategic_particles(&particles, 8);
         particles.reverse();
-        let reverse = select_strategic_particles(&particles, 8);
+        let reverse = select_experimental_strategic_particles(&particles, 8);
         let summarize = |items: &[BeliefParticle]| {
             items
                 .iter()

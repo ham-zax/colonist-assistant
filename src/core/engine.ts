@@ -58,12 +58,34 @@ export interface DeepSearchActionStatistics {
   lowerConfidenceValue: number[];
 }
 
+export type DecisionAuthority =
+  | "exact-mandatory"
+  | "tactical-proven"
+  | "deep-maxn"
+  | "exact-family"
+  | "safety-override";
+
+export interface DomesticTradeState {
+  give: ResourceVector;
+  receive: ResourceVector;
+}
+
+export interface RootTradeActionExclusion extends DomesticTradeState {
+  kind: "offer-trade" | "counter-trade";
+}
+
+export interface DecisionSearchConstraints {
+  lastRejectedTrade?: DomesticTradeState;
+  rootExclusions?: RootTradeActionExclusion[];
+}
+
 export interface DeepSearchResult {
   engineRevision: string;
   rootIndex: number;
   learnedModelVersion?: string;
   tradeModelVersion?: string;
   algorithm: string;
+  authority: DecisionAuthority;
   chosen?: DeepSearchAction;
   rootValue: number[];
   tacticalWinProbability: number;

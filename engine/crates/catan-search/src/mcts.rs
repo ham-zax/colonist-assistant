@@ -11,6 +11,7 @@ use crate::policy::{
     choose_rollout_action, normalize_observed_priors, order_scored_with_state_quotas,
 };
 use crate::tactical::{TacticalResult, solve_belief_current_turn, solve_current_turn};
+use crate::threats::forced_loss_weight;
 use crate::trade_safety::belief_domestic_trade_threat;
 
 const NONE: u32 = u32::MAX;
@@ -204,7 +205,33 @@ pub fn safer_end_turn_alternative(
     state: &GameState,
     actor: usize,
     actions: &[ActionStats],
+    particles: Option<&[BeliefParticle]>,
 ) -> Option<Action> {
+    let forced_loss = |action: &Action| -> f32 {
+        if let Some(worlds) = particles {
+            forced_loss_weight(
+                worlds
+                    .iter()
+                    .map(|particle| (&particle.state, particle.weight)),
+                actor as u8,
+                action,
+            )
+        } else {
+            forced_loss_weight(std::iter::once((state, 1.0)), actor as u8, action)
+        }
+    };
+    if forced_loss(&Action::EndTurn) >= 1.0 - 1e-6
+        && let Some(escape) = actions
+            .iter()
+            .filter(|candidate| candidate.action != Action::EndTurn)
+            .filter(|candidate| forced_loss(&candidate.action) <= 1e-6)
+            .max_by(|left, right| {
+                robust_root_score(left, actor).total_cmp(&robust_root_score(right, actor))
+            })
+    {
+        return Some(escape.action.clone());
+    }
+
     let held = state.players.get(actor)?.resource_total();
     if held <= state.card_discard_limit {
         return None;
@@ -839,7 +866,7 @@ impl Mcts {
             actions.first().map(|stats| stats.action.clone())
         };
         if chosen == Some(Action::EndTurn)
-            && let Some(safer) = safer_end_turn_alternative(state, actor, &actions)
+            && let Some(safer) = safer_end_turn_alternative(state, actor, &actions, particles)
         {
             chosen = Some(safer);
         }
@@ -1239,6 +1266,40 @@ mod tests {
     }
 
     #[test]
+    fn threat_certain_end_turn_loss_uses_verified_escape_even_when_score_is_lower() {
+        let (state, blocker) = crate::threats::forced_blocker_fixture();
+        let actor = state.actor() as usize;
+        let actions = vec![root_stats(Action::EndTurn, 0.95), root_stats(blocker.clone(), 0.05)];
+        assert_eq!(
+            safer_end_turn_alternative(&state, actor, &actions, None),
+            Some(blocker),
+        );
+    }
+
+    #[test]
+    fn threat_uncertain_end_turn_risk_does_not_force_the_lower_value_blocker() {
+        let (threatened, blocker) = crate::threats::forced_blocker_fixture();
+        let mut safe = threatened.clone();
+        safe.players[1].public_victory_points = 8;
+        let particles = vec![
+            BeliefParticle {
+                state: threatened.clone(),
+                weight: 0.5,
+            },
+            BeliefParticle {
+                state: safe,
+                weight: 0.5,
+            },
+        ];
+        let actor = threatened.actor() as usize;
+        let actions = vec![root_stats(Action::EndTurn, 0.95), root_stats(blocker, 0.05)];
+        assert_eq!(
+            safer_end_turn_alternative(&threatened, actor, &actions, Some(&particles)),
+            None,
+        );
+    }
+
+    #[test]
     fn close_end_turn_ties_prefer_reducing_an_unsafe_hand() {
         let mut state = GameState::standard(71, 4);
         let mut rng = SplitMix64::new(72);
@@ -1251,7 +1312,7 @@ mod tests {
         ];
 
         assert_eq!(
-            safer_end_turn_alternative(&state, actor, &actions),
+            safer_end_turn_alternative(&state, actor, &actions, None),
             Some(Action::BuyDevelopment),
         );
     }
@@ -1280,7 +1341,7 @@ mod tests {
 
         let actions = vec![end_turn, brittle_high_mean, robust_lower_mean.clone()];
         assert_eq!(
-            safer_end_turn_alternative(&state, actor, &actions),
+            safer_end_turn_alternative(&state, actor, &actions, None),
             Some(robust_lower_mean.action),
         );
     }
@@ -1297,7 +1358,10 @@ mod tests {
             root_stats(Action::BuyDevelopment, 0.50),
         ];
 
-        assert_eq!(safer_end_turn_alternative(&state, actor, &actions), None);
+        assert_eq!(
+            safer_end_turn_alternative(&state, actor, &actions, None),
+            None
+        );
     }
 
     #[test]

@@ -21,8 +21,16 @@ export interface WasmActionStatistics {
   lowerConfidenceValue: [number, number, number, number];
 }
 
+export type WasmDecisionAuthority =
+  | "exact-mandatory"
+  | "tactical-proven"
+  | "deep-maxn"
+  | "exact-family"
+  | "safety-override";
+
 export interface WasmSearchResponse {
   engineRevision: string;
+  authority: WasmDecisionAuthority;
   learnedModelVersion: string;
   tradeModelVersion: string;
   algorithm: string;

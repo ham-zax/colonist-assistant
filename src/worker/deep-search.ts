@@ -23,6 +23,7 @@ import type {
   DeepSearchAction,
   DeepSearchResult,
   DecisionAnalysis,
+  DecisionSearchConstraints,
 } from "../core/engine";
 
 const RESOURCE_CODE = new Map<Resource, number>(
@@ -433,6 +434,14 @@ const currentPlayerIndex = (
   return index;
 };
 
+const isProtocolActiveTrade = (
+  trade: NonNullable<BoardSnapshot["activeTrades"]>[number],
+): boolean =>
+  (trade.incoming && (!trade.myResponse || trade.myResponse === "pending")) ||
+  (!trade.incoming &&
+    trade.responsesComplete === true &&
+    Boolean(trade.acceptedPlayers?.length || trade.rejectedPlayers?.length));
+
 const inferPhase = (
   board: BoardSnapshot,
   actingPlayer?: string,
@@ -461,22 +470,7 @@ const inferPhase = (
   }
   if (board.action === "discard") return { phase: "discard" };
   if (board.action === "robber") return { phase: "move-robber" };
-  if (
-    board.activeTrades?.some(
-      (trade) =>
-        (
-          trade.incoming &&
-          (!trade.myResponse || trade.myResponse === "pending")
-        ) ||
-        (
-          !trade.incoming &&
-          Boolean(
-            trade.responsesComplete &&
-            trade.acceptedPlayers?.length,
-          )
-        ),
-    )
-  ) {
+  if (board.activeTrades?.some(isProtocolActiveTrade)) {
     return { phase: "trade-responses" };
   }
   if (board.isMyTurn && board.hasRolled === false) return { phase: "pre-roll" };
@@ -602,6 +596,7 @@ export const buildDeepSearchRequest = (
   state: TrackerState,
   board: BoardSnapshot,
   rootPlayer: string,
+  searchConstraints: DecisionSearchConstraints = {},
   playerTradesEnabled = true,
 ) => {
   const players = playerNames(state, board);
@@ -667,20 +662,7 @@ export const buildDeepSearchRequest = (
     );
   }
   const phase = inferPhase(board, players[current] ?? rootPlayer);
-  const activeTrade = board.activeTrades?.find(
-    (trade) =>
-      (
-        trade.incoming &&
-        (!trade.myResponse || trade.myResponse === "pending")
-      ) ||
-      (
-        !trade.incoming &&
-        Boolean(
-          trade.responsesComplete &&
-          trade.acceptedPlayers?.length,
-        )
-      ),
-  );
+  const activeTrade = board.activeTrades?.find(isProtocolActiveTrade);
   const requirePlayerIndex = (name: string, context: string): number => {
     const index = playerIndex.get(name);
     if (index === undefined) {
@@ -811,6 +793,7 @@ export const buildDeepSearchRequest = (
       rejected: trade.rejectedPlayers,
       complete: trade.responsesComplete,
     })),
+    searchConstraints,
   });
   const seed = hashString(signature);
   const lastOwnRoll = state.recentEvents
@@ -1129,6 +1112,23 @@ export const buildDeepSearchRequest = (
       depth: 4,
       branchCap: 8,
       ponder: false,
+      ...(searchConstraints.lastRejectedTrade
+        ? {
+            lastRejectedTrade: {
+              give: resources(searchConstraints.lastRejectedTrade.give),
+              receive: resources(searchConstraints.lastRejectedTrade.receive),
+            },
+          }
+        : {}),
+      ...(searchConstraints.rootExclusions?.length
+        ? {
+            rootExclusions: searchConstraints.rootExclusions.map((exclusion) => ({
+              kind: exclusion.kind,
+              give: resources(exclusion.give),
+              receive: resources(exclusion.receive),
+            })),
+          }
+        : {}),
     },
   };
 };
@@ -1138,6 +1138,7 @@ export const analyzeDeepSearch = async (
   board: BoardSnapshot,
   rootPlayer: string,
   fallback: DecisionAnalysis,
+  searchConstraints: DecisionSearchConstraints = {},
   playerTradesEnabled = true,
 ): Promise<DecisionAnalysis> => {
   await ensureWasm();
@@ -1145,6 +1146,7 @@ export const analyzeDeepSearch = async (
     state,
     board,
     rootPlayer,
+    searchConstraints,
     playerTradesEnabled,
   );
   request.mode = "maxn";
@@ -1180,24 +1182,17 @@ export const analyzeDeepSearch = async (
   const startedAt = performance.now();
   const response = analyzeWasm(request) as WasmSearchResponse;
   const elapsedMs = performance.now() - startedAt;
-  const allowed = response.actions.filter((statistic) =>
-    matchingPrompt(statistic.action, board),
-  );
   const selected =
-    (matchingPrompt(response.chosen ?? { kind: "" }, board)
+    response.chosen && matchingPrompt(response.chosen, board)
       ? response.chosen
-      : undefined) ??
-    allowed.sort(
-      (left, right) =>
-        right.visits - left.visits ||
-        (right.value[root] ?? 0) - (left.value[root] ?? 0),
-    )[0]?.action;
+      : undefined;
   const search: DeepSearchResult = {
     engineRevision: response.engineRevision,
     rootIndex: root,
     learnedModelVersion: response.learnedModelVersion,
     tradeModelVersion: response.tradeModelVersion,
     algorithm: response.algorithm,
+    authority: response.authority,
     ...(selected ? { chosen: mapAction(selected, players, board) } : {}),
     rootValue: response.rootValue.slice(0, players.length),
     tacticalWinProbability: response.tacticalWinProbability,

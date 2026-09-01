@@ -2,6 +2,7 @@ import {
   analyzePublicEstimate,
   type DecisionAnalysis,
   type DecisionEngine,
+  type DecisionSearchConstraints,
 } from "../core/engine";
 import type { BoardSnapshot } from "../core/placement";
 import type { TrackerState } from "../core/types";
@@ -12,6 +13,7 @@ export interface DecisionRequest {
   board: BoardSnapshot;
   rootPlayer: string;
   engine: DecisionEngine;
+  searchConstraints?: DecisionSearchConstraints;
   /** Engine-level seam for the future no-player-trades UI toggle. */
   playerTradesEnabled?: boolean;
 }
@@ -31,6 +33,7 @@ export const analyzeDecisionRequest = async (
     request.board,
     request.rootPlayer,
     baseline,
+    request.searchConstraints,
     request.playerTradesEnabled ?? true,
   );
 };

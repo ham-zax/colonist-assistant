@@ -11,7 +11,7 @@ pub struct TurnPlan {
     pub actions: Vec<Action>,
     pub value: f32,
     pub nodes: u32,
-    pub completed: bool,
+    pub completion_mass: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -37,7 +37,7 @@ impl Default for TurnPlanConfig {
 struct PlanValue {
     value: f32,
     actions: Vec<Action>,
-    completed: bool,
+    completion_mass: f32,
 }
 
 struct Planner {
@@ -64,10 +64,13 @@ impl Planner {
             || state.is_terminal()
             || (state.current_player != self.root && !matches!(state.phase, Phase::TradeResponses))
         {
+            let completed_endpoint = state.is_terminal()
+                || (state.current_player != self.root
+                    && !matches!(state.phase, Phase::TradeResponses));
             return PlanValue {
                 value: self.endpoint_value(state),
                 actions: Vec::new(),
-                completed: state.is_terminal() || state.current_player != self.root,
+                completion_mass: if completed_endpoint { 1.0 } else { 0.0 },
             };
         }
         self.nodes += 1;
@@ -79,14 +82,14 @@ impl Planner {
             return PlanValue {
                 value: self.endpoint_value(state),
                 actions: Vec::new(),
-                completed: false,
+                completion_mass: 0.0,
             };
         }
         let result = match state.node_kind() {
             NodeKind::Terminal => PlanValue {
                 value: self.endpoint_value(state),
                 actions: Vec::new(),
-                completed: true,
+                completion_mass: 1.0,
             },
             NodeKind::Chance => {
                 let total = legal
@@ -95,22 +98,32 @@ impl Planner {
                     .sum::<f32>()
                     .max(1.0);
                 let mut value = 0.0;
+                let mut completion_mass = 0.0;
                 let mut representative = PlanValue {
                     value: f32::NEG_INFINITY,
                     actions: Vec::new(),
-                    completed: false,
+                    completion_mass: 0.0,
                 };
                 for action in legal {
-                    if self.nodes >= self.node_limit {
-                        break;
-                    }
                     let probability = state.chance_weight(&action) as f32 / total;
+                    if probability <= 0.0 {
+                        continue;
+                    }
                     let mut next = state.clone();
                     if next.apply(&action).is_err() {
                         continue;
                     }
-                    let child = self.visit(&next, depth + 1);
+                    let child = if self.nodes < self.node_limit {
+                        self.visit(&next, depth + 1)
+                    } else {
+                        PlanValue {
+                            value: self.endpoint_value(&next),
+                            actions: Vec::new(),
+                            completion_mass: 0.0,
+                        }
+                    };
                     value += child.value * probability;
+                    completion_mass += child.completion_mass * probability;
                     if child.value > representative.value {
                         representative = child;
                     }
@@ -118,7 +131,7 @@ impl Planner {
                 PlanValue {
                     value,
                     actions: representative.actions,
-                    completed: representative.completed,
+                    completion_mass: completion_mass.clamp(0.0, 1.0),
                 }
             }
             NodeKind::Decision { actor } if actor == self.root => {
@@ -126,17 +139,30 @@ impl Planner {
                 let mut best = PlanValue {
                     value: f32::NEG_INFINITY,
                     actions: Vec::new(),
-                    completed: false,
+                    completion_mass: 0.0,
                 };
                 for (action, _) in ranked {
-                    if self.nodes >= self.node_limit {
-                        break;
-                    }
                     let mut next = state.clone();
                     if next.apply(&action).is_err() {
                         continue;
                     }
-                    let mut child = self.visit(&next, depth + 1);
+                    let mut child = if self.nodes < self.node_limit {
+                        self.visit(&next, depth + 1)
+                    } else if next.is_terminal()
+                        || (next.current_player != self.root
+                            && !matches!(next.phase, Phase::TradeResponses))
+                    {
+                        // Recognizing a directly completed child does not spend
+                        // another recursive node. This is the endpoint that the
+                        // per-root response-path floor is designed to reach.
+                        PlanValue {
+                            value: self.endpoint_value(&next),
+                            actions: Vec::new(),
+                            completion_mass: 1.0,
+                        }
+                    } else {
+                        continue;
+                    };
                     if child.value > best.value {
                         child.actions.insert(0, action);
                         best = child;
@@ -148,7 +174,7 @@ impl Planner {
                     PlanValue {
                         value: self.endpoint_value(state),
                         actions: Vec::new(),
-                        completed: false,
+                        completion_mass: 0.0,
                     }
                 }
             }
@@ -157,7 +183,12 @@ impl Planner {
                 // domestic-trade replies. They are stochastic opponent-policy
                 // outcomes, not adversarial omniscient choices.
                 let mut weighted = 0.0;
-                let mut mass = 0.0;
+                let mut completion_mass = 0.0;
+                let mut representative = PlanValue {
+                    value: f32::NEG_INFINITY,
+                    actions: Vec::new(),
+                    completion_mass: 0.0,
+                };
                 let accept_probability = trade_acceptance_probability(state, actor);
                 let counter_count = legal
                     .iter()
@@ -168,49 +199,147 @@ impl Planner {
                 } else {
                     0.0
                 };
-                for action in legal {
-                    if self.nodes >= self.node_limit {
-                        break;
-                    }
-                    let probability = match action {
-                        Action::RespondTrade { accept: true } => accept_probability,
-                        Action::RespondTrade { accept: false } => {
-                            1.0 - accept_probability - counter_mass
-                        }
-                        Action::CounterTrade { .. } => counter_mass / counter_count.max(1) as f32,
-                        _ => 1.0,
-                    };
-                    if probability <= 0.0 {
-                        continue;
-                    }
+                let weighted_actions = legal
+                    .into_iter()
+                    .filter_map(|action| {
+                        let probability = match action {
+                            Action::RespondTrade { accept: true } => accept_probability,
+                            Action::RespondTrade { accept: false } => {
+                                1.0 - accept_probability - counter_mass
+                            }
+                            Action::CounterTrade { .. } => {
+                                counter_mass / counter_count.max(1) as f32
+                            }
+                            _ => 1.0,
+                        };
+                        (probability > 0.0).then_some((action, probability))
+                    })
+                    .collect::<Vec<_>>();
+                let total_probability = weighted_actions
+                    .iter()
+                    .map(|(_, probability)| *probability)
+                    .sum::<f32>()
+                    .max(f32::EPSILON);
+                for (action, raw_probability) in weighted_actions {
+                    let probability = raw_probability / total_probability;
                     let mut next = state.clone();
                     if next.apply(&action).is_err() {
                         continue;
                     }
-                    let child = self.visit(&next, depth + 1);
+                    let child = if self.nodes < self.node_limit {
+                        self.visit(&next, depth + 1)
+                    } else {
+                        PlanValue {
+                            value: self.endpoint_value(&next),
+                            actions: Vec::new(),
+                            completion_mass: 0.0,
+                        }
+                    };
                     weighted += child.value * probability;
-                    mass += probability;
+                    completion_mass += child.completion_mass * probability;
+                    if child.value > representative.value {
+                        representative = child;
+                    }
                 }
                 PlanValue {
-                    value: if mass > 0.0 {
-                        weighted / mass
+                    value: if weighted.is_finite() {
+                        weighted
                     } else {
                         self.endpoint_value(state)
                     },
-                    actions: Vec::new(),
-                    completed: false,
+                    actions: representative.actions,
+                    completion_mass: completion_mass.clamp(0.0, 1.0),
                 }
             }
         };
         // A budget-truncated value is only a lower-quality bound. Caching it
         // would let a later root action inherit an incomplete continuation
         // merely because it reached the same state after its fair budget slice.
-        if result.completed {
+        if result.completion_mass >= 1.0 - 1e-6 {
             self.memo
                 .insert((state.state_hash(), depth), result.clone());
         }
         result
     }
+}
+
+fn is_domestic_trade(action: &Action) -> bool {
+    matches!(action, Action::OfferTrade { .. } | Action::CounterTrade { .. })
+}
+
+fn retained_planner_roots(
+    state: &GameState,
+    legal: &[Action],
+    root: u8,
+    config: &TurnPlanConfig,
+) -> Vec<(Action, f32)> {
+    let quota_ranked = rank_with_class_quotas(state, legal, root, config.root_cap);
+    if quota_ranked.is_empty() {
+        return Vec::new();
+    }
+    let per_root_floor = state.board.num_players as u32 + 1;
+    let planner_root_cap = quota_ranked.len().min(
+        (config.maximum_nodes / per_root_floor.max(1))
+            .max(1) as usize,
+    );
+    let mut retained = Vec::with_capacity(planner_root_cap);
+    if let Some(trade) = quota_ranked
+        .iter()
+        .find(|(action, _)| is_domestic_trade(action))
+    {
+        retained.push(trade.clone());
+    }
+    for candidate in quota_ranked {
+        if retained.len() >= planner_root_cap {
+            break;
+        }
+        if !retained.iter().any(|(action, _)| action == &candidate.0) {
+            retained.push(candidate);
+        }
+    }
+    retained
+}
+
+fn planner_root_budgets(
+    ranked: &[(Action, f32)],
+    maximum_nodes: u32,
+    per_root_floor: u32,
+) -> Vec<u32> {
+    if ranked.is_empty() {
+        return Vec::new();
+    }
+    let count = ranked.len() as u32;
+    let floor = per_root_floor.min(maximum_nodes / count.max(1));
+    let mut budgets = vec![floor; ranked.len()];
+    let mut remaining = maximum_nodes.saturating_sub(floor.saturating_mul(count));
+    if remaining == 0 {
+        return budgets;
+    }
+    let total_prior = ranked
+        .iter()
+        .map(|(_, prior)| prior.max(0.0))
+        .sum::<f32>();
+    if total_prior > f32::EPSILON {
+        for (index, (_, prior)) in ranked.iter().enumerate() {
+            if remaining == 0 {
+                break;
+            }
+            let share = ((maximum_nodes.saturating_sub(floor.saturating_mul(count)) as f32)
+                * prior.max(0.0)
+                / total_prior)
+                .floor() as u32;
+            let granted = share.min(remaining);
+            budgets[index] = budgets[index].saturating_add(granted);
+            remaining -= granted;
+        }
+    }
+    let mut index = 0usize;
+    while remaining > 0 {
+        budgets[index] = budgets[index].saturating_add(1);
+        remaining -= 1;
+        index = (index + 1) % budgets.len();
+    }
+    budgets
 }
 
 /// Enumerates complete current-turn endpoints. Search still executes one
@@ -222,7 +351,9 @@ pub fn plan_current_turn(state: &GameState, config: TurnPlanConfig) -> Vec<TurnP
     }
     let root = state.actor();
     let legal = state.legal_actions();
-    let ranked = rank_with_class_quotas(state, &legal, root, config.root_cap);
+    let ranked = retained_planner_roots(state, &legal, root, &config);
+    let per_root_floor = state.board.num_players as u32 + 1;
+    let budgets = planner_root_budgets(&ranked, config.maximum_nodes, per_root_floor);
     let mut planner = Planner {
         root,
         config,
@@ -230,22 +361,18 @@ pub fn plan_current_turn(state: &GameState, config: TurnPlanConfig) -> Vec<TurnP
         node_limit: 0,
         memo: HashMap::new(),
     };
-    let root_count = ranked.len().max(1) as u32;
-    let per_root_budget = (planner.config.maximum_nodes / root_count)
-        .max(1)
-        .min(planner.config.maximum_nodes);
     let mut plans = Vec::new();
-    for (action, _) in ranked {
+    for ((action, _), budget) in ranked.into_iter().zip(budgets) {
         if planner.nodes >= planner.config.maximum_nodes {
             break;
         }
-        // Give every root action an opportunity to expose its coherent
-        // continuation. Without a local ceiling, the first broad action can
-        // consume the entire budget and silently starve roads, trades, or
-        // builds that appear later in the policy ordering.
+        // Give every retained root the configured response-path floor, then
+        // distribute remaining live-budget nodes by ranked prior. A reserved
+        // domestic-trade representative therefore has enough room to traverse
+        // recipient replies and reach a returned Main-phase continuation.
         planner.node_limit = planner
             .nodes
-            .saturating_add(per_root_budget)
+            .saturating_add(budget)
             .min(planner.config.maximum_nodes);
         let before = planner.nodes;
         let mut next = state.clone();
@@ -259,7 +386,7 @@ pub fn plan_current_turn(state: &GameState, config: TurnPlanConfig) -> Vec<TurnP
             actions: result.actions,
             value: result.value,
             nodes: planner.nodes - before,
-            completed: result.completed,
+            completion_mass: result.completion_mass.clamp(0.0, 1.0),
         });
     }
     plans.sort_by(|left, right| right.value.total_cmp(&left.value));
@@ -286,7 +413,7 @@ pub(crate) fn plan_adjusted_priors(
     );
     let completed = plans
         .iter()
-        .filter(|plan| plan.completed)
+        .filter(|plan| plan.completion_mass > 0.0)
         .collect::<Vec<_>>();
     let Some(minimum) = completed.iter().map(|plan| plan.value).reduce(f32::min) else {
         return;
@@ -301,9 +428,10 @@ pub(crate) fn plan_adjusted_priors(
             } else {
                 0.5
             };
-            // Preserve a small policy prior while letting a coherent endpoint
-            // dominate shallow inventory rewards.
-            *prior = (*prior * 0.40 + normalized * 0.60).max(0.0001);
+            // Scale the configured planner influence by the probability mass
+            // that actually reached a coherent current-turn endpoint.
+            let blend = 0.60 * plan.completion_mass.clamp(0.0, 1.0);
+            *prior = (*prior * (1.0 - blend) + normalized * blend).max(0.0001);
         }
     }
     let total = ranked
@@ -396,6 +524,64 @@ mod tests {
                 .is_none_or(|development| { best_expansion.unwrap().value > development.value }),
             "a live road-to-settlement conversion must beat inventory-only dev value",
         );
+    }
+
+    #[test]
+    fn domestic_trade_planner_gets_completion_mass_under_live_belief_budget() {
+        let mut state = GameState::standard(211, 4);
+        while matches!(
+            state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        ) {
+            let action = state.legal_actions()[0].clone();
+            state.apply(&action).unwrap();
+        }
+        state.phase = Phase::Main;
+        state.current_player = 0;
+        state.players[0].resources = [2, 2, 2, 0, 0];
+        for opponent in 1..4 {
+            state.players[opponent].resources = [0, 0, 0, 2, 0];
+        }
+
+        let live_planner_nodes = (4_000_u32 / 12).clamp(300, 4_000);
+        let per_particle_nodes = (live_planner_nodes / 12).max(1);
+        assert_eq!(per_particle_nodes, 27);
+        let live = plan_current_turn(
+            &state,
+            TurnPlanConfig {
+                maximum_nodes: per_particle_nodes,
+                root_cap: 14,
+                ..TurnPlanConfig::default()
+            },
+        );
+        let trade = live
+            .iter()
+            .find(|plan| {
+                matches!(
+                    plan.first_action,
+                    Action::OfferTrade { give, receive, .. }
+                        if give == [1, 1, 1, 0, 0]
+                            && receive == [0, 0, 0, 1, 0]
+                )
+            })
+            .expect("live planner allocation must retain the settlement-unlocking trade");
+        assert!(trade.completion_mass > 0.0);
+        assert!(trade.completion_mass <= 1.0);
+        assert!(live.iter().map(|plan| plan.nodes).sum::<u32>() <= per_particle_nodes);
+
+        let expanded = plan_current_turn(
+            &state,
+            TurnPlanConfig {
+                maximum_nodes: per_particle_nodes * 2,
+                root_cap: 14,
+                ..TurnPlanConfig::default()
+            },
+        );
+        let same_trade = expanded
+            .iter()
+            .find(|plan| plan.first_action == trade.first_action)
+            .expect("increasing planner budget must retain the live trade root");
+        assert!(same_trade.completion_mass + 1e-6 >= trade.completion_mass);
     }
 
     #[test]

@@ -14,8 +14,9 @@ use colonist_catan_search::{
     ExactDecisionResult, Mcts, SearchConfig, SearchMode, SearchReport, SearchStatistics,
     TacticalResult, evaluate, exact_family_for_action, learned_model_version,
     learned_trade_model_version, safer_end_turn_alternative,
-    search_weighted_belief_maxn_bounded_timed, search_weighted_belief_paranoid_bounded_timed,
-    solve_belief_current_turn, solve_exact_belief,
+    search_weighted_belief_maxn_bounded_timed_excluding,
+    search_weighted_belief_paranoid_bounded_timed_excluding, solve_belief_current_turn,
+    solve_exact_belief_excluding,
 };
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -129,8 +130,26 @@ struct StateInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct RejectedTradeInput {
+    give: [u8; 5],
+    receive: [u8; 5],
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RootExclusionInput {
+    kind: String,
+    give: [u8; 5],
+    receive: [u8; 5],
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Request {
     state: StateInput,
+    last_rejected_trade: Option<RejectedTradeInput>,
+    #[serde(default)]
+    root_exclusions: Vec<RootExclusionInput>,
     iterations: Option<u32>,
     max_nodes: Option<usize>,
     rollout_actions: Option<u16>,
@@ -210,10 +229,21 @@ struct ActionStatisticsOutput {
     lower_confidence_value: [f32; 4],
 }
 
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum DecisionAuthority {
+    ExactMandatory,
+    TacticalProven,
+    DeepMaxn,
+    ExactFamily,
+    SafetyOverride,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Response {
     engine_revision: &'static str,
+    authority: DecisionAuthority,
     learned_model_version: &'static str,
     trade_model_version: &'static str,
     algorithm: &'static str,
@@ -296,7 +326,10 @@ fn player(input: PlayerInput) -> PlayerState {
     }
 }
 
-fn game_states(input: StateInput) -> Result<Vec<BeliefParticle>, JsValue> {
+fn game_states(
+    input: StateInput,
+    last_rejected_trade: Option<RejectedTradeInput>,
+) -> Result<Vec<BeliefParticle>, JsValue> {
     let num_players = input.players.len() as u8;
     let board = Board {
         num_players,
@@ -437,7 +470,14 @@ fn game_states(input: StateInput) -> Result<Vec<BeliefParticle>, JsValue> {
             // expand a full tree of redundant offers.
             domestic_trade_count: if input.domestic_trade_used { 2 } else { 0 },
             player_trades_enabled: input.player_trades_enabled.unwrap_or(true),
-            last_rejected_trade: None,
+            last_rejected_trade: last_rejected_trade.as_ref().map(|rejected| TradeOffer {
+                creator: input.current_player,
+                recipients: ((1u8 << num_players) - 1) & !(1u8 << input.current_player),
+                give: rejected.give,
+                receive: rejected.receive,
+                accepted: 0,
+                rejected: ((1u8 << num_players) - 1) & !(1u8 << input.current_player),
+            }),
             trade,
             trade_cursor: input.trade_cursor,
             trade_negotiation_round: 0,
@@ -570,9 +610,15 @@ fn action(action: Action) -> ActionOutput {
     output
 }
 
-fn response(report: SearchReport, particles: usize, algorithm: &'static str) -> Response {
+fn response(
+    report: SearchReport,
+    particles: usize,
+    algorithm: &'static str,
+    authority: DecisionAuthority,
+) -> Response {
     Response {
         engine_revision: ENGINE_REVISION,
+        authority,
         learned_model_version: learned_model_version(),
         trade_model_version: learned_trade_model_version(),
         algorithm,
@@ -629,17 +675,30 @@ fn effective_particle_count(particles: &[BeliefParticle]) -> f32 {
     1.0 / squared.max(f32::EPSILON)
 }
 
-fn exact_single_action(particles: &[BeliefParticle]) -> Option<ExactDecisionResult> {
+fn exact_single_action(
+    particles: &[BeliefParticle],
+    root_exclusions: &[Action],
+) -> Option<ExactDecisionResult> {
     let first = particles.first()?;
-    let legal = first.state.legal_actions();
+    let legal = first
+        .state
+        .legal_actions()
+        .into_iter()
+        .filter(|action| !root_exclusions.contains(action))
+        .collect::<Vec<_>>();
     if legal.len() != 1 {
         return None;
     }
     let chosen = legal[0].clone();
-    if particles
-        .iter()
-        .any(|particle| particle.state.legal_actions() != [chosen.clone()])
-    {
+    if particles.iter().any(|particle| {
+        particle
+            .state
+            .legal_actions()
+            .into_iter()
+            .filter(|action| !root_exclusions.contains(action))
+            .collect::<Vec<_>>()
+            != [chosen.clone()]
+    }) {
         return None;
     }
     let total_weight = particles
@@ -683,12 +742,19 @@ fn exact_single_action(particles: &[BeliefParticle]) -> Option<ExactDecisionResu
 /// action are exact. Returning them before any long-range search keeps roll,
 /// end-turn, discard, robber/victim, and trade-response latency independent of
 /// the strategic simulation budget.
-fn exact_mandatory_report(particles: &[BeliefParticle]) -> Option<SearchReport> {
-    let mandatory = solve_exact_belief(particles, ExactActionFamily::Mandatory);
+fn exact_mandatory_report(
+    particles: &[BeliefParticle],
+    root_exclusions: &[Action],
+) -> Option<SearchReport> {
+    let mandatory = solve_exact_belief_excluding(
+        particles,
+        ExactActionFamily::Mandatory,
+        root_exclusions,
+    );
     let exact = if mandatory.applicable {
         mandatory
     } else {
-        exact_single_action(particles)?
+        exact_single_action(particles, root_exclusions)?
     };
     if !exact.applicable {
         return None;
@@ -737,18 +803,49 @@ fn exact_mandatory_report(particles: &[BeliefParticle]) -> Option<SearchReport> 
     })
 }
 
+fn root_exclusion_actions(
+    inputs: &[RootExclusionInput],
+    state: &GameState,
+) -> Result<Vec<Action>, JsValue> {
+    let recipients = ((1u8 << state.board.num_players) - 1) & !(1u8 << state.actor());
+    inputs
+        .iter()
+        .map(|input| match input.kind.as_str() {
+            "offer-trade" => Ok(Action::OfferTrade {
+                recipients,
+                give: input.give,
+                receive: input.receive,
+            }),
+            "counter-trade" => Ok(Action::CounterTrade {
+                give: input.give,
+                receive: input.receive,
+            }),
+            other => Err(JsValue::from_str(&format!(
+                "unsupported root exclusion kind: {other}"
+            ))),
+        })
+        .collect()
+}
+
 #[wasm_bindgen]
 pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
     let request: Request = serde_wasm_bindgen::from_value(request)
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let mode = RequestedMode::parse(request.mode.as_deref())?;
-    let particles = game_states(request.state)?;
+    let ponder = request.ponder.unwrap_or(false);
+    let particles = game_states(request.state, request.last_rejected_trade)?;
+    let root_exclusions = root_exclusion_actions(&request.root_exclusions, &particles[0].state)?;
     let algorithm = mode.label();
-    if !request.ponder.unwrap_or(false)
-        && let Some(report) = exact_mandatory_report(&particles)
+    if !ponder
+        && let Some(report) = exact_mandatory_report(&particles, &root_exclusions)
     {
-        return serde_wasm_bindgen::to_value(&response(report, particles.len(), algorithm))
-            .map_err(|error| JsValue::from_str(&error.to_string()));
+        return serde_wasm_bindgen::to_value(&response(
+            report,
+            particles.len(),
+            algorithm,
+            DecisionAuthority::ExactMandatory,
+        ))
+        .map_err(|error| JsValue::from_str(&error.to_string()));
     }
     let config = SearchConfig {
         iterations: request.iterations.unwrap_or(2_400).clamp(16, 50_000),
@@ -765,25 +862,27 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
         particles[0].state.phase,
         Phase::SetupSettlement | Phase::SetupRoad { .. }
     );
-    let report = if matches!(mode, RequestedMode::Maxn | RequestedMode::AlphaBeta) || opening {
+    let (report, authority) = if matches!(mode, RequestedMode::Maxn | RequestedMode::AlphaBeta) || opening {
         let depth = request.depth.unwrap_or(3).clamp(1, 6);
         let branch_cap = request.branch_cap.unwrap_or(12).clamp(2, 32);
         let maximum_nodes = request.max_nodes.unwrap_or(48_000).clamp(1_000, 250_000) as u32;
         let depth_report = if mode == RequestedMode::AlphaBeta {
-            search_weighted_belief_paranoid_bounded_timed(
+            search_weighted_belief_paranoid_bounded_timed_excluding(
                 &particles,
                 depth,
                 branch_cap,
                 maximum_nodes,
                 config.time_budget_ms,
+                &root_exclusions,
             )
         } else {
-            search_weighted_belief_maxn_bounded_timed(
+            search_weighted_belief_maxn_bounded_timed_excluding(
                 &particles,
                 depth,
                 branch_cap,
                 maximum_nodes,
                 config.time_budget_ms,
+                &root_exclusions,
             )
         }
         .map_err(|error| JsValue::from_str(&format!("{error:?}")))?;
@@ -810,7 +909,18 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
                 lower_confidence_value: candidate.lower_confidence_value,
             })
             .collect::<Vec<_>>();
-        let mut exact = solve_exact_belief(&particles, ExactActionFamily::Mandatory);
+        let mut exact = solve_exact_belief_excluding(
+            &particles,
+            ExactActionFamily::Mandatory,
+            &root_exclusions,
+        );
+        let mut authority = if exact.applicable {
+            DecisionAuthority::ExactMandatory
+        } else if tactical.proven {
+            DecisionAuthority::TacticalProven
+        } else {
+            DecisionAuthority::DeepMaxn
+        };
         let mut chosen = if exact.applicable {
             exact.chosen.clone()
         } else if tactical.proven {
@@ -818,23 +928,31 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
         } else {
             depth_report.chosen
         };
+        if !exact.applicable
+            && !tactical.proven
+            && let Some(family) = chosen.as_ref().and_then(exact_family_for_action)
+        {
+            exact = solve_exact_belief_excluding(&particles, family, &root_exclusions);
+            if exact.chosen.is_some() {
+                chosen = exact.chosen.clone();
+                authority = DecisionAuthority::ExactFamily;
+            }
+        }
+        // This is the final arbitration gate: when it changes the selected
+        // action, downstream telemetry/execution must retain safety-override
+        // authority rather than being relabeled by an earlier family solver.
         if chosen == Some(Action::EndTurn)
             && let Some(safer) = safer_end_turn_alternative(
                 &particles[0].state,
                 particles[0].state.actor() as usize,
                 &actions,
+                Some(&particles),
             )
         {
             chosen = Some(safer);
+            authority = DecisionAuthority::SafetyOverride;
         }
-        if !exact.applicable
-            && !tactical.proven
-            && let Some(family) = chosen.as_ref().and_then(exact_family_for_action)
-        {
-            exact = solve_exact_belief(&particles, family);
-            chosen = exact.chosen.clone().or(chosen);
-        }
-        SearchReport {
+        (SearchReport {
             chosen,
             root_value: depth_report.value,
             actions,
@@ -848,7 +966,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
                 effective_particle_count: effective_particle_count(&particles),
                 deadline_reached: depth_report.deadline_reached,
             },
-        }
+        }, authority)
     } else {
         let mut groups = Vec::<(u64, Vec<BeliefParticle>)>::new();
         for particle in &particles {
@@ -862,13 +980,12 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
                 groups.push((identity, vec![particle.clone()]));
             }
         }
-        let ponder = request.ponder.unwrap_or(false);
         if !ponder && groups.len() > 1 {
             return Err(JsValue::from_str(
                 "root observation mismatch outside pondering mode",
             ));
         }
-        PERSISTENT_SEARCH.with(|slot| {
+        let report = PERSISTENT_SEARCH.with(|slot| {
             let mut forest = slot.borrow_mut();
             let group_count = groups.len().max(1) as u32;
             let mut selected: Option<(f32, SearchReport)> = None;
@@ -914,9 +1031,10 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
             selected
                 .map(|(_, report)| report)
                 .ok_or_else(|| JsValue::from_str("pondering produced no search group"))
-        })?
+        })?;
+        (report, DecisionAuthority::DeepMaxn)
     };
-    serde_wasm_bindgen::to_value(&response(report, particles.len(), algorithm))
+    serde_wasm_bindgen::to_value(&response(report, particles.len(), algorithm, authority))
         .map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
