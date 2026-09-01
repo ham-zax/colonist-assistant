@@ -86,3 +86,10 @@ pub use depth::{
     search_weighted_belief_paranoid_bounded_timed_excluding,
     search_weighted_belief_paranoid_with_config,
 };
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+pub use depth::{
+    search_weighted_belief_maxn_cuda_with_config,
+    search_weighted_belief_maxn_cuda_with_config_excluding,
+    search_weighted_belief_maxn_cuda_with_config_mutex,
+    search_weighted_belief_maxn_cuda_with_config_mutex_excluding,
+};

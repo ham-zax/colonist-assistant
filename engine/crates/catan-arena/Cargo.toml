@@ -14,6 +14,11 @@ name = "exact-gpu-parity"
 path = "src/bin/exact-gpu-parity.rs"
 required-features = ["cuda-exact"]
 
+[[bin]]
+name = "exact-gpu-search-parity"
+path = "src/bin/exact-gpu-search-parity.rs"
+required-features = ["cuda-exact"]
+
 [features]
 cuda-exact = ["colonist-catan-search/cuda-exact"]
 
