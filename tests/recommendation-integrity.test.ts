@@ -217,7 +217,7 @@ describe("recommendation state integrity", () => {
     expect(built.request.state.robberReturnPhase).toBe("pre-roll");
   });
 
-  it("encodes every public discard obligation", () => {
+  it("encodes every unresolved public discard obligation", () => {
     const names = ["a", "b"];
     const board = makeBoard(names, {
       action: "discard",
@@ -233,7 +233,32 @@ describe("recommendation state integrity", () => {
     expect(built.request.state.discardRemaining.slice(0, 2)).toEqual([4, 5]);
   });
 
-  it("does not create resource worlds that exceed a visible bank supply", () => {
+  it("keeps the seven roller as current player while the root discards", () => {
+    const names = ["roller", "you", "later"];
+    const state = makeState(names);
+    state.currentTurn = { player: "roller", sequence: 4 };
+    const board = makeBoard(names, {
+      action: "discard",
+      // Colonist can expose the local discard prompt as the actionable player;
+      // the tracker still owns the underlying turn/roll owner.
+      currentPlayer: "you",
+      myPlayer: "you",
+      discardCount: 4,
+      ownHand: resources({ lumber: 8 }),
+      players: {
+        roller: publicPlayer({ handSize: 8 }),
+        you: publicPlayer({ handSize: 8 }),
+        later: publicPlayer({ handSize: 10 }),
+      },
+    });
+
+    const built = buildDeepSearchRequest(state, board, "you");
+    expect(built.request.state.currentPlayer).toBe(0);
+    expect(built.request.state.discardCursor).toBe(1);
+    expect(built.request.state.discardRemaining.slice(0, 3)).toEqual([0, 4, 5]);
+  });
+
+  it("rejects public resource evidence that cannot conserve a visible bank", () => {
     const names = ["a", "b"];
     const board = makeBoard(names, {
       bank: resources({ lumber: 19, brick: 19, wool: 19, grain: 19, ore: 19 }),
@@ -244,16 +269,9 @@ describe("recommendation state integrity", () => {
       },
     });
 
-    const built = buildDeepSearchRequest(makeState(names), board, "a");
-    for (const world of built.request.state.worlds) {
-      for (let resource = 0; resource < 5; resource += 1) {
-        const held = world.hands.reduce(
-          (sum, hand) => sum + (hand[resource] ?? 0),
-          0,
-        );
-        expect(held + (world.bank[resource] ?? 0)).toBeLessThanOrEqual(19);
-      }
-    }
+    expect(() => buildDeepSearchRequest(makeState(names), board, "a")).toThrow(
+      /resource|world|conservation|public evidence/iu,
+    );
   });
 
   it("changes the decision cache key when eventCount changes the search seed", () => {

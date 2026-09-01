@@ -407,43 +407,47 @@ fn game_states(input: StateInput) -> Result<Vec<BeliefParticle>, JsValue> {
                 state.bought_development = cards;
             }
         }
+        let state = GameState {
+            board: board.clone().into(),
+            players: world_players,
+            buildings: buildings.clone(),
+            roads: roads.clone(),
+            bank: world.bank.unwrap_or(input.bank),
+            bank_is_public: input.bank_visible.unwrap_or(true),
+            development_deck: world.development_deck.unwrap_or(input.development_deck),
+            played_development: input.played_development,
+            robber_hex: input.robber_hex,
+            current_player: input.current_player,
+            phase: game_phase,
+            turn: input.turn,
+            last_roll: input.last_roll,
+            victory_target: input.victory_target,
+            card_discard_limit: input.card_discard_limit.unwrap_or(7),
+            friendly_robber: input.friendly_robber.unwrap_or(false),
+            setup_step: input.setup_step,
+            discard_remaining: input.discard_remaining,
+            discard_cursor: input.discard_cursor,
+            robber_return_phase,
+            free_roads: 0,
+            domestic_trade_used: input.domestic_trade_used,
+            // The live adapter's boolean means this turn's offer budget is
+            // exhausted. Mapping it to one left the simulator's second
+            // negotiation round open and made trivial end-turn states
+            // expand a full tree of redundant offers.
+            domestic_trade_count: if input.domestic_trade_used { 2 } else { 0 },
+            last_rejected_trade: None,
+            trade,
+            trade_cursor: input.trade_cursor,
+            trade_negotiation_round: 0,
+            longest_road_holder: input.longest_road_holder,
+            largest_army_holder: input.largest_army_holder,
+        };
+        state
+            .validate()
+            .map_err(|error| JsValue::from_str(&format!("invalid search state: {error}")))?;
         result.push(BeliefParticle {
             weight: world.weight.unwrap_or(1.0).max(0.0),
-            state: GameState {
-                board: board.clone().into(),
-                players: world_players,
-                buildings: buildings.clone(),
-                roads: roads.clone(),
-                bank: world.bank.unwrap_or(input.bank),
-                bank_is_public: input.bank_visible.unwrap_or(true),
-                development_deck: world.development_deck.unwrap_or(input.development_deck),
-                played_development: input.played_development,
-                robber_hex: input.robber_hex,
-                current_player: input.current_player,
-                phase: game_phase,
-                turn: input.turn,
-                last_roll: input.last_roll,
-                victory_target: input.victory_target,
-                card_discard_limit: input.card_discard_limit.unwrap_or(7),
-                friendly_robber: input.friendly_robber.unwrap_or(false),
-                setup_step: input.setup_step,
-                discard_remaining: input.discard_remaining,
-                discard_cursor: input.discard_cursor,
-                robber_return_phase,
-                free_roads: 0,
-                domestic_trade_used: input.domestic_trade_used,
-                // The live adapter's boolean means this turn's offer budget is
-                // exhausted. Mapping it to one left the simulator's second
-                // negotiation round open and made trivial end-turn states
-                // expand a full tree of redundant offers.
-                domestic_trade_count: if input.domestic_trade_used { 2 } else { 0 },
-                last_rejected_trade: None,
-                trade,
-                trade_cursor: input.trade_cursor,
-                trade_negotiation_round: 0,
-                longest_road_holder: input.longest_road_holder,
-                largest_army_holder: input.largest_army_holder,
-            },
+            state,
         });
     }
     Ok(result)

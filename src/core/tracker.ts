@@ -975,7 +975,7 @@ export const reconcilePublicResourceEvidence = (
           resourceTotal(world.hands[player] ?? emptyResources()) === size,
       ),
     );
-    if (matching.length) worlds = matching;
+    worlds = matching;
   }
 
   if (evidence.bank && evidence.resourceSupply) {
@@ -988,7 +988,7 @@ export const reconcilePublicResourceEvidence = (
         return held + evidence.bank![resource] === evidence.resourceSupply;
       }),
     );
-    if (matching.length) worlds = matching;
+    worlds = matching;
   }
 
   return {

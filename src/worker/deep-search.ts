@@ -397,6 +397,7 @@ const currentPlayerIndex = (
   players: string[],
 ): number => {
   const current =
+    (board.action === "discard" ? state.currentTurn.player : undefined) ??
     board.currentPlayer ??
     (board.isMyTurn ? board.myPlayer : state.currentTurn.player) ??
     board.myPlayer;
@@ -607,10 +608,7 @@ export const buildDeepSearchRequest = (
   if (root < 0) {
     throw new Error(`Deep Search root player is unknown: ${rootPlayer}`);
   }
-  let current =
-    board.isMyTurn || board.action === "discard"
-      ? root
-      : currentPlayerIndex(state, board, players);
+  const current = currentPlayerIndex(state, board, players);
 
   for (const vertex of board.vertices) {
     for (const hexId of vertex.adjacentHexes) {
@@ -816,18 +814,14 @@ export const buildDeepSearchRequest = (
     hiddenDevelopmentCards > 0
       ? Math.floor(MAX_PARTICLES / 2)
       : MAX_PARTICLES;
-  const sourceWorlds = state.worlds.length
-    ? selectRepresentativeWorlds(
-        state.worlds,
-        players,
-        sourceWorldLimit,
-      )
-    : [{
-        hands: Object.fromEntries(
-          players.map((player) => [player, emptyResources()]),
-        ),
-        weight: 1,
-      }];
+  if (!state.worlds.length) {
+    throw new Error("Deep Search has no resource worlds consistent with public evidence");
+  }
+  const sourceWorlds = selectRepresentativeWorlds(
+    state.worlds,
+    players,
+    sourceWorldLimit,
+  );
   const developmentSamples =
     hiddenDevelopmentCards > 0
       ? Math.max(
@@ -839,7 +833,7 @@ export const buildDeepSearchRequest = (
         )
       : 1;
   const rawWorlds = sourceWorlds.flatMap((world, worldIndex) =>
-    Array.from({ length: developmentSamples }, (_, developmentSampleIndex) => {
+    Array.from({ length: developmentSamples }).flatMap((_, developmentSampleIndex) => {
     const random = mulberry32(
       seed ^
       Math.imul(worldIndex + 1, 0x9e3779b1) ^
@@ -864,6 +858,7 @@ export const buildDeepSearchRequest = (
       : RESOURCE_ORDER.map((_, index) =>
           Math.max(0, 19 - (own[index] ?? 0)),
         );
+    let validResources = true;
     const hands = players.map((player) => {
       if (player === board.myPlayer && board.ownHand) return own;
       const known = resources(world.hands[player]);
@@ -872,30 +867,37 @@ export const buildDeepSearchRequest = (
           known.reduce((sum, count) => sum + count, 0),
       );
       const knownTotal = known.reduce((sum, count) => sum + count, 0);
-      const sampled = knownTotal <= target
-        ? [...known]
-        : [0, 0, 0, 0, 0];
-      for (let index = 0; index < sampled.length; index += 1) {
-        remainingPool[index] = Math.max(
-          0,
-          (remainingPool[index] ?? 0) - (sampled[index] ?? 0),
-        );
+      if (knownTotal > target) {
+        validResources = false;
+        return known;
       }
-      for (
-        let missing = sampled.reduce((sum, count) => sum + count, 0);
-        missing < target;
-        missing += 1
-      ) {
-        if (!remainingPool.some((count) => count > 0)) break;
+      const sampled = [...known];
+      for (let index = 0; index < sampled.length; index += 1) {
+        const count = sampled[index] ?? 0;
+        if (count > (remainingPool[index] ?? 0)) {
+          validResources = false;
+          return sampled as [number, number, number, number, number];
+        }
+        remainingPool[index] = (remainingPool[index] ?? 0) - count;
+      }
+      const missingCards = target - knownTotal;
+      if (missingCards > remainingPool.reduce((sum, count) => sum + count, 0)) {
+        validResources = false;
+        return sampled as [number, number, number, number, number];
+      }
+      for (let missing = 0; missing < missingCards; missing += 1) {
         const index = sampleIndex(remainingPool, random);
         sampled[index] = (sampled[index] ?? 0) + 1;
-        remainingPool[index] = Math.max(
-          0,
-          (remainingPool[index] ?? 0) - 1,
-        );
+        remainingPool[index] = (remainingPool[index] ?? 0) - 1;
       }
       return sampled as [number, number, number, number, number];
     });
+    if (
+      !validResources ||
+      (board.bankVisible && board.bank && remainingPool.some((count) => count !== 0))
+    ) {
+      return [];
+    }
     const inferredBank = RESOURCE_ORDER.map((_, resourceIndex) =>
       Math.max(
         0,
@@ -906,7 +908,7 @@ export const buildDeepSearchRequest = (
           ),
       ),
     ) as [number, number, number, number, number];
-    return {
+    return [{
       weight: world.weight / developmentSamples,
       hands,
       development: developmentWorld.hands,
@@ -914,8 +916,11 @@ export const buildDeepSearchRequest = (
       developmentDeck: developmentWorld.deck,
       bank:
         board.bankVisible && board.bank ? resources(board.bank) : inferredBank,
-    };
+    }];
   }));
+  if (!rawWorlds.length) {
+    throw new Error("Deep Search could not construct a resource world consistent with public evidence");
+  }
   // Monte-Carlo development determinizations can collide. Merge identical
   // particles so ESS and downstream search effort reflect actual diversity.
   const mergedWorlds = new Map<string, (typeof rawWorlds)[number]>();
@@ -1046,7 +1051,7 @@ export const buildDeepSearchRequest = (
         ),
         discardRemaining: players
           .map((player, index) => {
-            if (board.action !== "discard") return 0;
+            if (board.action !== "discard" || index < root) return 0;
             if (index === root && board.discardCount !== undefined) {
               return board.discardCount;
             }

@@ -127,19 +127,27 @@ struct Searcher {
 
 fn normalize_belief_root_priors(
     particles: &[BeliefParticle],
-    actions: &[Action],
     actor: u8,
+    planner_nodes: u32,
 ) -> Vec<(Action, f32)> {
+    struct Aggregate {
+        action: Action,
+        prior: f32,
+        quota_score: f32,
+    }
+
     let total_weight = particles
         .iter()
         .map(|particle| particle.weight.max(0.0))
         .sum::<f32>()
         .max(f32::EPSILON);
-    let mut aggregate = actions
+    let positive_particles = particles
         .iter()
-        .cloned()
-        .map(|action| (action, 0.0_f32))
-        .collect::<Vec<_>>();
+        .filter(|particle| particle.weight > 0.0)
+        .count()
+        .max(1) as u32;
+    let per_particle_planner_nodes = (planner_nodes / positive_particles).max(1);
+    let mut aggregate = Vec::<Aggregate>::new();
 
     for particle in particles {
         let weight = particle.weight.max(0.0) / total_weight;
@@ -147,26 +155,47 @@ fn normalize_belief_root_priors(
             continue;
         }
         let legal = particle.state.legal_actions();
-        for (action, prior) in normalize_priors(&particle.state, &legal, actor) {
-            if let Some((_, score)) = aggregate
+        let mut ranked = normalize_priors(&particle.state, &legal, actor);
+        plan_adjusted_priors(&particle.state, &mut ranked, per_particle_planner_nodes);
+        let ordered = order_scored_with_state_quotas(&particle.state, actor, ranked);
+        let rank_scale = ordered.len().max(1) as f32;
+        for (position, (action, prior)) in ordered.into_iter().enumerate() {
+            let quota_score = (rank_scale - position as f32) / rank_scale;
+            if let Some(existing) = aggregate
                 .iter_mut()
-                .find(|(candidate, _)| *candidate == action)
+                .find(|candidate| candidate.action == action)
             {
-                *score += prior * weight;
+                existing.prior += prior * weight;
+                existing.quota_score += quota_score * weight;
+            } else {
+                aggregate.push(Aggregate {
+                    action,
+                    prior: prior * weight,
+                    quota_score: quota_score * weight,
+                });
             }
         }
     }
 
     let prior_mass = aggregate
         .iter()
-        .map(|(_, prior)| *prior)
+        .map(|candidate| candidate.prior)
         .sum::<f32>()
         .max(f32::EPSILON);
-    for (_, prior) in &mut aggregate {
-        *prior /= prior_mass;
+    for candidate in &mut aggregate {
+        candidate.prior /= prior_mass;
     }
-    aggregate.sort_by(|left, right| right.1.total_cmp(&left.1));
+    aggregate.sort_by(|left, right| {
+        right
+            .quota_score
+            .total_cmp(&left.quota_score)
+            .then_with(|| right.prior.total_cmp(&left.prior))
+            .then_with(|| format!("{:?}", left.action).cmp(&format!("{:?}", right.action)))
+    });
     aggregate
+        .into_iter()
+        .map(|candidate| (candidate.action, candidate.prior))
+        .collect()
 }
 
 impl Searcher {
@@ -617,9 +646,8 @@ fn belief_search(
         .map(|particle| particle.weight.max(0.0))
         .sum::<f32>()
         .max(f32::EPSILON);
-    let first_legal = first.legal_actions();
-    let root_priors = normalize_belief_root_priors(particles, &first_legal, observer);
-    let root_scored = order_scored_with_state_quotas(first, observer, root_priors);
+    let planner_nodes = (maximum_nodes / 12).clamp(300, 4_000);
+    let root_scored = normalize_belief_root_priors(particles, observer, planner_nodes);
     // Threat forcing disabled until posterior-aggregated and post-apply verified.
     let mut root_actions = truncate_root_preserving_end_turn(root_scored, branch_cap)
         .into_iter()
@@ -629,7 +657,7 @@ fn belief_search(
     // Pick that representative over the complete posterior before MaxN spends
     // its root budget; a production-based public prior cannot know which
     // accumulated resource the opponents are actually holding.
-    if first_legal
+    if root_actions
         .iter()
         .any(|action| matches!(action, Action::PlayMonopoly { .. }))
     {
@@ -1201,6 +1229,97 @@ mod tests {
     }
 
     #[test]
+    fn belief_root_candidates_include_actions_legal_only_in_later_hidden_worlds() {
+        let mut unavailable = GameState::standard(111, 4);
+        advance_setup_and_roll(&mut unavailable, &mut SplitMix64::new(112));
+        unavailable.phase = Phase::Main;
+        unavailable.current_player = 0;
+        unavailable.bank_is_public = false;
+        unavailable.domestic_trade_used = true;
+        for player in &mut unavailable.players {
+            player.resources = [0; 5];
+        }
+        unavailable.players[0].resources[Resource::Lumber.index()] = 4;
+        unavailable.players[1].resources[Resource::Ore.index()] = 19;
+        unavailable.bank = [15, 19, 19, 19, 0];
+
+        let mut available = unavailable.clone();
+        available.players[1].resources[Resource::Ore.index()] -= 1;
+        available.players[1].resources[Resource::Brick.index()] += 1;
+        available.bank[Resource::Ore.index()] += 1;
+        available.bank[Resource::Brick.index()] -= 1;
+
+        unavailable.validate().unwrap();
+        available.validate().unwrap();
+        assert_eq!(
+            unavailable.observation_hash(0),
+            available.observation_hash(0)
+        );
+
+        let target = Action::MaritimeTrade {
+            give: Resource::Lumber,
+            receive: Resource::Ore,
+            ratio: 4,
+        };
+        assert!(!unavailable.legal_actions().contains(&target));
+        assert!(available.legal_actions().contains(&target));
+
+        let particles = vec![
+            BeliefParticle {
+                state: unavailable,
+                weight: 0.75,
+            },
+            BeliefParticle {
+                state: available,
+                weight: 0.25,
+            },
+        ];
+        let report = search_weighted_belief_maxn_bounded(&particles, 2, 32, 4_000).unwrap();
+        let candidate = report
+            .actions
+            .iter()
+            .find(|candidate| candidate.action == target)
+            .expect("belief root must union actions across hidden worlds");
+        assert!((candidate.legal_weight - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn belief_root_priors_apply_the_whole_turn_planner_before_truncation() {
+        let mut state = GameState::standard(107, 3);
+        while matches!(
+            state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        ) {
+            let action = state.legal_actions()[0].clone();
+            state.apply(&action).unwrap();
+        }
+        state.phase = Phase::Main;
+        state.current_player = 0;
+        state.players[0].resources = [2, 2, 1, 1, 1];
+
+        let legal = state.legal_actions();
+        let mut expected = crate::policy::normalize_priors(&state, &legal, 0);
+        crate::planner::plan_adjusted_priors(&state, &mut expected, 5_000);
+        let expected = crate::policy::order_scored_with_state_quotas(&state, 0, expected);
+        let particles = vec![BeliefParticle {
+            state: state.clone(),
+            weight: 1.0,
+        }];
+        let actual = normalize_belief_root_priors(&particles, 0, 5_000);
+
+        assert_eq!(
+            actual.iter().map(|(action, _)| action).collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|(action, _)| action)
+                .collect::<Vec<_>>(),
+        );
+        for ((_, actual), (_, expected)) in actual.iter().zip(&expected) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+    }
+
+    #[test]
     fn belief_root_priors_and_candidates_do_not_depend_on_particle_order() {
         let mut first = GameState::standard(109, 4);
         advance_setup_and_roll(&mut first, &mut SplitMix64::new(110));
@@ -1232,9 +1351,8 @@ mod tests {
                 weight: 0.78,
             },
         ];
-        let legal = first.legal_actions();
-        let forward_priors = normalize_belief_root_priors(&forward, &legal, 0);
-        let reversed_priors = normalize_belief_root_priors(&reversed, &legal, 0);
+        let forward_priors = normalize_belief_root_priors(&forward, 0, 1_000);
+        let reversed_priors = normalize_belief_root_priors(&reversed, 0, 1_000);
         assert_eq!(
             forward_priors
                 .iter()

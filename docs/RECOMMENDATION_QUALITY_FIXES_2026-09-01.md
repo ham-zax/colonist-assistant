@@ -55,7 +55,7 @@ The discard limit is used consistently by:
 
 Friendly Robber is enforced in `catan-core` legal robber-action generation. A robber destination is illegal when any building adjacent to that hex belongs to a player below three public victory points. Because the rule is enforced in `GameState::legal_actions()`, exact search, MaxN, AlphaBeta, PUCT, and rollouts all use the same legality contract.
 
-The WASM request boundary in `engine/crates/catan-wasm/src/lib.rs` accepts both rule fields. The engine revision is now `deep-maxn-v8`.
+The WASM request boundary in `engine/crates/catan-wasm/src/lib.rs` accepts both rule fields. The engine revision introduced by that rule-modeling pass was `deep-maxn-v8`; the post-review search-integrity fixes below advance it to `deep-maxn-v9`.
 
 ### Recommendation and UI state correctness
 
@@ -76,6 +76,18 @@ Adding the new rule fields to `GameState::state_hash()` exposed an existing orde
 Particles with identical strategic signature and identical state hash but different posterior weights had no canonical final sort key. Stable sort therefore inherited input order, and reversing the posterior could change systematic-sampling strata.
 
 The selector now uses posterior weight as the final canonical tie-break. The existing permutation-invariance regression test passes again.
+
+### Post-review search-integrity fixes
+
+A review of commit `85785de` found five additional correctness gaps. The follow-up changes:
+
+- keep `currentPlayer` tied to the actual turn/roll owner during discard while `discardCursor` identifies the current discarder; already-resolved lower-index discarders are not reconstructed as pending again;
+- build weighted-belief root candidates from the union of legal actions across positive-mass particles, so hidden bank composition cannot make a legal action disappear because of particle ordering;
+- run the whole-turn planner inside the weighted-belief root-prior aggregation before the existing quota and branch-cap policy, with planner work split across the representative particles instead of using one hidden world as authority;
+- drop belief support when public hand totals or a visible bank contradict every tracked world, reject determinizations that cannot satisfy exact public hand totals and resource conservation, and call `GameState::validate()` on every particle at WASM ingress;
+- evaluate every eligible hand-reducing EndTurn alternative and compare the best `robust_root_score()` candidate instead of stopping at the first mean-value-ordered candidate.
+
+These search-policy changes advance `ENGINE_REVISION` to `deep-maxn-v9`.
 
 ## Intentionally not ported
 
@@ -122,10 +134,36 @@ npm run check
 passed
 
 npm run build:wasm
-passed; packaged engine rebuilt as deep-maxn-v8
+passed; packaged engine rebuilt as deep-maxn-v8 before the post-review `deep-maxn-v9` changes
 
 npm run build
 passed; extension bundle rebuilt with the new WASM engine
 ```
 
 The first mapped RED run reproduced 12 of 13 selected recommendation failures in the original repository. The only non-reproducing case was representative-world slot filling, which was already correct in this codebase.
+
+Post-review verification for `deep-maxn-v9`:
+
+```text
+cargo test -p colonist-catan-core --lib
+24 passed, 0 failed
+
+cargo test -p colonist-catan-search --lib
+81 passed, 0 failed
+
+cargo test -p colonist-catan-wasm
+passed
+
+npm test
+20 files passed
+174 tests passed
+
+npm run check
+passed
+
+npm run build:wasm
+passed; packaged engine rebuilt as deep-maxn-v9
+
+npm run build
+passed; extension rebuilt in dist with deep-maxn-v9
+```

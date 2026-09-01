@@ -213,18 +213,23 @@ pub fn safer_end_turn_alternative(
         .iter()
         .find(|candidate| candidate.action == Action::EndTurn)
         .map(|candidate| robust_root_score(candidate, actor))?;
-    let alternative = actions.iter().find(|candidate| {
-        if candidate.action == Action::EndTurn {
-            return false;
-        }
-        if let Action::BuildRoad { edge } = &candidate.action
-            && road_frontier_value(state, *edge, actor as u8) <= 0.04
-        {
-            return false;
-        }
-        let mut next = state.clone();
-        next.apply(&candidate.action).is_ok() && next.players[actor].resource_total() < held
-    })?;
+    let alternative = actions
+        .iter()
+        .filter(|candidate| {
+            if candidate.action == Action::EndTurn {
+                return false;
+            }
+            if let Action::BuildRoad { edge } = &candidate.action
+                && road_frontier_value(state, *edge, actor as u8) <= 0.04
+            {
+                return false;
+            }
+            let mut next = state.clone();
+            next.apply(&candidate.action).is_ok() && next.players[actor].resource_total() < held
+        })
+        .max_by(|left, right| {
+            robust_root_score(left, actor).total_cmp(&robust_root_score(right, actor))
+        })?;
     // A tiny noisy search edge is not enough to justify exposing an at-risk
     // hand to the next orbit. Preserve EndTurn only when its modeled advantage
     // is material; the tolerance grows with overflow.
@@ -1104,7 +1109,7 @@ impl Mcts {
 
 #[cfg(test)]
 mod tests {
-    use colonist_catan_core::{Action, GameState, NodeKind, Phase, SplitMix64};
+    use colonist_catan_core::{Action, GameState, NodeKind, Phase, Resource, SplitMix64};
 
     use super::{
         ActionStats, BeliefError, BeliefParticle, Mcts, SearchConfig, progressive_width,
@@ -1248,6 +1253,35 @@ mod tests {
         assert_eq!(
             safer_end_turn_alternative(&state, actor, &actions),
             Some(Action::BuyDevelopment),
+        );
+    }
+
+    #[test]
+    fn end_turn_safety_uses_the_best_robust_hand_reducing_alternative() {
+        let mut state = GameState::standard(75, 4);
+        let mut rng = SplitMix64::new(76);
+        advance_setup_and_roll(&mut state, &mut rng);
+        let actor = state.actor() as usize;
+        state.players[actor].resources = [0, 0, 4, 3, 2];
+
+        let end_turn = root_stats(Action::EndTurn, 0.54);
+        let mut brittle_high_mean = root_stats(Action::BuyDevelopment, 0.55);
+        brittle_high_mean.lower_confidence_value = [0.30; 4];
+        brittle_high_mean.legal_weight = 0.55;
+        let mut robust_lower_mean = root_stats(
+            Action::MaritimeTrade {
+                give: Resource::Wool,
+                receive: Resource::Ore,
+                ratio: 4,
+            },
+            0.535,
+        );
+        robust_lower_mean.lower_confidence_value = [0.535; 4];
+
+        let actions = vec![end_turn, brittle_high_mean, robust_lower_mean.clone()];
+        assert_eq!(
+            safer_end_turn_alternative(&state, actor, &actions),
+            Some(robust_lower_mean.action),
         );
     }
 

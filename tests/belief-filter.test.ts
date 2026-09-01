@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   createTrackerState,
   effectiveParticleCount,
+  reconcilePublicResourceEvidence,
   reduceTracker,
   reweightTradeEvidence,
 } from "../src/core/tracker";
@@ -18,6 +19,28 @@ const resources = (
 ) => ({ lumber, brick, wool, grain, ore });
 
 describe("weighted hidden-state filter", () => {
+  it("drops belief support when public hand totals contradict every world", () => {
+    let state = createTrackerState();
+    for (const player of ["You", "Rival"]) {
+      state = reduceTracker(state, { type: "discover", player });
+    }
+    state.worlds = [
+      {
+        hands: {
+          You: resources(1, 0, 0, 0, 0),
+          Rival: resources(0, 1, 0, 0, 0),
+        },
+        weight: 1,
+      },
+    ];
+
+    const reconciled = reconcilePublicResourceEvidence(state, {
+      handSizes: { You: 1, Rival: 3 },
+    });
+
+    expect(reconciled.worlds).toEqual([]);
+  });
+
   it("weights an unknown steal by card multiplicity", () => {
     let state = createTrackerState();
     state = reduceTracker(state, { type: "discover", player: "Victim" });
