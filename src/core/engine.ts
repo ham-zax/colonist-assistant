@@ -65,6 +65,56 @@ export type DecisionAuthority =
   | "exact-family"
   | "safety-override";
 
+export interface DeepSearchActionReplacement {
+  from: DeepSearchAction;
+  to: DeepSearchAction;
+}
+
+export interface DeepSearchRankedRoot {
+  action: DeepSearchAction;
+  rank: number;
+  prior: number;
+  plannerValue?: number;
+  plannerCompletionMass?: number;
+}
+
+export interface DeepSearchRetainedRoot {
+  action: DeepSearchAction;
+  preTruncationRank?: number;
+  prior: number;
+  nodeBudgetPerParticle: number;
+  allocatedNodes: number;
+  plannerValue?: number;
+  plannerCompletionMass?: number;
+}
+
+export interface DeepSearchPrunedRoot {
+  action: DeepSearchAction;
+  preTruncationRank?: number;
+  reason:
+    | "root-excluded"
+    | "branch-truncated"
+    | "trade-safety"
+    | "exact-family-collapsed";
+}
+
+export interface DeepSearchRootProvenance {
+  rankedRootCount: number;
+  rankedRoots: DeepSearchRankedRoot[];
+  retainedRoots: DeepSearchRetainedRoot[];
+  prunedRootCount: number;
+  prunedRoots: DeepSearchPrunedRoot[];
+  exactFamilyReplacement?: DeepSearchActionReplacement;
+  safetyReplacement?: DeepSearchActionReplacement;
+}
+
+export interface DeepSearchAuthorityTrace {
+  initialAuthority: DecisionAuthority;
+  exactFamily?: string;
+  exactFamilyReplacement?: DeepSearchActionReplacement;
+  safetyReplacement?: DeepSearchActionReplacement;
+}
+
 export interface DomesticTradeState {
   give: ResourceVector;
   receive: ResourceVector;
@@ -99,7 +149,15 @@ export interface DeepSearchResult {
   nodes: number;
   deepestDecisionDepth: number;
   rollouts: number;
+  /** Final joint particles sent across the TypeScript -> WASM boundary. */
   particles: number;
+  sourceWorldCount: number;
+  wasmParticleCount: number;
+  rustPosteriorParticleCount: number;
+  rustSearchParticleCount: number;
+  rootProvenance: DeepSearchRootProvenance;
+  authorityTrace: DeepSearchAuthorityTrace;
+  mappingFailureReason?: string;
   effectiveParticleCount: number;
   deadlineReached?: boolean;
   elapsedMs: number;

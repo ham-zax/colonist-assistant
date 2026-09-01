@@ -393,13 +393,13 @@ pub fn plan_current_turn(state: &GameState, config: TurnPlanConfig) -> Vec<TurnP
     plans
 }
 
-pub(crate) fn plan_adjusted_priors(
+pub(crate) fn plan_adjusted_priors_with_plans(
     state: &GameState,
     ranked: &mut [(Action, f32)],
     maximum_nodes: u32,
-) {
+) -> Vec<TurnPlan> {
     if !matches!(state.phase, Phase::PreRoll | Phase::Main) || ranked.is_empty() {
-        return;
+        return Vec::new();
     }
     let plans = plan_current_turn(
         state,
@@ -416,10 +416,10 @@ pub(crate) fn plan_adjusted_priors(
         .filter(|plan| plan.completion_mass > 0.0)
         .collect::<Vec<_>>();
     let Some(minimum) = completed.iter().map(|plan| plan.value).reduce(f32::min) else {
-        return;
+        return plans;
     };
     let Some(maximum) = completed.iter().map(|plan| plan.value).reduce(f32::max) else {
-        return;
+        return plans;
     };
     for (action, prior) in ranked.iter_mut() {
         if let Some(plan) = completed.iter().find(|plan| plan.first_action == *action) {
@@ -443,6 +443,15 @@ pub(crate) fn plan_adjusted_priors(
         *prior /= total;
     }
     ranked.sort_by(|left, right| right.1.total_cmp(&left.1));
+    plans
+}
+
+pub(crate) fn plan_adjusted_priors(
+    state: &GameState,
+    ranked: &mut [(Action, f32)],
+    maximum_nodes: u32,
+) {
+    let _ = plan_adjusted_priors_with_plans(state, ranked, maximum_nodes);
 }
 
 #[cfg(test)]

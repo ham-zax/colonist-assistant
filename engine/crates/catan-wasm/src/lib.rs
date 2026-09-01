@@ -10,10 +10,10 @@ use colonist_catan_core::{
     Vertex,
 };
 use colonist_catan_search::{
-    ActionStats, BeliefParticle, ENGINE_REVISION, ExactActionFamily, ExactActionValue,
-    ExactDecisionResult, Mcts, SearchConfig, SearchMode, SearchReport, SearchStatistics,
-    TacticalResult, evaluate, exact_family_for_action, learned_model_version,
-    learned_trade_model_version, safer_end_turn_alternative,
+    ActionStats, BeliefParticle, BeliefSearchProvenance, ENGINE_REVISION, ExactActionFamily,
+    ExactActionValue, ExactDecisionResult, Mcts, RootPruneReason, SearchConfig, SearchMode,
+    SearchReport, SearchStatistics, TacticalResult, evaluate, exact_family_for_action,
+    learned_model_version, learned_trade_model_version, safer_end_turn_alternative,
     search_weighted_belief_maxn_bounded_timed_excluding,
     search_weighted_belief_paranoid_bounded_timed_excluding, solve_belief_current_turn,
     solve_exact_belief_excluding,
@@ -241,6 +241,71 @@ enum DecisionAuthority {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ActionReplacementOutput {
+    from: ActionOutput,
+    to: ActionOutput,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RankedRootOutput {
+    action: ActionOutput,
+    rank: usize,
+    prior: f32,
+    planner_value: Option<f32>,
+    planner_completion_mass: Option<f32>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RetainedRootOutput {
+    action: ActionOutput,
+    pre_truncation_rank: Option<usize>,
+    prior: f32,
+    node_budget_per_particle: u32,
+    allocated_nodes: u32,
+    planner_value: Option<f32>,
+    planner_completion_mass: Option<f32>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PrunedRootOutput {
+    action: ActionOutput,
+    pre_truncation_rank: Option<usize>,
+    reason: &'static str,
+}
+
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct RootProvenanceOutput {
+    ranked_root_count: usize,
+    ranked_roots: Vec<RankedRootOutput>,
+    retained_roots: Vec<RetainedRootOutput>,
+    pruned_root_count: usize,
+    pruned_roots: Vec<PrunedRootOutput>,
+    exact_family_replacement: Option<ActionReplacementOutput>,
+    safety_replacement: Option<ActionReplacementOutput>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthorityTraceOutput {
+    initial_authority: DecisionAuthority,
+    exact_family: Option<&'static str>,
+    exact_family_replacement: Option<ActionReplacementOutput>,
+    safety_replacement: Option<ActionReplacementOutput>,
+}
+
+struct ResponseDiagnostics {
+    rust_posterior_particles: usize,
+    rust_search_particles: usize,
+    root_provenance: RootProvenanceOutput,
+    authority_trace: AuthorityTraceOutput,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct Response {
     engine_revision: &'static str,
     authority: DecisionAuthority,
@@ -261,6 +326,11 @@ struct Response {
     deepest_decision_depth: u16,
     rollouts: u32,
     particles: usize,
+    wasm_particles: usize,
+    rust_posterior_particles: usize,
+    rust_search_particles: usize,
+    root_provenance: RootProvenanceOutput,
+    authority_trace: AuthorityTraceOutput,
     effective_particle_count: f32,
     deadline_reached: bool,
 }
@@ -610,11 +680,99 @@ fn action(action: Action) -> ActionOutput {
     output
 }
 
+fn root_prune_reason(reason: RootPruneReason) -> &'static str {
+    match reason {
+        RootPruneReason::RootExcluded => "root-excluded",
+        RootPruneReason::BranchTruncated => "branch-truncated",
+        RootPruneReason::TradeSafety => "trade-safety",
+        RootPruneReason::ExactFamilyCollapsed => "exact-family-collapsed",
+    }
+}
+
+fn exact_family_label(family: ExactActionFamily) -> &'static str {
+    match family {
+        ExactActionFamily::Mandatory => "mandatory",
+        ExactActionFamily::Knight => "knight",
+        ExactActionFamily::Monopoly => "monopoly",
+        ExactActionFamily::YearOfPlenty => "year-of-plenty",
+        ExactActionFamily::RoadBuilding => "road-building",
+    }
+}
+
+fn replacement_output(replacement: (Action, Action)) -> ActionReplacementOutput {
+    ActionReplacementOutput {
+        from: action(replacement.0),
+        to: action(replacement.1),
+    }
+}
+
+fn root_provenance_output(provenance: BeliefSearchProvenance) -> RootProvenanceOutput {
+    RootProvenanceOutput {
+        ranked_root_count: provenance.ranked_root_count,
+        ranked_roots: provenance
+            .ranked_roots
+            .into_iter()
+            .map(|candidate| RankedRootOutput {
+                action: action(candidate.action),
+                rank: candidate.rank,
+                prior: candidate.prior,
+                planner_value: candidate.planner_value,
+                planner_completion_mass: candidate.planner_completion_mass,
+            })
+            .collect(),
+        retained_roots: provenance
+            .retained_roots
+            .into_iter()
+            .map(|candidate| RetainedRootOutput {
+                action: action(candidate.action),
+                pre_truncation_rank: candidate.pre_truncation_rank,
+                prior: candidate.prior,
+                node_budget_per_particle: candidate.node_budget_per_particle,
+                allocated_nodes: candidate.allocated_nodes,
+                planner_value: candidate.planner_value,
+                planner_completion_mass: candidate.planner_completion_mass,
+            })
+            .collect(),
+        pruned_root_count: provenance.pruned_root_count,
+        pruned_roots: provenance
+            .pruned_roots
+            .into_iter()
+            .map(|candidate| PrunedRootOutput {
+                action: action(candidate.action),
+                pre_truncation_rank: candidate.pre_truncation_rank,
+                reason: root_prune_reason(candidate.reason),
+            })
+            .collect(),
+        exact_family_replacement: provenance
+            .exact_family_replacement
+            .map(replacement_output),
+        safety_replacement: provenance.safety_replacement.map(replacement_output),
+    }
+}
+
+fn basic_response_diagnostics(
+    particles: usize,
+    authority: DecisionAuthority,
+) -> ResponseDiagnostics {
+    ResponseDiagnostics {
+        rust_posterior_particles: particles,
+        rust_search_particles: particles,
+        root_provenance: RootProvenanceOutput::default(),
+        authority_trace: AuthorityTraceOutput {
+            initial_authority: authority,
+            exact_family: None,
+            exact_family_replacement: None,
+            safety_replacement: None,
+        },
+    }
+}
+
 fn response(
     report: SearchReport,
     particles: usize,
     algorithm: &'static str,
     authority: DecisionAuthority,
+    diagnostics: ResponseDiagnostics,
 ) -> Response {
     Response {
         engine_revision: ENGINE_REVISION,
@@ -654,6 +812,11 @@ fn response(
         deepest_decision_depth: report.statistics.deepest_decision_depth,
         rollouts: report.statistics.rollouts,
         particles,
+        wasm_particles: particles,
+        rust_posterior_particles: diagnostics.rust_posterior_particles,
+        rust_search_particles: diagnostics.rust_search_particles,
+        root_provenance: diagnostics.root_provenance,
+        authority_trace: diagnostics.authority_trace,
         effective_particle_count: report.statistics.effective_particle_count,
         deadline_reached: report.statistics.deadline_reached,
     }
@@ -844,6 +1007,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
             particles.len(),
             algorithm,
             DecisionAuthority::ExactMandatory,
+            basic_response_diagnostics(particles.len(), DecisionAuthority::ExactMandatory),
         ))
         .map_err(|error| JsValue::from_str(&error.to_string()));
     }
@@ -862,7 +1026,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
         particles[0].state.phase,
         Phase::SetupSettlement | Phase::SetupRoad { .. }
     );
-    let (report, authority) = if matches!(mode, RequestedMode::Maxn | RequestedMode::AlphaBeta) || opening {
+    let (report, authority, diagnostics) = if matches!(mode, RequestedMode::Maxn | RequestedMode::AlphaBeta) || opening {
         let depth = request.depth.unwrap_or(3).clamp(1, 6);
         let branch_cap = request.branch_cap.unwrap_or(12).clamp(2, 32);
         let maximum_nodes = request.max_nodes.unwrap_or(48_000).clamp(1_000, 250_000) as u32;
@@ -886,6 +1050,11 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
             )
         }
         .map_err(|error| JsValue::from_str(&format!("{error:?}")))?;
+        let rust_posterior_particles = depth_report.posterior_particles;
+        let rust_search_particles = depth_report.particles;
+        let depth_safety_replacement = depth_report.provenance.safety_replacement.clone();
+        let retained_root_priors = depth_report.provenance.retained_roots.clone();
+        let root_provenance = root_provenance_output(depth_report.provenance.clone());
         let tactical_particles = particles
             .iter()
             .map(|particle| (&particle.state, particle.weight))
@@ -898,15 +1067,21 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
         let actions = depth_report
             .actions
             .into_iter()
-            .map(|candidate| ActionStats {
-                action: candidate.action,
-                visits: particles.len() as u32,
-                availability: (candidate.legal_weight * particles.len() as f32).round() as u32,
-                availability_weight: candidate.legal_weight,
-                legal_weight: candidate.legal_weight,
-                prior: 0.0,
-                value: candidate.value,
-                lower_confidence_value: candidate.lower_confidence_value,
+            .map(|candidate| {
+                let prior = retained_root_priors
+                    .iter()
+                    .find(|root| root.action == candidate.action)
+                    .map_or(0.0, |root| root.prior);
+                ActionStats {
+                    action: candidate.action,
+                    visits: particles.len() as u32,
+                    availability: (candidate.legal_weight * particles.len() as f32).round() as u32,
+                    availability_weight: candidate.legal_weight,
+                    legal_weight: candidate.legal_weight,
+                    prior,
+                    value: candidate.value,
+                    lower_confidence_value: candidate.lower_confidence_value,
+                }
             })
             .collect::<Vec<_>>();
         let mut exact = solve_exact_belief_excluding(
@@ -918,9 +1093,15 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
             DecisionAuthority::ExactMandatory
         } else if tactical.proven {
             DecisionAuthority::TacticalProven
+        } else if depth_safety_replacement.is_some() {
+            DecisionAuthority::SafetyOverride
         } else {
             DecisionAuthority::DeepMaxn
         };
+        let initial_authority = authority;
+        let mut exact_family = None;
+        let mut exact_family_replacement = None;
+        let mut safety_replacement = depth_safety_replacement.map(replacement_output);
         let mut chosen = if exact.applicable {
             exact.chosen.clone()
         } else if tactical.proven {
@@ -932,9 +1113,19 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
             && !tactical.proven
             && let Some(family) = chosen.as_ref().and_then(exact_family_for_action)
         {
+            exact_family = Some(exact_family_label(family));
+            let before = chosen.clone();
             exact = solve_exact_belief_excluding(&particles, family, &root_exclusions);
-            if exact.chosen.is_some() {
-                chosen = exact.chosen.clone();
+            if let Some(exact_chosen) = exact.chosen.clone() {
+                if before.as_ref() != Some(&exact_chosen)
+                    && let Some(previous) = before
+                {
+                    exact_family_replacement = Some(ActionReplacementOutput {
+                        from: action(previous),
+                        to: action(exact_chosen.clone()),
+                    });
+                }
+                chosen = Some(exact_chosen);
                 authority = DecisionAuthority::ExactFamily;
             }
         }
@@ -949,9 +1140,26 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
                 Some(&particles),
             )
         {
+            if safer != Action::EndTurn {
+                safety_replacement = Some(ActionReplacementOutput {
+                    from: action(Action::EndTurn),
+                    to: action(safer.clone()),
+                });
+            }
             chosen = Some(safer);
             authority = DecisionAuthority::SafetyOverride;
         }
+        let diagnostics = ResponseDiagnostics {
+            rust_posterior_particles,
+            rust_search_particles,
+            root_provenance,
+            authority_trace: AuthorityTraceOutput {
+                initial_authority,
+                exact_family,
+                exact_family_replacement,
+                safety_replacement,
+            },
+        };
         (SearchReport {
             chosen,
             root_value: depth_report.value,
@@ -966,7 +1174,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
                 effective_particle_count: effective_particle_count(&particles),
                 deadline_reached: depth_report.deadline_reached,
             },
-        }, authority)
+        }, authority, diagnostics)
     } else {
         let mut groups = Vec::<(u64, Vec<BeliefParticle>)>::new();
         for particle in &particles {
@@ -1032,9 +1240,17 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
                 .map(|(_, report)| report)
                 .ok_or_else(|| JsValue::from_str("pondering produced no search group"))
         })?;
-        (report, DecisionAuthority::DeepMaxn)
+        let authority = DecisionAuthority::DeepMaxn;
+        let diagnostics = basic_response_diagnostics(particles.len(), authority);
+        (report, authority, diagnostics)
     };
-    serde_wasm_bindgen::to_value(&response(report, particles.len(), algorithm, authority))
+    serde_wasm_bindgen::to_value(&response(
+        report,
+        particles.len(),
+        algorithm,
+        authority,
+        diagnostics,
+    ))
         .map_err(|error| JsValue::from_str(&error.to_string()))
 }
 

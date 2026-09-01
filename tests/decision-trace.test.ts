@@ -134,6 +134,38 @@ describe("decision trace recorder", () => {
         deepestDecisionDepth: 3,
         rollouts: 12,
         particles: 3,
+        sourceWorldCount: 5,
+        wasmParticleCount: 3,
+        rustPosteriorParticleCount: 3,
+        rustSearchParticleCount: 2,
+        rootProvenance: {
+          rankedRootCount: 1,
+          rankedRoots: [
+            {
+              action: { kind: "build-city", targetId: "v1" },
+              rank: 1,
+              prior: 0.5,
+              plannerValue: 0.61,
+              plannerCompletionMass: 1,
+            },
+          ],
+          retainedRoots: [
+            {
+              action: { kind: "build-city", targetId: "v1" },
+              preTruncationRank: 1,
+              prior: 0.5,
+              nodeBudgetPerParticle: 10,
+              allocatedNodes: 30,
+              plannerValue: 0.61,
+              plannerCompletionMass: 1,
+            },
+          ],
+          prunedRootCount: 0,
+          prunedRoots: [],
+        },
+        authorityTrace: {
+          initialAuthority: "deep-maxn",
+        },
         effectiveParticleCount: 2.8,
         deadlineReached: true,
         elapsedMs: 4,
@@ -144,7 +176,7 @@ describe("decision trace recorder", () => {
     recorder.final(
       "state-17",
       { kind: "build", build: "city" },
-      "deep",
+      "deep-maxn",
     );
     recorder.execution("state-17", true);
     await vi.advanceTimersByTimeAsync(250);
@@ -159,7 +191,12 @@ describe("decision trace recorder", () => {
       stateHash: "state-17",
       turn: 17,
       deepTimedOut: true,
-      finalActionSource: "deep",
+      finalActionSource: "deep-maxn",
+      sourceWorldCount: 5,
+      wasmParticleCount: 3,
+      rustPosteriorParticleCount: 3,
+      rustSearchParticleCount: 2,
+      rustAuthority: "deep-maxn",
       executedBeforeDeepResult: false,
       executionSucceeded: true,
     });

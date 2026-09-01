@@ -804,6 +804,37 @@ describe("deep-search state adapter", () => {
     expect(response.chosen).toBeDefined();
     expect(response.actions.length).toBeGreaterThan(0);
     expect(response.particles).toBe(built.request.state.worlds.length);
+    expect(response.wasmParticles).toBe(built.request.state.worlds.length);
+    expect(response.rustPosteriorParticles).toBe(response.wasmParticles);
+    expect(response.rustSearchParticles).toBeGreaterThan(0);
+    expect(response.rustSearchParticles).toBeLessThanOrEqual(
+      response.rustPosteriorParticles,
+    );
+    expect(response.rootProvenance.rankedRootCount).toBeGreaterThanOrEqual(
+      response.rootProvenance.retainedRoots.length,
+    );
+    expect(response.rootProvenance.retainedRoots.length).toBeLessThanOrEqual(
+      built.request.branchCap,
+    );
+    expect(
+      response.rootProvenance.retainedRoots.every(
+        (candidate) =>
+          candidate.preTruncationRank === undefined ||
+          candidate.preTruncationRank > 0,
+      ),
+    ).toBe(true);
+    expect(
+      response.rootProvenance.retainedRoots.every(
+        (candidate) => candidate.allocatedNodes > 0,
+      ),
+    ).toBe(true);
+    expect([
+      "exact-mandatory",
+      "tactical-proven",
+      "deep-maxn",
+      "exact-family",
+      "safety-override",
+    ]).toContain(response.authorityTrace.initialAuthority);
     expect(response.nodes).toBeLessThanOrEqual(built.request.maxNodes);
     expect(typeof response.deadlineReached).toBe("boolean");
     // This is deliberately the cold packaged boundary, not fastest-of-three.

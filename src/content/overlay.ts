@@ -1447,11 +1447,7 @@ export class AssistantOverlay {
   private decisionSourceForAuthority(
     authority: DecisionAuthority,
   ): DecisionActionSource {
-    if (authority === "exact-mandatory") return "mandatory";
-    if (authority === "tactical-proven" || authority === "safety-override") {
-      return "tactical";
-    }
-    return "deep";
+    return authority;
   }
 
   private decisionSource(
@@ -1462,7 +1458,7 @@ export class AssistantOverlay {
       const authority = this.decisionAnalysis?.deepSearch?.authority;
       return authority
         ? this.decisionSourceForAuthority(authority)
-        : "deep";
+        : "deep-maxn";
     }
     if (next.kind === "discard" || next.kind === "player") {
       return "mandatory";
@@ -1488,7 +1484,7 @@ export class AssistantOverlay {
         )
       )
     ) {
-      return "deep";
+      return this.decisionAnalysis?.deepSearch?.authority ?? "deep-maxn";
     }
     if (next.kind === "turn-control" && next.control === "end") {
       return "end-turn-fallback";
@@ -2910,6 +2906,10 @@ export class AssistantOverlay {
       }
       if (deepAction.kind === "offer-trade") {
         if (!deepAction.cards || !deepAction.receiveCards) {
+          this.decisionTraces.mappingFailure(
+            this.decisionKey,
+            "rust-offer-trade-missing-card-bundle",
+          );
           return undefined;
         }
         return {
@@ -2945,6 +2945,10 @@ export class AssistantOverlay {
       // The selected action could not be mapped to a validated live control.
       // The changed board signature must be searched again; no legacy policy
       // is allowed to silently choose a different action.
+      this.decisionTraces.mappingFailure(
+        this.decisionKey,
+        "rust-action-could-not-map-to-live-control",
+      );
       return undefined;
     }
     if (board.isMyTurn && deep) {

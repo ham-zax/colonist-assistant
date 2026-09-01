@@ -2,7 +2,10 @@ import initWasm, {
   analyze as analyzeWasm,
   engine_version as engineVersion,
   type WasmAction,
+  type WasmActionReplacement,
   type WasmActionStatistics,
+  type WasmAuthorityTrace,
+  type WasmRootProvenance,
   type WasmSearchResponse,
 } from "../generated/wasm/colonist_search.js";
 import {
@@ -549,6 +552,97 @@ const mapAction = (
         }
       : {}),
     ...(action.accept !== undefined ? { accept: action.accept } : {}),
+  };
+};
+
+const mapActionReplacement = (
+  replacement: WasmActionReplacement | undefined,
+  players: string[],
+  board: BoardSnapshot,
+) =>
+  replacement
+    ? {
+        from: mapAction(replacement.from, players, board),
+        to: mapAction(replacement.to, players, board),
+      }
+    : undefined;
+
+const mapRootProvenance = (
+  provenance: WasmRootProvenance,
+  players: string[],
+  board: BoardSnapshot,
+) => {
+  const exactFamilyReplacement = mapActionReplacement(
+    provenance.exactFamilyReplacement,
+    players,
+    board,
+  );
+  const safetyReplacement = mapActionReplacement(
+    provenance.safetyReplacement,
+    players,
+    board,
+  );
+  return {
+    rankedRootCount: provenance.rankedRootCount,
+    rankedRoots: provenance.rankedRoots.map((candidate) => ({
+      action: mapAction(candidate.action, players, board),
+      rank: candidate.rank,
+      prior: candidate.prior,
+      ...(candidate.plannerValue !== undefined
+        ? { plannerValue: candidate.plannerValue }
+        : {}),
+      ...(candidate.plannerCompletionMass !== undefined
+        ? { plannerCompletionMass: candidate.plannerCompletionMass }
+        : {}),
+    })),
+    retainedRoots: provenance.retainedRoots.map((candidate) => ({
+      action: mapAction(candidate.action, players, board),
+      ...(candidate.preTruncationRank !== undefined
+        ? { preTruncationRank: candidate.preTruncationRank }
+        : {}),
+      prior: candidate.prior,
+      nodeBudgetPerParticle: candidate.nodeBudgetPerParticle,
+      allocatedNodes: candidate.allocatedNodes,
+      ...(candidate.plannerValue !== undefined
+        ? { plannerValue: candidate.plannerValue }
+        : {}),
+      ...(candidate.plannerCompletionMass !== undefined
+        ? { plannerCompletionMass: candidate.plannerCompletionMass }
+        : {}),
+    })),
+    prunedRootCount: provenance.prunedRootCount,
+    prunedRoots: provenance.prunedRoots.map((candidate) => ({
+      action: mapAction(candidate.action, players, board),
+      ...(candidate.preTruncationRank !== undefined
+        ? { preTruncationRank: candidate.preTruncationRank }
+        : {}),
+      reason: candidate.reason,
+    })),
+    ...(exactFamilyReplacement ? { exactFamilyReplacement } : {}),
+    ...(safetyReplacement ? { safetyReplacement } : {}),
+  };
+};
+
+const mapAuthorityTrace = (
+  trace: WasmAuthorityTrace,
+  players: string[],
+  board: BoardSnapshot,
+) => {
+  const exactFamilyReplacement = mapActionReplacement(
+    trace.exactFamilyReplacement,
+    players,
+    board,
+  );
+  const safetyReplacement = mapActionReplacement(
+    trace.safetyReplacement,
+    players,
+    board,
+  );
+  return {
+    initialAuthority: trace.initialAuthority,
+    ...(trace.exactFamily ? { exactFamily: trace.exactFamily } : {}),
+    ...(exactFamilyReplacement ? { exactFamilyReplacement } : {}),
+    ...(safetyReplacement ? { safetyReplacement } : {}),
   };
 };
 
@@ -1182,10 +1276,11 @@ export const analyzeDeepSearch = async (
   const startedAt = performance.now();
   const response = analyzeWasm(request) as WasmSearchResponse;
   const elapsedMs = performance.now() - startedAt;
-  const selected =
-    response.chosen && matchingPrompt(response.chosen, board)
-      ? response.chosen
+  const mappingFailureReason =
+    response.chosen && !matchingPrompt(response.chosen, board)
+      ? "rust-chosen-action-does-not-match-live-prompt"
       : undefined;
+  const selected = mappingFailureReason ? undefined : response.chosen;
   const search: DeepSearchResult = {
     engineRevision: response.engineRevision,
     rootIndex: root,
@@ -1220,7 +1315,22 @@ export const analyzeDeepSearch = async (
     nodes: response.nodes,
     deepestDecisionDepth: response.deepestDecisionDepth,
     rollouts: response.rollouts,
-    particles: response.particles,
+    particles: response.wasmParticles,
+    sourceWorldCount: state.worlds.length,
+    wasmParticleCount: response.wasmParticles,
+    rustPosteriorParticleCount: response.rustPosteriorParticles,
+    rustSearchParticleCount: response.rustSearchParticles,
+    rootProvenance: mapRootProvenance(
+      response.rootProvenance,
+      players,
+      board,
+    ),
+    authorityTrace: mapAuthorityTrace(
+      response.authorityTrace,
+      players,
+      board,
+    ),
+    ...(mappingFailureReason ? { mappingFailureReason } : {}),
     effectiveParticleCount: response.effectiveParticleCount,
     deadlineReached: response.deadlineReached,
     elapsedMs,

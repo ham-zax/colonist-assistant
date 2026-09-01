@@ -6,7 +6,7 @@ use crate::exact::{ExactActionFamily, solve_exact_belief};
 use crate::mcts::BeliefParticle;
 use crate::opening::opening_adjusted_priors;
 use crate::opening::{OpeningConfig, solve_opening};
-use crate::planner::plan_adjusted_priors;
+use crate::planner::{plan_adjusted_priors, plan_adjusted_priors_with_plans};
 use crate::policy::{
     allocate_root_node_budgets, normalize_observed_priors, normalize_priors,
     order_scored_with_state_quotas, rank_with_class_quotas, truncate_root_preserving_end_turn,
@@ -20,6 +20,7 @@ use crate::trade_safety::belief_domestic_trade_threat;
 const DEFAULT_DEPTH_NODE_BUDGET: u32 = 8_000;
 const DOMESTIC_OFFER_FRICTION: f32 = 0.006;
 const COUNTEROFFER_FRICTION: f32 = 0.004;
+const MAX_ROOT_PROVENANCE: usize = 256;
 
 #[derive(Clone, Debug)]
 pub struct DepthActionValue {
@@ -40,6 +41,52 @@ pub struct DepthSearchResult {
     pub deadline_reached: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootPruneReason {
+    RootExcluded,
+    BranchTruncated,
+    TradeSafety,
+    ExactFamilyCollapsed,
+}
+
+#[derive(Clone, Debug)]
+pub struct RankedRootDiagnostic {
+    pub action: Action,
+    pub rank: usize,
+    pub prior: f32,
+    pub planner_value: Option<f32>,
+    pub planner_completion_mass: Option<f32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RetainedRootDiagnostic {
+    pub action: Action,
+    pub pre_truncation_rank: Option<usize>,
+    pub prior: f32,
+    pub node_budget_per_particle: u32,
+    pub allocated_nodes: u32,
+    pub planner_value: Option<f32>,
+    pub planner_completion_mass: Option<f32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PrunedRootDiagnostic {
+    pub action: Action,
+    pub pre_truncation_rank: Option<usize>,
+    pub reason: RootPruneReason,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct BeliefSearchProvenance {
+    pub ranked_root_count: usize,
+    pub ranked_roots: Vec<RankedRootDiagnostic>,
+    pub retained_roots: Vec<RetainedRootDiagnostic>,
+    pub pruned_root_count: usize,
+    pub pruned_roots: Vec<PrunedRootDiagnostic>,
+    pub exact_family_replacement: Option<(Action, Action)>,
+    pub safety_replacement: Option<(Action, Action)>,
+}
+
 #[derive(Clone, Debug)]
 pub struct BeliefDepthResult {
     pub chosen: Option<Action>,
@@ -53,6 +100,7 @@ pub struct BeliefDepthResult {
     /// Weighted particles supplied to this Rust belief search before coalescing.
     pub posterior_particles: usize,
     pub deadline_reached: bool,
+    pub provenance: BeliefSearchProvenance,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -223,15 +271,18 @@ struct Searcher {
     observation_safe_recursive: bool,
 }
 
-fn normalize_belief_root_priors(
+fn normalize_belief_root_priors_with_diagnostics(
     particles: &[BeliefParticle],
     actor: u8,
     planner_nodes: u32,
-) -> Vec<(Action, f32)> {
+) -> Vec<RankedRootDiagnostic> {
     struct Aggregate {
         action: Action,
         prior: f32,
         quota_score: f32,
+        planner_value: f32,
+        planner_completion_mass: f32,
+        planner_weight: f32,
     }
 
     let total_weight = particles
@@ -254,22 +305,37 @@ fn normalize_belief_root_priors(
         }
         let legal = particle.state.legal_actions();
         let mut ranked = normalize_priors(&particle.state, &legal, actor);
-        plan_adjusted_priors(&particle.state, &mut ranked, per_particle_planner_nodes);
+        let plans = plan_adjusted_priors_with_plans(
+            &particle.state,
+            &mut ranked,
+            per_particle_planner_nodes,
+        );
         let ordered = order_scored_with_state_quotas(&particle.state, actor, ranked);
         let rank_scale = ordered.len().max(1) as f32;
         for (position, (action, prior)) in ordered.into_iter().enumerate() {
             let quota_score = (rank_scale - position as f32) / rank_scale;
+            let planner = plans.iter().find(|plan| plan.first_action == action);
+            let planner_weight = planner.map_or(0.0, |_| weight);
+            let planner_value = planner.map_or(0.0, |plan| plan.value * weight);
+            let planner_completion_mass =
+                planner.map_or(0.0, |plan| plan.completion_mass * weight);
             if let Some(existing) = aggregate
                 .iter_mut()
                 .find(|candidate| candidate.action == action)
             {
                 existing.prior += prior * weight;
                 existing.quota_score += quota_score * weight;
+                existing.planner_value += planner_value;
+                existing.planner_completion_mass += planner_completion_mass;
+                existing.planner_weight += planner_weight;
             } else {
                 aggregate.push(Aggregate {
                     action,
                     prior: prior * weight,
                     quota_score: quota_score * weight,
+                    planner_value,
+                    planner_completion_mass,
+                    planner_weight,
                 });
             }
         }
@@ -291,6 +357,27 @@ fn normalize_belief_root_priors(
             .then_with(|| format!("{:?}", left.action).cmp(&format!("{:?}", right.action)))
     });
     aggregate
+        .into_iter()
+        .enumerate()
+        .map(|(rank, candidate)| RankedRootDiagnostic {
+            action: candidate.action,
+            rank: rank + 1,
+            prior: candidate.prior,
+            planner_value: (candidate.planner_weight > f32::EPSILON)
+                .then_some(candidate.planner_value / candidate.planner_weight),
+            planner_completion_mass: (candidate.planner_weight > f32::EPSILON)
+                .then_some(candidate.planner_completion_mass.clamp(0.0, 1.0)),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn normalize_belief_root_priors(
+    particles: &[BeliefParticle],
+    actor: u8,
+    planner_nodes: u32,
+) -> Vec<(Action, f32)> {
+    normalize_belief_root_priors_with_diagnostics(particles, actor, planner_nodes)
         .into_iter()
         .map(|candidate| (candidate.action, candidate.prior))
         .collect()
@@ -811,6 +898,7 @@ fn belief_search(
             particles: particles.len(),
             posterior_particles: particles.len(),
             deadline_reached: report.deadline_reached,
+            provenance: BeliefSearchProvenance::default(),
         });
     }
     // Preserve every distinct WASM world in production. Exact-identical states
@@ -854,8 +942,24 @@ fn belief_search(
         .sum::<f32>()
         .max(f32::EPSILON);
     let planner_nodes = (maximum_nodes / 12).clamp(300, 4_000);
-    let mut root_scored = normalize_belief_root_priors(particles, observer, planner_nodes);
-    root_scored.retain(|(action, _)| !root_exclusions.contains(action));
+    let ranked_diagnostics =
+        normalize_belief_root_priors_with_diagnostics(particles, observer, planner_nodes);
+    let ranked_root_count = ranked_diagnostics.len();
+    let mut pruned_roots = Vec::<PrunedRootDiagnostic>::new();
+    for candidate in &ranked_diagnostics {
+        if root_exclusions.contains(&candidate.action) {
+            pruned_roots.push(PrunedRootDiagnostic {
+                action: candidate.action.clone(),
+                pre_truncation_rank: Some(candidate.rank),
+                reason: RootPruneReason::RootExcluded,
+            });
+        }
+    }
+    let root_scored = ranked_diagnostics
+        .iter()
+        .filter(|candidate| !root_exclusions.contains(&candidate.action))
+        .map(|candidate| (candidate.action.clone(), candidate.prior))
+        .collect::<Vec<_>>();
     let immediate_threat_weight = posterior_immediate_threat_weight(
         posterior
             .iter()
@@ -880,7 +984,8 @@ fn belief_search(
     } else {
         Vec::new()
     };
-    let ordinarily_retained = truncate_root_preserving_end_turn(root_scored, branch_cap);
+    let ordinarily_retained =
+        truncate_root_preserving_end_turn(root_scored.clone(), branch_cap);
     let mut retained = Vec::with_capacity(branch_cap.max(1));
     for candidate in verified_blockers.into_iter().chain(ordinarily_retained) {
         if retained.len() >= branch_cap.max(1) {
@@ -890,52 +995,93 @@ fn belief_search(
             retained.push(candidate);
         }
     }
-    let mut root_actions = retained
-        .into_iter()
-        .map(|(action, _)| action)
-        .collect::<Vec<_>>();
+    for (action, _) in &root_scored {
+        if !retained
+            .iter()
+            .any(|(retained_action, _)| retained_action == action)
+        {
+            pruned_roots.push(PrunedRootDiagnostic {
+                action: action.clone(),
+                pre_truncation_rank: ranked_diagnostics
+                    .iter()
+                    .find(|candidate| candidate.action == *action)
+                    .map(|candidate| candidate.rank),
+                reason: RootPruneReason::BranchTruncated,
+            });
+        }
+    }
+    let mut root_actions = retained;
+    let mut exact_family_replacement = None;
     // Monopoly's five resource parameters share one strategic family slot.
     // Pick that representative over the complete posterior before MaxN spends
     // its root budget; a production-based public prior cannot know which
     // accumulated resource the opponents are actually holding.
     if let Some(monopoly_slot) = root_actions
         .iter()
-        .position(|action| matches!(action, Action::PlayMonopoly { .. }))
+        .position(|(action, _)| matches!(action, Action::PlayMonopoly { .. }))
     {
-        let fallback = root_actions[monopoly_slot].clone();
+        let (fallback, fallback_prior) = root_actions[monopoly_slot].clone();
         let replacement = solve_exact_belief(particles, ExactActionFamily::Monopoly)
             .chosen
-            .unwrap_or(fallback);
-        root_actions.retain(|action| !matches!(action, Action::PlayMonopoly { .. }));
-        root_actions.insert(monopoly_slot.min(root_actions.len()), replacement);
+            .unwrap_or_else(|| fallback.clone());
+        for (action, _) in root_actions
+            .iter()
+            .filter(|(action, _)| matches!(action, Action::PlayMonopoly { .. }))
+        {
+            if action != &replacement {
+                pruned_roots.push(PrunedRootDiagnostic {
+                    action: action.clone(),
+                    pre_truncation_rank: ranked_diagnostics
+                        .iter()
+                        .find(|candidate| candidate.action == *action)
+                        .map(|candidate| candidate.rank),
+                    reason: RootPruneReason::ExactFamilyCollapsed,
+                });
+            }
+        }
+        if replacement != fallback {
+            exact_family_replacement = Some((fallback, replacement.clone()));
+        }
+        let replacement_prior = ranked_diagnostics
+            .iter()
+            .find(|candidate| candidate.action == replacement)
+            .map_or(fallback_prior, |candidate| candidate.prior);
+        root_actions.retain(|(action, _)| !matches!(action, Action::PlayMonopoly { .. }));
+        root_actions.insert(
+            monopoly_slot.min(root_actions.len()),
+            (replacement, replacement_prior),
+        );
     }
     let mut unique_root_actions = Vec::with_capacity(root_actions.len());
-    for action in root_actions {
-        if !unique_root_actions.contains(&action) {
-            unique_root_actions.push(action);
+    for candidate in root_actions {
+        if !unique_root_actions
+            .iter()
+            .any(|(action, _)| action == &candidate.0)
+        {
+            unique_root_actions.push(candidate);
         }
     }
     let mut root_actions = unique_root_actions;
-    debug_assert!(root_actions.iter().enumerate().all(|(index, action)| {
+    debug_assert!(root_actions.iter().enumerate().all(|(index, (action, _))| {
         root_actions
             .iter()
             .skip(index + 1)
-            .all(|other| other != action)
+            .all(|(other, _)| other != action)
     }));
     debug_assert_eq!(
         root_actions
             .iter()
-            .filter(|action| matches!(action, Action::PlayMonopoly { .. }))
+            .filter(|(action, _)| matches!(action, Action::PlayMonopoly { .. }))
             .count(),
         usize::from(
             root_actions
                 .iter()
-                .any(|action| matches!(action, Action::PlayMonopoly { .. }))
+                .any(|(action, _)| matches!(action, Action::PlayMonopoly { .. }))
         ),
     );
     let safe_root_actions = root_actions
         .iter()
-        .filter(|action| {
+        .filter(|(action, _)| {
             belief_domestic_trade_threat(
                 particles
                     .iter()
@@ -947,6 +1093,21 @@ fn belief_search(
         .cloned()
         .collect::<Vec<_>>();
     if !safe_root_actions.is_empty() {
+        for (action, _) in &root_actions {
+            if !safe_root_actions
+                .iter()
+                .any(|(safe_action, _)| safe_action == action)
+            {
+                pruned_roots.push(PrunedRootDiagnostic {
+                    action: action.clone(),
+                    pre_truncation_rank: ranked_diagnostics
+                        .iter()
+                        .find(|candidate| candidate.action == *action)
+                        .map(|candidate| candidate.rank),
+                    reason: RootPruneReason::TradeSafety,
+                });
+            }
+        }
         root_actions = safe_root_actions;
     }
     // Concentrate nodes on the leading root actions instead of giving every
@@ -956,6 +1117,50 @@ fn belief_search(
         root_actions.len(),
         maximum_nodes / particles.len().max(1) as u32,
     );
+    let positive_particle_count = particles
+        .iter()
+        .filter(|particle| particle.weight > 0.0)
+        .count()
+        .max(1) as u32;
+    let retained_roots = root_actions
+        .iter()
+        .zip(action_budgets.iter().copied())
+        .map(|((action, prior), node_budget_per_particle)| {
+            let diagnostic = ranked_diagnostics
+                .iter()
+                .find(|candidate| candidate.action == *action);
+            RetainedRootDiagnostic {
+                action: action.clone(),
+                pre_truncation_rank: diagnostic.map(|candidate| candidate.rank),
+                prior: *prior,
+                node_budget_per_particle,
+                allocated_nodes: node_budget_per_particle
+                    .saturating_mul(positive_particle_count),
+                planner_value: diagnostic.and_then(|candidate| candidate.planner_value),
+                planner_completion_mass: diagnostic
+                    .and_then(|candidate| candidate.planner_completion_mass),
+            }
+        })
+        .collect::<Vec<_>>();
+    let pruned_root_count = pruned_roots.len();
+    pruned_roots.truncate(MAX_ROOT_PROVENANCE);
+    let mut provenance = BeliefSearchProvenance {
+        ranked_root_count,
+        ranked_roots: ranked_diagnostics
+            .iter()
+            .take(MAX_ROOT_PROVENANCE)
+            .cloned()
+            .collect(),
+        retained_roots,
+        pruned_root_count,
+        pruned_roots,
+        exact_family_replacement,
+        safety_replacement: None,
+    };
+    let root_actions = root_actions
+        .into_iter()
+        .map(|(action, _)| action)
+        .collect::<Vec<_>>();
     for particle in particles {
         let weight = particle.weight.max(0.0) / total_weight;
         if weight <= 0.0 {
@@ -1109,6 +1314,14 @@ fn belief_search(
             chosen_index = escape_index;
         }
     }
+    if chosen_index > 0
+        && let (Some(leading), Some(replacement)) = (actions.first(), actions.get(chosen_index))
+    {
+        provenance.safety_replacement = Some((
+            leading.action.clone(),
+            replacement.action.clone(),
+        ));
+    }
     let chosen = actions
         .get(chosen_index)
         .map(|entry| entry.action.clone());
@@ -1126,6 +1339,7 @@ fn belief_search(
         particles: particles_searched,
         posterior_particles,
         deadline_reached,
+        provenance,
     })
 }
 

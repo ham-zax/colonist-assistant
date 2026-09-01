@@ -28,6 +28,56 @@ export type WasmDecisionAuthority =
   | "exact-family"
   | "safety-override";
 
+export interface WasmActionReplacement {
+  from: WasmAction;
+  to: WasmAction;
+}
+
+export interface WasmRankedRoot {
+  action: WasmAction;
+  rank: number;
+  prior: number;
+  plannerValue?: number;
+  plannerCompletionMass?: number;
+}
+
+export interface WasmRetainedRoot {
+  action: WasmAction;
+  preTruncationRank?: number;
+  prior: number;
+  nodeBudgetPerParticle: number;
+  allocatedNodes: number;
+  plannerValue?: number;
+  plannerCompletionMass?: number;
+}
+
+export interface WasmPrunedRoot {
+  action: WasmAction;
+  preTruncationRank?: number;
+  reason:
+    | "root-excluded"
+    | "branch-truncated"
+    | "trade-safety"
+    | "exact-family-collapsed";
+}
+
+export interface WasmRootProvenance {
+  rankedRootCount: number;
+  rankedRoots: WasmRankedRoot[];
+  retainedRoots: WasmRetainedRoot[];
+  prunedRootCount: number;
+  prunedRoots: WasmPrunedRoot[];
+  exactFamilyReplacement?: WasmActionReplacement;
+  safetyReplacement?: WasmActionReplacement;
+}
+
+export interface WasmAuthorityTrace {
+  initialAuthority: WasmDecisionAuthority;
+  exactFamily?: string;
+  exactFamilyReplacement?: WasmActionReplacement;
+  safetyReplacement?: WasmActionReplacement;
+}
+
 export interface WasmSearchResponse {
   engineRevision: string;
   authority: WasmDecisionAuthority;
@@ -48,6 +98,11 @@ export interface WasmSearchResponse {
   deepestDecisionDepth: number;
   rollouts: number;
   particles: number;
+  wasmParticles: number;
+  rustPosteriorParticles: number;
+  rustSearchParticles: number;
+  rootProvenance: WasmRootProvenance;
+  authorityTrace: WasmAuthorityTrace;
   effectiveParticleCount: number;
   deadlineReached: boolean;
 }

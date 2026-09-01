@@ -1,12 +1,17 @@
 import type { BoardSnapshot } from "./placement";
 import { DECISION_TRACE_STORAGE_KEY } from "./local-data";
 import { RESOURCE_ORDER } from "./resources";
-import type { DeepSearchAction, DecisionAnalysis } from "./engine";
+import type {
+  DeepSearchAction,
+  DeepSearchAuthorityTrace,
+  DeepSearchRootProvenance,
+  DecisionAnalysis,
+  DecisionAuthority,
+} from "./engine";
 import type { TrackerState } from "./types";
 
 export type DecisionActionSource =
-  | "tactical"
-  | "deep"
+  | DecisionAuthority
   | "incoming-trade-evaluator"
   | "road-plan"
   | "placement-heuristic"
@@ -21,6 +26,7 @@ export interface DecisionTraceCandidate {
   availabilityWeight?: number;
   legalWeight?: number;
   lowerConfidenceValue?: number;
+  prior?: number;
 }
 
 export interface DecisionTrace {
@@ -30,6 +36,10 @@ export interface DecisionTrace {
   hand: [number, number, number, number, number];
   publicVictoryPoints: number[];
   beliefParticleCount: number;
+  sourceWorldCount: number;
+  wasmParticleCount?: number;
+  rustPosteriorParticleCount?: number;
+  rustSearchParticleCount?: number;
   effectiveParticleCount?: number;
   deepRequestStartedAt?: number;
   deepRequestFinishedAt?: number;
@@ -37,6 +47,10 @@ export interface DecisionTrace {
   deepTimedOut: boolean;
   deepChosenAction?: DeepSearchAction;
   deepCandidates?: DecisionTraceCandidate[];
+  rustAuthority?: DecisionAuthority;
+  authorityTrace?: DeepSearchAuthorityTrace;
+  rootProvenance?: DeepSearchRootProvenance;
+  mappingFailureReason?: string;
   finalAction?: unknown;
   finalActionSource?: DecisionActionSource;
   executedBeforeDeepResult: boolean;
@@ -98,6 +112,7 @@ export class DecisionTraceRecorder {
       publicVictoryPoints: (board.playerOrder ?? Object.keys(board.players ?? {}))
         .map((player) => board.players?.[player]?.visiblePoints ?? 0),
       beliefParticleCount: state.worlds.length,
+      sourceWorldCount: state.worlds.length,
       deepRequestStartedAt: startedAt,
       deepTimedOut: false,
       executedBeforeDeepResult: false,
@@ -137,9 +152,20 @@ export class DecisionTraceRecorder {
       analysis.deepSearch?.learnedModelVersion;
     trace.tradeModelVersion =
       analysis.deepSearch?.tradeModelVersion;
+    trace.sourceWorldCount =
+      analysis.deepSearch?.sourceWorldCount ?? trace.sourceWorldCount;
+    trace.wasmParticleCount = analysis.deepSearch?.wasmParticleCount;
+    trace.rustPosteriorParticleCount =
+      analysis.deepSearch?.rustPosteriorParticleCount;
+    trace.rustSearchParticleCount =
+      analysis.deepSearch?.rustSearchParticleCount;
     trace.effectiveParticleCount =
       analysis.deepSearch?.effectiveParticleCount;
     trace.seed = analysis.deepSearch?.seed;
+    trace.rustAuthority = analysis.deepSearch?.authority;
+    trace.authorityTrace = analysis.deepSearch?.authorityTrace;
+    trace.rootProvenance = analysis.deepSearch?.rootProvenance;
+    trace.mappingFailureReason = analysis.deepSearch?.mappingFailureReason;
     trace.deepChosenAction = analysis.deepSearch?.chosen;
     trace.deepCandidates = analysis.deepSearch?.actions.map((candidate) => ({
       action: candidate.action,
@@ -150,7 +176,15 @@ export class DecisionTraceRecorder {
       lowerConfidenceValue:
         candidate.lowerConfidenceValue[rootIndex] ??
         candidate.lowerConfidenceValue[0],
+      prior: candidate.prior,
     }));
+    this.schedulePersist();
+  }
+
+  mappingFailure(stateHash: string, reason: string): void {
+    const trace = this.traces.get(stateHash);
+    if (!trace || trace.mappingFailureReason === reason) return;
+    trace.mappingFailureReason = reason;
     this.schedulePersist();
   }
 
