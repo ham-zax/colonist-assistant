@@ -224,6 +224,28 @@ describe("tracker posterior integrity", () => {
     expect(worlds.reduce((sum, world) => sum + world.weight, 0)).toBeCloseTo(1, 10);
   });
 
+  it("matches the enumerable joint hand-composition conditional", () => {
+    const worlds = seedPublicResourceWorlds({
+      playerOrder: ["You", "A", "B"],
+      ownPlayer: "You",
+      exactOwnHand: resources(0, 0, 0, 0, 0),
+      handSizes: { You: 0, A: 2, B: 2 },
+      bank: resources(2, 0, 2, 0, 2),
+      resourceSupply: 2,
+      seed: 17,
+      sampleCount: 600,
+    });
+    const massForBrickCount = (brick: number) =>
+      worlds
+        .filter((world) => (world.hands.A?.brick ?? 0) === brick)
+        .reduce((sum, world) => sum + world.weight, 0);
+
+    expect(Math.abs(massForBrickCount(2) - 1 / 6)).toBeLessThan(0.02);
+    expect(Math.abs(massForBrickCount(1) - 2 / 3)).toBeLessThan(0.02);
+    expect(Math.abs(massForBrickCount(0) - 1 / 6)).toBeLessThan(0.02);
+    expect(worlds.reduce((sum, world) => sum + world.weight, 0)).toBeCloseTo(1, 10);
+  });
+
   it("rejects fallback snapshots whose public slots exceed physical supply", () => {
     expect(() =>
       seedPublicResourceWorlds({

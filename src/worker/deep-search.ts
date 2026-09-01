@@ -434,6 +434,14 @@ const currentPlayerIndex = (
   return index;
 };
 
+const isProtocolActiveTrade = (
+  trade: NonNullable<BoardSnapshot["activeTrades"]>[number],
+): boolean =>
+  (trade.incoming && (!trade.myResponse || trade.myResponse === "pending")) ||
+  (!trade.incoming &&
+    trade.responsesComplete === true &&
+    Boolean(trade.acceptedPlayers?.length || trade.rejectedPlayers?.length));
+
 const inferPhase = (
   board: BoardSnapshot,
   actingPlayer?: string,
@@ -462,22 +470,7 @@ const inferPhase = (
   }
   if (board.action === "discard") return { phase: "discard" };
   if (board.action === "robber") return { phase: "move-robber" };
-  if (
-    board.activeTrades?.some(
-      (trade) =>
-        (
-          trade.incoming &&
-          (!trade.myResponse || trade.myResponse === "pending")
-        ) ||
-        (
-          !trade.incoming &&
-          Boolean(
-            trade.responsesComplete &&
-            trade.acceptedPlayers?.length,
-          )
-        ),
-    )
-  ) {
+  if (board.activeTrades?.some(isProtocolActiveTrade)) {
     return { phase: "trade-responses" };
   }
   if (board.isMyTurn && board.hasRolled === false) return { phase: "pre-roll" };
@@ -668,20 +661,7 @@ export const buildDeepSearchRequest = (
     );
   }
   const phase = inferPhase(board, players[current] ?? rootPlayer);
-  const activeTrade = board.activeTrades?.find(
-    (trade) =>
-      (
-        trade.incoming &&
-        (!trade.myResponse || trade.myResponse === "pending")
-      ) ||
-      (
-        !trade.incoming &&
-        Boolean(
-          trade.responsesComplete &&
-          trade.acceptedPlayers?.length,
-        )
-      ),
-  );
+  const activeTrade = board.activeTrades?.find(isProtocolActiveTrade);
   const requirePlayerIndex = (name: string, context: string): number => {
     const index = playerIndex.get(name);
     if (index === undefined) {

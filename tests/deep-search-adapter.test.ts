@@ -650,7 +650,7 @@ describe("deep-search state adapter", () => {
   it("carries a rejected outgoing bundle into Rust without exhausting every trade root", () => {
     const give = resources(0, 1, 0, 0, 0);
     const receive = resources(0, 0, 0, 0, 1);
-    const withRejectedPanel = buildDeepSearchRequest(
+    const rejectedPanel = buildDeepSearchRequest(
       state,
       {
         ...board,
@@ -672,8 +672,20 @@ describe("deep-search state adapter", () => {
         ],
       },
       "You",
-    ).request as any;
+    );
+    const withRejectedPanel = rejectedPanel.request as any;
     expect(withRejectedPanel.state.domesticTradeUsed).toBe(true);
+    expect(withRejectedPanel.state.phase).toBe("trade-responses");
+    expect(withRejectedPanel.state.trade).toMatchObject({
+      creator: 0,
+      recipients: 2,
+      accepted: 0,
+      rejected: 2,
+    });
+    const rejectedPanelResponse = analyzeWasm(rejectedPanel.request);
+    expect(rejectedPanelResponse.exactDecision).toBe(true);
+    expect(rejectedPanelResponse.authority).toBe("exact-mandatory");
+    expect(rejectedPanelResponse.chosen?.kind).toBe("cancel-trade");
 
     const unconstrained = buildDeepSearchRequest(
       state,

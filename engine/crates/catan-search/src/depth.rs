@@ -1861,6 +1861,36 @@ mod tests {
     }
 
     #[test]
+    fn threat_immediate_winning_road_is_not_replaced_by_blocker() {
+        let (state, winning_road, blocker) =
+            crate::threats::winning_road_over_blocker_fixture();
+        let report = search_weighted_belief_maxn_bounded(
+            &[BeliefParticle {
+                state: state.clone(),
+                weight: 1.0,
+            }],
+            4,
+            8,
+            4_000,
+        )
+        .unwrap();
+
+        let chosen = report
+            .chosen
+            .clone()
+            .expect("production-width search must select a root action");
+        assert_ne!(chosen, blocker);
+        let mut after = state.clone();
+        after.apply(&chosen).unwrap();
+        assert_eq!(after.winner(), Some(0));
+        assert!(after.is_terminal());
+        assert!(report.nodes <= 4_000);
+        assert!(report.actions.iter().any(|candidate| {
+            candidate.action == winning_road && candidate.legal_weight >= 1.0 - 1e-6
+        }));
+    }
+
+    #[test]
     fn observation_policy_ignores_third_party_hidden_resource_swap() {
         let (left, right) = observation_swap_control(3);
         assert_eq!(left.observation_hash(3), right.observation_hash(3));

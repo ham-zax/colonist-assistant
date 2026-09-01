@@ -745,6 +745,49 @@ const deterministicUnitOffset = (seed: number, drawIndex: number): number => {
   return (value >>> 0) / 0x1_0000_0000;
 };
 
+const primeForDimension = (dimension: number): number => {
+  let candidate = 2;
+  let found = 0;
+  while (true) {
+    let prime = true;
+    for (let divisor = 2; divisor * divisor <= candidate; divisor += 1) {
+      if (candidate % divisor === 0) {
+        prime = false;
+        break;
+      }
+    }
+    if (prime) {
+      if (found === dimension) return candidate;
+      found += 1;
+    }
+    candidate += 1;
+  }
+};
+
+const radicalInverse = (index: number, base: number): number => {
+  let value = index;
+  let factor = 1 / base;
+  let result = 0;
+  while (value > 0) {
+    result += (value % base) * factor;
+    value = Math.floor(value / base);
+    factor /= base;
+  }
+  return result;
+};
+
+const deterministicDrawUnit = (
+  seed: number,
+  sampleIndex: number,
+  drawIndex: number,
+): number => {
+  const base = primeForDimension(drawIndex);
+  const rotated =
+    radicalInverse(sampleIndex + 1, base) +
+    deterministicUnitOffset(seed, drawIndex);
+  return rotated - Math.floor(rotated);
+};
+
 const drawResourceWithoutReplacement = (
   remaining: ResourceVector,
   unit: number,
@@ -846,8 +889,7 @@ export const seedPublicResourceWorlds = (
       if (player === input.ownPlayer) continue;
       const hand = world.hands[player]!;
       for (let slot = 0; slot < input.handSizes[player]!; slot += 1) {
-        const offset = deterministicUnitOffset(input.seed, drawIndex);
-        const unit = (sampleIndex + offset) / sampleCount;
+        const unit = deterministicDrawUnit(input.seed, sampleIndex, drawIndex);
         const resource = drawResourceWithoutReplacement(remaining, unit);
         hand[resource] += 1;
         remaining[resource] -= 1;
