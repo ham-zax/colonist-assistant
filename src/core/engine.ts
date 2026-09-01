@@ -20,14 +20,12 @@ import {
   type PlayerBoardProfile,
 } from "./strategy";
 
-/** The product has one decision authority. Legacy engines remain only as
- * explicitly named native-arena diagnostics and cannot enter live settings or
- * worker requests. */
-export type DecisionEngine = "deep-search";
+/** Live decision policy selected by the user. Both modes execute through the
+ * packaged WASM rules engine; MaxN remains the default. */
+export type DecisionEngine = "deep-search" | "weighted";
 
-export const isDeepDecisionEngine = (
-  engine: DecisionEngine,
-): engine is "deep-search" => engine === "deep-search";
+export const isWasmDecisionEngine = (engine: DecisionEngine): boolean =>
+  engine === "deep-search" || engine === "weighted";
 
 export type DecisionRuntime =
   | "background-wasm"
@@ -62,6 +60,7 @@ export type DecisionAuthority =
   | "exact-mandatory"
   | "tactical-proven"
   | "deep-maxn"
+  | "weighted-policy"
   | "exact-family"
   | "safety-override";
 

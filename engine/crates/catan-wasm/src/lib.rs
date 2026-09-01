@@ -6,15 +6,15 @@
 use std::cell::RefCell;
 
 use colonist_catan_core::{
-    Action, Board, Building, Edge, GameState, Phase, PlayerState, Port, Resource, TradeOffer,
-    Vertex,
+    Action, Board, Building, Edge, GameState, Phase, PlayerState, Port, Resource, SplitMix64,
+    TradeOffer, Vertex,
 };
 use colonist_catan_search::{
     ActionStats, BeliefParticle, BeliefSearchProvenance, ENGINE_REVISION, ExactActionFamily,
     ExactActionValue, ExactDecisionResult, Mcts, RootPruneReason, SearchConfig, SearchMode,
-    SearchReport, SearchStatistics, TacticalResult, evaluate, exact_family_for_action,
-    learned_model_version, learned_trade_model_version, safer_end_turn_alternative,
-    search_weighted_belief_maxn_bounded_timed_excluding,
+    SearchReport, SearchStatistics, TacticalResult, choose_rollout_action, evaluate,
+    exact_family_for_action, learned_model_version, learned_trade_model_version,
+    safer_end_turn_alternative, search_weighted_belief_maxn_bounded_timed_excluding,
     search_weighted_belief_paranoid_bounded_timed_excluding, solve_belief_current_turn,
     solve_exact_belief_excluding,
 };
@@ -167,6 +167,7 @@ struct Request {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RequestedMode {
     Maxn,
+    Weighted,
     Puct,
     Uct,
     AlphaBeta,
@@ -176,6 +177,7 @@ impl RequestedMode {
     fn parse(value: Option<&str>) -> Result<Self, JsValue> {
         match value.unwrap_or("maxn") {
             "maxn" | "deep" => Ok(Self::Maxn),
+            "weighted" => Ok(Self::Weighted),
             // Retain old request names only as an explicit experimental PUCT
             // compatibility path. The packaged live worker never selects it.
             "puct" | "strategist" => Ok(Self::Puct),
@@ -188,6 +190,7 @@ impl RequestedMode {
     fn label(self) -> &'static str {
         match self {
             Self::Maxn => "maxn",
+            Self::Weighted => "weighted",
             Self::Puct => "puct",
             Self::Uct => "uct",
             Self::AlphaBeta => "alpha-beta",
@@ -236,6 +239,7 @@ enum DecisionAuthority {
     ExactMandatory,
     TacticalProven,
     DeepMaxn,
+    WeightedPolicy,
     ExactFamily,
     SafetyOverride,
 }
@@ -750,6 +754,67 @@ fn root_provenance_output(provenance: BeliefSearchProvenance) -> RootProvenanceO
     }
 }
 
+fn weighted_policy_report(
+    particles: &[BeliefParticle],
+    root_exclusions: &[Action],
+    seed: u64,
+) -> SearchReport {
+    let state = &particles[0].state;
+    let actor = state.actor();
+    let observed = state.observed_state(actor);
+    let actions = observed
+        .legal_actions()
+        .into_iter()
+        .filter(|action| !root_exclusions.contains(action))
+        .collect::<Vec<_>>();
+    let mut rng = SplitMix64::new(seed);
+    let chosen =
+        (!actions.is_empty()).then(|| choose_rollout_action(&observed, &actions, &mut rng));
+    let root_value = evaluate(&observed);
+    let statistics = chosen
+        .iter()
+        .map(|selected| {
+            let mut next = observed.clone();
+            let value = if next.apply(selected).is_ok() {
+                evaluate(&next)
+            } else {
+                root_value
+            };
+            ActionStats {
+                action: selected.clone(),
+                visits: 1,
+                availability: particles.len() as u32,
+                availability_weight: 1.0,
+                legal_weight: 1.0,
+                prior: 1.0,
+                value,
+                lower_confidence_value: value,
+            }
+        })
+        .collect();
+    SearchReport {
+        chosen,
+        root_value,
+        actions: statistics,
+        tactical: TacticalResult {
+            win_probability: 0.0,
+            lower_bound: 0.0,
+            principal_line: Vec::new(),
+            nodes: 0,
+            proven: false,
+        },
+        exact: ExactDecisionResult::default(),
+        statistics: SearchStatistics {
+            iterations: 1,
+            nodes: 1,
+            deepest_decision_depth: 0,
+            rollouts: 0,
+            effective_particle_count: effective_particle_count(particles),
+            deadline_reached: false,
+        },
+    }
+}
+
 fn basic_response_diagnostics(
     particles: usize,
     authority: DecisionAuthority,
@@ -996,6 +1061,22 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
     let particles = game_states(request.state, request.last_rejected_trade)?;
     let root_exclusions = root_exclusion_actions(&request.root_exclusions, &particles[0].state)?;
     let algorithm = mode.label();
+    if mode == RequestedMode::Weighted {
+        let authority = DecisionAuthority::WeightedPolicy;
+        let report = weighted_policy_report(
+            &particles,
+            &root_exclusions,
+            request.seed.unwrap_or(0x0043_4154_414e),
+        );
+        return serde_wasm_bindgen::to_value(&response(
+            report,
+            particles.len(),
+            algorithm,
+            authority,
+            basic_response_diagnostics(particles.len(), authority),
+        ))
+        .map_err(|error| JsValue::from_str(&error.to_string()));
+    }
     if !ponder && let Some(report) = exact_mandatory_report(&particles, &root_exclusions) {
         return serde_wasm_bindgen::to_value(&response(
             report,

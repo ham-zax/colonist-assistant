@@ -2,6 +2,7 @@ import type { SessionSummary } from "../content/session";
 import {
   DEFAULT_SETTINGS,
   normalizeAutopilotDelaySeconds,
+  normalizeDecisionEngine,
   RESET_NONCE_KEY,
   SETTINGS_KEY,
   type AssistantSettings,
@@ -37,7 +38,9 @@ const boot = async (): Promise<void> => {
   let settings: AssistantSettings = {
     ...DEFAULT_SETTINGS,
     ...(sync[SETTINGS_KEY] as Partial<AssistantSettings> | undefined),
-    engine: "deep-search",
+    engine: normalizeDecisionEngine(
+      (sync[SETTINGS_KEY] as Partial<AssistantSettings> | undefined)?.engine,
+    ),
     autopilotDelaySeconds: normalizeAutopilotDelaySeconds(
       (sync[SETTINGS_KEY] as Partial<AssistantSettings> | undefined)
         ?.autopilotDelaySeconds,
@@ -54,7 +57,9 @@ const boot = async (): Promise<void> => {
     for (const select of document.querySelectorAll<HTMLSelectElement>(
       "select[data-setting]",
     )) {
-      if (select.dataset.setting === "autopilotDelaySeconds") {
+      if (select.dataset.setting === "engine") {
+        select.value = settings.engine;
+      } else if (select.dataset.setting === "autopilotDelaySeconds") {
         select.value = String(settings.autopilotDelaySeconds);
       }
     }
@@ -82,14 +87,19 @@ const boot = async (): Promise<void> => {
   for (const select of document.querySelectorAll<HTMLSelectElement>(
     "select[data-setting]",
   )) {
-    if (select.dataset.setting !== "autopilotDelaySeconds") continue;
     select.addEventListener("change", () => {
-      settings = {
-        ...settings,
-        autopilotDelaySeconds: normalizeAutopilotDelaySeconds(
-          Number(select.value),
-        ),
-      };
+      if (select.dataset.setting === "engine") {
+        settings = { ...settings, engine: normalizeDecisionEngine(select.value) };
+      } else if (select.dataset.setting === "autopilotDelaySeconds") {
+        settings = {
+          ...settings,
+          autopilotDelaySeconds: normalizeAutopilotDelaySeconds(
+            Number(select.value),
+          ),
+        };
+      } else {
+        return;
+      }
       void chrome.storage.sync.set({ [SETTINGS_KEY]: settings });
     });
   }
@@ -101,7 +111,7 @@ const boot = async (): Promise<void> => {
       ...DEFAULT_SETTINGS,
       ...settings,
       ...changed,
-      engine: "deep-search",
+      engine: normalizeDecisionEngine(changed.engine ?? settings.engine),
       autopilotDelaySeconds: normalizeAutopilotDelaySeconds(
         changed.autopilotDelaySeconds ?? settings.autopilotDelaySeconds,
       ),

@@ -14,6 +14,9 @@ export const normalizeAutopilotDelaySeconds = (
     ? (value as AutopilotDelaySeconds)
     : 0;
 
+export const normalizeDecisionEngine = (value: unknown): DecisionEngine =>
+  value === "weighted" ? "weighted" : "deep-search";
+
 export interface AssistantSettings {
   enabled: boolean;
   startCollapsed: boolean;
@@ -43,8 +46,6 @@ export const DEFAULT_SETTINGS: AssistantSettings = {
 export const SETTINGS_KEY = "colonistAssistantSettings";
 export const POSITION_KEY = "colonistAssistantPosition";
 export const RESET_NONCE_KEY = "colonistAssistantResetNonce";
-const STRATEGIST_MIGRATION_KEY = "colonistAssistantStrategistDefaultV1";
-
 const LEGACY_SETTINGS_KEY = "harborLedgerSettings";
 const LEGACY_POSITION_KEY = "harborLedgerPosition";
 
@@ -52,7 +53,6 @@ export const readSettings = async (): Promise<AssistantSettings> => {
   const result = await chrome.storage.sync.get([
     SETTINGS_KEY,
     LEGACY_SETTINGS_KEY,
-    STRATEGIST_MIGRATION_KEY,
   ]);
   const settings = {
     ...DEFAULT_SETTINGS,
@@ -60,22 +60,17 @@ export const readSettings = async (): Promise<AssistantSettings> => {
       | Partial<AssistantSettings>
       | undefined),
   };
-  // Strategy selection is intentionally no longer a product setting. Migrate
-  // every historical or invalid value to the one observation-safe authority.
+  const normalizedEngine = normalizeDecisionEngine(settings.engine);
   const normalizedDelay = normalizeAutopilotDelaySeconds(
     settings.autopilotDelaySeconds,
   );
-  const needsMigration =
-    result[STRATEGIST_MIGRATION_KEY] !== true ||
-    settings.engine !== "deep-search" ||
+  const needsNormalization =
+    settings.engine !== normalizedEngine ||
     settings.autopilotDelaySeconds !== normalizedDelay;
-  settings.engine = "deep-search";
+  settings.engine = normalizedEngine;
   settings.autopilotDelaySeconds = normalizedDelay;
-  if (needsMigration) {
-    await chrome.storage.sync.set({
-      [SETTINGS_KEY]: settings,
-      [STRATEGIST_MIGRATION_KEY]: true,
-    });
+  if (needsNormalization) {
+    await chrome.storage.sync.set({ [SETTINGS_KEY]: settings });
   }
   return settings;
 };
@@ -85,7 +80,7 @@ export const saveSettings = async (settings: AssistantSettings): Promise<void> =
     await chrome.storage.sync.set({
       [SETTINGS_KEY]: {
         ...settings,
-        engine: "deep-search",
+        engine: normalizeDecisionEngine(settings.engine),
         autopilotDelaySeconds: normalizeAutopilotDelaySeconds(
           settings.autopilotDelaySeconds,
         ),
