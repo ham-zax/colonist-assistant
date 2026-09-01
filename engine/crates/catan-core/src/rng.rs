@@ -8,6 +8,14 @@ impl SplitMix64 {
         Self { state: seed }
     }
 
+    pub const fn from_state(state: u64) -> Self {
+        Self { state }
+    }
+
+    pub const fn state(&self) -> u64 {
+        self.state
+    }
+
     pub fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut value = self.state;
@@ -45,6 +53,16 @@ mod tests {
             (0..64).map(|_| first.next_u64()).collect::<Vec<_>>(),
             (0..64).map(|_| second.next_u64()).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn state_round_trip_preserves_the_next_value() {
+        let mut original = SplitMix64::new(42);
+        for _ in 0..17 {
+            original.next_u64();
+        }
+        let mut restored = SplitMix64::from_state(original.state());
+        assert_eq!(original.next_u64(), restored.next_u64());
     }
 
     #[test]

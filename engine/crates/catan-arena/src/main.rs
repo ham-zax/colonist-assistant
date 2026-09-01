@@ -1,12 +1,15 @@
+use std::collections::HashSet;
 use std::env;
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use colonist_catan_core::{Action, GameState, NodeKind, Phase, SplitMix64};
+use colonist_catan_core::{
+    Action, Building, GameState, NodeKind, Phase, PlayerState, SplitMix64, TradeOffer,
+};
 use colonist_catan_search::{
     BeliefDepthConfig, BeliefParticle, DepthActionValue, ENGINE_REVISION, Mcts, SearchConfig,
     SearchMode, SearchReport, action_prior, choose_rollout_action, encode_action,
@@ -15,7 +18,7 @@ use colonist_catan_search::{
     search_weighted_belief_maxn_with_config, search_weighted_belief_paranoid_with_config,
     strategic_utility, trade_acceptance_features,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Engine {
@@ -72,6 +75,10 @@ struct Config {
     quiet: bool,
     json: bool,
     checkpoint_output: Option<String>,
+    challenge_output: Option<String>,
+    takeover_input: Option<String>,
+    takeover_output: Option<String>,
+    takeover_engine: Option<Engine>,
     expert_output: Option<String>,
     trade_output: Option<String>,
     trajectory_output: Option<String>,
@@ -113,6 +120,10 @@ impl Default for Config {
             quiet: false,
             json: false,
             checkpoint_output: None,
+            challenge_output: None,
+            takeover_input: None,
+            takeover_output: None,
+            takeover_engine: None,
             expert_output: None,
             trade_output: None,
             trajectory_output: None,
@@ -152,6 +163,22 @@ fn parse_config() -> Config {
             }
             "--max-turns" => config.max_turns = value.and_then(|v| v.parse().ok()).unwrap_or(600),
             "--checkpoint-output" => config.checkpoint_output = value.map(str::to_string),
+            "--challenge-output" => config.challenge_output = value.map(str::to_string),
+            "--takeover-input" => config.takeover_input = value.map(str::to_string),
+            "--takeover-output" => config.takeover_output = value.map(str::to_string),
+            "--takeover-engine" => {
+                config.takeover_engine = match value {
+                    Some("control") => None,
+                    Some(engine) => Engine::parse(engine).or_else(|| {
+                        eprintln!("unknown --takeover-engine: {engine}");
+                        std::process::exit(2);
+                    }),
+                    None => {
+                        eprintln!("--takeover-engine requires a value");
+                        std::process::exit(2);
+                    }
+                }
+            }
             "--expert-output" => config.expert_output = value.map(str::to_string),
             "--trade-output" => config.trade_output = value.map(str::to_string),
             "--trajectory-output" => config.trajectory_output = value.map(str::to_string),
@@ -252,7 +279,9 @@ fn parse_config() -> Config {
                      [--belief-particles N] [--strategic-particles N] \\
                      [--maxn-depth N] [--maxn-branch N] [--maxn-nodes N] [--maxn-time-ms N] \\
                      [--perfect-information] \\
-                     [--checkpoint-output progress.jsonl] \\
+                     [--checkpoint-output progress.jsonl] [--challenge-output challenges.jsonl] \\
+                     [--takeover-input challenges.jsonl] [--takeover-output outcomes.jsonl] \\
+                     [--takeover-engine control|random|weighted|maxn|alphabeta|uct|puct] \\
                      [--expert-output samples.jsonl] [--trade-output trades.jsonl] \\
                      [--trajectory-output trajectory.jsonl] \\
                      [--expert-stride N] [--expert-iterations N] \\
@@ -275,6 +304,10 @@ fn parse_config() -> Config {
     }
     if !(2..=4).contains(&config.players) {
         eprintln!("--players must be 2, 3, or 4");
+        std::process::exit(2);
+    }
+    if config.takeover_input.is_some() != config.takeover_output.is_some() {
+        eprintln!("--takeover-input and --takeover-output must be provided together");
         std::process::exit(2);
     }
     if config.blocks == 0 {
@@ -467,6 +500,433 @@ fn information_mode(config: &Config) -> &'static str {
     } else {
         "weighted-belief"
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum PhaseSnapshot {
+    SetupSettlement,
+    SetupRoad { settlement: u8 },
+    PreRoll,
+    RollChance,
+    Discard,
+    MoveRobber,
+    ResolveSteal { victim: u8 },
+    Main,
+    DevelopmentChance,
+    TradeResponses,
+    Finished,
+}
+
+impl From<Phase> for PhaseSnapshot {
+    fn from(value: Phase) -> Self {
+        match value {
+            Phase::SetupSettlement => Self::SetupSettlement,
+            Phase::SetupRoad { settlement } => Self::SetupRoad { settlement },
+            Phase::PreRoll => Self::PreRoll,
+            Phase::RollChance => Self::RollChance,
+            Phase::Discard => Self::Discard,
+            Phase::MoveRobber => Self::MoveRobber,
+            Phase::ResolveSteal { victim } => Self::ResolveSteal { victim },
+            Phase::Main => Self::Main,
+            Phase::DevelopmentChance => Self::DevelopmentChance,
+            Phase::TradeResponses => Self::TradeResponses,
+            Phase::Finished => Self::Finished,
+        }
+    }
+}
+
+impl From<PhaseSnapshot> for Phase {
+    fn from(value: PhaseSnapshot) -> Self {
+        match value {
+            PhaseSnapshot::SetupSettlement => Self::SetupSettlement,
+            PhaseSnapshot::SetupRoad { settlement } => Self::SetupRoad { settlement },
+            PhaseSnapshot::PreRoll => Self::PreRoll,
+            PhaseSnapshot::RollChance => Self::RollChance,
+            PhaseSnapshot::Discard => Self::Discard,
+            PhaseSnapshot::MoveRobber => Self::MoveRobber,
+            PhaseSnapshot::ResolveSteal { victim } => Self::ResolveSteal { victim },
+            PhaseSnapshot::Main => Self::Main,
+            PhaseSnapshot::DevelopmentChance => Self::DevelopmentChance,
+            PhaseSnapshot::TradeResponses => Self::TradeResponses,
+            PhaseSnapshot::Finished => Self::Finished,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum BuildingSnapshot {
+    Settlement { player: u8 },
+    City { player: u8 },
+}
+
+impl From<Building> for BuildingSnapshot {
+    fn from(value: Building) -> Self {
+        match value {
+            Building::Settlement(player) => Self::Settlement { player },
+            Building::City(player) => Self::City { player },
+        }
+    }
+}
+
+impl From<BuildingSnapshot> for Building {
+    fn from(value: BuildingSnapshot) -> Self {
+        match value {
+            BuildingSnapshot::Settlement { player } => Self::Settlement(player),
+            BuildingSnapshot::City { player } => Self::City(player),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlayerStateSnapshot {
+    resources: [u8; 5],
+    development: [u8; 5],
+    bought_development: [u8; 5],
+    public_victory_points: u8,
+    played_knights: u8,
+    roads_left: u8,
+    settlements_left: u8,
+    cities_left: u8,
+    has_longest_road: bool,
+    has_largest_army: bool,
+    played_development_this_turn: bool,
+    policy_profile: [u8; 5],
+}
+
+impl From<&PlayerState> for PlayerStateSnapshot {
+    fn from(value: &PlayerState) -> Self {
+        Self {
+            resources: value.resources,
+            development: value.development,
+            bought_development: value.bought_development,
+            public_victory_points: value.public_victory_points,
+            played_knights: value.played_knights,
+            roads_left: value.roads_left,
+            settlements_left: value.settlements_left,
+            cities_left: value.cities_left,
+            has_longest_road: value.has_longest_road,
+            has_largest_army: value.has_largest_army,
+            played_development_this_turn: value.played_development_this_turn,
+            policy_profile: value.policy_profile,
+        }
+    }
+}
+
+impl From<PlayerStateSnapshot> for PlayerState {
+    fn from(value: PlayerStateSnapshot) -> Self {
+        Self {
+            resources: value.resources,
+            development: value.development,
+            bought_development: value.bought_development,
+            public_victory_points: value.public_victory_points,
+            played_knights: value.played_knights,
+            roads_left: value.roads_left,
+            settlements_left: value.settlements_left,
+            cities_left: value.cities_left,
+            has_longest_road: value.has_longest_road,
+            has_largest_army: value.has_largest_army,
+            played_development_this_turn: value.played_development_this_turn,
+            policy_profile: value.policy_profile,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TradeOfferSnapshot {
+    creator: u8,
+    recipients: u8,
+    give: [u8; 5],
+    receive: [u8; 5],
+    accepted: u8,
+    rejected: u8,
+}
+
+impl From<TradeOffer> for TradeOfferSnapshot {
+    fn from(value: TradeOffer) -> Self {
+        Self {
+            creator: value.creator,
+            recipients: value.recipients,
+            give: value.give,
+            receive: value.receive,
+            accepted: value.accepted,
+            rejected: value.rejected,
+        }
+    }
+}
+
+impl From<TradeOfferSnapshot> for TradeOffer {
+    fn from(value: TradeOfferSnapshot) -> Self {
+        Self {
+            creator: value.creator,
+            recipients: value.recipients,
+            give: value.give,
+            receive: value.receive,
+            accepted: value.accepted,
+            rejected: value.rejected,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GameStateSnapshot {
+    players: Vec<PlayerStateSnapshot>,
+    buildings: Vec<Option<BuildingSnapshot>>,
+    roads: Vec<Option<u8>>,
+    bank: [u8; 5],
+    bank_is_public: bool,
+    development_deck: [u8; 5],
+    played_development: [u8; 5],
+    robber_hex: u8,
+    current_player: u8,
+    phase: PhaseSnapshot,
+    turn: u16,
+    last_roll: u8,
+    victory_target: u8,
+    card_discard_limit: u8,
+    friendly_robber: bool,
+    setup_step: u8,
+    discard_remaining: [u8; 4],
+    discard_cursor: u8,
+    robber_return_phase: PhaseSnapshot,
+    free_roads: u8,
+    domestic_trade_used: bool,
+    domestic_trade_count: u8,
+    last_rejected_trade: Option<TradeOfferSnapshot>,
+    trade: Option<TradeOfferSnapshot>,
+    trade_cursor: u8,
+    trade_negotiation_round: u8,
+    longest_road_holder: Option<u8>,
+    largest_army_holder: Option<u8>,
+}
+
+impl GameStateSnapshot {
+    fn capture(state: &GameState) -> Self {
+        Self {
+            players: state
+                .players
+                .iter()
+                .map(PlayerStateSnapshot::from)
+                .collect(),
+            buildings: state
+                .buildings
+                .iter()
+                .map(|building| building.map(BuildingSnapshot::from))
+                .collect(),
+            roads: state.roads.clone(),
+            bank: state.bank,
+            bank_is_public: state.bank_is_public,
+            development_deck: state.development_deck,
+            played_development: state.played_development,
+            robber_hex: state.robber_hex,
+            current_player: state.current_player,
+            phase: state.phase.into(),
+            turn: state.turn,
+            last_roll: state.last_roll,
+            victory_target: state.victory_target,
+            card_discard_limit: state.card_discard_limit,
+            friendly_robber: state.friendly_robber,
+            setup_step: state.setup_step,
+            discard_remaining: state.discard_remaining,
+            discard_cursor: state.discard_cursor,
+            robber_return_phase: state.robber_return_phase.into(),
+            free_roads: state.free_roads,
+            domestic_trade_used: state.domestic_trade_used,
+            domestic_trade_count: state.domestic_trade_count,
+            last_rejected_trade: state.last_rejected_trade.map(TradeOfferSnapshot::from),
+            trade: state.trade.map(TradeOfferSnapshot::from),
+            trade_cursor: state.trade_cursor,
+            trade_negotiation_round: state.trade_negotiation_round,
+            longest_road_holder: state.longest_road_holder,
+            largest_army_holder: state.largest_army_holder,
+        }
+    }
+
+    fn restore(self, board_seed: u64, players: u8) -> GameState {
+        let mut state = GameState::standard(board_seed, players);
+        state.players = self.players.into_iter().map(PlayerState::from).collect();
+        state.buildings = self
+            .buildings
+            .into_iter()
+            .map(|building| building.map(Building::from))
+            .collect();
+        state.roads = self.roads;
+        state.bank = self.bank;
+        state.bank_is_public = self.bank_is_public;
+        state.development_deck = self.development_deck;
+        state.played_development = self.played_development;
+        state.robber_hex = self.robber_hex;
+        state.current_player = self.current_player;
+        state.phase = self.phase.into();
+        state.turn = self.turn;
+        state.last_roll = self.last_roll;
+        state.victory_target = self.victory_target;
+        state.card_discard_limit = self.card_discard_limit;
+        state.friendly_robber = self.friendly_robber;
+        state.setup_step = self.setup_step;
+        state.discard_remaining = self.discard_remaining;
+        state.discard_cursor = self.discard_cursor;
+        state.robber_return_phase = self.robber_return_phase.into();
+        state.free_roads = self.free_roads;
+        state.domestic_trade_used = self.domestic_trade_used;
+        state.domestic_trade_count = self.domestic_trade_count;
+        state.last_rejected_trade = self.last_rejected_trade.map(TradeOffer::from);
+        state.trade = self.trade.map(TradeOffer::from);
+        state.trade_cursor = self.trade_cursor;
+        state.trade_negotiation_round = self.trade_negotiation_round;
+        state.longest_road_holder = self.longest_road_holder;
+        state.largest_army_holder = self.largest_army_holder;
+        state
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ArenaSearchProfileSnapshot {
+    iterations: u32,
+    rollout_actions: u16,
+    max_turns: u16,
+    belief_particles: usize,
+    strategic_particle_limit: usize,
+    maxn_depth: u8,
+    maxn_branch: usize,
+    maxn_nodes: u32,
+    maxn_time_ms: u32,
+    opening_nodes: u32,
+    opening_time_ms: u32,
+    trade_response_nodes: u32,
+    trade_response_time_ms: u32,
+    information_mode: String,
+}
+
+impl ArenaSearchProfileSnapshot {
+    fn capture(config: &Config) -> Self {
+        Self {
+            iterations: config.iterations,
+            rollout_actions: config.rollout_actions,
+            max_turns: config.max_turns,
+            belief_particles: config.belief_particles,
+            strategic_particle_limit: config.strategic_particle_limit,
+            maxn_depth: config.maxn_depth,
+            maxn_branch: config.maxn_branch,
+            maxn_nodes: config
+                .maxn_nodes
+                .unwrap_or_else(|| (config.iterations * 160).clamp(4_000, 80_000)),
+            maxn_time_ms: config.maxn_time_ms,
+            opening_nodes: config.opening_nodes,
+            opening_time_ms: config.opening_time_ms,
+            trade_response_nodes: config.trade_response_nodes,
+            trade_response_time_ms: config.trade_response_time_ms,
+            information_mode: information_mode(config).to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChallengeSnapshot {
+    schema_version: u8,
+    kind: String,
+    snapshot_id: String,
+    board_seed: u64,
+    chance_seed: u64,
+    players: u8,
+    state_hash: String,
+    chance_rng_state: u64,
+    policy_rng_states: Vec<u64>,
+    target_seat: u8,
+    source_block: u32,
+    source_rotation: u8,
+    turn: u16,
+    source_engines: Vec<String>,
+    source_git_sha: String,
+    source_build_dirty: bool,
+    engine_revision: String,
+    search_profile: ArenaSearchProfileSnapshot,
+    target_public_victory_points: u8,
+    target_victory_points: u8,
+    target_evaluator_win_value: f32,
+    game_state: GameStateSnapshot,
+}
+
+fn capture_challenge_snapshot(
+    state: &GameState,
+    board_seed: u64,
+    chance_seed: u64,
+    chance_rng: &SplitMix64,
+    policy_rngs: &[SplitMix64],
+    engines: &[Engine],
+    config: &Config,
+    source_block: u32,
+    source_rotation: u8,
+    captured_targets: &[bool; 4],
+    captured_hashes: &HashSet<u64>,
+) -> Option<ChallengeSnapshot> {
+    if state.is_terminal()
+        || state.phase != Phase::PreRoll
+        || state.turn < u16::from(config.players) * 5
+    {
+        return None;
+    }
+    let target = state.current_player as usize;
+    if target >= config.players as usize || captured_targets[target] {
+        return None;
+    }
+    let state_hash = state.state_hash();
+    if captured_hashes.contains(&state_hash) {
+        return None;
+    }
+    let public_points = state.players[..config.players as usize]
+        .iter()
+        .map(|player| player.public_victory_points)
+        .collect::<Vec<_>>();
+    let target_public_points = public_points[target];
+    let minimum = public_points.iter().copied().min().unwrap_or(0);
+    let leader = public_points.iter().copied().max().unwrap_or(0);
+    let is_last = target_public_points == minimum;
+    let behind_by_two = leader.saturating_sub(target_public_points) >= 2;
+    if !is_last && !behind_by_two {
+        return None;
+    }
+    let evaluator = evaluate(state)[target];
+    if evaluator > 0.25 {
+        return None;
+    }
+    let snapshot_id = format!(
+        "{}p-b{}-r{}-s{}-t{}-{:016x}",
+        config.players, source_block, source_rotation, target, state.turn, state_hash
+    );
+    Some(ChallengeSnapshot {
+        schema_version: 1,
+        kind: "colonist-native-takeover-challenge".to_string(),
+        snapshot_id,
+        board_seed,
+        chance_seed,
+        players: config.players,
+        state_hash: format!("{state_hash:016x}"),
+        chance_rng_state: chance_rng.state(),
+        policy_rng_states: policy_rngs.iter().map(SplitMix64::state).collect(),
+        target_seat: target as u8,
+        source_block,
+        source_rotation,
+        turn: state.turn,
+        source_engines: engines
+            .iter()
+            .map(|engine| engine.as_str().to_string())
+            .collect(),
+        source_git_sha: config.build_git_sha.to_string(),
+        source_build_dirty: config.build_dirty,
+        engine_revision: ENGINE_REVISION.to_string(),
+        search_profile: ArenaSearchProfileSnapshot::capture(config),
+        target_public_victory_points: target_public_points,
+        target_victory_points: state.players[target].victory_points(),
+        target_evaluator_win_value: evaluator,
+        game_state: GameStateSnapshot::capture(state),
+    })
 }
 
 fn choose_action(
@@ -806,6 +1266,9 @@ struct GameResult {
     expert_samples: Vec<ExpertSample>,
     trade_samples: Vec<TradeSample>,
     trajectory_samples: Vec<TrajectorySample>,
+    challenge_snapshots: Vec<ChallengeSnapshot>,
+    longest_road_holder: Option<u8>,
+    largest_army_holder: Option<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -1102,8 +1565,12 @@ fn compact_engine_metrics(metrics: &[CandidateMetrics; 6]) -> String {
     .join(",")
 }
 
-fn play_game(board_seed: u64, chance_seed: u64, engines: &[Engine], config: &Config) -> GameResult {
-    let mut state = GameState::standard(board_seed, config.players);
+fn initialized_game(
+    board_seed: u64,
+    chance_seed: u64,
+    players: u8,
+) -> (GameState, SplitMix64, Vec<SplitMix64>) {
+    let mut state = GameState::standard(board_seed, players);
     // Rotate explicit bounded-rational styles independently of engine family.
     // Paired seat rotations therefore test road-heavy, development-heavy,
     // trade-happy, and trade-resistant behavior instead of overfitting every
@@ -1116,15 +1583,49 @@ fn play_game(board_seed: u64, chance_seed: u64, engines: &[Engine], config: &Con
         [45, 45, 45, 15, 96],
         [70, 55, 55, 55, 55],
     ];
-    for player in 0..config.players as usize {
+    for player in 0..players as usize {
         let profile = ((board_seed ^ (player as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15))
             % POLICY_PROFILES.len() as u64) as usize;
         state.players[player].policy_profile = POLICY_PROFILES[profile];
     }
-    let mut chance_rng = SplitMix64::new(chance_seed);
-    let mut policy_rngs = (0..config.players)
+    let chance_rng = SplitMix64::new(chance_seed);
+    let policy_rngs = (0..players)
         .map(|player| SplitMix64::new(chance_seed ^ ((player as u64 + 1) * 0x9e37_79b9)))
         .collect::<Vec<_>>();
+    (state, chance_rng, policy_rngs)
+}
+
+fn play_game(
+    board_seed: u64,
+    chance_seed: u64,
+    engines: &[Engine],
+    config: &Config,
+    source: Option<(u32, u8)>,
+) -> GameResult {
+    let (state, chance_rng, policy_rngs) =
+        initialized_game(board_seed, chance_seed, config.players);
+    play_game_from_state(
+        board_seed,
+        chance_seed,
+        engines,
+        config,
+        source,
+        state,
+        chance_rng,
+        policy_rngs,
+    )
+}
+
+fn play_game_from_state(
+    board_seed: u64,
+    chance_seed: u64,
+    engines: &[Engine],
+    config: &Config,
+    source: Option<(u32, u8)>,
+    mut state: GameState,
+    mut chance_rng: SplitMix64,
+    mut policy_rngs: Vec<SplitMix64>,
+) -> GameResult {
     let mut actions = 0u32;
     let mut metrics = GameMetrics::default();
     let mut calibration = Vec::<(u8, f32)>::new();
@@ -1138,7 +1639,32 @@ fn play_game(board_seed: u64, chance_seed: u64, engines: &[Engine], config: &Con
     let mut expert_searches = (0..config.players)
         .map(|_| None)
         .collect::<Vec<Option<Mcts>>>();
+    let mut challenge_snapshots = Vec::<ChallengeSnapshot>::new();
+    let mut captured_challenge_targets = [false; 4];
+    let mut captured_challenge_hashes = HashSet::<u64>::new();
     while !state.is_terminal() && state.turn <= config.max_turns {
+        if config.challenge_output.is_some()
+            && let Some((source_block, source_rotation)) = source
+            && let Some(snapshot) = capture_challenge_snapshot(
+                &state,
+                board_seed,
+                chance_seed,
+                &chance_rng,
+                &policy_rngs,
+                engines,
+                config,
+                source_block,
+                source_rotation,
+                &captured_challenge_targets,
+                &captured_challenge_hashes,
+            )
+        {
+            let target = snapshot.target_seat as usize;
+            let hash = state.state_hash();
+            captured_challenge_targets[target] = true;
+            captured_challenge_hashes.insert(hash);
+            challenge_snapshots.push(snapshot);
+        }
         if config.trajectory_output.is_some()
             && state.turn != last_trajectory_turn
             && matches!(
@@ -1396,6 +1922,9 @@ fn play_game(board_seed: u64, chance_seed: u64, engines: &[Engine], config: &Con
         expert_samples,
         trade_samples,
         trajectory_samples,
+        challenge_snapshots,
+        longest_road_holder: state.longest_road_holder,
+        largest_army_holder: state.largest_army_holder,
     }
 }
 
@@ -1421,8 +1950,227 @@ fn bootstrap_interval(block_scores: &[f32], seed: u64) -> (f32, f32) {
     (percentile(&samples, 0.025), percentile(&samples, 0.975))
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TakeoverOutcome {
+    schema_version: u8,
+    kind: &'static str,
+    snapshot_id: String,
+    state_hash: String,
+    players: u8,
+    target_seat: u8,
+    source_block: u32,
+    source_rotation: u8,
+    source_turn: u16,
+    source_engine: String,
+    arm: String,
+    engine_revision: &'static str,
+    build_git_sha: &'static str,
+    build_dirty: bool,
+    search_profile: ArenaSearchProfileSnapshot,
+    terminal: bool,
+    winner: u8,
+    target_win: bool,
+    final_rank: f32,
+    final_victory_points: u8,
+    victory_points_gained: u8,
+    final_turn: u16,
+    turns_elapsed: u16,
+    actions: u32,
+    cutoff: bool,
+    longest_road_acquired: bool,
+    largest_army_acquired: bool,
+    roads: u32,
+    settlements: u32,
+    cities: u32,
+    development_cards_bought: u32,
+    domestic_offers: u32,
+    trade_accepts: u32,
+    counters: u32,
+    cards_lost_to_sevens: u32,
+    mean_decision_latency_ms: f64,
+    search_decisions: u32,
+    mean_search_nodes: f64,
+    mean_search_depth: f64,
+    mean_posterior_particles: f64,
+    mean_strategic_particles: f64,
+    search_deadline_share: f64,
+    illegal_action_failures: u32,
+    protocol_failures: u32,
+}
+
+fn run_takeover_mode(config: &Config) {
+    let input_path = config
+        .takeover_input
+        .as_ref()
+        .expect("takeover input is present in takeover mode");
+    let output_path = config
+        .takeover_output
+        .as_ref()
+        .expect("takeover output is present in takeover mode");
+    let input = BufReader::new(
+        File::open(input_path)
+            .unwrap_or_else(|error| panic!("failed to open takeover input {input_path}: {error}")),
+    );
+    let mut output =
+        BufWriter::new(File::create(output_path).unwrap_or_else(|error| {
+            panic!("failed to create takeover output {output_path}: {error}")
+        }));
+    for (line_index, line) in input.lines().enumerate() {
+        let line = line.unwrap_or_else(|error| {
+            panic!(
+                "failed to read takeover input line {}: {error}",
+                line_index + 1
+            )
+        });
+        if line.trim().is_empty() {
+            continue;
+        }
+        let snapshot: ChallengeSnapshot = serde_json::from_str(&line).unwrap_or_else(|error| {
+            panic!(
+                "invalid takeover snapshot on line {}: {error}",
+                line_index + 1
+            )
+        });
+        let mut replay_config = config.clone();
+        replay_config.players = snapshot.players;
+        // Arena board seeds are source_seed + block * 2. Belief sampling also
+        // mixes config.seed, so restore the exact source seed for common-random
+        // continuation rather than using the takeover command's default seed.
+        replay_config.seed = snapshot
+            .board_seed
+            .wrapping_sub(u64::from(snapshot.source_block) * 2);
+        replay_config.challenge_output = None;
+        replay_config.takeover_input = None;
+        replay_config.takeover_output = None;
+        let state = snapshot
+            .game_state
+            .clone()
+            .restore(snapshot.board_seed, snapshot.players);
+        state.validate().unwrap_or_else(|error| {
+            panic!(
+                "restored snapshot {} is invalid: {error}",
+                snapshot.snapshot_id
+            )
+        });
+        let expected_hash = u64::from_str_radix(&snapshot.state_hash, 16)
+            .expect("snapshot state hash must be hexadecimal");
+        assert_eq!(
+            state.state_hash(),
+            expected_hash,
+            "restored snapshot {} changed state hash",
+            snapshot.snapshot_id
+        );
+        assert_eq!(
+            state.phase,
+            Phase::PreRoll,
+            "takeover snapshot {} is not a stable PreRoll boundary",
+            snapshot.snapshot_id
+        );
+        let chance_rng = SplitMix64::from_state(snapshot.chance_rng_state);
+        let policy_rngs = snapshot
+            .policy_rng_states
+            .iter()
+            .copied()
+            .map(SplitMix64::from_state)
+            .collect::<Vec<_>>();
+        assert_eq!(policy_rngs.len(), snapshot.players as usize);
+        let mut engines = snapshot
+            .source_engines
+            .iter()
+            .map(|engine| {
+                Engine::parse(engine).unwrap_or_else(|| panic!("unknown snapshot engine {engine}"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(engines.len(), snapshot.players as usize);
+        let target = snapshot.target_seat as usize;
+        let source_engine = engines[target].as_str().to_string();
+        let arm = if let Some(engine) = config.takeover_engine {
+            engines[target] = engine;
+            engine.as_str().to_string()
+        } else {
+            "control".to_string()
+        };
+        let initial_longest_road_holder = snapshot.game_state.longest_road_holder;
+        let initial_largest_army_holder = snapshot.game_state.largest_army_holder;
+        let result = play_game_from_state(
+            snapshot.board_seed,
+            snapshot.chance_seed,
+            &engines,
+            &replay_config,
+            None,
+            state,
+            chance_rng,
+            policy_rngs,
+        );
+        let metrics = &result.metrics;
+        let decisions = metrics.decision_count[target].max(1) as f64;
+        let searches = metrics.search_decision_count[target].max(1) as f64;
+        let outcome = TakeoverOutcome {
+            schema_version: 1,
+            kind: "colonist-native-takeover-outcome",
+            snapshot_id: snapshot.snapshot_id,
+            state_hash: snapshot.state_hash,
+            players: snapshot.players,
+            target_seat: snapshot.target_seat,
+            source_block: snapshot.source_block,
+            source_rotation: snapshot.source_rotation,
+            source_turn: snapshot.turn,
+            source_engine,
+            arm,
+            engine_revision: ENGINE_REVISION,
+            build_git_sha: replay_config.build_git_sha,
+            build_dirty: replay_config.build_dirty,
+            search_profile: ArenaSearchProfileSnapshot::capture(&replay_config),
+            terminal: !result.cutoff,
+            winner: result.winner,
+            target_win: !result.cutoff && result.winner as usize == target,
+            final_rank: result.ranks[target],
+            final_victory_points: result.points[target],
+            victory_points_gained: result.points[target]
+                .saturating_sub(snapshot.target_victory_points),
+            final_turn: result.turns,
+            turns_elapsed: result.turns.saturating_sub(snapshot.turn),
+            actions: result.actions,
+            cutoff: result.cutoff,
+            longest_road_acquired: result.longest_road_holder == Some(snapshot.target_seat)
+                && initial_longest_road_holder != Some(snapshot.target_seat),
+            largest_army_acquired: result.largest_army_holder == Some(snapshot.target_seat)
+                && initial_largest_army_holder != Some(snapshot.target_seat),
+            roads: metrics.roads[target],
+            settlements: metrics.settlements[target],
+            cities: metrics.cities[target],
+            development_cards_bought: metrics.development_bought[target],
+            domestic_offers: metrics.offers[target],
+            trade_accepts: metrics.accepts[target],
+            counters: metrics.counters[target],
+            cards_lost_to_sevens: metrics.cards_lost_to_sevens[target],
+            mean_decision_latency_ms: metrics.decision_time[target].as_nanos() as f64
+                / decisions
+                / 1_000_000.0,
+            search_decisions: metrics.search_decision_count[target],
+            mean_search_nodes: metrics.search_nodes[target] as f64 / searches,
+            mean_search_depth: metrics.search_depth[target] as f64 / searches,
+            mean_posterior_particles: metrics.posterior_particles[target] as f64 / searches,
+            mean_strategic_particles: metrics.strategic_particles[target] as f64 / searches,
+            search_deadline_share: metrics.search_deadlines[target] as f64 / searches,
+            illegal_action_failures: 0,
+            protocol_failures: 0,
+        };
+        serde_json::to_writer(&mut output, &outcome).expect("takeover outcome must serialize");
+        output
+            .write_all(b"\n")
+            .expect("takeover outcome must be writable");
+        output.flush().expect("takeover outcome must flush");
+    }
+}
+
 fn main() {
     let config = parse_config();
+    if config.takeover_input.is_some() {
+        run_takeover_mode(&config);
+        return;
+    }
     let started = Instant::now();
     let mut total_games = 0u32;
     let mut candidate_wins = 0u32;
@@ -1497,7 +2245,13 @@ fn main() {
                     engines[seat as usize] = config.candidate;
                     engines
                 };
-                let result = play_game(board_seed, chance_seed, &engines, &config);
+                let result = play_game(
+                    board_seed,
+                    chance_seed,
+                    &engines,
+                    &config,
+                    Some((block, seat)),
+                );
                 if sender
                     .send(ArenaResult {
                         block,
@@ -1551,7 +2305,24 @@ fn main() {
         )
     });
     let mut trajectory_sample_count = 0u64;
+    let mut challenge_writer = config.challenge_output.as_ref().map(|path| {
+        BufWriter::new(
+            File::create(path)
+                .unwrap_or_else(|error| panic!("failed to create challenge data {path}: {error}")),
+        )
+    });
+    let mut challenge_sample_count = 0u64;
     for result in results {
+        if let Some(writer) = &mut challenge_writer {
+            for snapshot in &result.game.challenge_snapshots {
+                serde_json::to_writer(&mut *writer, snapshot)
+                    .expect("challenge snapshot must serialize");
+                writer
+                    .write_all(b"\n")
+                    .expect("challenge data must be writable");
+                challenge_sample_count += 1;
+            }
+        }
         if let Some(writer) = &mut expert_writer {
             for sample in &result.game.expert_samples {
                 serde_json::to_writer(&mut *writer, sample).expect("expert sample must serialize");
@@ -1721,6 +2492,7 @@ fn main() {
                 "\"expertSamples\":{},",
                 "\"tradeSamples\":{},",
                 "\"trajectorySamples\":{},",
+                "\"challengeSamples\":{},",
                 "\"cutoffs\":{},",
                 "\"elapsedMs\":{},",
                 "\"gamesPerSecond\":{:.6},",
@@ -1733,8 +2505,10 @@ fn main() {
                 "\"maxnDepth\":{},",
                 "\"maxnBranch\":{},",
                 "\"maxnNodes\":{},",
+                "\"maxnTimeMs\":{},",
                 "\"engineRevision\":\"{}\",",
                 "\"buildGitSha\":\"{}\",",
+                "\"buildDirty\":{},",
                 "\"informationMode\":\"{}\",",
                 "\"perfectInformationSearch\":{},",
                 "\"threads\":{},",
@@ -1799,6 +2573,7 @@ fn main() {
             expert_sample_count,
             trade_sample_count,
             trajectory_sample_count,
+            challenge_sample_count,
             cutoffs,
             elapsed.as_millis(),
             games_per_second,
@@ -1813,8 +2588,10 @@ fn main() {
             config
                 .maxn_nodes
                 .unwrap_or_else(|| (config.iterations * 160).clamp(4_000, 80_000)),
+            config.maxn_time_ms,
             ENGINE_REVISION,
             config.build_git_sha,
+            config.build_dirty,
             information_mode(&config),
             config.perfect_information_search,
             config.threads,
@@ -1856,8 +2633,8 @@ mod tests {
             ..Config::default()
         };
         let engines = [Engine::Random; 3];
-        let first = play_game(1, 2, &engines, &config);
-        let second = play_game(1, 2, &engines, &config);
+        let first = play_game(1, 2, &engines, &config, None);
+        let second = play_game(1, 2, &engines, &config, None);
         assert_eq!(first.winner, second.winner);
         assert_eq!(first.turns, second.turns);
         assert_eq!(first.actions, second.actions);
@@ -1963,6 +2740,9 @@ mod tests {
             expert_samples: Vec::new(),
             trade_samples: Vec::new(),
             trajectory_samples: Vec::new(),
+            challenge_snapshots: Vec::new(),
+            longest_road_holder: None,
+            largest_army_holder: None,
         };
         let mut partial = PartialArenaMetrics::new(config.blocks);
         let mut output = Vec::new();
@@ -2035,6 +2815,9 @@ mod tests {
                 expert_samples: Vec::new(),
                 trade_samples: Vec::new(),
                 trajectory_samples: Vec::new(),
+                challenge_snapshots: Vec::new(),
+                longest_road_holder: None,
+                largest_army_holder: None,
             },
         };
         let mut partial = PartialArenaMetrics::new(1);

@@ -42,10 +42,17 @@ function readOptions(argv) {
     iterations: 80,
     rolloutActions: 140,
     maxTurns: 600,
+    maxnDepth: 4,
+    maxnBranch: 8,
+    maxnNodes: 4_000,
+    maxnTimeMs: 350,
+    beliefParticles: 24,
+    strategicParticles: 12,
     threads: Math.min(cpus().length, 4),
     seed: 91_000_001,
     validate: true,
     build: true,
+    challengeOutputDirectory: null,
     output: resolve(ROOT, "benchmark-results", "local-latest"),
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -80,6 +87,30 @@ function readOptions(argv) {
         options.maxTurns = Number(value);
         index += 1;
         break;
+      case "--maxn-depth":
+        options.maxnDepth = Number(value);
+        index += 1;
+        break;
+      case "--maxn-branch":
+        options.maxnBranch = Number(value);
+        index += 1;
+        break;
+      case "--maxn-nodes":
+        options.maxnNodes = Number(value);
+        index += 1;
+        break;
+      case "--maxn-time-ms":
+        options.maxnTimeMs = Number(value);
+        index += 1;
+        break;
+      case "--belief-particles":
+        options.beliefParticles = Number(value);
+        index += 1;
+        break;
+      case "--strategic-particles":
+        options.strategicParticles = Number(value);
+        index += 1;
+        break;
       case "--threads":
         options.threads = Number(value);
         index += 1;
@@ -90,6 +121,10 @@ function readOptions(argv) {
         break;
       case "--output":
         options.output = resolve(value);
+        index += 1;
+        break;
+      case "--challenge-output-directory":
+        options.challengeOutputDirectory = resolve(value);
         index += 1;
         break;
       case "--no-build":
@@ -117,9 +152,17 @@ function readOptions(argv) {
   --iterations N           MCTS iteration budget
   --rollout-actions N      MCTS rollout action budget
   --max-turns N            Cutoff (reported, never hidden)
+  --maxn-depth N           MaxN depth (default: 4)
+  --maxn-branch N          MaxN branch cap (default: 8)
+  --maxn-nodes N           MaxN node budget (default: 4000)
+  --maxn-time-ms N         MaxN deadline in ms (default: 350)
+  --belief-particles N     Arena posterior particles (default: 24)
+  --strategic-particles N  Rust strategic particle cap (default: 12)
   --seed N                 First deterministic seed
   --output PATH            Output path without extension
                            Checkpoints go to <output>.checkpoints/
+  --challenge-output-directory PATH
+                           Persist eligible PreRoll takeover snapshots by matchup
   --no-validate            Skip per-transition invariant validation
   --no-build               Reuse the current release binary
   --quick                  24 games versus weighted and alpha-beta
@@ -151,9 +194,21 @@ function readOptions(argv) {
     !Number.isInteger(options.games) ||
     options.games < 1 ||
     !Number.isInteger(options.threads) ||
-    options.threads < 1
+    options.threads < 1 ||
+    !Number.isInteger(options.maxnDepth) ||
+    options.maxnDepth < 1 ||
+    !Number.isInteger(options.maxnBranch) ||
+    options.maxnBranch < 1 ||
+    !Number.isInteger(options.maxnNodes) ||
+    options.maxnNodes < 1 ||
+    !Number.isInteger(options.maxnTimeMs) ||
+    options.maxnTimeMs < 0 ||
+    !Number.isInteger(options.beliefParticles) ||
+    options.beliefParticles < 1 ||
+    !Number.isInteger(options.strategicParticles) ||
+    options.strategicParticles < 1
   ) {
-    throw new Error("Players, games, or threads are outside the supported range.");
+    throw new Error("Benchmark numeric options are outside the supported range.");
   }
   return options;
 }
@@ -214,6 +269,12 @@ function markdown(report) {
 
 Generated: ${report.generatedAt}
 
+Build: \`${report.buildIdentity.buildGitSha}${report.buildIdentity.buildDirty ? "+dirty" : ""}\`
+
+Engine: \`${report.buildIdentity.engineRevision}\`
+
+Production profile: depth ${report.liveProductionProfile.maxnDepth}, branch ${report.liveProductionProfile.maxnBranch}, ${report.liveProductionProfile.maxnNodes.toLocaleString()} nodes, ${report.liveProductionProfile.maxnTimeMs} ms, ${report.liveProductionProfile.beliefParticles} belief / ${report.liveProductionProfile.strategicParticles} strategic particles, weighted-belief information.
+
 Candidate: \`${report.configuration.candidate}\`. Each board block rotates the
 candidate through every seat while preserving the board and chance seed.
 Confidence intervals are block bootstraps. Strategic engines receive the same
@@ -240,8 +301,12 @@ if (options.build) {
 }
 
 const results = [];
+const challengeOutputs = [];
 const checkpointDirectory = `${options.output}.checkpoints`;
 await mkdir(checkpointDirectory, { recursive: true });
+if (options.challengeOutputDirectory) {
+  await mkdir(options.challengeOutputDirectory, { recursive: true });
+}
 const matchupCount = options.players.length * options.baselines.length;
 let matchupIndex = 0;
 for (const players of options.players) {
@@ -258,6 +323,16 @@ for (const players of options.players) {
       `[${matchupIndex}/${matchupCount}] ${options.candidate} vs ${baseline}, ${players} players, ${blocks * players} games…`,
     );
     console.error(`  checkpoint: ${checkpointOutput}`);
+    const challengeOutput = options.challengeOutputDirectory
+      ? resolve(
+          options.challengeOutputDirectory,
+          `${players}p-${options.candidate}-vs-${baseline}.jsonl`,
+        )
+      : null;
+    if (challengeOutput) {
+      challengeOutputs.push(challengeOutput);
+      console.error(`  challenges: ${challengeOutput}`);
+    }
     const args = [
       "--players",
       String(players),
@@ -275,12 +350,27 @@ for (const players of options.players) {
       String(options.rolloutActions),
       "--max-turns",
       String(options.maxTurns),
+      "--maxn-depth",
+      String(options.maxnDepth),
+      "--maxn-branch",
+      String(options.maxnBranch),
+      "--maxn-nodes",
+      String(options.maxnNodes),
+      "--maxn-time-ms",
+      String(options.maxnTimeMs),
+      "--belief-particles",
+      String(options.beliefParticles),
+      "--strategic-particles",
+      String(options.strategicParticles),
       "--threads",
       String(options.threads),
       "--checkpoint-output",
       checkpointOutput,
       "--json",
     ];
+    if (challengeOutput) {
+      args.push("--challenge-output", challengeOutput);
+    }
     if (options.validate) args.push("--validate");
     const output = await run(ARENA, args, {
       cwd: ENGINE_DIR,
@@ -294,12 +384,44 @@ for (const players of options.players) {
   }
 }
 
+const sourceIdentities = [
+  ...new Map(
+    results.map((result) => [
+      `${result.buildGitSha}:${result.buildDirty ?? "unknown"}:${result.engineRevision}`,
+      {
+        buildGitSha: result.buildGitSha,
+        buildDirty: result.buildDirty ?? null,
+        engineRevision: result.engineRevision,
+      },
+    ]),
+  ).values(),
+];
+if (sourceIdentities.length !== 1) {
+  throw new Error("Arena matchups were produced by inconsistent build identities.");
+}
 const report = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   kind: "colonist-assistant-native-arena-matrix",
   generatedAt: new Date().toISOString(),
+  buildIdentity: sourceIdentities[0],
+  liveProductionProfile: {
+    algorithm: "weighted-belief Deep MaxN",
+    maxnDepth: options.maxnDepth,
+    maxnBranch: options.maxnBranch,
+    maxnNodes: options.maxnNodes,
+    maxnTimeMs: options.maxnTimeMs,
+    beliefParticles: options.beliefParticles,
+    strategicParticles: options.strategicParticles,
+    trackerWorldLimit: 4_096,
+    adapterSourceWorldLimit: 96,
+    interactiveParticleLimit: 24,
+    tacticalDepth: 14,
+    tacticalNodes: 900,
+    informationMode: "weighted-belief",
+  },
   configuration: options,
   checkpointDirectory,
+  challengeOutputs,
   totalGames: results.reduce((sum, result) => sum + result.games, 0),
   results,
 };
@@ -314,6 +436,7 @@ console.log(
       json: `${options.output}.json`,
       markdown: `${options.output}.md`,
       checkpoints: checkpointDirectory,
+      challenges: challengeOutputs,
       totalGames: report.totalGames,
     },
     null,
