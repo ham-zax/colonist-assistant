@@ -2,6 +2,7 @@ import {
   analyzePublicEstimate,
   type DecisionAnalysis,
   type DecisionEngine,
+  type DecisionSearchConstraints,
 } from "../core/engine";
 import type { BoardSnapshot } from "../core/placement";
 import type { TrackerState } from "../core/types";
@@ -12,6 +13,7 @@ export interface DecisionRequest {
   board: BoardSnapshot;
   rootPlayer: string;
   engine: DecisionEngine;
+  searchConstraints?: DecisionSearchConstraints;
 }
 
 export const analyzeDecisionRequest = async (
@@ -29,5 +31,6 @@ export const analyzeDecisionRequest = async (
     request.board,
     request.rootPlayer,
     baseline,
+    request.searchConstraints,
   );
 };

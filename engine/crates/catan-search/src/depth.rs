@@ -504,6 +504,7 @@ fn belief_search(
     particles: &[BeliefParticle],
     config: BeliefDepthConfig,
     paranoid: bool,
+    root_exclusions: &[Action],
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
     let config = config.normalized();
     let maximum_depth = config.maximum_depth;
@@ -647,7 +648,8 @@ fn belief_search(
         .sum::<f32>()
         .max(f32::EPSILON);
     let planner_nodes = (maximum_nodes / 12).clamp(300, 4_000);
-    let root_scored = normalize_belief_root_priors(particles, observer, planner_nodes);
+    let mut root_scored = normalize_belief_root_priors(particles, observer, planner_nodes);
+    root_scored.retain(|(action, _)| !root_exclusions.contains(action));
     // Threat forcing disabled until posterior-aggregated and post-apply verified.
     let mut root_actions = truncate_root_preserving_end_turn(root_scored, branch_cap)
         .into_iter()
@@ -870,6 +872,7 @@ fn public_opening_result(
             strategic_particle_limit: 1,
         },
         paranoid,
+        &[],
     )
     .expect("one public setup state is a valid belief");
     DepthSearchResult {
@@ -1019,7 +1022,7 @@ pub fn search_weighted_belief_maxn_with_config(
     particles: &[BeliefParticle],
     config: BeliefDepthConfig,
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
-    belief_search(particles, config, false)
+    belief_search(particles, config, false, &[])
 }
 
 pub fn search_weighted_belief_maxn_bounded(
@@ -1047,7 +1050,25 @@ pub fn search_weighted_belief_maxn_bounded_timed(
     maximum_nodes: u32,
     time_budget_ms: u32,
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
-    search_weighted_belief_maxn_with_config(
+    search_weighted_belief_maxn_bounded_timed_excluding(
+        particles,
+        depth,
+        branch_cap,
+        maximum_nodes,
+        time_budget_ms,
+        &[],
+    )
+}
+
+pub fn search_weighted_belief_maxn_bounded_timed_excluding(
+    particles: &[BeliefParticle],
+    depth: u8,
+    branch_cap: usize,
+    maximum_nodes: u32,
+    time_budget_ms: u32,
+    root_exclusions: &[Action],
+) -> Result<BeliefDepthResult, DepthBeliefError> {
+    belief_search(
         particles,
         BeliefDepthConfig {
             maximum_depth: depth,
@@ -1056,6 +1077,8 @@ pub fn search_weighted_belief_maxn_bounded_timed(
             time_budget_ms,
             strategic_particle_limit: STRATEGIC_PARTICLE_TARGET,
         },
+        false,
+        root_exclusions,
     )
 }
 
@@ -1094,7 +1117,7 @@ pub fn search_weighted_belief_paranoid_with_config(
     particles: &[BeliefParticle],
     config: BeliefDepthConfig,
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
-    belief_search(particles, config, true)
+    belief_search(particles, config, true, &[])
 }
 
 pub fn search_weighted_belief_paranoid_bounded(
@@ -1122,7 +1145,25 @@ pub fn search_weighted_belief_paranoid_bounded_timed(
     maximum_nodes: u32,
     time_budget_ms: u32,
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
-    search_weighted_belief_paranoid_with_config(
+    search_weighted_belief_paranoid_bounded_timed_excluding(
+        particles,
+        depth,
+        branch_cap,
+        maximum_nodes,
+        time_budget_ms,
+        &[],
+    )
+}
+
+pub fn search_weighted_belief_paranoid_bounded_timed_excluding(
+    particles: &[BeliefParticle],
+    depth: u8,
+    branch_cap: usize,
+    maximum_nodes: u32,
+    time_budget_ms: u32,
+    root_exclusions: &[Action],
+) -> Result<BeliefDepthResult, DepthBeliefError> {
+    belief_search(
         particles,
         BeliefDepthConfig {
             maximum_depth: depth,
@@ -1131,6 +1172,8 @@ pub fn search_weighted_belief_paranoid_bounded_timed(
             time_budget_ms,
             strategic_particle_limit: STRATEGIC_PARTICLE_TARGET,
         },
+        true,
+        root_exclusions,
     )
 }
 

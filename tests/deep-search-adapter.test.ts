@@ -643,11 +643,14 @@ describe("deep-search state adapter", () => {
 
     expect(supportedMass).toBeCloseTo(0.9889001, 6);
     expect(response.exactDecision).toBe(true);
+    expect(response.authority).toBe("exact-mandatory");
     expect(["confirm-trade", "cancel-trade"]).toContain(response.chosen?.kind);
   });
 
-  it("moves on after an outgoing trade has received its responses", () => {
-    const withRejectedTrade = buildDeepSearchRequest(
+  it("carries a rejected outgoing bundle into Rust without exhausting every trade root", () => {
+    const give = resources(0, 1, 0, 0, 0);
+    const receive = resources(0, 0, 0, 0, 1);
+    const withRejectedPanel = buildDeepSearchRequest(
       state,
       {
         ...board,
@@ -656,8 +659,8 @@ describe("deep-search state adapter", () => {
             id: "trade-1",
             creator: "You",
             tradeExecutor: "You",
-            creatorGive: resources(0, 1, 0, 0, 0),
-            creatorReceive: resources(1, 0, 0, 0, 0),
+            creatorGive: give,
+            creatorReceive: receive,
             incoming: false,
             counterOffer: false,
             canAccept: false,
@@ -670,19 +673,92 @@ describe("deep-search state adapter", () => {
       },
       "You",
     ).request as any;
+    expect(withRejectedPanel.state.domesticTradeUsed).toBe(true);
 
-    expect(withRejectedTrade.state.domesticTradeUsed).toBe(true);
-
-    const afterOfferCloses = buildDeepSearchRequest(
+    const unconstrained = buildDeepSearchRequest(
       state,
-      {
-        ...board,
-        domesticTradeUsed: true,
-        activeTrades: [],
-      },
+      { ...board, activeTrades: [] },
       "You",
     ).request as any;
-    expect(afterOfferCloses.state.domesticTradeUsed).toBe(true);
+    expect(unconstrained.state.domesticTradeUsed).toBe(false);
+    unconstrained.branchCap = 32;
+    const raw = analyzeWasm(unconstrained);
+    const generated = raw.actions.find(
+      (candidate: any) => candidate.action.kind === "offer-trade",
+    )?.action;
+    if (!generated?.cards || !generated.receiveCards) {
+      throw new Error("fixture must expose at least one generated domestic trade root");
+    }
+    const generatedCards = generated.cards;
+    const generatedReceiveCards = generated.receiveCards;
+    const [giveLumber, giveBrick, giveWool, giveGrain, giveOre] = generatedCards;
+    const [receiveLumber, receiveBrick, receiveWool, receiveGrain, receiveOre] =
+      generatedReceiveCards;
+    const generatedGive = resources(
+      giveLumber,
+      giveBrick,
+      giveWool,
+      giveGrain,
+      giveOre,
+    );
+    const generatedReceive = resources(
+      receiveLumber,
+      receiveBrick,
+      receiveWool,
+      receiveGrain,
+      receiveOre,
+    );
+
+    const constrained = buildDeepSearchRequest(
+      state,
+      { ...board, activeTrades: [] },
+      "You",
+      {
+        lastRejectedTrade: {
+          give: generatedGive,
+          receive: generatedReceive,
+        },
+      },
+    ).request as any;
+    const uiRetry = buildDeepSearchRequest(
+      state,
+      { ...board, activeTrades: [] },
+      "You",
+      {
+        rootExclusions: [
+          {
+            kind: "offer-trade",
+            give: generatedGive,
+            receive: generatedReceive,
+          },
+        ],
+      },
+    ).request as any;
+
+    expect(constrained.state.domesticTradeUsed).toBe(false);
+    expect(constrained.lastRejectedTrade).toEqual({
+      give: generatedCards,
+      receive: generatedReceiveCards,
+    });
+    expect(uiRetry.rootExclusions).toEqual([
+      {
+        kind: "offer-trade",
+        give: generatedCards,
+        receive: generatedReceiveCards,
+      },
+    ]);
+    constrained.branchCap = 32;
+    uiRetry.branchCap = 32;
+    const rejected = analyzeWasm(constrained);
+    const retried = analyzeWasm(uiRetry);
+    const matchesRejectedOffer = (candidate: any) =>
+      candidate.action.kind === "offer-trade" &&
+      candidate.action.cards?.join(",") === generatedCards.join(",") &&
+      candidate.action.receiveCards?.join(",") ===
+        generatedReceiveCards.join(",");
+    expect(raw.actions.some(matchesRejectedOffer)).toBe(true);
+    expect(rejected.actions.some(matchesRejectedOffer)).toBe(false);
+    expect(retried.actions.some(matchesRejectedOffer)).toBe(false);
   });
 
   it("crosses the packaged WASM boundary and returns a legal report", async () => {
@@ -706,6 +782,13 @@ describe("deep-search state adapter", () => {
     expect(built.request.timeBudgetMs).toBe(350);
     expect(response.algorithm).toBe("maxn");
     expect(response.engineRevision).toBe("deep-maxn-v9");
+    expect([
+      "exact-mandatory",
+      "tactical-proven",
+      "deep-maxn",
+      "exact-family",
+      "safety-override",
+    ]).toContain(response.authority);
     expect(response.chosen).toBeDefined();
     expect(response.actions.length).toBeGreaterThan(0);
     expect(response.particles).toBe(built.request.state.worlds.length);
@@ -838,9 +921,39 @@ describe("deep-search state adapter", () => {
     const elapsed = performance.now() - started;
 
     expect(response.exactDecision).toBe(true);
+    expect(response.authority).toBe("exact-mandatory");
     expect(["respond-trade", "counter-trade"]).toContain(
       response.chosen?.kind,
     );
+    const counter = response.actions.find(
+      (candidate) => candidate.action.kind === "counter-trade",
+    )?.action;
+    expect(counter?.cards).toBeDefined();
+    expect(counter?.receiveCards).toBeDefined();
+    const retry = buildDeepSearchRequest(state, incomingBoard, "You", {
+      rootExclusions: [
+        {
+          kind: "counter-trade",
+          give: resources(...counter!.cards!),
+          receive: resources(...counter!.receiveCards!),
+        },
+      ],
+    });
+    retry.request.mode = "puct";
+    retry.request.iterations = 50_000;
+    retry.request.maxNodes = 250_000;
+    const retried = analyzeWasm(retry.request);
+    expect(retried.exactDecision).toBe(true);
+    expect(retried.authority).toBe("exact-mandatory");
+    expect(
+      retried.actions.some(
+        (candidate) =>
+          candidate.action.kind === "counter-trade" &&
+          candidate.action.cards?.join(",") === counter!.cards!.join(",") &&
+          candidate.action.receiveCards?.join(",") ===
+            counter!.receiveCards!.join(","),
+      ),
+    ).toBe(false);
     expect(response.nodes).toBe(0);
     expect(response.iterations).toBe(0);
     expect(response.rollouts).toBe(0);

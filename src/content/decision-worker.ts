@@ -1,6 +1,7 @@
 import type {
   DecisionAnalysis,
   DecisionEngine,
+  DecisionSearchConstraints,
 } from "../core/engine";
 import type { BoardSnapshot } from "../core/placement";
 import type { TrackerState } from "../core/types";
@@ -94,6 +95,7 @@ export class DecisionWorkerClient {
     callback: (analysis: DecisionAnalysis) => void,
     slowCallback?: (elapsedMs: number) => void,
     failureCallback?: (detail: string) => void,
+    searchConstraints?: DecisionSearchConstraints,
   ): boolean {
     if (
       this.destroyed ||
@@ -122,6 +124,7 @@ export class DecisionWorkerClient {
       callback,
       ...(slowCallback ? { slowCallback } : {}),
       ...(failureCallback ? { failureCallback } : {}),
+      ...(searchConstraints ? { searchConstraints } : {}),
     };
     this.desiredKey = key;
     this.pump();
@@ -141,6 +144,9 @@ export class DecisionWorkerClient {
       board: request.board,
       rootPlayer: request.rootPlayer,
       engine: request.engine,
+      ...(request.searchConstraints
+        ? { searchConstraints: request.searchConstraints }
+        : {}),
     };
     const slowTimer = globalThis.setTimeout(() => {
       const elapsedMs = performance.now() - startedAt;

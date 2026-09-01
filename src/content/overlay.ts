@@ -64,8 +64,6 @@ import {
 } from "../core/trades";
 import {
   outgoingTradeDisposition,
-  selectUsableDeepAction,
-  shouldConfirmAcceptedTradeImmediately,
   tradeMemoryScopeChanged,
   tradeOfferKey,
   unansweredIncomingTrades,
@@ -78,7 +76,11 @@ import {
 import type { TradeVerdict } from "../core/trades";
 import type {
   DecisionAnalysis,
+  DecisionAuthority,
   DecisionRuntime,
+  DecisionSearchConstraints,
+  DomesticTradeState,
+  RootTradeActionExclusion,
 } from "../core/engine";
 import { isDeepDecisionEngine } from "../core/engine";
 import type { TrackerState } from "../core/types";
@@ -306,8 +308,8 @@ export class AssistantOverlay {
   private decisionRuntimeDetail = "Connecting to the packaged search engine.";
   private decisionRuntimeError = "";
   private decisionContextInvalidated = false;
-  private domesticTradeAttempt?: { gameKey?: string; turn?: number };
-  private readonly attemptedTradeOffers = new Set<string>();
+  private lastRejectedDomesticTrade?: DomesticTradeState;
+  private readonly rootTradeActionExclusions: RootTradeActionExclusion[] = [];
   private readonly failedTradeActions = new Set<string>();
   private readonly completedIncomingTradeIds = new Set<string>();
   private readonly outgoingTradeSeenAt = new Map<string, number>();
@@ -394,8 +396,8 @@ export class AssistantOverlay {
       this.resetGameScope = undefined;
     }
     if (tradeMemoryScopeChanged(this.board, nextBoard)) {
-      this.domesticTradeAttempt = undefined;
-      this.attemptedTradeOffers.clear();
+      this.lastRejectedDomesticTrade = undefined;
+      this.rootTradeActionExclusions.length = 0;
       this.failedTradeActions.clear();
       this.completedIncomingTradeIds.clear();
       this.outgoingTradeSeenAt.clear();
@@ -418,10 +420,6 @@ export class AssistantOverlay {
     const outgoingTrades =
       nextBoard?.activeTrades?.filter((trade) => !trade.incoming) ?? [];
     if (outgoingTrades.length) {
-      this.domesticTradeAttempt = {
-        gameKey: nextBoard?.gameKey,
-        turn: nextBoard?.turn,
-      };
       for (const trade of outgoingTrades) {
         if (!this.outgoingTradeSeenAt.has(trade.id)) {
           this.outgoingTradeSeenAt.set(trade.id, Date.now());
@@ -437,7 +435,26 @@ export class AssistantOverlay {
           this.outgoingTradeWatchdogs.set(trade.id, timer);
         }
         const { give, receive } = localTradeBundles(trade);
-        this.attemptedTradeOffers.add(tradeOfferKey(give, receive));
+        if (
+          trade.responsesComplete &&
+          !trade.acceptedPlayers?.length &&
+          Boolean(trade.rejectedPlayers?.length)
+        ) {
+          this.lastRejectedDomesticTrade = {
+            give: { ...give },
+            receive: { ...receive },
+          };
+        }
+        const observedKey = tradeOfferKey(give, receive);
+        for (let index = this.rootTradeActionExclusions.length - 1; index >= 0; index -= 1) {
+          const exclusion = this.rootTradeActionExclusions[index]!;
+          if (
+            exclusion.kind === "offer-trade" &&
+            tradeOfferKey(exclusion.give, exclusion.receive) === observedKey
+          ) {
+            this.rootTradeActionExclusions.splice(index, 1);
+          }
+        }
       }
     }
     const outgoingIds = new Set(outgoingTrades.map((trade) => trade.id));
@@ -448,20 +465,6 @@ export class AssistantOverlay {
         if (timer !== undefined) window.clearTimeout(timer);
         this.outgoingTradeWatchdogs.delete(id);
       }
-    }
-    const domesticTradeAttempt = this.domesticTradeAttempt;
-    if (
-      nextBoard &&
-      nextBoard.isMyTurn &&
-      domesticTradeAttempt &&
-      domesticTradeAttempt.gameKey === nextBoard.gameKey &&
-      (
-        domesticTradeAttempt.turn === undefined ||
-        nextBoard.turn === undefined ||
-        domesticTradeAttempt.turn === nextBoard.turn
-      )
-    ) {
-      nextBoard = { ...nextBoard, domesticTradeUsed: true };
     }
     if (this.confirmedPlacement && nextBoard) {
       if (
@@ -531,12 +534,12 @@ export class AssistantOverlay {
       this.confirmedPlacement = undefined;
       this.confirmedPlacementSpend = undefined;
       this.robberVictimPlan = undefined;
-      this.attemptedTradeOffers.clear();
+      this.lastRejectedDomesticTrade = undefined;
+      this.rootTradeActionExclusions.length = 0;
       this.failedTradeActions.clear();
       this.completedIncomingTradeIds.clear();
       this.outgoingTradeSeenAt.clear();
       this.clearOutgoingTradeWatchdogs();
-      this.domesticTradeAttempt = undefined;
     }
     if (
       this.robberVictimPlan &&
@@ -627,8 +630,8 @@ export class AssistantOverlay {
     this.robberVictimPlan = undefined;
     this.confirmedPlacement = undefined;
     this.confirmedPlacementSpend = undefined;
-    this.domesticTradeAttempt = undefined;
-    this.attemptedTradeOffers.clear();
+    this.lastRejectedDomesticTrade = undefined;
+    this.rootTradeActionExclusions.length = 0;
     this.failedTradeActions.clear();
     this.completedIncomingTradeIds.clear();
     this.outgoingTradeSeenAt.clear();
@@ -1179,13 +1182,6 @@ export class AssistantOverlay {
             this.decisionSource(next, Boolean(workflow)),
           );
         }
-        if (
-          succeeded &&
-          next?.kind === "trade-builder" &&
-          next.mode === "player"
-        ) {
-          this.rememberDomesticTradeAttempt(next);
-        }
         if (succeeded && next?.kind === "build") {
           this.rememberBuildPlacement(next, spatial);
         }
@@ -1200,6 +1196,7 @@ export class AssistantOverlay {
           );
         }
         if (!succeeded && next?.kind === "trade-builder") {
+          this.rememberRootTradeFailure();
           this.decisionAnalysis = undefined;
           this.decisionKey = "";
           this.decisionPendingKey = "";
@@ -1225,6 +1222,7 @@ export class AssistantOverlay {
           this.render();
         }
         if (!succeeded && next?.kind === "trade") {
+          this.rememberRootTradeFailure();
           this.failedTradeActions.add(next.signature);
           this.decisionAnalysis = undefined;
           this.decisionKey = "";
@@ -1246,33 +1244,40 @@ export class AssistantOverlay {
     });
   }
 
-  private rememberDomesticTradeAttempt(
-    next: Extract<NextClick, { kind: "trade-builder" }>,
-  ): void {
-    if (next.mode !== "player") return;
-    this.attemptedTradeOffers.add(tradeOfferKey(next.give, next.receive));
-    this.domesticTradeAttempt = {
-      gameKey: this.board?.gameKey,
-      turn: this.board?.turn,
-    };
-    if (this.board?.isMyTurn) {
-      this.board = { ...this.board, domesticTradeUsed: true };
+  private rememberRootTradeFailure(): void {
+    const action = this.decisionAnalysis?.deepSearch?.chosen;
+    if (
+      !action ||
+      (action.kind !== "offer-trade" && action.kind !== "counter-trade") ||
+      !action.cards ||
+      !action.receiveCards
+    ) {
+      return;
     }
+    const exclusion: RootTradeActionExclusion = {
+      kind: action.kind,
+      give: tupleResources(action.cards),
+      receive: tupleResources(action.receiveCards),
+    };
+    const key = `${exclusion.kind}|${tradeOfferKey(exclusion.give, exclusion.receive)}`;
+    if (
+      this.rootTradeActionExclusions.some(
+        (candidate) =>
+          `${candidate.kind}|${tradeOfferKey(candidate.give, candidate.receive)}` === key,
+      )
+    ) {
+      return;
+    }
+    this.rootTradeActionExclusions.push(exclusion);
   }
 
   private preferredDeepAction(
-    state: TrackerState | undefined,
-    player: string | undefined,
+    _state: TrackerState | undefined,
+    _player: string | undefined,
   ): NonNullable<
     NonNullable<DecisionAnalysis["deepSearch"]>["chosen"]
   > | undefined {
-    return selectUsableDeepAction(
-      this.decisionAnalysis?.deepSearch,
-      state,
-      player,
-      this.attemptedTradeOffers,
-      this.board,
-    );
+    return this.decisionAnalysis?.deepSearch?.chosen;
   }
 
   private nextClickStillLegal(next: NextClick): boolean {
@@ -1439,26 +1444,34 @@ export class AssistantOverlay {
     return this.nextClickStillLegal(next);
   }
 
+  private decisionSourceForAuthority(
+    authority: DecisionAuthority,
+  ): DecisionActionSource {
+    if (authority === "exact-mandatory") return "mandatory";
+    if (authority === "tactical-proven" || authority === "safety-override") {
+      return "tactical";
+    }
+    return "deep";
+  }
+
   private decisionSource(
     next: NextClick,
     _workflow: boolean,
   ): DecisionActionSource {
+    if (this.nextClickMatchesDeepAction(next)) {
+      const authority = this.decisionAnalysis?.deepSearch?.authority;
+      return authority
+        ? this.decisionSourceForAuthority(authority)
+        : "deep";
+    }
     if (next.kind === "discard" || next.kind === "player") {
       return "mandatory";
     }
     if (next.kind === "trade") {
-      const deep = this.decisionAnalysis?.deepSearch?.chosen;
-      return deep?.kind === "respond-trade" || deep?.kind === "counter-trade"
-        ? "deep"
-        : "incoming-trade-evaluator";
+      return "incoming-trade-evaluator";
     }
     if (next.kind === "trade-cancel") {
       return "incoming-trade-evaluator";
-    }
-    if (this.nextClickMatchesDeepAction(next)) {
-      return this.decisionAnalysis?.deepSearch?.tacticalProven
-        ? "tactical"
-        : "deep";
     }
     if (
       next.kind === "board" &&
@@ -1555,6 +1568,16 @@ export class AssistantOverlay {
     }
     if (next.kind === "trade-partner") {
       return action.kind === "confirm-trade" && action.player === next.player;
+    }
+    if (next.kind === "trade-cancel") {
+      return action.kind === "cancel-trade";
+    }
+    if (next.kind === "trade") {
+      if (next.verdict === "counter") return action.kind === "counter-trade";
+      return (
+        action.kind === "respond-trade" &&
+        action.accept === (next.verdict === "accept")
+      );
     }
     if (next.kind === "discard") {
       return (
@@ -1752,10 +1775,33 @@ export class AssistantOverlay {
     });
   }
 
+  private decisionSearchConstraints(): DecisionSearchConstraints {
+    return {
+      ...(this.lastRejectedDomesticTrade
+        ? {
+            lastRejectedTrade: {
+              give: { ...this.lastRejectedDomesticTrade.give },
+              receive: { ...this.lastRejectedDomesticTrade.receive },
+            },
+          }
+        : {}),
+      ...(this.rootTradeActionExclusions.length
+        ? {
+            rootExclusions: this.rootTradeActionExclusions.map((exclusion) => ({
+              kind: exclusion.kind,
+              give: { ...exclusion.give },
+              receive: { ...exclusion.receive },
+            })),
+          }
+        : {}),
+    };
+  }
+
   private decisionSignature(
     state: TrackerState,
     board: BoardSnapshot,
     player: string,
+    searchConstraints: DecisionSearchConstraints,
   ): string {
     return JSON.stringify({
       engine: this.settings.engine,
@@ -1774,6 +1820,7 @@ export class AssistantOverlay {
       robberVictimSelection: board.robberVictimSelection,
       robberVictimPlayers: board.robberVictimPlayers,
       domesticTradeUsed: board.domesticTradeUsed,
+      searchConstraints,
       currentPlayer: board.currentPlayer,
       legalVertices: [...(board.legalVertexIds ?? [])].sort(),
       legalEdges: [...(board.legalEdgeIds ?? [])].sort(),
@@ -1913,7 +1960,8 @@ export class AssistantOverlay {
       retainedPlacementTarget &&
       this.decisionAnalysis?.runtime === "background-wasm"
     ) {
-      const key = this.decisionSignature(state, board, player);
+      const searchConstraints = this.decisionSearchConstraints();
+      const key = this.decisionSignature(state, board, player, searchConstraints);
       if (key !== this.decisionKey) {
         this.decisionKey = key;
         this.decisionPendingKey = "";
@@ -1938,7 +1986,8 @@ export class AssistantOverlay {
       this.decisionWorker.reset();
       return;
     }
-    const key = this.decisionSignature(state, board, player);
+    const searchConstraints = this.decisionSearchConstraints();
+    const key = this.decisionSignature(state, board, player, searchConstraints);
     if (key !== this.decisionKey) {
       this.decisionKey = key;
       this.decisionAnalysis = undefined;
@@ -2019,6 +2068,7 @@ export class AssistantOverlay {
         });
         this.render();
       },
+      searchConstraints,
     );
     if (requested) {
       this.decisionPendingKey = key;
@@ -2615,38 +2665,27 @@ export class AssistantOverlay {
     );
     for (const trade of outgoingTrades) {
       if (trade.acceptedPlayers?.length) {
-        const confirmImmediately =
-          shouldConfirmAcceptedTradeImmediately(trade);
-        const deepAction = this.decisionAnalysis?.deepSearch?.chosen;
+        const deepSearch = this.decisionAnalysis?.deepSearch;
+        if (!deepSearch || this.decisionPendingKey) return undefined;
+        const deepAction = deepSearch.chosen;
+        if (deepAction?.kind === "cancel-trade") {
+          return {
+            kind: "trade-cancel",
+            offerIndex: board.activeTrades!.indexOf(trade),
+            tradeId: trade.id,
+            label: "Cancel this accepted trade",
+            signature: `${signatureBase}|cancel-trade|${trade.id}|rust`,
+            confidence: 1,
+          };
+        }
         if (
-          !confirmImmediately &&
-          deepAction?.kind !== "confirm-trade" &&
-          (
-            this.decisionPendingKey ||
-            this.decisionAnalysis?.deepSearch
-          ) &&
-          isDeepDecisionEngine(this.settings.engine)
+          deepAction?.kind !== "confirm-trade" ||
+          !deepAction.player ||
+          !trade.acceptedPlayers.includes(deepAction.player)
         ) {
           return undefined;
         }
-        const selected =
-          confirmImmediately
-            ? trade.acceptedPlayers[0]!
-            : deepAction?.kind === "confirm-trade" &&
-                deepAction.player &&
-                trade.acceptedPlayers.includes(deepAction.player)
-              ? deepAction.player
-              : [...trade.acceptedPlayers].sort((left, right) => {
-                  const leftWin =
-                    report?.decisionAnalysis?.players.find(
-                      (candidate) => candidate.player === left,
-                    )?.probability ?? 0;
-                  const rightWin =
-                    report?.decisionAnalysis?.players.find(
-                      (candidate) => candidate.player === right,
-                    )?.probability ?? 0;
-                  return leftWin - rightWin;
-                })[0]!;
+        const selected = deepAction.player;
         return {
           kind: "trade-partner",
           offerIndex: board.activeTrades!.indexOf(trade),
@@ -2679,6 +2718,9 @@ export class AssistantOverlay {
           confidence: 1,
         };
       }
+      const deepSearch = this.decisionAnalysis?.deepSearch;
+      if (!deepSearch || this.decisionPendingKey) return undefined;
+      if (deepSearch.chosen?.kind !== "cancel-trade") return undefined;
       return {
         kind: "trade-cancel",
         offerIndex: board.activeTrades!.indexOf(trade),

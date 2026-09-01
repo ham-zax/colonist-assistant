@@ -27,7 +27,7 @@ pub use eval::{
 };
 pub use exact::{
     ExactActionFamily, ExactActionValue, ExactDecisionResult, exact_family_for_action,
-    solve_exact_belief,
+    solve_exact_belief, solve_exact_belief_excluding,
 };
 pub use features::{
     ACTION_FEATURES, EDGE_FEATURES, GLOBAL_FEATURES, HEX_FEATURES, HeterogeneousGraphFeatures,
@@ -72,6 +72,8 @@ pub use depth::{
     search_belief_paranoid_bounded, search_maxn, search_maxn_bounded, search_maxn_bounded_timed,
     search_paranoid, search_paranoid_bounded, search_paranoid_bounded_timed,
     search_weighted_belief_maxn_bounded, search_weighted_belief_maxn_bounded_timed,
-    search_weighted_belief_maxn_with_config, search_weighted_belief_paranoid_bounded,
-    search_weighted_belief_paranoid_bounded_timed, search_weighted_belief_paranoid_with_config,
+    search_weighted_belief_maxn_bounded_timed_excluding, search_weighted_belief_maxn_with_config,
+    search_weighted_belief_paranoid_bounded, search_weighted_belief_paranoid_bounded_timed,
+    search_weighted_belief_paranoid_bounded_timed_excluding,
+    search_weighted_belief_paranoid_with_config,
 };

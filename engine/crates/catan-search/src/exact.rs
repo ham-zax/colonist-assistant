@@ -406,6 +406,14 @@ pub fn solve_exact_belief(
     particles: &[BeliefParticle],
     family: ExactActionFamily,
 ) -> ExactDecisionResult {
+    solve_exact_belief_excluding(particles, family, &[])
+}
+
+pub fn solve_exact_belief_excluding(
+    particles: &[BeliefParticle],
+    family: ExactActionFamily,
+    root_exclusions: &[Action],
+) -> ExactDecisionResult {
     let Some(first) = particles.first() else {
         return ExactDecisionResult::default();
     };
@@ -436,6 +444,7 @@ pub fn solve_exact_belief(
         .collect::<Vec<_>>();
     candidates.sort_by_key(|action| format!("{action:?}"));
     candidates.dedup();
+    candidates.retain(|action| !root_exclusions.contains(action));
     if candidates.is_empty() {
         return ExactDecisionResult::default();
     }

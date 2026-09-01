@@ -108,6 +108,7 @@ describe("decision trace recorder", () => {
         engineRevision: "trace-test",
         rootIndex: 1,
         algorithm: "puct",
+        authority: "deep-maxn",
         chosen: { kind: "build-city", targetId: "v1" },
         rootValue: [0.5, 0.3, 0.2],
         tacticalWinProbability: 0,

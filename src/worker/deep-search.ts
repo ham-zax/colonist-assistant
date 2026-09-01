@@ -23,6 +23,7 @@ import type {
   DeepSearchAction,
   DeepSearchResult,
   DecisionAnalysis,
+  DecisionSearchConstraints,
 } from "../core/engine";
 
 const RESOURCE_CODE = new Map<Resource, number>(
@@ -602,6 +603,7 @@ export const buildDeepSearchRequest = (
   state: TrackerState,
   board: BoardSnapshot,
   rootPlayer: string,
+  searchConstraints: DecisionSearchConstraints = {},
 ) => {
   const players = playerNames(state, board);
   if (players.length < 2 || players.length > 4) {
@@ -810,6 +812,7 @@ export const buildDeepSearchRequest = (
       rejected: trade.rejectedPlayers,
       complete: trade.responsesComplete,
     })),
+    searchConstraints,
   });
   const seed = hashString(signature);
   const lastOwnRoll = state.recentEvents
@@ -1127,6 +1130,23 @@ export const buildDeepSearchRequest = (
       depth: 4,
       branchCap: 8,
       ponder: false,
+      ...(searchConstraints.lastRejectedTrade
+        ? {
+            lastRejectedTrade: {
+              give: resources(searchConstraints.lastRejectedTrade.give),
+              receive: resources(searchConstraints.lastRejectedTrade.receive),
+            },
+          }
+        : {}),
+      ...(searchConstraints.rootExclusions?.length
+        ? {
+            rootExclusions: searchConstraints.rootExclusions.map((exclusion) => ({
+              kind: exclusion.kind,
+              give: resources(exclusion.give),
+              receive: resources(exclusion.receive),
+            })),
+          }
+        : {}),
     },
   };
 };
@@ -1136,12 +1156,14 @@ export const analyzeDeepSearch = async (
   board: BoardSnapshot,
   rootPlayer: string,
   fallback: DecisionAnalysis,
+  searchConstraints: DecisionSearchConstraints = {},
 ): Promise<DecisionAnalysis> => {
   await ensureWasm();
   const { request, players, root } = buildDeepSearchRequest(
     state,
     board,
     rootPlayer,
+    searchConstraints,
   );
   request.mode = "maxn";
   if (board.initialPlacement) {
@@ -1176,24 +1198,17 @@ export const analyzeDeepSearch = async (
   const startedAt = performance.now();
   const response = analyzeWasm(request) as WasmSearchResponse;
   const elapsedMs = performance.now() - startedAt;
-  const allowed = response.actions.filter((statistic) =>
-    matchingPrompt(statistic.action, board),
-  );
   const selected =
-    (matchingPrompt(response.chosen ?? { kind: "" }, board)
+    response.chosen && matchingPrompt(response.chosen, board)
       ? response.chosen
-      : undefined) ??
-    allowed.sort(
-      (left, right) =>
-        right.visits - left.visits ||
-        (right.value[root] ?? 0) - (left.value[root] ?? 0),
-    )[0]?.action;
+      : undefined;
   const search: DeepSearchResult = {
     engineRevision: response.engineRevision,
     rootIndex: root,
     learnedModelVersion: response.learnedModelVersion,
     tradeModelVersion: response.tradeModelVersion,
     algorithm: response.algorithm,
+    authority: response.authority,
     ...(selected ? { chosen: mapAction(selected, players, board) } : {}),
     rootValue: response.rootValue.slice(0, players.length),
     tacticalWinProbability: response.tacticalWinProbability,
