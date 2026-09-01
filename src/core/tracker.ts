@@ -724,6 +724,144 @@ export const affordability = (
     .reduce((sum, world) => sum + world.weight, 0);
 };
 
+export interface PublicResourceSeedInput {
+  playerOrder: string[];
+  ownPlayer: string;
+  exactOwnHand: ResourceVector;
+  handSizes: Record<string, number>;
+  bank?: ResourceVector;
+  resourceSupply: number;
+  seed: number;
+  sampleCount?: number;
+}
+
+const deterministicUnitOffset = (seed: number, drawIndex: number): number => {
+  let value = (seed ^ Math.imul(drawIndex + 1, 0x9e3779b1)) >>> 0;
+  value ^= value >>> 16;
+  value = Math.imul(value, 0x7feb352d) >>> 0;
+  value ^= value >>> 15;
+  value = Math.imul(value, 0x846ca68b) >>> 0;
+  value ^= value >>> 16;
+  return (value >>> 0) / 0x1_0000_0000;
+};
+
+const drawResourceWithoutReplacement = (
+  remaining: ResourceVector,
+  unit: number,
+): Resource => {
+  const total = resourceTotal(remaining);
+  if (total <= 0) {
+    throw new Error("Public resource snapshot exceeds physical resource supply");
+  }
+  const target = Math.max(0, Math.min(1 - Number.EPSILON, unit)) * total;
+  let cumulative = 0;
+  for (const resource of RESOURCE_ORDER) {
+    cumulative += remaining[resource];
+    if (target < cumulative) return resource;
+  }
+  return RESOURCE_ORDER[RESOURCE_ORDER.length - 1]!;
+};
+
+/**
+ * Seeds fallback hidden-resource worlds from the physical-card conditional used
+ * when the assistant attaches after public log history has already been lost.
+ * Opponent hand slots are sampled uniformly without replacement. If the bank is
+ * public it is conditioned on exactly; otherwise the unsampled residual cards
+ * are the hidden bank.
+ */
+export const seedPublicResourceWorlds = (
+  input: PublicResourceSeedInput,
+): HandWorld[] => {
+  const sampleCount = Math.min(
+    MAX_WORLDS,
+    Math.max(1, Math.floor(input.sampleCount ?? 24)),
+  );
+  const resourceSupply = Math.floor(input.resourceSupply);
+  if (!(resourceSupply > 0)) {
+    throw new Error("Public resource snapshot has an invalid physical resource supply");
+  }
+  if (!input.playerOrder.includes(input.ownPlayer)) {
+    throw new Error("Public resource snapshot is missing the local player");
+  }
+  const orderedPlayers = input.playerOrder.filter(
+    (player, index, all) => all.indexOf(player) === index,
+  );
+  if (orderedPlayers.length !== input.playerOrder.length) {
+    throw new Error("Public resource snapshot has duplicate player slots");
+  }
+  for (const player of orderedPlayers) {
+    const size = input.handSizes[player];
+    if (!Number.isInteger(size) || size < 0) {
+      throw new Error(`Public resource snapshot has an invalid hand size for ${player}`);
+    }
+  }
+  const ownSize = input.handSizes[input.ownPlayer];
+  if (resourceTotal(input.exactOwnHand) !== ownSize) {
+    throw new Error("Public resource snapshot conflicts with the exact local hand size");
+  }
+
+  const initialRemaining = emptyResources();
+  for (const resource of RESOURCE_ORDER) {
+    const own = input.exactOwnHand[resource];
+    const bank = input.bank?.[resource] ?? 0;
+    if (
+      !Number.isInteger(own) ||
+      own < 0 ||
+      !Number.isInteger(bank) ||
+      bank < 0 ||
+      own + bank > resourceSupply
+    ) {
+      throw new Error("Public resource snapshot exceeds physical resource supply");
+    }
+    initialRemaining[resource] = resourceSupply - own - bank;
+  }
+
+  const opponentSlots = orderedPlayers
+    .filter((player) => player !== input.ownPlayer)
+    .reduce((sum, player) => sum + input.handSizes[player]!, 0);
+  const remainingCards = resourceTotal(initialRemaining);
+  if (
+    opponentSlots > remainingCards ||
+    (input.bank && opponentSlots !== remainingCards)
+  ) {
+    throw new Error("Public resource snapshot exceeds physical resource supply");
+  }
+
+  const merged = new Map<string, HandWorld>();
+  for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
+    const remaining = cloneResources(initialRemaining);
+    const world: HandWorld = {
+      weight: 1 / sampleCount,
+      hands: Object.fromEntries(
+        orderedPlayers.map((player) => [
+          player,
+          player === input.ownPlayer
+            ? cloneResources(input.exactOwnHand)
+            : emptyResources(),
+        ]),
+      ),
+    };
+    let drawIndex = 0;
+    for (const player of orderedPlayers) {
+      if (player === input.ownPlayer) continue;
+      const hand = world.hands[player]!;
+      for (let slot = 0; slot < input.handSizes[player]!; slot += 1) {
+        const offset = deterministicUnitOffset(input.seed, drawIndex);
+        const unit = (sampleIndex + offset) / sampleCount;
+        const resource = drawResourceWithoutReplacement(remaining, unit);
+        hand[resource] += 1;
+        remaining[resource] -= 1;
+        drawIndex += 1;
+      }
+    }
+    const key = worldKey(world);
+    const existing = merged.get(key);
+    if (existing) existing.weight += world.weight;
+    else merged.set(key, world);
+  }
+  return normalizeWorldWeights([...merged.values()]);
+};
+
 export interface PublicResourceEvidence {
   exactHands?: Record<string, ResourceVector>;
   handSizes?: Record<string, number>;

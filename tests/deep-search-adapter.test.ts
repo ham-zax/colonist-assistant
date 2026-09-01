@@ -7,7 +7,10 @@ import type {
   BoardSnapshot,
   DevelopmentCardVector,
 } from "../src/core/placement";
-import { reweightTradeEvidence } from "../src/core/tracker";
+import {
+  reweightTradeEvidence,
+  seedPublicResourceWorlds,
+} from "../src/core/tracker";
 import { buildDeepSearchRequest } from "../src/worker/deep-search";
 import initWasm, {
   analyze as analyzeWasm,
@@ -205,6 +208,36 @@ const board: BoardSnapshot = {
 };
 
 describe("deep-search state adapter", () => {
+  it("accepts a seeded public-board fallback posterior after a midgame attach", () => {
+    const fallbackState: TrackerState = {
+      ...state,
+      worlds: seedPublicResourceWorlds({
+        playerOrder: state.playerOrder,
+        ownPlayer: "You",
+        exactOwnHand: board.ownHand!,
+        handSizes: { You: 4, Rival: 5 },
+        resourceSupply: 19,
+        seed: 54,
+        sampleCount: 16,
+      }),
+    };
+
+    const built = buildDeepSearchRequest(fallbackState, board, "You");
+    const request = built.request as any;
+
+    expect(fallbackState.worlds.length).toBeGreaterThan(0);
+    expect(request.state.worlds.length).toBeGreaterThan(0);
+    expect(
+      request.state.worlds.every(
+        (world: any) =>
+          world.hands[1].reduce(
+            (sum: number, count: number) => sum + count,
+            0,
+          ) === 5,
+      ),
+    ).toBe(true);
+  });
+
   it("preserves exact private evidence and public topology", () => {
     const built = buildDeepSearchRequest(state, board, "You");
     const request = built.request as any;

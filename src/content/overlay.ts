@@ -52,6 +52,7 @@ import {
   getPlayerEstimate,
   reconcilePublicResourceEvidence,
   reduceTracker,
+  seedPublicResourceWorlds,
 } from "../core/tracker";
 import {
   likelyUpgradePath,
@@ -116,6 +117,18 @@ import { InteractionRenderGate } from "./render-gate";
 type ViewName = "advice" | "cards" | "settings";
 
 const STRATEGIST_LABEL = "Strategist ★";
+
+const resourceSupplyForPlayerCount = (playerCount: number): number =>
+  playerCount > 6 ? 29 : playerCount > 4 ? 24 : 19;
+
+const publicResourceSeed = (value: string): number => {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash >>> 0;
+};
 
 export const autonomousExecutionAllowed = (enabled: boolean): boolean =>
   enabled;
@@ -2047,8 +2060,7 @@ export class AssistantOverlay {
         : this.stateFromPublicBoard(board);
     if (!state || !board) return state;
     const playerCount = Object.keys(board.players ?? {}).length;
-    const resourceSupply =
-      playerCount > 6 ? 29 : playerCount > 4 ? 24 : 19;
+    const resourceSupply = resourceSupplyForPlayerCount(playerCount);
     const resources = reconcilePublicResourceEvidence(state, {
       exactHands:
         board.myPlayer && board.ownHand
@@ -2116,21 +2128,39 @@ export class AssistantOverlay {
       player: board.currentPlayer,
       sequence: board.turn ?? 0,
     };
-    // Before the game log mounts, seed several deterministic belief particles
-    // from public hand sizes. The deep-search adapter fills their hidden cards
-    // consistently, so setup advice does not wait for the first chat message.
-    const particleCount = players.length >= 3 ? 24 : 16;
-    state.worlds = Array.from({ length: particleCount }, () => ({
-      weight: 1,
-      hands: Object.fromEntries(
+    // If the public log mounts late, reconstruct a finite posterior from the
+    // physical resource-card conditional instead of creating empty opponent
+    // hands that reconciliation would immediately filter to zero worlds.
+    if (board.myPlayer && board.ownHand) {
+      const handSizes = Object.fromEntries(
         players.map((player) => [
           player,
-          player === board.myPlayer && board.ownHand
-            ? cloneResources(board.ownHand)
-            : emptyResources(),
+          board.players?.[player]?.handSize ?? 0,
         ]),
-      ),
-    }));
+      );
+      const resourceSupply = resourceSupplyForPlayerCount(players.length);
+      const particleCount = players.length >= 3 ? 24 : 16;
+      const seed = publicResourceSeed(
+        JSON.stringify({
+          game: board.gameKey ?? null,
+          turn: board.turn ?? 0,
+          currentPlayer: board.currentPlayer ?? null,
+          players: players.map((player) => [player, handSizes[player]]),
+          ownHand: board.ownHand,
+          bank: board.bankVisible ? board.bank ?? null : null,
+        }),
+      );
+      state.worlds = seedPublicResourceWorlds({
+        playerOrder: players,
+        ownPlayer: board.myPlayer,
+        exactOwnHand: board.ownHand,
+        handSizes,
+        ...(board.bankVisible && board.bank ? { bank: board.bank } : {}),
+        resourceSupply,
+        seed,
+        sampleCount: particleCount,
+      });
+    }
     return state;
   }
 
