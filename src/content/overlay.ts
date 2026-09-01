@@ -19,6 +19,11 @@ import {
   type DecisionActionSource,
 } from "../core/decision-trace";
 import {
+  downloadRecordedGame,
+  GameRecordRecorder,
+  readRecordedGame,
+} from "../core/game-record";
+import {
   shouldFastTrackEndTurn,
   shouldFastTrackRoll,
 } from "../core/forced-action";
@@ -300,7 +305,10 @@ export class AssistantOverlay {
   private tradeRenderFrame?: number;
   private readonly decisionWorker = new DecisionWorkerClient();
   private readonly renderGate = new InteractionRenderGate();
-  private readonly decisionTraces = new DecisionTraceRecorder();
+  private readonly gameRecorder = new GameRecordRecorder();
+  private readonly decisionTraces = new DecisionTraceRecorder(() =>
+    this.captureGameRecord(),
+  );
   private readonly winPredictions = new WinPredictionStabilizer();
   private decisionAnalysis?: DecisionAnalysis;
   private decisionKey = "";
@@ -373,6 +381,7 @@ export class AssistantOverlay {
     this.session = session;
     if (session?.events?.length) this.resetGameScope = undefined;
     this.confirmPendingPlacementFromLog();
+    this.captureGameRecord();
     this.render();
   }
 
@@ -598,10 +607,12 @@ export class AssistantOverlay {
       destroyActionGuide();
       destroyWinOdds();
     }
+    this.captureGameRecord(Boolean(nextBoard?.gameOver));
     this.render();
   }
 
   setSettings(settings: AssistantSettings): void {
+    const wasRecording = this.settings.recordGame;
     if (
       settings.engine !== this.settings.engine ||
       settings.disablePlayerTrades !== this.settings.disablePlayerTrades
@@ -615,6 +626,11 @@ export class AssistantOverlay {
       this.winPredictions.reset();
     }
     this.settings = settings;
+    if (wasRecording && !settings.recordGame) {
+      void this.gameRecorder.flush();
+    } else if (!wasRecording && settings.recordGame) {
+      this.captureGameRecord();
+    }
     this.host.style.display = settings.enabled ? "block" : "none";
     this.render();
   }
@@ -648,6 +664,7 @@ export class AssistantOverlay {
     destroyActionGuide();
     destroyWinOdds();
     await this.decisionTraces.reset();
+    await this.gameRecorder.reset();
     this.render();
   }
 
@@ -659,6 +676,7 @@ export class AssistantOverlay {
     destroyActionGuide();
     destroyWinOdds();
     this.decisionWorker.destroy();
+    if (this.settings.recordGame) void this.gameRecorder.flush();
     this.clearOutgoingTradeWatchdogs();
     this.clearPendingPlacement();
     this.confirmedPlacementSpend = undefined;
@@ -705,6 +723,10 @@ export class AssistantOverlay {
       if (action === "reset" && confirm("Reset the current Colonist Assistant session?")) {
         void this.callbacks.reset();
       }
+      if (action === "export-record") {
+        void this.exportGameRecord();
+        return;
+      }
       this.render();
     });
 
@@ -718,6 +740,7 @@ export class AssistantOverlay {
         const key = target.dataset.setting as
           | "highlightNextAction"
           | "disablePlayerTrades"
+          | "recordGame"
           | "autonomousPrivateGames";
         this.applySettings({
           ...this.settings,
@@ -991,6 +1014,42 @@ export class AssistantOverlay {
     void saveSettings(settings);
   }
 
+  private captureGameRecord(finalize = false): void {
+    if (!this.settings.recordGame || !this.session) return;
+    const gameKey = this.board?.gameKey ?? this.session.gameKey;
+    const capture = {
+      scope: gameKey ?? this.session.id,
+      sessionId: this.session.id,
+      ...(gameKey ? { gameKey } : {}),
+      startedAt: this.session.startedAt,
+      partialHistory:
+        this.session.partialHistory || Boolean(this.session.state.warnings.length),
+      unmatchedCount: this.session.unmatchedCount,
+      playerOrder: [...this.session.state.playerOrder],
+      assistant: {
+        engine: this.settings.engine,
+        disablePlayerTrades: this.settings.disablePlayerTrades,
+        autopilot: this.settings.autonomousPrivateGames,
+      },
+      events: this.session.events,
+      decisions: this.decisionTraces.snapshot(false),
+      ...(this.board ? { board: this.board } : {}),
+    };
+    if (finalize || this.board?.gameOver) this.gameRecorder.finalize(capture);
+    else this.gameRecorder.capture(capture);
+  }
+
+  private async exportGameRecord(): Promise<void> {
+    if (this.settings.recordGame) this.captureGameRecord(Boolean(this.board?.gameOver));
+    await this.gameRecorder.flush();
+    const record = await readRecordedGame();
+    if (!record) {
+      alert("No recorded Colonist game is available yet.");
+      return;
+    }
+    downloadRecordedGame(record);
+  }
+
   private userPlayer(state?: TrackerState): string | undefined {
     if (this.board?.myPlayer && state?.players[this.board.myPlayer]) {
       return this.board.myPlayer;
@@ -1079,7 +1138,7 @@ export class AssistantOverlay {
         <header class="topbar">
           <span class="brand-mark">${assistantMark()}</span>
           <span class="product-name">Colonist Assistant</span>
-          <span class="status ${ready ? "live" : ""}"><i></i>${ready ? "LIVE" : "WAITING"}</span>
+          <span class="status ${ready ? "live" : ""}"><i></i>${ready ? (this.settings.recordGame ? "LIVE · REC" : "LIVE") : "WAITING"}</span>
           <button class="view-button ${this.activeView === "cards" ? "active" : ""}" data-action="view" data-view="cards" aria-pressed="${this.activeView === "cards"}" aria-label="${this.activeView === "cards" ? "Back to your advice" : "Show tracked cards"}" title="${this.activeView === "cards" ? "Your advice" : "Tracked cards"}">
             ${cardsIcon(this.activeView === "cards")}
             <span>${this.activeView === "cards" ? "ADVICE" : "CARDS"}</span>
@@ -1160,6 +1219,13 @@ export class AssistantOverlay {
         );
       };
     })();
+    if (next && traceKey) {
+      this.decisionTraces.final(
+        traceKey,
+        next,
+        this.decisionSource(next, Boolean(workflow)),
+      );
+    }
     this.actionGuideSignature = nextSignature;
     renderActionGuide(next, {
       highlight: this.settings.highlightNextAction,
@@ -1189,13 +1255,6 @@ export class AssistantOverlay {
         ? { validateTransactionCommit: transactionCommit }
         : {}),
       onExecution: ({ succeeded, reason }) => {
-        if (next && traceKey) {
-          this.decisionTraces.final(
-            traceKey,
-            next,
-            this.decisionSource(next, Boolean(workflow)),
-          );
-        }
         if (succeeded && next?.kind === "build") {
           this.rememberBuildPlacement(next, spatial);
         }
@@ -2093,6 +2152,7 @@ export class AssistantOverlay {
           return;
         }
         this.decisionSlowKey = key;
+        this.decisionTraces.slow(key);
         this.render();
       },
       (detail) => {
@@ -2110,6 +2170,7 @@ export class AssistantOverlay {
           : detail;
         this.decisionRuntimeError = displayedDetail;
         this.decisionRuntimeDetail = displayedDetail;
+        this.decisionTraces.failure(key, displayedDetail);
         console.error("[Colonist Assistant] Selected decision engine failed", {
           key,
           engine: this.settings.engine,
@@ -3936,6 +3997,11 @@ export class AssistantOverlay {
         <i aria-hidden="true"></i>
       </label>
       <label class="settings-field">
+        <span><b>Record game</b><small>Keep the game timeline, engine reasoning, search timing, status, and execution results for later analysis.</small></span>
+        <input type="checkbox" data-setting="recordGame"${this.settings.recordGame ? " checked" : ""}>
+        <i aria-hidden="true"></i>
+      </label>
+      <label class="settings-field">
         <span><b>Autopilot</b><small>Play recommended steps automatically in any Colonist game.</small></span>
         <input type="checkbox" data-setting="autonomousPrivateGames"${this.settings.autonomousPrivateGames ? " checked" : ""}>
         <i aria-hidden="true"></i>
@@ -3954,6 +4020,7 @@ export class AssistantOverlay {
         <strong title="${escapeHtml(buildIdentity)}">${escapeHtml(buildLabel)}</strong>
       </div>
       ${builtAt ? `<div class="settings-version"><span>BUILT AT</span><strong>${escapeHtml(builtAt)}</strong></div>` : ""}
+      <button class="reset-link" data-action="export-record">Export latest game record (.json)</button>
       <button class="reset-link" data-action="reset">Reset this game session</button>
     </section>`;
   }

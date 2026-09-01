@@ -3,6 +3,10 @@ export const LATEST_SUMMARY_STORAGE_KEY = "colonistAssistantLatestSummary";
 export const SESSION_STORAGE_PREFIX = "colonistAssistantSession:";
 export const DECISION_TRACE_STORAGE_KEY =
   "colonist-assistant-decision-traces-v1";
+export const ACTIVE_GAME_RECORD_STORAGE_KEY =
+  "colonist-assistant-active-game-record-v1";
+export const LATEST_GAME_RECORD_STORAGE_KEY =
+  "colonist-assistant-latest-game-record-v1";
 
 export const sessionStorageKey = (sessionId: string): string =>
   `${SESSION_STORAGE_PREFIX}${sessionId}`;
@@ -21,6 +25,8 @@ export const clearCurrentGameStorage = async (): Promise<void> => {
     ACTIVE_SESSION_STORAGE_KEY,
     LATEST_SUMMARY_STORAGE_KEY,
     DECISION_TRACE_STORAGE_KEY,
+    ACTIVE_GAME_RECORD_STORAGE_KEY,
+    LATEST_GAME_RECORD_STORAGE_KEY,
     ...storedSessionKeys(stored),
   ]);
 };

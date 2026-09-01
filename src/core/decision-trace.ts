@@ -31,6 +31,7 @@ export interface DecisionTraceCandidate {
 
 export interface DecisionTrace {
   stateHash: string;
+  recordedAt: number;
   turn: number;
   phase: string;
   hand: [number, number, number, number, number];
@@ -44,7 +45,22 @@ export interface DecisionTrace {
   deepRequestStartedAt?: number;
   deepRequestFinishedAt?: number;
   deepLatencyMs?: number;
+  deepSlowWarningAtMs?: number;
+  deepStatus: "pending" | "complete" | "failed";
+  deepFailureReason?: string;
   deepTimedOut: boolean;
+  decisionModel?: string;
+  runtimeReason?: string;
+  engineRevision?: string;
+  algorithm?: string;
+  searchElapsedMs?: number;
+  iterations?: number;
+  nodes?: number;
+  deepestDecisionDepth?: number;
+  rollouts?: number;
+  tacticalWinProbability?: number;
+  tacticalProven?: boolean;
+  exactDecision?: boolean;
   deepChosenAction?: DeepSearchAction;
   deepCandidates?: DecisionTraceCandidate[];
   rustAuthority?: DecisionAuthority;
@@ -53,7 +69,9 @@ export interface DecisionTrace {
   mappingFailureReason?: string;
   finalAction?: unknown;
   finalActionSource?: DecisionActionSource;
+  finalActionSelectedAt?: number;
   executedBeforeDeepResult: boolean;
+  executionFinishedAt?: number;
   executionSucceeded?: boolean;
   executionFailureReason?: string;
   engine?: string;
@@ -79,6 +97,8 @@ export class DecisionTraceRecorder {
   private readonly traces = new Map<string, DecisionTrace>();
   private persistTimer?: ReturnType<typeof globalThis.setTimeout>;
   private storageOperations: Promise<void> = Promise.resolve();
+
+  constructor(private readonly onChange?: () => void) {}
 
   begin(
     stateHash: string,
@@ -106,6 +126,7 @@ export class DecisionTraceRecorder {
     replayBoard.edges = replayBoard.edges.map(({ screen: _screen, ...edge }) => edge);
     this.traces.set(stateHash, {
       stateHash,
+      recordedAt: Date.now(),
       turn: board.turn ?? state.currentTurn.sequence,
       phase: board.action ?? "none",
       hand: tuple(board),
@@ -114,6 +135,7 @@ export class DecisionTraceRecorder {
       beliefParticleCount: state.worlds.length,
       sourceWorldCount: state.worlds.length,
       deepRequestStartedAt: startedAt,
+      deepStatus: "pending",
       deepTimedOut: false,
       executedBeforeDeepResult: false,
       rootPlayer: board.myPlayer,
@@ -145,9 +167,23 @@ export class DecisionTraceRecorder {
         : finishedAt - trace.deepRequestStartedAt;
     // A cooperative search deadline returns the best fully bounded report; it
     // is diagnostic evidence, not permission to substitute another policy.
+    trace.deepStatus = "complete";
+    trace.deepFailureReason = undefined;
     trace.deepTimedOut = analysis.deepSearch?.deadlineReached ?? false;
+    trace.decisionModel = analysis.model;
+    trace.runtimeReason = analysis.runtimeReason;
     trace.engine = analysis.engine;
     trace.runtime = analysis.runtime;
+    trace.engineRevision = analysis.deepSearch?.engineRevision;
+    trace.algorithm = analysis.deepSearch?.algorithm;
+    trace.searchElapsedMs = analysis.deepSearch?.elapsedMs;
+    trace.iterations = analysis.deepSearch?.iterations;
+    trace.nodes = analysis.deepSearch?.nodes;
+    trace.deepestDecisionDepth = analysis.deepSearch?.deepestDecisionDepth;
+    trace.rollouts = analysis.deepSearch?.rollouts;
+    trace.tacticalWinProbability = analysis.deepSearch?.tacticalWinProbability;
+    trace.tacticalProven = analysis.deepSearch?.tacticalProven;
+    trace.exactDecision = analysis.deepSearch?.exactDecision;
     trace.learnedModelVersion =
       analysis.deepSearch?.learnedModelVersion;
     trace.tradeModelVersion =
@@ -181,6 +217,30 @@ export class DecisionTraceRecorder {
     this.schedulePersist();
   }
 
+  slow(stateHash: string): void {
+    const trace = this.traces.get(stateHash);
+    if (!trace || trace.deepSlowWarningAtMs !== undefined) return;
+    trace.deepSlowWarningAtMs =
+      trace.deepRequestStartedAt === undefined
+        ? undefined
+        : performance.now() - trace.deepRequestStartedAt;
+    this.schedulePersist();
+  }
+
+  failure(stateHash: string, reason: string): void {
+    const trace = this.traces.get(stateHash);
+    if (!trace) return;
+    const finishedAt = performance.now();
+    trace.deepRequestFinishedAt = finishedAt;
+    trace.deepLatencyMs =
+      trace.deepRequestStartedAt === undefined
+        ? undefined
+        : finishedAt - trace.deepRequestStartedAt;
+    trace.deepStatus = "failed";
+    trace.deepFailureReason = reason;
+    this.schedulePersist();
+  }
+
   mappingFailure(stateHash: string, reason: string): void {
     const trace = this.traces.get(stateHash);
     if (!trace || trace.mappingFailureReason === reason) return;
@@ -195,8 +255,15 @@ export class DecisionTraceRecorder {
   ): void {
     const trace = this.traces.get(stateHash);
     if (!trace) return;
+    if (
+      trace.finalActionSource === source &&
+      JSON.stringify(trace.finalAction) === JSON.stringify(action)
+    ) {
+      return;
+    }
     trace.finalAction = action;
     trace.finalActionSource = source;
+    trace.finalActionSelectedAt ??= Date.now();
     trace.executedBeforeDeepResult =
       trace.deepRequestFinishedAt === undefined;
     this.schedulePersist();
@@ -209,9 +276,24 @@ export class DecisionTraceRecorder {
   ): void {
     const trace = this.traces.get(stateHash);
     if (!trace) return;
+    trace.executionFinishedAt = Date.now();
     trace.executionSucceeded = succeeded;
     trace.executionFailureReason = failureReason;
     this.schedulePersist();
+  }
+
+  snapshot(includeReplayState = true): DecisionTrace[] {
+    if (includeReplayState) {
+      return structuredClone([...this.traces.values()]);
+    }
+    return [...this.traces.values()].map((trace) => {
+      const {
+        replayState: _replayState,
+        replayBoard: _replayBoard,
+        ...compact
+      } = trace;
+      return structuredClone(compact);
+    });
   }
 
   async reset(): Promise<void> {
@@ -226,6 +308,7 @@ export class DecisionTraceRecorder {
   }
 
   private schedulePersist(): void {
+    this.onChange?.();
     if (this.persistTimer !== undefined) return;
     const storage = chrome.storage.local;
     this.persistTimer = globalThis.setTimeout(() => {

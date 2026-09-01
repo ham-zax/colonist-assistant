@@ -9,6 +9,7 @@ import {
 } from "../content/settings";
 import { latestSummaryKey } from "../content/session";
 import { clearCurrentGameStorage } from "../core/local-data";
+import { downloadRecordedGame, readRecordedGame } from "../core/game-record";
 
 const LATEST_SUMMARY_KEY = latestSummaryKey;
 
@@ -47,6 +48,7 @@ const boot = async (): Promise<void> => {
     ),
   };
   const summary = local[LATEST_SUMMARY_KEY] as SessionSummary | undefined;
+  let recordedGame = await readRecordedGame();
   const syncSettingControls = (): void => {
     for (const input of document.querySelectorAll<HTMLInputElement>(
       "input[data-setting]",
@@ -118,6 +120,23 @@ const boot = async (): Promise<void> => {
     };
     syncSettingControls();
   });
+
+  const exportRecord = document.querySelector<HTMLButtonElement>("#export-record");
+  if (exportRecord) {
+    exportRecord.title = recordedGame
+      ? `${recordedGame.decisions.length} decisions · ${recordedGame.events.length} game events`
+      : "Enable Record game and play a match first";
+    exportRecord.addEventListener("click", () => {
+      void (async () => {
+        recordedGame = await readRecordedGame();
+        if (!recordedGame) {
+          alert("No recorded Colonist game is available yet.");
+          return;
+        }
+        downloadRecordedGame(recordedGame);
+      })();
+    });
+  }
 
   document.querySelector("#reset")?.addEventListener("click", () => {
     void (async () => {

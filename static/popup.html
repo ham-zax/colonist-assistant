@@ -50,6 +50,11 @@
           <i></i>
         </label>
         <label>
+          <span><b>Record game</b><small>Keep game events, board states, decision reasons, timing, and execution results</small></span>
+          <input type="checkbox" data-setting="recordGame" />
+          <i></i>
+        </label>
+        <label>
           <span><b>Autopilot</b><small>Play recommended steps automatically in any Colonist game</small></span>
           <input type="checkbox" data-setting="autonomousPrivateGames" />
           <i></i>
@@ -74,6 +79,7 @@
 
       <div class="actions">
         <a href="https://colonist.io/" target="_blank" rel="noreferrer">Open Colonist ↗</a>
+        <button id="export-record">Export latest record</button>
         <button id="reset">Reset session</button>
       </div>
     </main>
