@@ -791,7 +791,7 @@ export const seedPublicResourceWorlds = (
   }
   for (const player of orderedPlayers) {
     const size = input.handSizes[player];
-    if (!Number.isInteger(size) || size < 0) {
+    if (size === undefined || !Number.isInteger(size) || size < 0) {
       throw new Error(`Public resource snapshot has an invalid hand size for ${player}`);
     }
   }
