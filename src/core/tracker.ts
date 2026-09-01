@@ -199,67 +199,6 @@ export const effectiveParticleCount = (state: TrackerState): number => {
   return squared > 0 ? 1 / squared : 0;
 };
 
-const resampleDegenerateWorlds = (worlds: HandWorld[]): HandWorld[] => {
-  const normalized = normalizeWorldWeights(worlds);
-  if (normalized.length < 8) return normalized;
-  const ess =
-    1 /
-    normalized.reduce(
-      (sum, world) => sum + world.weight * world.weight,
-      0,
-    );
-  if (ess >= normalized.length * 0.35) return normalized;
-  // Deterministic stratified resampling followed by support-preserving
-  // rejuvenation. We never mutate a hand: doing so could violate a confirmed
-  // trade, exact own-hand evidence, or public bank conservation. Instead, a
-  // small number of duplicate samples are replaced with strategically distinct
-  // low-mass particles that were already valid under every observation. This
-  // retains posterior tails without inventing impossible card allocations.
-  const selectedIndices: number[] = [];
-  let source = 0;
-  let cumulative = normalized[0]?.weight ?? 1;
-  for (let stratum = 0; stratum < normalized.length; stratum += 1) {
-    const target = (stratum + 0.5) / normalized.length;
-    while (source < normalized.length - 1 && cumulative < target) {
-      source += 1;
-      cumulative += normalized[source]?.weight ?? 0;
-    }
-    if (normalized[source]) selectedIndices.push(source);
-  }
-  const selectedSet = new Set(selectedIndices);
-  const omitted = normalized
-    .map((world, index) => ({ world, index }))
-    .filter(({ index }) => !selectedSet.has(index))
-    .sort(
-      (left, right) =>
-        right.world.weight - left.world.weight ||
-        worldKey(left.world).localeCompare(worldKey(right.world)),
-    );
-  const duplicatePositions = selectedIndices
-    .map((index, position) => ({ index, position }))
-    .filter(
-      ({ index, position }) =>
-        selectedIndices.indexOf(index) !== position,
-    )
-    .map(({ position }) => position);
-  const rejuvenationBudget = Math.min(
-    omitted.length,
-    duplicatePositions.length,
-    Math.max(1, Math.floor(normalized.length * 0.08)),
-  );
-  for (let index = 0; index < rejuvenationBudget; index += 1) {
-    const replacement = omitted[index];
-    const position = duplicatePositions[index];
-    if (replacement && position !== undefined) {
-      selectedIndices[position] = replacement.index;
-    }
-  }
-  return selectedIndices.map((index) => ({
-    ...cloneWorld(normalized[index]!),
-    weight: 1 / normalized.length,
-  }));
-};
-
 const compactWorlds = (state: TrackerState, candidates: HandWorld[]): void => {
   const merged = new Map<string, HandWorld>();
   for (const candidate of candidates) {
@@ -273,37 +212,12 @@ const compactWorlds = (state: TrackerState, candidates: HandWorld[]): void => {
   }
   const unique = normalizeWorldWeights([...merged.values()]);
   if (unique.length <= MAX_WORLDS) {
-    state.worlds = resampleDegenerateWorlds(unique);
+    state.worlds = unique;
     return;
   }
 
   state.possibilitiesTruncated = true;
   const selected = new Map<number, number>();
-  const reserve = (index: number, weight: number): void => {
-    selected.set(index, (selected.get(index) ?? 0) + weight);
-  };
-  for (const player of state.playerOrder) {
-    for (const resource of RESOURCE_ORDER) {
-      let minIndex = 0;
-      let maxIndex = 0;
-      for (let index = 1; index < unique.length; index += 1) {
-        if (
-          (unique[index]?.hands[player]?.[resource] ?? 0) <
-          (unique[minIndex]?.hands[player]?.[resource] ?? 0)
-        ) {
-          minIndex = index;
-        }
-        if (
-          (unique[index]?.hands[player]?.[resource] ?? 0) >
-          (unique[maxIndex]?.hands[player]?.[resource] ?? 0)
-        ) {
-          maxIndex = index;
-        }
-      }
-      reserve(minIndex, 1 / MAX_WORLDS);
-      reserve(maxIndex, 1 / MAX_WORLDS);
-    }
-  }
   const sorted = unique
     .map((world, index) => ({ world, index }))
     .sort(
@@ -312,7 +226,7 @@ const compactWorlds = (state: TrackerState, candidates: HandWorld[]): void => {
     );
   let cursor = 0;
   let cumulative = sorted[0]?.world.weight ?? 1;
-  for (let stratum = selected.size; stratum < MAX_WORLDS; stratum += 1) {
+  for (let stratum = 0; stratum < MAX_WORLDS; stratum += 1) {
     const target = (stratum + 0.5) / MAX_WORLDS;
     while (
       cursor < sorted.length - 1 &&
@@ -322,7 +236,9 @@ const compactWorlds = (state: TrackerState, candidates: HandWorld[]): void => {
       cumulative += sorted[cursor]?.world.weight ?? 0;
     }
     const index = sorted[cursor]?.index;
-    if (index !== undefined) reserve(index, 1 / MAX_WORLDS);
+    if (index !== undefined) {
+      selected.set(index, (selected.get(index) ?? 0) + 1 / MAX_WORLDS);
+    }
   }
   state.worlds = normalizeWorldWeights(
     [...selected.entries()]
@@ -922,7 +838,7 @@ export const reweightTradeEvidence = (
   }
   return {
     ...updated,
-    worlds: resampleDegenerateWorlds(worlds),
+    worlds: normalizeWorldWeights(worlds),
   };
 };
 

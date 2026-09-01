@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { emptyResources } from "../src/core/resources";
 import type { TrackerState } from "../src/core/types";
 import type { BoardSnapshot } from "../src/core/placement";
+import { reweightTradeEvidence } from "../src/core/tracker";
 import { buildDeepSearchRequest } from "../src/worker/deep-search";
 import initWasm, {
   analyze as analyzeWasm,
@@ -367,6 +368,125 @@ describe("deep-search state adapter", () => {
     expect(request.state.currentPlayer).toBe(1);
     expect(request.state.phase).toBe("setup-settlement");
     expect(request.state.phaseParameter).toBeUndefined();
+  });
+
+  it("preserves the Bayesian accepted-trade posterior through the WASM boundary", async () => {
+    const bytes = await readFile(
+      new URL(
+        "../src/generated/wasm/colonist_search_bg.wasm",
+        import.meta.url,
+      ),
+    );
+    await initWasm({ module_or_path: bytes });
+    const unsupportedHands = [
+      resources(0, 0, 5, 0, 0),
+      resources(0, 0, 4, 1, 0),
+      resources(0, 0, 4, 0, 1),
+      resources(0, 0, 3, 2, 0),
+      resources(0, 0, 3, 1, 1),
+      resources(0, 0, 3, 0, 2),
+      resources(0, 0, 2, 3, 0),
+      resources(0, 0, 2, 2, 1),
+      resources(0, 0, 2, 1, 2),
+      resources(0, 0, 2, 0, 3),
+      resources(0, 0, 1, 4, 0),
+    ];
+    const posterior = reweightTradeEvidence(
+      {
+        ...state,
+        worlds: [
+          {
+            hands: {
+              You: resources(1, 0, 0, 0, 0),
+              Rival: resources(0, 1, 4, 0, 0),
+            },
+            weight: 1 / 12,
+          },
+          ...unsupportedHands.map((hand) => ({
+            hands: {
+              You: resources(1, 0, 0, 0, 0),
+              Rival: hand,
+            },
+            weight: 1 / 12,
+          })),
+        ],
+      },
+      [
+        {
+          id: "accepted-hard-evidence",
+          creator: "You",
+          give: resources(1, 0, 0, 0, 0),
+          receive: resources(0, 1, 0, 0, 0),
+          acceptedPlayers: ["Rival"],
+        },
+      ],
+    );
+    const acceptedBoard: BoardSnapshot = {
+      ...board,
+      ownHand: resources(1, 0, 0, 0, 0),
+      ownDevelopmentCards: {
+        cards: {
+          knight: 0,
+          monopoly: 0,
+          "road-building": 0,
+          "year-of-plenty": 0,
+          "victory-point": 0,
+        },
+        playable: {
+          knight: 0,
+          monopoly: 0,
+          "road-building": 0,
+          "year-of-plenty": 0,
+          "victory-point": 0,
+        },
+        boughtThisTurn: {
+          knight: 0,
+          monopoly: 0,
+          "road-building": 0,
+          "year-of-plenty": 0,
+          "victory-point": 0,
+        },
+        hasPlayedThisTurn: false,
+      },
+      players: {
+        You: {
+          ...board.players!.You!,
+          handSize: 1,
+          developmentCards: 0,
+        },
+        Rival: {
+          ...board.players!.Rival!,
+          handSize: 5,
+          developmentCards: 0,
+        },
+      },
+      activeTrades: [
+        {
+          id: "accepted-hard-evidence",
+          creator: "You",
+          tradeExecutor: "You",
+          give: resources(1, 0, 0, 0, 0),
+          receive: resources(0, 1, 0, 0, 0),
+          incoming: false,
+          counterOffer: false,
+          canAccept: false,
+          acceptedPlayers: ["Rival"],
+          pendingPlayers: [],
+          rejectedPlayers: [],
+          responsesComplete: true,
+        },
+      ],
+    };
+    const built = buildDeepSearchRequest(posterior, acceptedBoard, "You");
+    const request = built.request as any;
+    const supportedMass = request.state.worlds
+      .filter((world: any) => (world.hands[1]?.[1] ?? 0) >= 1)
+      .reduce((sum: number, world: any) => sum + world.weight, 0);
+    const response = analyzeWasm(built.request);
+
+    expect(supportedMass).toBeCloseTo(0.9889001, 6);
+    expect(response.exactDecision).toBe(true);
+    expect(["confirm-trade", "cancel-trade"]).toContain(response.chosen?.kind);
   });
 
   it("moves on after an outgoing trade has received its responses", () => {

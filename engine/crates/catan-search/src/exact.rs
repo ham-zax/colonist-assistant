@@ -560,13 +560,49 @@ pub fn solve_exact_belief(
 mod tests {
     use std::sync::Arc;
 
-    use colonist_catan_core::{Action, Building, GameState, Phase, Resource};
+    use colonist_catan_core::{Action, Building, GameState, Phase, Resource, TradeOffer};
 
     use super::{ExactActionFamily, solve_exact_belief};
     use crate::mcts::BeliefParticle;
 
     fn particle(state: GameState) -> Vec<BeliefParticle> {
         vec![BeliefParticle { state, weight: 1.0 }]
+    }
+
+    fn accepted_trade_world(partner_resources: [u8; 5]) -> GameState {
+        let mut state = GameState::standard(9911, 3);
+        while matches!(
+            state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        ) {
+            let action = state.legal_actions()[0].clone();
+            state.apply(&action).unwrap();
+        }
+        for player in &mut state.players {
+            player.resources = [0; 5];
+        }
+        state.bank = [19; 5];
+        state.players[0].resources = [0, 0, 0, 1, 1];
+        state.players[1].resources = partner_resources;
+        for resource in 0..5 {
+            state.bank[resource] = state.bank[resource]
+                .saturating_sub(state.players[0].resources[resource])
+                .saturating_sub(state.players[1].resources[resource]);
+        }
+        state.current_player = 0;
+        state.turn = 12;
+        state.phase = Phase::TradeResponses;
+        state.trade = Some(TradeOffer {
+            creator: 0,
+            recipients: 1 << 1,
+            give: [0, 0, 0, 1, 0],
+            receive: [0, 0, 0, 0, 1],
+            accepted: 1 << 1,
+            rejected: 0,
+        });
+        state.trade_cursor = 1;
+        state.validate().unwrap();
+        state
     }
 
     #[test]
@@ -865,6 +901,41 @@ mod tests {
                 .iter()
                 .any(|candidate| candidate.legal_weight < 1.0),
         );
+    }
+
+    #[test]
+    fn accepted_trade_decision_is_sensitive_to_rejuvenated_tail_mass() {
+        let main = accepted_trade_world([0, 1, 0, 0, 2]);
+        let tail = accepted_trade_world([1, 1, 0, 0, 1]);
+        let bayesian = solve_exact_belief(
+            &[
+                BeliefParticle {
+                    state: main.clone(),
+                    weight: 0.9889001,
+                },
+                BeliefParticle {
+                    state: tail.clone(),
+                    weight: 0.0110999,
+                },
+            ],
+            ExactActionFamily::Mandatory,
+        );
+        let rejuvenated = solve_exact_belief(
+            &[
+                BeliefParticle {
+                    state: main,
+                    weight: 0.9166667,
+                },
+                BeliefParticle {
+                    state: tail,
+                    weight: 0.0833333,
+                },
+            ],
+            ExactActionFamily::Mandatory,
+        );
+
+        assert_eq!(bayesian.chosen, Some(Action::ConfirmTrade { partner: 1 }));
+        assert_eq!(rejuvenated.chosen, Some(Action::CancelTrade));
     }
 
     #[test]

@@ -135,6 +135,30 @@ Reason: the 350 ms production search deadline is wall-clock sensitive. The degen
 
 Trade-off: takeover evidence remains valid as production-runtime evidence, but its causal strength claims must be calibrated against the same-policy disagreement rate. Correctness closure continues to rely on deterministic/focused reproductions and production-style node limits, not on takeover win flips alone.
 
+## D12 - Materialize the plan's verification ledger as one tracked document
+
+**Status:** active
+
+The implementation plan repeatedly requires task-level evidence to be recorded in a "verification ledger" but does not name a file or storage format.
+
+Decision: use `docs/RECOMMENDATION_ENGINE_VERIFICATION_LEDGER_2026-09-01.md` as the single tracked task-by-task correctness ledger and append each task's reproduction status, focused validation, and boundary state there.
+
+Reason: a single append-oriented document keeps the implementation evidence reviewable without rewriting the historical audit or scattering task results across ad hoc notes.
+
+Trade-off: this adds one tracked documentation artifact that the plan implied but did not explicitly name.
+
+## D13 - Split Task 1's decision proof across the real tracker/adapter boundary and exact solver
+
+**Status:** active
+
+The original raw accepted-trade fixture behind the audit's exact numeric F1 scores is no longer retained as a standalone artifact. A recovered generic exact trade fixture still proves that changing posterior mass from `0.9889001 / 0.0110999` to the rejuvenated `0.9166667 / 0.0833333` can reverse `ConfirmTrade` and `CancelTrade`, but an outgoing production adapter request also marks `domesticTradeUsed = true`, so that generic synthetic state is not itself a production adapter state.
+
+Decision: do not fabricate a one-piece end-to-end fixture. Task 1 proof is split at the actual contracts: the tracker regression reproduces and closes the 82x posterior corruption; the adapter regression proves the corrected Bayesian mass reaches WASM unchanged; the exact-solver regression locks the demonstrated Confirm/Cancel sensitivity to that mass distortion.
+
+Reason: this proves the causal chain without weakening state validation or pretending an unrecovered historical fixture is still available.
+
+Trade-off: Task 1 does not claim that the recovered generic exact fixture is the identical historical runtime state. The verification ledger states that limitation explicitly.
+
 ## Review rule
 
 At the end of the mission, review every active entry and classify it as:
