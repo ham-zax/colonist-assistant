@@ -13,6 +13,7 @@
     "benchmark:colonist": "node scripts/benchmark-colonist.mjs",
     "benchmark:catanatron": "python3 scripts/benchmark-catanatron.py",
     "benchmark:local": "node scripts/benchmark-local.mjs",
+    "benchmark:gpu": "uv run --with torch --with numpy python scripts/benchmark-gpu-zoom.py",
     "benchmark:checkpoint": "node scripts/read-arena-checkpoint.mjs",
     "train:model": "python3 scripts/train-strategic-model.py",
     "train:trade": "python3 scripts/train-trade-model.py",

@@ -19,6 +19,7 @@ The repository already contains the core of the evaluation harness:
 - `scripts/benchmark-colonist.mjs` drives the built extension through real four-player Base-map games against three Colonist bots.
 - `scripts/audit-colonist-benchmark.mjs` audits those browser games for recommendation/execution failures and suspicious actions.
 - `scripts/run-expert-iteration.mjs` and the training scripts are useful research tooling, but learned-policy training is not part of this evidence plan until structural correctness is green.
+- `npm run benchmark:gpu -- <expert.jsonl> ...` runs `scripts/benchmark-gpu-zoom.py` through `uv` with PyTorch and NumPy. After correctness is green, use it as the fast inner loop for batched value/policy training, held-out evaluation, architecture experiments, and large position-level comparisons. Keep the native arena as the final strength/correctness authority.
 
 The missing capability is a persistent counterfactual takeover corpus: save an exact nonterminal arena position plus the random-stream state, then continue that identical position with different candidate engines.
 
@@ -280,6 +281,27 @@ Create one final report that keeps the evidence layers separate:
 5. **Real browser evidence:** Colonist bot games and execution audit.
 
 A release-strength conclusion should state all five. Do not reduce the conclusion to one win-rate number.
+
+# Post-correctness strategic-model workflow
+
+After Tasks 1-16 are complete and `deep-maxn-v10` has passed the packaged correctness gates, use the GPU zoom benchmark as the default experimental inner loop for strategic value/policy work:
+
+```text
+Generate and freeze a substantial colonist-arena --expert-output corpus once
+-> run npm run benchmark:gpu on CUDA for value/policy architecture and hyperparameter experiments
+-> reject clearly weak variants from held-out value/policy metrics and batched throughput
+-> keep only promising candidates
+-> run the authoritative native CPU arena on matched 3-player and 4-player seats/seeds, takeover snapshots, and full win/rank/VP evidence
+-> run packaged/browser validation when the candidate changes shipped recommendation behavior
+```
+
+Use the same fixed corpus, seed, train/validation split, targets, optimizer settings, and architecture when comparing CPU and CUDA quality. Treat only normal floating-point/device noise as equivalent; investigate material metric drift before trusting throughput results.
+
+Do not assume CUDA training is faster for every workload. The compact hidden-width-32 model and small corpora can train faster on CPU because launch and transfer overhead dominate. Measure training and inference throughput for the actual model size and batch shape. Use GPU acceleration aggressively when wider models, larger corpora, large batched evaluation, architecture experiments, or hyperparameter sweeps make it advantageous.
+
+Keep the architecture boundary explicit: game rules, `GameState` transitions, legal-action generation, tree traversal, chance handling, belief construction, and expert-position generation remain on CPU. CUDA is for fixed/batched value and policy tensors, model training/evaluation, and experiment throughput. Do not move the complete native simulator or recursive MaxN/AlphaBeta state machine onto CUDA as part of model iteration.
+
+PyTorch remains an optional developer dependency supplied by `uv`; do not add PyTorch, CUDA libraries, or Node dependencies to the repository runtime. Lack of CUDA must not affect extension build, recommendation execution, or native arena correctness evidence.
 
 ## Proposed verification-tooling changes
 
