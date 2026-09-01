@@ -5,11 +5,14 @@ import type { TrackerState } from "../src/core/types";
 import { buildDeepSearchRequest } from "../src/worker/deep-search";
 import initWasm, {
   analyze as analyzeWasm,
+  type WasmAction,
   type WasmSearchResponse,
 } from "../src/generated/wasm/colonist_search.js";
 
 interface ReplayTrace {
   stateHash: string;
+  fixtureId?: string;
+  tags?: string[];
   rootPlayer?: string;
   replayState?: TrackerState;
   replayBoard?: BoardSnapshot;
@@ -35,104 +38,194 @@ const parsed = JSON.parse(await readFile(input, "utf8")) as
   | ReplayTrace[]
   | { traces: ReplayTrace[] };
 const traces = Array.isArray(parsed) ? parsed : parsed.traces;
-const configurations = [
-  {
-    name: "maxn-authoritative",
-    mode: "maxn",
-    depth: 4,
-    branchCap: 12,
-    maxNodes: 48_000,
-    iterations: 1,
-  },
-  {
-    name: "maxn-10x-wide",
-    mode: "maxn",
-    depth: 6,
-    branchCap: 32,
-    maxNodes: 250_000,
-    iterations: 1,
-  },
-  {
-    name: "puct-authoritative",
-    mode: "puct",
-    maxNodes: 60_000,
-    iterations: 2_400,
-  },
-  {
-    name: "puct-10x",
-    mode: "puct",
-    maxNodes: 250_000,
-    iterations: 24_000,
-  },
-] as const;
+const particleLimits = [24, 48, 96] as const;
+const searchConfiguration = {
+  mode: "maxn",
+  depth: 4,
+  branchCap: 8,
+  maxNodes: 4_000,
+  timeBudgetMs: 350,
+  iterations: 1,
+} as const;
+const regretThreshold = 0.02;
+
+const actionKey = (action: WasmAction | undefined): string =>
+  action
+    ? JSON.stringify([
+        action.kind,
+        action.first,
+        action.second,
+        action.player,
+        action.resource,
+        action.otherResource,
+        action.cards,
+        action.receiveCards,
+        action.accept,
+      ])
+    : "none";
+
+const actionFamily = (action: WasmAction | undefined): string | undefined =>
+  action?.kind;
+
+const actionValue = (
+  response: WasmSearchResponse,
+  action: WasmAction | undefined,
+  root: number,
+): number | undefined => {
+  if (!action) return undefined;
+  const key = actionKey(action);
+  return response.actions.find((candidate) => actionKey(candidate.action) === key)
+    ?.value[root];
+};
 
 const reports = [];
 for (const trace of traces) {
   if (!trace.replayState || !trace.replayBoard || !trace.rootPlayer) continue;
-  const built = buildDeepSearchRequest(
-    trace.replayState,
-    trace.replayBoard,
-    trace.rootPlayer,
-  );
-  const configurationsForState = [];
-  for (const configuration of configurations) {
+  const runs = [] as Array<{
+    particleLimit: number;
+    root: number;
+    response: WasmSearchResponse;
+    latencyMs: number;
+    constructedParticles: number;
+    requestSeed: number;
+  }>;
+  for (const particleLimit of particleLimits) {
+    const built = buildDeepSearchRequest(
+      trace.replayState,
+      trace.replayBoard,
+      trace.rootPlayer,
+      {},
+      true,
+      particleLimit,
+    );
     const request = {
       ...structuredClone(built.request),
-      ...configuration,
+      ...searchConfiguration,
     };
     const started = performance.now();
     const response = analyzeWasm(request) as WasmSearchResponse;
-    configurationsForState.push({
-      name: configuration.name,
-      chosen: response.chosen,
-      rootValue: response.rootValue,
-      actions: response.actions.slice(0, 12),
-      nodes: response.nodes,
-      iterations: response.iterations,
-      exactDecision: response.exactDecision,
-      tacticalProven: response.tacticalProven,
+    runs.push({
+      particleLimit,
+      root: built.root,
+      response,
       latencyMs: performance.now() - started,
+      constructedParticles: request.state.worlds.length,
+      requestSeed: request.seed,
     });
   }
 
-  const oracleWorlds = built.request.state.worlds.slice(0, 8).map((world) => {
-    const request = structuredClone(built.request);
-    request.state.worlds = [{ ...world, weight: 1 }];
-    request.mode = "maxn";
-    request.depth = 6;
-    request.branchCap = 32;
-    request.maxNodes = 250_000;
-    const response = analyzeWasm(request) as WasmSearchResponse;
-    return {
-      weight: world.weight,
-      chosen: response.chosen,
-      rootValue: response.rootValue,
-      nodes: response.nodes,
-    };
-  });
+  const live = runs[0]!;
+  const medium = runs[1]!;
+  const large = runs[2]!;
+  const regretAgainst = (reference: (typeof runs)[number]): number | undefined => {
+    const referenceChosen = actionValue(
+      reference.response,
+      reference.response.chosen,
+      reference.root,
+    );
+    const liveChosen = actionValue(
+      reference.response,
+      live.response.chosen,
+      reference.root,
+    );
+    if (referenceChosen === undefined || liveChosen === undefined) return undefined;
+    return Math.max(0, referenceChosen - liveChosen);
+  };
+  const regret48 = regretAgainst(medium);
+  const regret96 = regretAgainst(large);
+  const liveFamily = actionFamily(live.response.chosen);
+  const familyUnsafe =
+    liveFamily !== actionFamily(medium.response.chosen) &&
+    liveFamily !== actionFamily(large.response.chosen);
+  const regretUnsafe =
+    regret48 !== undefined &&
+    regret96 !== undefined &&
+    regret48 > regretThreshold &&
+    regret96 > regretThreshold;
+  const gatePassed = !familyUnsafe && !regretUnsafe;
+  const seedStability = trace.tags?.includes("seed-sensitivity")
+    ? (() => {
+        const seedRuns = [];
+        for (let seedIndex = 0; seedIndex < 8; seedIndex += 1) {
+          const board = structuredClone(trace.replayBoard!);
+          board.gameKey = `${board.gameKey ?? trace.fixtureId ?? trace.stateHash}:seed-${seedIndex}`;
+          const built = buildDeepSearchRequest(
+            trace.replayState!,
+            board,
+            trace.rootPlayer!,
+            {},
+            true,
+            24,
+          );
+          const request = {
+            ...structuredClone(built.request),
+            ...searchConfiguration,
+          };
+          const response = analyzeWasm(request) as WasmSearchResponse;
+          seedRuns.push({
+            seedIndex,
+            seed: request.seed,
+            chosen: response.chosen,
+            chosenFamily: actionFamily(response.chosen),
+          });
+        }
+        const chosenKeys = new Set(seedRuns.map((run) => actionKey(run.chosen)));
+        return {
+          stable: chosenKeys.size === 1,
+          distinctChosenActions: chosenKeys.size,
+          runs: seedRuns,
+        };
+      })()
+    : undefined;
+
   reports.push({
+    fixtureId: trace.fixtureId ?? trace.stateHash,
     stateHash: trace.stateHash,
-    actualLivePolicy: {
-      engine: trace.engine,
-      runtime: trace.runtime,
-      learnedModelVersion: trace.learnedModelVersion,
-      tradeModelVersion: trace.tradeModelVersion,
-      deepChosen: trace.deepChosenAction,
-      finalAction: trace.finalAction,
-      finalActionSource: trace.finalActionSource,
-      executionSucceeded: trace.executionSucceeded,
-      executedBeforeDeepResult: trace.executedBeforeDeepResult,
-      latencyMs: trace.deepLatencyMs,
+    tags: trace.tags ?? [],
+    sourceWorldCount: trace.replayState.worlds.length,
+    semanticSeed: live.requestSeed,
+    task14Gate: {
+      passed: gatePassed,
+      familyUnsafe,
+      regretUnsafe,
+      regretThreshold,
+      regret48,
+      regret96,
     },
-    configurations: configurationsForState,
-    completeInformationOracle: oracleWorlds,
+    ...(seedStability ? { seedStability } : {}),
+    particleComparisons: runs.map((run) => ({
+      particleLimit: run.particleLimit,
+      constructedParticles: run.constructedParticles,
+      wasmParticles: run.response.wasmParticles,
+      rustPosteriorParticles: run.response.rustPosteriorParticles,
+      rustSearchParticles: run.response.rustSearchParticles,
+      chosen: run.response.chosen,
+      chosenFamily: actionFamily(run.response.chosen),
+      chosenValue: actionValue(run.response, run.response.chosen, run.root),
+      authority: run.response.authority,
+      rootValue: run.response.rootValue,
+      rootProvenance: run.response.rootProvenance,
+      nodes: run.response.nodes,
+      deadlineReached: run.response.deadlineReached,
+      latencyMs: run.latencyMs,
+    })),
   });
 }
+const failedFixtures = reports
+  .filter((report) => !report.task14Gate.passed)
+  .map((report) => report.fixtureId);
 await writeFile(
   output,
   `${JSON.stringify(
     {
-      schemaVersion: 1,
+      schemaVersion: 2,
+      searchConfiguration,
+      particleLimits,
+      task14Gate: {
+        passed: failedFixtures.length === 0,
+        regretThreshold,
+        failedFixtures,
+      },
       traces: reports.length,
       reports,
     },

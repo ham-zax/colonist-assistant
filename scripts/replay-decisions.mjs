@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import process from "node:process";
 import { build } from "esbuild";
 
@@ -21,6 +21,7 @@ if (!input) {
     const output =
       outputArgument?.slice("--output=".length) ??
       resolve(root, "benchmark-results", "decision-replay-latest.json");
+    await mkdir(dirname(output), { recursive: true });
     await build({
       entryPoints: [resolve(root, "scripts/replay-engine.ts")],
       outfile: bundle,
@@ -48,8 +49,18 @@ if (!input) {
       });
     });
     await rm(temporary, { recursive: true, force: true });
-    console.log(JSON.stringify({ replay: output }, null, 2));
-    process.exit(0);
+    const replay = JSON.parse(await readFile(output, "utf8"));
+    console.log(
+      JSON.stringify(
+        {
+          replay: output,
+          ...(replay.task14Gate ? { task14Gate: replay.task14Gate } : {}),
+        },
+        null,
+        2,
+      ),
+    );
+    process.exit(replay.task14Gate?.passed === false ? 1 : 0);
   }
   const parsed = JSON.parse(await readFile(input, "utf8"));
   const traces = Array.isArray(parsed) ? parsed : parsed.traces;

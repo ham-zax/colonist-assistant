@@ -11,7 +11,10 @@ import {
   reweightTradeEvidence,
   seedPublicResourceWorlds,
 } from "../src/core/tracker";
-import { buildDeepSearchRequest } from "../src/worker/deep-search";
+import {
+  buildDeepSearchRequest,
+  selectRepresentativeWorlds,
+} from "../src/worker/deep-search";
 import initWasm, {
   analyze as analyzeWasm,
 } from "../src/generated/wasm/colonist_search.js";
@@ -208,6 +211,159 @@ const board: BoardSnapshot = {
 };
 
 describe("deep-search state adapter", () => {
+  it("preserves exact resource worlds and weights when no lossy sample is needed", () => {
+    const source = [
+      {
+        hands: {
+          You: resources(1, 1, 0, 0, 0),
+          Rival: resources(2, 0, 0, 0, 0),
+        },
+        weight: 0.25,
+      },
+      {
+        hands: {
+          You: resources(1, 1, 0, 0, 0),
+          Rival: resources(0, 2, 0, 0, 0),
+        },
+        weight: 0.75,
+      },
+    ];
+
+    const selected = selectRepresentativeWorlds(
+      source,
+      ["You", "Rival"],
+      24,
+      91,
+    );
+
+    expect(selected).toHaveLength(2);
+    expect(selected.map((world) => world.weight).sort()).toEqual([0.25, 0.75]);
+    expect(
+      selected.map((world) => JSON.stringify(world.hands.Rival)).sort(),
+    ).toEqual(
+      source.map((world) => JSON.stringify(world.hands.Rival)).sort(),
+    );
+  });
+
+  it("samples resource posterior mass without nearest-state reassignment", () => {
+    const source = Array.from({ length: 8 }, (_, index) => ({
+      hands: {
+        You: resources(1, 1, 0, 0, 0),
+        Rival: resources(index, 8 - index, 0, 0, 0),
+      },
+      weight: 1 / 8,
+    }));
+
+    const first = selectRepresentativeWorlds(
+      source,
+      ["You", "Rival"],
+      4,
+      1234,
+    );
+    const second = selectRepresentativeWorlds(
+      source,
+      ["You", "Rival"],
+      4,
+      1234,
+    );
+    const sourceKeys = new Set(
+      source.map((world) => JSON.stringify(world.hands.Rival)),
+    );
+
+    expect(second).toEqual(first);
+    expect(first.reduce((sum, world) => sum + world.weight, 0)).toBeCloseTo(1, 8);
+    expect(first.every((world) => sourceKeys.has(JSON.stringify(world.hands.Rival)))).toBe(true);
+    expect(
+      first.every((world) =>
+        Math.abs(world.weight * 4 - Math.round(world.weight * 4)) < 1e-9,
+      ),
+    ).toBe(true);
+  });
+
+  it("samples hidden development identities directly into ready and bought slots", () => {
+    const developmentState = structuredClone(state);
+    developmentState.players.Rival!.devCards = [
+      { boughtOnTurn: 1 },
+      { boughtOnTurn: developmentState.currentTurn.sequence },
+    ];
+    const developmentBoard = structuredClone(board);
+    developmentBoard.ownDevelopmentCards = {
+      cards: development(),
+      playable: development(),
+      boughtThisTurn: development(),
+      hasPlayedThisTurn: false,
+    };
+    developmentBoard.players!.You = {
+      ...developmentBoard.players!.You!,
+      developmentCards: 0,
+      playedDevelopmentCards: development({
+        knight: 12,
+        monopoly: 1,
+        "road-building": 2,
+        "year-of-plenty": 2,
+        "victory-point": 5,
+      }),
+    };
+    developmentBoard.players!.Rival = {
+      ...developmentBoard.players!.Rival!,
+      developmentCards: 2,
+      playedDevelopmentCards: development({ knight: 1 }),
+    };
+
+    const built = buildDeepSearchRequest(
+      developmentState,
+      developmentBoard,
+      "You",
+      {},
+      true,
+      24,
+    );
+    const worlds = (built.request as any).state.worlds as any[];
+    const boughtKnightMass = worlds
+      .filter((world) => world.boughtDevelopment[1][0] === 1)
+      .reduce((sum, world) => sum + world.weight, 0);
+    const boughtMonopolyMass = worlds
+      .filter((world) => world.boughtDevelopment[1][4] === 1)
+      .reduce((sum, world) => sum + world.weight, 0);
+
+    expect(worlds.reduce((sum, world) => sum + world.weight, 0)).toBeCloseTo(1, 8);
+    expect(boughtKnightMass).toBeCloseTo(0.5, 8);
+    expect(boughtMonopolyMass).toBeCloseTo(0.5, 8);
+    expect(
+      worlds.every(
+        (world) =>
+          world.development[1][0] === 1 &&
+          world.development[1][4] === 1 &&
+          world.boughtDevelopment[1].reduce(
+            (sum: number, count: number) => sum + count,
+            0,
+          ) === 1,
+      ),
+    ).toBe(true);
+  });
+
+  it("constructs deterministic 24/48/96 joint samples from one semantic seed", () => {
+    const request24a = buildDeepSearchRequest(state, board, "You", {}, true, 24).request as any;
+    const request24b = buildDeepSearchRequest(state, board, "You", {}, true, 24).request as any;
+    const request48 = buildDeepSearchRequest(state, board, "You", {}, true, 48).request as any;
+    const request96 = buildDeepSearchRequest(state, board, "You", {}, true, 96).request as any;
+
+    expect(request24b).toEqual(request24a);
+    expect(request24a.seed).toBe(request48.seed);
+    expect(request24a.seed).toBe(request96.seed);
+    expect(request24a.state.worlds.length).toBeLessThanOrEqual(24);
+    expect(request48.state.worlds.length).toBeLessThanOrEqual(48);
+    expect(request96.state.worlds.length).toBeLessThanOrEqual(96);
+    for (const request of [request24a, request48, request96]) {
+      expect(
+        request.state.worlds.reduce(
+          (sum: number, world: any) => sum + world.weight,
+          0,
+        ),
+      ).toBeCloseTo(1, 8);
+    }
+  });
+
   it("accepts a seeded public-board fallback posterior after a midgame attach", () => {
     const fallbackState: TrackerState = {
       ...state,

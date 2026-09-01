@@ -95,16 +95,51 @@ const hashString = (value: string): number => {
   return hash >>> 0;
 };
 
-const mulberry32 = (seed: number): (() => number) => {
-  let value = seed >>> 0;
-  return () => {
-    value += 0x6d2b79f5;
-    let result = value;
-    result = Math.imul(result ^ (result >>> 15), result | 1);
-    result ^= result + Math.imul(result ^ (result >>> 7), result | 61);
-    return ((result ^ (result >>> 14)) >>> 0) / 4294967296;
-  };
+const mixDimensionSeed = (seed: number, dimension: number): number => {
+  let value = (seed ^ Math.imul(dimension + 1, 0x9e3779b1)) >>> 0;
+  value ^= value >>> 16;
+  value = Math.imul(value, 0x7feb352d) >>> 0;
+  value ^= value >>> 15;
+  value = Math.imul(value, 0x846ca68b) >>> 0;
+  value ^= value >>> 16;
+  return value >>> 0;
 };
+
+const greatestCommonDivisor = (left: number, right: number): number => {
+  let a = Math.abs(Math.trunc(left));
+  let b = Math.abs(Math.trunc(right));
+  while (b) {
+    const next = a % b;
+    a = b;
+    b = next;
+  }
+  return a;
+};
+
+const stratifiedUnit = (
+  seed: number,
+  stratum: number,
+  strata: number,
+  dimension: number,
+): number => {
+  const count = Math.max(1, Math.floor(strata));
+  if (count === 1) {
+    return mixDimensionSeed(seed, dimension) / 0x1_0000_0000;
+  }
+  let multiplier = (mixDimensionSeed(seed, dimension) % count) || 1;
+  while (greatestCommonDivisor(multiplier, count) !== 1) {
+    multiplier = (multiplier + 1) % count || 1;
+  }
+  const shift = mixDimensionSeed(seed, dimension ^ 0x85ebca6b) % count;
+  const offset =
+    mixDimensionSeed(seed, dimension ^ 0xc2b2ae35) / 0x1_0000_0000;
+  const bucket = (multiplier * stratum + shift) % count;
+  return (bucket + offset) / count;
+};
+
+const RESOURCE_WORLD_DIMENSION = 0x1000;
+const RESOURCE_SLOT_DIMENSION = 0x2000;
+const DEVELOPMENT_SLOT_DIMENSION = 0x4000;
 
 const normalizedWorldWeight = (
   weight: number | undefined,
@@ -114,151 +149,112 @@ const normalizedWorldWeight = (
     ? weight!
     : fallback;
 
-const strategicWorldSignature = (
+const resourceWorldKey = (
   world: TrackerState["worlds"][number],
   players: string[],
 ): string =>
-  players
-    .map((player) => {
-      const hand = world.hands[player] ?? emptyResources();
-      const affordable = [
-        hand.lumber >= 1 && hand.brick >= 1,
-        hand.lumber >= 1 &&
-          hand.brick >= 1 &&
-          hand.wool >= 1 &&
-          hand.grain >= 1,
-        hand.grain >= 2 && hand.ore >= 3,
-        hand.wool >= 1 && hand.grain >= 1 && hand.ore >= 1,
-      ]
-        .map(Number)
-        .join("");
-      return `${resourceTotal(hand)}:${affordable}:${RESOURCE_ORDER.map(
-        (resource) => Math.min(3, hand[resource]),
-      ).join("")}`;
-    })
-    .join("|");
+  JSON.stringify(
+    players.map((player) => resources(world.hands[player])),
+  );
 
-const worldDistance = (
-  left: TrackerState["worlds"][number],
-  right: TrackerState["worlds"][number],
+const normalizedResourceWorlds = (
+  source: TrackerState["worlds"],
   players: string[],
-): number =>
-  players.reduce((sum, player) => {
-    const a = left.hands[player] ?? emptyResources();
-    const b = right.hands[player] ?? emptyResources();
-    return (
-      sum +
-      RESOURCE_ORDER.reduce(
-        (resourceSum, resource) =>
-          resourceSum + Math.abs(a[resource] - b[resource]),
-        0,
-      )
-    );
-  }, 0);
+): TrackerState["worlds"] => {
+  if (!source.length) return [];
+  const fallback = 1 / source.length;
+  const merged = new Map<string, TrackerState["worlds"][number]>();
+  for (const world of source) {
+    const key = resourceWorldKey(world, players);
+    const weight = normalizedWorldWeight(world.weight, fallback);
+    const existing = merged.get(key);
+    if (existing) {
+      existing.weight += weight;
+    } else {
+      merged.set(key, {
+        ...world,
+        weight,
+        hands: Object.fromEntries(
+          Object.entries(world.hands).map(([player, hand]) => [
+            player,
+            { ...hand },
+          ]),
+        ),
+      });
+    }
+  }
+  const total = [...merged.values()]
+    .reduce((sum, world) => sum + world.weight, 0)
+    || 1;
+  return [...merged.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, world]) => ({
+      ...world,
+      weight: world.weight / total,
+    }));
+};
+
+const weightedIndex = (weights: number[], unit: number): number => {
+  const total = weights.reduce((sum, weight) => sum + Math.max(0, weight), 0);
+  if (total <= 0) return 0;
+  let target = Math.max(0, Math.min(1 - Number.EPSILON, unit)) * total;
+  for (let index = 0; index < weights.length; index += 1) {
+    target -= Math.max(0, weights[index] ?? 0);
+    if (target < 0) return index;
+  }
+  return weights.length - 1;
+};
 
 /**
- * Deterministic weighted stratification. It preserves strategically distinct
- * affordability worlds, then assigns every omitted world's posterior mass to
- * its nearest representative instead of silently dropping that mass.
+ * Lossy resource-only sampling for tests/replay. Production joint sampling does
+ * not pre-cap resources. When sampling is required, each final stratum carries
+ * exactly 1/N mass; omitted mass is never reassigned to a nearest different
+ * world.
  */
 export const selectRepresentativeWorlds = (
   source: TrackerState["worlds"],
   players: string[],
   maximum = MAX_PARTICLES,
+  seed = 0,
 ): TrackerState["worlds"] => {
-  if (!source.length) return [];
-  const rawTotal = source.reduce(
-    (sum, world) =>
-      sum + normalizedWorldWeight(world.weight, 1 / source.length),
-    0,
+  const normalized = normalizedResourceWorlds(source, players);
+  const limit = Math.min(
+    MAX_PARTICLES,
+    Math.max(1, Math.floor(maximum)),
   );
-  const normalized = source.map((world) => ({
-    ...world,
-    weight:
-      normalizedWorldWeight(world.weight, 1 / source.length) /
-      Math.max(Number.EPSILON, rawTotal),
-  }));
-  if (normalized.length <= maximum) return normalized;
-
-  const selected = new Set<number>();
-  const buckets = new Map<string, number[]>();
-  normalized.forEach((world, index) => {
-    const signature = strategicWorldSignature(world, players);
-    const bucket = buckets.get(signature) ?? [];
-    bucket.push(index);
-    buckets.set(signature, bucket);
-  });
-  const bucketLeaders = [...buckets.values()]
-    .map((indices) =>
-      [...indices].sort(
-        (left, right) =>
-          normalized[right]!.weight - normalized[left]!.weight ||
-          left - right,
-      )[0]!,
-    )
-    .sort(
-      (left, right) =>
-        normalized[right]!.weight - normalized[left]!.weight ||
-        left - right,
+  if (normalized.length <= limit) return normalized;
+  const weights = normalized.map((world) => world.weight);
+  const selected = new Map<string, TrackerState["worlds"][number]>();
+  for (let stratum = 0; stratum < limit; stratum += 1) {
+    const index = weightedIndex(
+      weights,
+      stratifiedUnit(seed, stratum, limit, RESOURCE_WORLD_DIMENSION),
     );
-  for (const index of bucketLeaders.slice(0, Math.ceil(maximum / 2))) {
-    selected.add(index);
-  }
-
-  const sorted = normalized
-    .map((world, index) => ({ world, index }))
-    .sort(
-      (left, right) =>
-        strategicWorldSignature(left.world, players).localeCompare(
-          strategicWorldSignature(right.world, players),
-        ) || left.index - right.index,
-    );
-  let cursor = 0;
-  let cumulative = sorted[0]!.world.weight;
-  for (let stratum = 0; selected.size < maximum; stratum += 1) {
-    const target = (stratum + 0.5) / maximum;
-    while (cursor < sorted.length - 1 && cumulative < target) {
-      cursor += 1;
-      cumulative += sorted[cursor]!.world.weight;
-    }
-    selected.add(sorted[cursor]!.index);
-    if (stratum > maximum * 4 && selected.size < maximum) {
-      const fallback = normalized.findIndex((_, index) => !selected.has(index));
-      if (fallback < 0) break;
-      selected.add(fallback);
+    const world = normalized[index]!;
+    const key = resourceWorldKey(world, players);
+    const existing = selected.get(key);
+    if (existing) {
+      existing.weight += 1 / limit;
+    } else {
+      selected.set(key, {
+        ...world,
+        weight: 1 / limit,
+        hands: Object.fromEntries(
+          Object.entries(world.hands).map(([player, hand]) => [
+            player,
+            { ...hand },
+          ]),
+        ),
+      });
     }
   }
-
-  const indices = [...selected].slice(0, maximum);
-  const representatives = indices.map((index) => ({
-    ...normalized[index]!,
-    weight: 0,
-  }));
-  for (const world of normalized) {
-    let nearest = 0;
-    let distance = Number.POSITIVE_INFINITY;
-    representatives.forEach((representative, index) => {
-      const candidate = worldDistance(world, representative, players);
-      if (candidate < distance) {
-        distance = candidate;
-        nearest = index;
-      }
-    });
-    representatives[nearest]!.weight += world.weight;
-  }
-  return representatives.filter((world) => world.weight > 0);
+  return [...selected.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, world]) => world);
 };
 
-const sampleIndex = (counts: number[], random: () => number): number => {
-  const total = counts.reduce((sum, count) => sum + count, 0);
-  if (!total) return 0;
-  let cursor = random() * total;
-  for (let index = 0; index < counts.length; index += 1) {
-    cursor -= counts[index] ?? 0;
-    if (cursor < 0) return index;
-  }
-  return counts.length - 1;
-};
+const sampledCountIndex = (counts: number[], unit: number): number =>
+  weightedIndex(counts, unit);
 
 const publicDevelopmentEvidence = (
   state: TrackerState,
@@ -290,16 +286,26 @@ const publicDevelopmentEvidence = (
 const developmentStateIntegrityError = (detail: string): Error =>
   new Error(`Deep Search development-card state integrity error: ${detail}`);
 
-const sampledDevelopmentWorld = (
+type CardTuple = [number, number, number, number, number];
+
+interface DevelopmentSlot {
+  player: number;
+  playerName: string;
+  boughtThisTurn: boolean;
+}
+
+interface DevelopmentSamplingBase {
+  hands: CardTuple[];
+  bought: CardTuple[];
+  remaining: CardTuple;
+  slots: DevelopmentSlot[];
+}
+
+const developmentSamplingBase = (
   state: TrackerState,
   board: BoardSnapshot,
   players: string[],
-  random: () => number,
-): {
-  hands: Array<[number, number, number, number, number]>;
-  bought: Array<[number, number, number, number, number]>;
-  deck: [number, number, number, number, number];
-} => {
+): DevelopmentSamplingBase => {
   const played = publicDevelopmentEvidence(state, board);
   const remaining = DEVELOPMENT_TOTAL.map((total, index) => {
     const playedCount = played[index] ?? 0;
@@ -310,23 +316,24 @@ const sampledDevelopmentWorld = (
       );
     }
     return available;
-  });
-  const hands = players.map(
-    () => [0, 0, 0, 0, 0] as [number, number, number, number, number],
-  );
-  const bought = players.map(
-    () => [0, 0, 0, 0, 0] as [number, number, number, number, number],
-  );
+  }) as CardTuple;
+  const hands = players.map(() => [0, 0, 0, 0, 0] as CardTuple);
+  const bought = players.map(() => [0, 0, 0, 0, 0] as CardTuple);
   const ownIndex = board.myPlayer ? players.indexOf(board.myPlayer) : -1;
   if (ownIndex >= 0) {
     const exact = development(board.ownDevelopmentCards?.cards);
+    const exactBought = development(board.ownDevelopmentCards?.boughtThisTurn);
     hands[ownIndex] = exact;
-    bought[ownIndex] = development(
-      board.ownDevelopmentCards?.boughtThisTurn,
-    );
+    bought[ownIndex] = exactBought;
     for (let index = 0; index < exact.length; index += 1) {
       const exactCount = exact[index] ?? 0;
+      const boughtCount = exactBought[index] ?? 0;
       const available = remaining[index] ?? 0;
+      if (boughtCount > exactCount) {
+        throw developmentStateIntegrityError(
+          `exact local bought-this-turn ${DEVELOPMENT_ORDER[index]} count (${boughtCount}) exceeds the held count (${exactCount})`,
+        );
+      }
       if (exactCount > available) {
         throw developmentStateIntegrityError(
           `exact local ${DEVELOPMENT_ORDER[index]} holdings (${exactCount}) exceed the ${available} cards left after public plays`,
@@ -335,67 +342,77 @@ const sampledDevelopmentWorld = (
       remaining[index] = available - exactCount;
     }
   }
-  const hiddenDevelopmentCounts = players.map((playerName, player) => {
-    if (player === ownIndex) return 0;
+
+  const slots: DevelopmentSlot[] = [];
+  for (let player = 0; player < players.length; player += 1) {
+    if (player === ownIndex) continue;
+    const playerName = players[player]!;
     const count = board.players?.[playerName]?.developmentCards ?? 0;
     if (!Number.isInteger(count) || count < 0) {
       throw developmentStateIntegrityError(
         `${playerName} has invalid public hidden-card count ${count}`,
       );
     }
-    return count;
-  });
-  const hiddenRequired = hiddenDevelopmentCounts.reduce(
-    (sum, count) => sum + count,
-    0,
-  );
-  const hiddenAvailable = remaining.reduce((sum, count) => sum + count, 0);
-  if (hiddenRequired > hiddenAvailable) {
-    throw developmentStateIntegrityError(
-      `${hiddenRequired} hidden opponent cards are required but only ${hiddenAvailable} development cards remain after public plays and the exact local hand`,
-    );
-  }
-  for (let player = 0; player < players.length; player += 1) {
-    if (player === ownIndex) continue;
-    const playerName = players[player]!;
-    const count = hiddenDevelopmentCounts[player] ?? 0;
-    const sampledCards: number[] = [];
-    for (let card = 0; card < count; card += 1) {
-      const index = sampleIndex(remaining, random);
-      if ((remaining[index] ?? 0) <= 0) {
-        throw developmentStateIntegrityError(
-          `sampler exhausted the development deck while assigning ${playerName}`,
-        );
-      }
-      hands[player]![index] = (hands[player]![index] ?? 0) + 1;
-      remaining[index] = (remaining[index] ?? 0) - 1;
-      sampledCards.push(index);
-    }
-    // The tracker knows purchase age even when it does not know card identity.
-    // Preserve that joint uncertainty in each determinization so a simulated
-    // opponent cannot play a card bought on the current turn.
-    const unreadyCount = Math.min(
-      sampledCards.length,
+    const boughtThisTurn = Math.min(
+      count,
       state.players[playerName]?.devCards.filter(
         (card) => card.boughtOnTurn >= state.currentTurn.sequence,
       ).length ?? 0,
     );
-    for (
-      let index = sampledCards.length - unreadyCount;
-      index < sampledCards.length;
-      index += 1
-    ) {
-      const card = sampledCards[index];
-      if (card !== undefined) {
-        bought[player]![card] = (bought[player]![card] ?? 0) + 1;
-      }
+    const ready = count - boughtThisTurn;
+    for (let slot = 0; slot < ready; slot += 1) {
+      slots.push({ player, playerName, boughtThisTurn: false });
+    }
+    for (let slot = 0; slot < boughtThisTurn; slot += 1) {
+      slots.push({ player, playerName, boughtThisTurn: true });
     }
   }
-  return {
-    hands,
-    bought,
-    deck: remaining as [number, number, number, number, number],
-  };
+
+  const hiddenAvailable = remaining.reduce((sum, count) => sum + count, 0);
+  if (slots.length > hiddenAvailable) {
+    throw developmentStateIntegrityError(
+      `${slots.length} hidden opponent cards are required but only ${hiddenAvailable} development cards remain after public plays and the exact local hand`,
+    );
+  }
+  return { hands, bought, remaining, slots };
+};
+
+const sampledDevelopmentWorld = (
+  base: DevelopmentSamplingBase,
+  seed: number,
+  stratum: number,
+  strata: number,
+): {
+  hands: CardTuple[];
+  bought: CardTuple[];
+  deck: CardTuple;
+} => {
+  const remaining = [...base.remaining] as CardTuple;
+  const hands = base.hands.map((hand) => [...hand] as CardTuple);
+  const bought = base.bought.map((hand) => [...hand] as CardTuple);
+  for (let slotIndex = 0; slotIndex < base.slots.length; slotIndex += 1) {
+    const slot = base.slots[slotIndex]!;
+    const card = sampledCountIndex(
+      remaining,
+      stratifiedUnit(
+        seed,
+        stratum,
+        strata,
+        DEVELOPMENT_SLOT_DIMENSION + slotIndex,
+      ),
+    );
+    if ((remaining[card] ?? 0) <= 0) {
+      throw developmentStateIntegrityError(
+        `sampler exhausted the development deck while assigning ${slot.playerName}`,
+      );
+    }
+    hands[slot.player]![card] = (hands[slot.player]![card] ?? 0) + 1;
+    if (slot.boughtThisTurn) {
+      bought[slot.player]![card] = (bought[slot.player]![card] ?? 0) + 1;
+    }
+    remaining[card] = (remaining[card] ?? 0) - 1;
+  }
+  return { hands, bought, deck: remaining };
 };
 
 const playerNames = (
@@ -646,6 +663,139 @@ const mapAuthorityTrace = (
   };
 };
 
+interface SampledResourceWorld {
+  hands: CardTuple[];
+  bank: CardTuple;
+}
+
+interface JointParticleWorld extends SampledResourceWorld {
+  weight: number;
+  development: CardTuple[];
+  boughtDevelopment: CardTuple[];
+  developmentDeck: CardTuple;
+}
+
+const resourceWorldFeasible = (
+  world: TrackerState["worlds"][number],
+  players: string[],
+  board: BoardSnapshot,
+): boolean => {
+  const own = resources(board.ownHand);
+  const remaining = RESOURCE_ORDER.map((resource, index) => {
+    const bank = board.bankVisible && board.bank ? board.bank[resource] : 0;
+    return 19 - bank - (own[index] ?? 0);
+  });
+  if (remaining.some((count) => count < 0)) return false;
+  let missingTotal = 0;
+  for (let player = 0; player < players.length; player += 1) {
+    const playerName = players[player]!;
+    if (playerName === board.myPlayer) continue;
+    const known = resources(world.hands[playerName]);
+    const target = clampCard(
+      board.players?.[playerName]?.handSize ?? resourceTotal(world.hands[playerName] ?? emptyResources()),
+    );
+    const knownTotal = known.reduce((sum, count) => sum + count, 0);
+    if (knownTotal > target) return false;
+    for (let resource = 0; resource < known.length; resource += 1) {
+      if ((known[resource] ?? 0) > (remaining[resource] ?? 0)) return false;
+      remaining[resource] = (remaining[resource] ?? 0) - (known[resource] ?? 0);
+    }
+    missingTotal += target - knownTotal;
+  }
+  const available = remaining.reduce((sum, count) => sum + count, 0);
+  return missingTotal <= available &&
+    (!board.bankVisible || !board.bank || missingTotal === available);
+};
+
+const resourceCompletionRequired = (
+  world: TrackerState["worlds"][number],
+  players: string[],
+  board: BoardSnapshot,
+): boolean =>
+  players.some((player) => {
+    if (player === board.myPlayer) return false;
+    const known = resourceTotal(world.hands[player] ?? emptyResources());
+    const target = board.players?.[player]?.handSize ?? known;
+    return known < target;
+  });
+
+const sampledResourceWorld = (
+  world: TrackerState["worlds"][number],
+  players: string[],
+  board: BoardSnapshot,
+  seed: number,
+  stratum: number,
+  strata: number,
+): SampledResourceWorld | undefined => {
+  const own = resources(board.ownHand);
+  const remaining = RESOURCE_ORDER.map((resource, index) => {
+    const bank = board.bankVisible && board.bank ? board.bank[resource] : 0;
+    return 19 - bank - (own[index] ?? 0);
+  }) as CardTuple;
+  if (remaining.some((count) => count < 0)) return undefined;
+
+  const hands = players.map((player) =>
+    player === board.myPlayer
+      ? ([...own] as CardTuple)
+      : resources(world.hands[player]),
+  );
+  const missing = new Array<number>(players.length).fill(0);
+  for (let player = 0; player < players.length; player += 1) {
+    const playerName = players[player]!;
+    if (playerName === board.myPlayer) continue;
+    const hand = hands[player]!;
+    const target = clampCard(
+      board.players?.[playerName]?.handSize ?? hand.reduce((sum, count) => sum + count, 0),
+    );
+    const knownTotal = hand.reduce((sum, count) => sum + count, 0);
+    if (knownTotal > target) return undefined;
+    missing[player] = target - knownTotal;
+    for (let resource = 0; resource < hand.length; resource += 1) {
+      const count = hand[resource] ?? 0;
+      if (count > (remaining[resource] ?? 0)) return undefined;
+      remaining[resource] = (remaining[resource] ?? 0) - count;
+    }
+  }
+  const required = missing.reduce((sum, count) => sum + count, 0);
+  const available = remaining.reduce((sum, count) => sum + count, 0);
+  if (
+    required > available ||
+    (board.bankVisible && board.bank && required !== available)
+  ) {
+    return undefined;
+  }
+
+  for (let player = 0; player < players.length; player += 1) {
+    for (let slot = 0; slot < (missing[player] ?? 0); slot += 1) {
+      const resource = sampledCountIndex(
+        remaining,
+        stratifiedUnit(
+          seed,
+          stratum,
+          strata,
+          RESOURCE_SLOT_DIMENSION + player * 64 + slot,
+        ),
+      );
+      if ((remaining[resource] ?? 0) <= 0) return undefined;
+      hands[player]![resource] = (hands[player]![resource] ?? 0) + 1;
+      remaining[resource] = (remaining[resource] ?? 0) - 1;
+    }
+  }
+  const bank = board.bankVisible && board.bank
+    ? resources(board.bank)
+    : ([...remaining] as CardTuple);
+  return { hands, bank };
+};
+
+const jointWorldKey = (world: Omit<JointParticleWorld, "weight">): string =>
+  JSON.stringify([
+    world.hands,
+    world.development,
+    world.boughtDevelopment,
+    world.developmentDeck,
+    world.bank,
+  ]);
+
 const actionBuildKind = (kind: string): BuildKind | undefined => {
   if (kind === "build-road" || kind === "place-road") return "road";
   if (kind === "build-settlement" || kind === "place-settlement") {
@@ -692,6 +842,7 @@ export const buildDeepSearchRequest = (
   rootPlayer: string,
   searchConstraints: DecisionSearchConstraints = {},
   playerTradesEnabled = true,
+  particleLimit = MAX_INTERACTIVE_PARTICLES,
 ) => {
   const players = playerNames(state, board);
   if (players.length < 2 || players.length > 4) {
@@ -905,174 +1056,123 @@ export const buildDeepSearchRequest = (
           (event.player === rootPlayer ||
             event.acceptingPlayer === rootPlayer),
       );
-  const hiddenDevelopmentCards = players.reduce(
-    (sum, player) =>
-      player === board.myPlayer
-        ? sum
-        : sum + (board.players?.[player]?.developmentCards ?? 0),
-    0,
-  );
-  const sourceWorldLimit =
-    hiddenDevelopmentCards > 0
-      ? Math.floor(MAX_PARTICLES / 2)
-      : MAX_PARTICLES;
   if (!state.worlds.length) {
     throw new Error("Deep Search has no resource worlds consistent with public evidence");
   }
-  const sourceWorlds = selectRepresentativeWorlds(
-    state.worlds,
-    players,
-    sourceWorldLimit,
+  const finalParticleLimit = Math.min(
+    MAX_PARTICLES,
+    Math.max(1, Math.floor(particleLimit)),
   );
-  const developmentSamples =
-    hiddenDevelopmentCards > 0
-      ? Math.max(
-          2,
-          Math.min(
-            8,
-            Math.floor(MAX_PARTICLES / Math.max(1, sourceWorlds.length)),
-          ),
-        )
-      : 1;
-  const rawWorlds = sourceWorlds.flatMap((world, worldIndex) =>
-    Array.from({ length: developmentSamples }).flatMap((_, developmentSampleIndex) => {
-    const random = mulberry32(
-      seed ^
-      Math.imul(worldIndex + 1, 0x9e3779b1) ^
-      Math.imul(developmentSampleIndex + 1, 0x85ebca6b),
-    );
-    const developmentWorld = sampledDevelopmentWorld(
-      state,
-      board,
-      players,
-      random,
-    );
-    const own = resources(board.ownHand);
-    const remainingPool = board.bankVisible && board.bank
-      ? RESOURCE_ORDER.map((resource, index) =>
-          Math.max(
-            0,
-            19 -
-              board.bank![resource] -
-              (own[index] ?? 0),
-          ),
-        )
-      : RESOURCE_ORDER.map((_, index) =>
-          Math.max(0, 19 - (own[index] ?? 0)),
-        );
-    let validResources = true;
-    const hands = players.map((player) => {
-      if (player === board.myPlayer && board.ownHand) return own;
-      const known = resources(world.hands[player]);
-      const target = clampCard(
-        board.players?.[player]?.handSize ??
-          known.reduce((sum, count) => sum + count, 0),
-      );
-      const knownTotal = known.reduce((sum, count) => sum + count, 0);
-      if (knownTotal > target) {
-        validResources = false;
-        return known;
-      }
-      const sampled = [...known];
-      for (let index = 0; index < sampled.length; index += 1) {
-        const count = sampled[index] ?? 0;
-        if (count > (remainingPool[index] ?? 0)) {
-          validResources = false;
-          return sampled as [number, number, number, number, number];
-        }
-        remainingPool[index] = (remainingPool[index] ?? 0) - count;
-      }
-      const missingCards = target - knownTotal;
-      if (missingCards > remainingPool.reduce((sum, count) => sum + count, 0)) {
-        validResources = false;
-        return sampled as [number, number, number, number, number];
-      }
-      for (let missing = 0; missing < missingCards; missing += 1) {
-        const index = sampleIndex(remainingPool, random);
-        sampled[index] = (sampled[index] ?? 0) + 1;
-        remainingPool[index] = (remainingPool[index] ?? 0) - 1;
-      }
-      return sampled as [number, number, number, number, number];
-    });
-    if (
-      !validResources ||
-      (board.bankVisible && board.bank && remainingPool.some((count) => count !== 0))
-    ) {
-      return [];
-    }
-    const inferredBank = RESOURCE_ORDER.map((_, resourceIndex) =>
-      Math.max(
-        0,
-        19 -
-          hands.reduce(
-            (sum, hand) => sum + (hand[resourceIndex] ?? 0),
-            0,
-          ),
-      ),
-    ) as [number, number, number, number, number];
-    return [{
-      weight: world.weight / developmentSamples,
-      hands,
-      development: developmentWorld.hands,
-      boughtDevelopment: developmentWorld.bought,
-      developmentDeck: developmentWorld.deck,
-      bank:
-        board.bankVisible && board.bank ? resources(board.bank) : inferredBank,
-    }];
-  }));
-  if (!rawWorlds.length) {
+  const normalizedResources = normalizedResourceWorlds(state.worlds, players);
+  const feasibleResources = normalizedResources.filter((world) =>
+    resourceWorldFeasible(world, players, board),
+  );
+  if (!feasibleResources.length) {
     throw new Error("Deep Search could not construct a resource world consistent with public evidence");
   }
-  // Monte-Carlo development determinizations can collide. Merge identical
-  // particles so ESS and downstream search effort reflect actual diversity.
-  const mergedWorlds = new Map<string, (typeof rawWorlds)[number]>();
-  for (const world of rawWorlds) {
-    const key = JSON.stringify([
-      world.hands,
-      world.development,
-      world.boughtDevelopment,
-      world.developmentDeck,
-      world.bank,
-    ]);
+  const feasibleMass = feasibleResources.reduce(
+    (sum, world) => sum + world.weight,
+    0,
+  );
+  const sourceWorlds = feasibleResources.map((world) => ({
+    ...world,
+    weight: world.weight / Math.max(Number.EPSILON, feasibleMass),
+  }));
+  const sourceWeights = sourceWorlds.map((world) => world.weight);
+  const developmentBase = developmentSamplingBase(state, board, players);
+  const hasHiddenDevelopmentIdentity = developmentBase.slots.length > 0;
+  const hasIncompleteResourceWorld = sourceWorlds.some((world) =>
+    resourceCompletionRequired(world, players, board),
+  );
+  const exactJointPosterior =
+    !hasHiddenDevelopmentIdentity &&
+    !hasIncompleteResourceWorld &&
+    sourceWorlds.length <= finalParticleLimit;
+  const mergedWorlds = new Map<string, JointParticleWorld>();
+  const addParticle = (particle: JointParticleWorld): void => {
+    const key = jointWorldKey(particle);
     const existing = mergedWorlds.get(key);
-    if (existing) existing.weight += world.weight;
-    else mergedWorlds.set(key, world);
-  }
-  let worlds = [...mergedWorlds.values()];
-  if (worlds.length > MAX_INTERACTIVE_PARTICLES) {
-    // Preserve the weighted posterior without sending dozens of near-duplicate
-    // development-card determinizations through every interactive WASM call.
-    // Deterministic systematic resampling covers the complete cumulative mass
-    // (rather than taking the first N worlds) and merges repeated selections.
-    const totalWeight = worlds.reduce(
-      (sum, world) => sum + Math.max(0, world.weight),
+    if (existing) existing.weight += particle.weight;
+    else mergedWorlds.set(key, particle);
+  };
+
+  if (exactJointPosterior) {
+    const developmentWorld = sampledDevelopmentWorld(
+      developmentBase,
+      seed,
       0,
+      1,
     );
-    const quantum = totalWeight / MAX_INTERACTIVE_PARTICLES;
-    const selected = new Map<number, (typeof worlds)[number]>();
-    let cursor = 0;
-    let cumulative = Math.max(0, worlds[0]?.weight ?? 0);
-    for (let sample = 0; sample < MAX_INTERACTIVE_PARTICLES; sample += 1) {
-      const target = (sample + 0.5) * quantum;
-      while (
-        cursor < worlds.length - 1 &&
-        cumulative + Number.EPSILON < target
-      ) {
-        cursor += 1;
-        cumulative += Math.max(0, worlds[cursor]?.weight ?? 0);
-      }
-      const existing = selected.get(cursor);
-      if (existing) {
-        existing.weight += quantum;
-      } else {
-        selected.set(cursor, {
-          ...worlds[cursor]!,
-          weight: quantum,
-        });
-      }
+    for (const world of sourceWorlds) {
+      const resourceWorld = sampledResourceWorld(
+        world,
+        players,
+        board,
+        seed,
+        0,
+        1,
+      );
+      if (!resourceWorld) continue;
+      addParticle({
+        weight: world.weight,
+        ...resourceWorld,
+        development: developmentWorld.hands.map((hand) => [...hand] as CardTuple),
+        boughtDevelopment: developmentWorld.bought.map(
+          (hand) => [...hand] as CardTuple,
+        ),
+        developmentDeck: [...developmentWorld.deck] as CardTuple,
+      });
     }
-    worlds = [...selected.values()];
+  } else {
+    for (let stratum = 0; stratum < finalParticleLimit; stratum += 1) {
+      const resourceIndex = weightedIndex(
+        sourceWeights,
+        stratifiedUnit(
+          seed,
+          stratum,
+          finalParticleLimit,
+          RESOURCE_WORLD_DIMENSION,
+        ),
+      );
+      const resourceWorld = sampledResourceWorld(
+        sourceWorlds[resourceIndex]!,
+        players,
+        board,
+        seed,
+        stratum,
+        finalParticleLimit,
+      );
+      if (!resourceWorld) {
+        throw new Error("Deep Search joint sampler selected an invalid resource world");
+      }
+      const developmentWorld = sampledDevelopmentWorld(
+        developmentBase,
+        seed,
+        stratum,
+        finalParticleLimit,
+      );
+      addParticle({
+        weight: 1 / finalParticleLimit,
+        ...resourceWorld,
+        development: developmentWorld.hands,
+        boughtDevelopment: developmentWorld.bought,
+        developmentDeck: developmentWorld.deck,
+      });
+    }
   }
+  if (!mergedWorlds.size) {
+    throw new Error("Deep Search joint sampler produced no valid particles");
+  }
+  const mergedMass = [...mergedWorlds.values()].reduce(
+    (sum, world) => sum + world.weight,
+    0,
+  );
+  const worlds = [...mergedWorlds.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, world]) => ({
+      ...world,
+      weight: world.weight / Math.max(Number.EPSILON, mergedMass),
+    }));
   const baseWorld = worlds[0]!;
   const buildings = board.vertices.map((vertex) => {
     if (!vertex.building) return -1;
