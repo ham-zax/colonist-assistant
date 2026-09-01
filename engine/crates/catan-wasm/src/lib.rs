@@ -122,6 +122,7 @@ struct StateInput {
     trade: Option<TradeInput>,
     trade_cursor: u8,
     domestic_trade_used: bool,
+    player_trades_enabled: Option<bool>,
     longest_road_holder: Option<u8>,
     largest_army_holder: Option<u8>,
 }
@@ -435,6 +436,7 @@ fn game_states(input: StateInput) -> Result<Vec<BeliefParticle>, JsValue> {
             // negotiation round open and made trivial end-turn states
             // expand a full tree of redundant offers.
             domestic_trade_count: if input.domestic_trade_used { 2 } else { 0 },
+            player_trades_enabled: input.player_trades_enabled.unwrap_or(true),
             last_rejected_trade: None,
             trade,
             trade_cursor: input.trade_cursor,

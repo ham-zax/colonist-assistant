@@ -12,7 +12,8 @@ The repository already contains the core of the evaluation harness:
 - The arena supports `random`, `weighted`, `maxn`, `alphabeta`, `uct`, and `puct` engines plus explicit mixed `--lineup` configurations.
 - Each arena block preserves the same board seed and chance seed while rotating the candidate through every seat. This is the primary seat-bias control.
 - Search engines use weighted hidden-information particles by default. `--perfect-information` is an explicit diagnostic mode and must not be used for strength claims.
-- `scripts/benchmark-local.mjs` runs seat-balanced native matrices and writes JSON/Markdown plus incremental checkpoints.
+- `scripts/benchmark-local.mjs` runs seat-balanced native matrices and writes JSON/Markdown plus incremental checkpoints. Its `--no-player-trades` mode disables player-to-player offers, accepts, counters, and confirmations while preserving bank/port maritime trades.
+- `scripts/benchmark-no-player-trades.mjs` is the canonical 3-player/4-player no-player-trades lane. It runs the native MaxN-vs-`weighted`/`alphabeta` matrix first, then generates a separate no-player-trades expert corpus and runs the CUDA GPU zoom benchmark over that fixed corpus.
 - `scripts/read-arena-checkpoint.mjs` reads partial/complete arena checkpoints.
 - `scripts/replay-decisions.mjs` and `scripts/replay-engine.ts` rerun captured real positions through packaged WASM configurations.
 - `scripts/profile-live-search.ts` measures live-budget sensitivity on captured positions.
@@ -98,6 +99,50 @@ Primary strength matrix:
 Two-player games may remain a diagnostic matrix, but the primary release evidence is 3-player and 4-player because the extension is intended for ordinary multiplayer Colonist games and the real-browser benchmark is four-player.
 
 Persist the JSON, Markdown, and checkpoint files. Do not regenerate the v9 baseline after source changes and call it the same baseline.
+
+# Canonical no-player-trades before/after lane
+
+This lane was added after Tasks 1-3 had already landed. It is therefore **not** the untouched pre-fix `deep-maxn-v9` baseline from Phase E0. Its pre arm is the engine state after Task 3 and before Agent A's Tasks 4-12 are integrated. The correctness-semantic base is `cd0db20` (`Add GPU strategic model benchmark`), which already contains the Task 1-3 correctness commits. Before freezing the full no-player-trades pre arm, commit this measurement tooling on top of that base and run from the resulting clean SHA; do not call a dirty development build the canonical pre snapshot.
+
+The rule variant is intentionally narrow:
+
+- disable all player-to-player trade initiation and completion paths (`OfferTrade`, accepting `RespondTrade`, `CounterTrade`, `ConfirmTrade`); rejection and cancellation remain available only to unwind an existing protocol;
+- keep `MaritimeTrade` fully legal, including 4:1 bank trades and 3:1/2:1 port trades;
+- propagate the rule flag into every simulated search state so MaxN/AlphaBeta cannot value a deeper continuation that depends on a player trade that the benchmark forbids;
+- record the rule mode in native checkpoint/search-profile/result metadata.
+
+The canonical native matrix is 3-player and 4-player MaxN versus `weighted` and `alphabeta`, with the same matched board/chance seeds and seat rotation used by the normal strength harness. The default command uses 200 requested games per matchup, which becomes 201 games for each 3-player matchup after complete seat rotation and 200 games for each 4-player matchup.
+
+Freeze the **pre remaining-implementation** arm before integrating Tasks 4-12:
+
+```bash
+npm run benchmark:no-player-trades -- \
+  --label post-task3-pre-task4 \
+  --games 200 \
+  --seed 97100001
+```
+
+After Tasks 4-16 are integrated and `deep-maxn-v10` passes its correctness gates, rerun the exact same lane with the same seed and game count:
+
+```bash
+npm run benchmark:no-player-trades -- \
+  --label post-task16 \
+  --games 200 \
+  --seed 97100001
+```
+
+One command produces two evidence layers:
+
+1. **Native game-strength evidence (CPU):** authoritative 3-player/4-player win share, rank, VP, latency, search budget, and cutoff metrics under the no-player-trades rule.
+2. **GPU sidecar (CUDA):** separate fixed 3-player and 4-player no-player-trades expert corpora, each evaluated independently by `benchmark-gpu-zoom.py` with the default hidden width 512. Each corpus must contain at least two independent board/chance seed groups so the held-out split is meaningful. Keep the 3P and 4P GPU metrics separate so format-specific value/policy quality is visible. This is model-quality/throughput evidence, not a substitute for game outcomes.
+
+The recursive simulator and tree search remain CPU code. CUDA accelerates the fixed/batched value-policy experiment only. Do not describe the native arena result as GPU-accelerated.
+
+The same rule is also an engine-level contract for the future extension toggle. `DecisionRequest.playerTradesEnabled` flows through `buildDeepSearchRequest` into the WASM `StateInput.playerTradesEnabled` field and then into `GameState`. The field defaults to `true`, so the current extension behavior is unchanged until a UI setting explicitly sends `false`. When false, search must not generate or value player offers, accepts, counters, or confirmations at any depth. An incoming offer may still be rejected, and an already-open local offer may still be cancelled so the Colonist trade protocol can unwind; those are protocol exits, not player trades.
+
+For this lane, the report must show `playerTradesEnabled = false`. `meanDomesticOffers`, trade acceptance, and counters should remain zero; any nonzero player-trade activity is a benchmark-invalidating rule leak. `meanMaritimeTrades` records the allowed bank/port conversion channel and should be reported separately rather than folded into domestic-trade activity.
+
+This lane is especially useful when evaluating communities where player trading is uncommon: it removes the modeled negotiation channel and makes the strength comparison depend more heavily on placement, resource conversion, development cards, road/build timing, robber play, hidden-state reasoning, and bank/port economics. It still remains stochastic because dice, development draws, steals, and opponent decisions are stochastic.
 
 # Phase E1 - Add exact counterfactual takeover snapshots
 

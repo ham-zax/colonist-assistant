@@ -95,6 +95,7 @@ struct Config {
     opening_time_ms: u32,
     trade_response_nodes: u32,
     trade_response_time_ms: u32,
+    player_trades_enabled: bool,
     perfect_information_search: bool,
     build_git_sha: &'static str,
     build_dirty: bool,
@@ -140,6 +141,7 @@ impl Default for Config {
             opening_time_ms: 1_200,
             trade_response_nodes: 2_000,
             trade_response_time_ms: 350,
+            player_trades_enabled: true,
             perfect_information_search: false,
             build_git_sha: option_env!("COLONIST_BUILD_GIT_SHA").unwrap_or("unknown"),
             build_dirty: option_env!("COLONIST_BUILD_DIRTY") == Some("1"),
@@ -270,6 +272,11 @@ fn parse_config() -> Config {
                 index += 1;
                 continue;
             }
+            "--no-player-trades" => {
+                config.player_trades_enabled = false;
+                index += 1;
+                continue;
+            }
             "--help" | "-h" => {
                 println!(
                     "colonist-arena [--players 2|3|4] [--blocks N] [--seed N] \\
@@ -278,7 +285,7 @@ fn parse_config() -> Config {
                      [--iterations N] [--rollout-actions N] [--max-turns N] \\
                      [--belief-particles N] [--strategic-particles N] \\
                      [--maxn-depth N] [--maxn-branch N] [--maxn-nodes N] [--maxn-time-ms N] \\
-                     [--perfect-information] \\
+                     [--perfect-information] [--no-player-trades] \\
                      [--checkpoint-output progress.jsonl] [--challenge-output challenges.jsonl] \\
                      [--takeover-input challenges.jsonl] [--takeover-output outcomes.jsonl] \\
                      [--takeover-engine control|random|weighted|maxn|alphabeta|uct|puct] \\
@@ -291,6 +298,8 @@ fn parse_config() -> Config {
                      strategist remains a compatibility alias for puct.\n\
                      Search engines use identical weighted beliefs unless --perfect-information\n\
                      explicitly enables oracle access to hidden state.\n\
+                     --no-player-trades forbids player offers/accepts/counters/confirms while\n\
+                     preserving maritime bank and port trades.\n\
                      Checkpoints record git SHA and ENGINE_REVISION for reproducibility."
                 );
                 std::process::exit(0);
@@ -671,6 +680,10 @@ impl From<TradeOfferSnapshot> for TradeOffer {
     }
 }
 
+fn player_trades_enabled_default() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GameStateSnapshot {
@@ -696,6 +709,8 @@ struct GameStateSnapshot {
     free_roads: u8,
     domestic_trade_used: bool,
     domestic_trade_count: u8,
+    #[serde(default = "player_trades_enabled_default")]
+    player_trades_enabled: bool,
     last_rejected_trade: Option<TradeOfferSnapshot>,
     trade: Option<TradeOfferSnapshot>,
     trade_cursor: u8,
@@ -737,6 +752,7 @@ impl GameStateSnapshot {
             free_roads: state.free_roads,
             domestic_trade_used: state.domestic_trade_used,
             domestic_trade_count: state.domestic_trade_count,
+            player_trades_enabled: state.player_trades_enabled,
             last_rejected_trade: state.last_rejected_trade.map(TradeOfferSnapshot::from),
             trade: state.trade.map(TradeOfferSnapshot::from),
             trade_cursor: state.trade_cursor,
@@ -774,6 +790,7 @@ impl GameStateSnapshot {
         state.free_roads = self.free_roads;
         state.domestic_trade_used = self.domestic_trade_used;
         state.domestic_trade_count = self.domestic_trade_count;
+        state.player_trades_enabled = self.player_trades_enabled;
         state.last_rejected_trade = self.last_rejected_trade.map(TradeOffer::from);
         state.trade = self.trade.map(TradeOffer::from);
         state.trade_cursor = self.trade_cursor;
@@ -800,6 +817,7 @@ struct ArenaSearchProfileSnapshot {
     opening_time_ms: u32,
     trade_response_nodes: u32,
     trade_response_time_ms: u32,
+    player_trades_enabled: bool,
     information_mode: String,
 }
 
@@ -821,6 +839,7 @@ impl ArenaSearchProfileSnapshot {
             opening_time_ms: config.opening_time_ms,
             trade_response_nodes: config.trade_response_nodes,
             trade_response_time_ms: config.trade_response_time_ms,
+            player_trades_enabled: config.player_trades_enabled,
             information_mode: information_mode(config).to_string(),
         }
     }
@@ -1084,6 +1103,7 @@ struct GameMetrics {
     cities: [u32; 4],
     development_bought: [u32; 4],
     dead_roads: [u32; 4],
+    maritime_trades: [u32; 4],
     offers: [u32; 4],
     accepts: [u32; 4],
     counters: [u32; 4],
@@ -1289,6 +1309,7 @@ struct CandidateMetrics {
     cities: u64,
     development_bought: u64,
     dead_roads: u64,
+    maritime_trades: u64,
     offers: u64,
     accepts: u64,
     counters: u64,
@@ -1383,6 +1404,7 @@ struct ArenaCheckpoint {
     opening_time_ms: u32,
     trade_response_nodes: u32,
     trade_response_time_ms: u32,
+    player_trades_enabled: bool,
     engine_revision: &'static str,
     build_git_sha: &'static str,
     build_dirty: bool,
@@ -1495,6 +1517,7 @@ impl PartialArenaMetrics {
             opening_time_ms: config.opening_time_ms,
             trade_response_nodes: config.trade_response_nodes,
             trade_response_time_ms: config.trade_response_time_ms,
+            player_trades_enabled: config.player_trades_enabled,
             engine_revision: ENGINE_REVISION,
             build_git_sha: config.build_git_sha,
             build_dirty: config.build_dirty,
@@ -1602,8 +1625,9 @@ fn play_game(
     config: &Config,
     source: Option<(u32, u8)>,
 ) -> GameResult {
-    let (state, chance_rng, policy_rngs) =
+    let (mut state, chance_rng, policy_rngs) =
         initialized_game(board_seed, chance_seed, config.players);
+    state.player_trades_enabled = config.player_trades_enabled;
     play_game_from_state(
         board_seed,
         chance_seed,
@@ -1626,6 +1650,7 @@ fn play_game_from_state(
     mut chance_rng: SplitMix64,
     mut policy_rngs: Vec<SplitMix64>,
 ) -> GameResult {
+    state.player_trades_enabled = config.player_trades_enabled;
     let mut actions = 0u32;
     let mut metrics = GameMetrics::default();
     let mut calibration = Vec::<(u8, f32)>::new();
@@ -1811,6 +1836,7 @@ fn play_game_from_state(
             }
             Action::BuildCity { .. } => metrics.cities[actor] += 1,
             Action::BuyDevelopment => metrics.development_bought[actor] += 1,
+            Action::MaritimeTrade { .. } => metrics.maritime_trades[actor] += 1,
             Action::OfferTrade { .. } => metrics.offers[actor] += 1,
             Action::RespondTrade { accept: true } => metrics.accepts[actor] += 1,
             Action::CounterTrade { .. } => metrics.counters[actor] += 1,
@@ -2193,11 +2219,12 @@ fn main() {
             },
         );
         println!(
-            "arena candidate={} baseline={} lineup={} information={} players={} blocks={} iterations={} threads={} seed={}",
+            "arena candidate={} baseline={} lineup={} information={} player_trades={} players={} blocks={} iterations={} threads={} seed={}",
             config.candidate.as_str(),
             config.baseline.as_str(),
             lineup,
             information_mode(&config),
+            config.player_trades_enabled,
             config.players,
             config.blocks,
             config.iterations,
@@ -2373,6 +2400,7 @@ fn main() {
             candidate_metrics.cities += metrics.cities[player] as u64;
             candidate_metrics.development_bought += metrics.development_bought[player] as u64;
             candidate_metrics.dead_roads += metrics.dead_roads[player] as u64;
+            candidate_metrics.maritime_trades += metrics.maritime_trades[player] as u64;
             candidate_metrics.offers += metrics.offers[player] as u64;
             candidate_metrics.accepts += metrics.accepts[player] as u64;
             candidate_metrics.counters += metrics.counters[player] as u64;
@@ -2478,6 +2506,7 @@ fn main() {
                 "\"meanCities\":{:.6},",
                 "\"meanDevelopmentCardsBought\":{:.6},",
                 "\"meanDeadRoads\":{:.6},",
+                "\"meanMaritimeTrades\":{:.6},",
                 "\"meanDomesticOffers\":{:.6},",
                 "\"tradeAcceptanceRate\":{:.6},",
                 "\"meanCounters\":{:.6},",
@@ -2506,6 +2535,7 @@ fn main() {
                 "\"maxnBranch\":{},",
                 "\"maxnNodes\":{},",
                 "\"maxnTimeMs\":{},",
+                "\"playerTradesEnabled\":{},",
                 "\"engineRevision\":\"{}\",",
                 "\"buildGitSha\":\"{}\",",
                 "\"buildDirty\":{},",
@@ -2555,6 +2585,7 @@ fn main() {
             candidate_metrics.cities as f64 / candidate_metrics.seats.max(1) as f64,
             candidate_metrics.development_bought as f64 / candidate_metrics.seats.max(1) as f64,
             candidate_metrics.dead_roads as f64 / candidate_metrics.seats.max(1) as f64,
+            candidate_metrics.maritime_trades as f64 / candidate_metrics.seats.max(1) as f64,
             candidate_metrics.offers as f64 / candidate_metrics.seats.max(1) as f64,
             candidate_metrics.accepts as f64 / candidate_metrics.offers.max(1) as f64,
             candidate_metrics.counters as f64 / candidate_metrics.seats.max(1) as f64,
@@ -2589,6 +2620,7 @@ fn main() {
                 .maxn_nodes
                 .unwrap_or_else(|| (config.iterations * 160).clamp(4_000, 80_000)),
             config.maxn_time_ms,
+            config.player_trades_enabled,
             ENGINE_REVISION,
             config.build_git_sha,
             config.build_dirty,

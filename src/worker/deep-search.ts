@@ -602,6 +602,7 @@ export const buildDeepSearchRequest = (
   state: TrackerState,
   board: BoardSnapshot,
   rootPlayer: string,
+  playerTradesEnabled = true,
 ) => {
   const players = playerNames(state, board);
   if (players.length < 2 || players.length > 4) {
@@ -1089,6 +1090,7 @@ export const buildDeepSearchRequest = (
         discardCursor: board.action === "discard" ? root : 0,
         robberReturnPhase: board.hasRolled === false ? "pre-roll" : "main",
         domesticTradeUsed,
+        playerTradesEnabled,
         ...(activeTrade
           ? {
               trade: {
@@ -1136,12 +1138,14 @@ export const analyzeDeepSearch = async (
   board: BoardSnapshot,
   rootPlayer: string,
   fallback: DecisionAnalysis,
+  playerTradesEnabled = true,
 ): Promise<DecisionAnalysis> => {
   await ensureWasm();
   const { request, players, root } = buildDeepSearchRequest(
     state,
     board,
     rootPlayer,
+    playerTradesEnabled,
   );
   request.mode = "maxn";
   if (board.initialPlacement) {

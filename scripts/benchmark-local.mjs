@@ -52,6 +52,7 @@ function readOptions(argv) {
     seed: 91_000_001,
     validate: true,
     build: true,
+    playerTradesEnabled: true,
     challengeOutputDirectory: null,
     output: resolve(ROOT, "benchmark-results", "local-latest"),
   };
@@ -133,6 +134,9 @@ function readOptions(argv) {
       case "--no-validate":
         options.validate = false;
         break;
+      case "--no-player-trades":
+        options.playerTradesEnabled = false;
+        break;
       case "--validate":
         options.validate = true;
         break;
@@ -163,6 +167,8 @@ function readOptions(argv) {
                            Checkpoints go to <output>.checkpoints/
   --challenge-output-directory PATH
                            Persist eligible PreRoll takeover snapshots by matchup
+  --no-player-trades       Disable player offers/accepts/counters/confirms;
+                           bank/port maritime trades remain enabled
   --no-validate            Skip per-transition invariant validation
   --no-build               Reuse the current release binary
   --quick                  24 games versus weighted and alpha-beta
@@ -275,6 +281,8 @@ Engine: \`${report.buildIdentity.engineRevision}\`
 
 Production profile: depth ${report.liveProductionProfile.maxnDepth}, branch ${report.liveProductionProfile.maxnBranch}, ${report.liveProductionProfile.maxnNodes.toLocaleString()} nodes, ${report.liveProductionProfile.maxnTimeMs} ms, ${report.liveProductionProfile.beliefParticles} belief / ${report.liveProductionProfile.strategicParticles} strategic particles, weighted-belief information.
 
+Player trades: ${report.liveProductionProfile.playerTradesEnabled ? "enabled" : "disabled (bank/port maritime trades remain enabled)"}.
+
 Candidate: \`${report.configuration.candidate}\`. Each board block rotates the
 candidate through every seat while preserving the board and chance seed.
 Confidence intervals are block bootstraps. Strategic engines receive the same
@@ -371,12 +379,26 @@ for (const players of options.players) {
     if (challengeOutput) {
       args.push("--challenge-output", challengeOutput);
     }
+    if (!options.playerTradesEnabled) args.push("--no-player-trades");
     if (options.validate) args.push("--validate");
     const output = await run(ARENA, args, {
       cwd: ENGINE_DIR,
       capture: true,
     });
     const result = JSON.parse(output.trim());
+    if (result.playerTradesEnabled !== options.playerTradesEnabled) {
+      throw new Error(
+        `Arena rules mismatch: requested playerTradesEnabled=${options.playerTradesEnabled}, got ${String(result.playerTradesEnabled)}`,
+      );
+    }
+    if (
+      !options.playerTradesEnabled &&
+      (result.candidateMetrics?.meanDomesticOffers !== 0 ||
+        result.candidateMetrics?.tradeAcceptanceRate !== 0 ||
+        result.candidateMetrics?.meanCounters !== 0)
+    ) {
+      throw new Error("No-player-trades benchmark leaked a candidate domestic-trade action.");
+    }
     results.push(result);
     console.error(
       `  ${result.candidateWins}/${result.terminalGames ?? result.games - result.cutoffs} terminal = ${percent(result.winShare)} (${percent(result.blockedCi95.lower)}–${percent(result.blockedCi95.upper)}), ${result.cutoffs} cutoffs`,
@@ -418,6 +440,7 @@ const report = {
     tacticalDepth: 14,
     tacticalNodes: 900,
     informationMode: "weighted-belief",
+    playerTradesEnabled: options.playerTradesEnabled,
   },
   configuration: options,
   checkpointDirectory,

@@ -67,6 +67,9 @@ pub struct GameState {
     pub free_roads: u8,
     pub domestic_trade_used: bool,
     pub domestic_trade_count: u8,
+    /// Benchmark/rules toggle for player-to-player trading. Maritime bank/port
+    /// trades remain legal when this is false.
+    pub player_trades_enabled: bool,
     pub last_rejected_trade: Option<TradeOffer>,
     pub trade: Option<TradeOffer>,
     pub trade_cursor: u8,
@@ -107,6 +110,7 @@ impl GameState {
             free_roads: 0,
             domestic_trade_used: false,
             domestic_trade_count: 0,
+            player_trades_enabled: true,
             last_rejected_trade: None,
             trade: None,
             trade_cursor: 0,
@@ -439,6 +443,13 @@ impl GameState {
                 self.trade_negotiation_round,
             ],
         );
+        // Preserve existing hashes for the default ruleset. The disabled mode
+        // gets an explicit suffix so persistent search/replay caches cannot
+        // confuse states whose legal domestic-trade actions differ.
+        if !self.player_trades_enabled {
+            byte(&mut hash, 0x4e);
+            byte(&mut hash, 0x50);
+        }
         for byte_value in self.turn.to_le_bytes() {
             byte(&mut hash, byte_value);
         }
@@ -975,7 +986,7 @@ impl GameState {
                 }
             }
         }
-        if self.domestic_trade_count < 2 {
+        if self.player_trades_enabled && self.domestic_trade_count < 2 {
             actions.extend(self.generated_domestic_trade_offers());
         }
         actions
@@ -1476,7 +1487,8 @@ impl GameState {
         give: ResourceHand,
         receive: ResourceHand,
     ) -> Result<(), RuleError> {
-        if self.phase != Phase::Main
+        if !self.player_trades_enabled
+            || self.phase != Phase::Main
             || recipients == 0
             || recipients & (1 << self.current_player) != 0
             || recipients >> self.board.num_players != 0
@@ -1511,6 +1523,13 @@ impl GameState {
         let Some(trade) = self.trade else {
             return Vec::new();
         };
+        if !self.player_trades_enabled {
+            return if self.trade_responses_complete(trade) {
+                vec![Action::CancelTrade]
+            } else {
+                vec![Action::RespondTrade { accept: false }]
+            };
+        }
         if self.trade_responses_complete(trade) {
             let mut actions = vec![Action::CancelTrade];
             for partner in 0..self.board.num_players {
@@ -1666,6 +1685,9 @@ impl GameState {
     }
 
     fn respond_trade(&mut self, accept: bool) -> Result<(), RuleError> {
+        if !self.player_trades_enabled && accept {
+            return Err(RuleError::InvalidTrade);
+        }
         if self.phase != Phase::TradeResponses {
             return Err(RuleError::WrongPhase);
         }
@@ -1701,6 +1723,9 @@ impl GameState {
         give: ResourceHand,
         receive: ResourceHand,
     ) -> Result<(), RuleError> {
+        if !self.player_trades_enabled {
+            return Err(RuleError::InvalidTrade);
+        }
         if self.phase != Phase::TradeResponses || self.trade_negotiation_round >= 1 {
             return Err(RuleError::WrongPhase);
         }
@@ -1730,6 +1755,9 @@ impl GameState {
     }
 
     fn confirm_trade(&mut self, partner: u8) -> Result<(), RuleError> {
+        if !self.player_trades_enabled {
+            return Err(RuleError::InvalidTrade);
+        }
         if self.phase != Phase::TradeResponses {
             return Err(RuleError::WrongPhase);
         }
