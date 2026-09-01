@@ -791,7 +791,10 @@ export const scoreRoadPlacements = (
           : 0;
       const publicState = board.players?.[context.player];
       const exactCurrentLength = longestRoadFromEdges(board, context.player);
-      const currentLength = publicState?.longestRoad ?? exactCurrentLength;
+      const currentLength = Math.max(
+        publicState?.longestRoad ?? 0,
+        exactCurrentLength,
+      );
       const boardAfterRoad: BoardSnapshot = {
         ...board,
         edges: board.edges.map((candidate) =>
@@ -811,7 +814,12 @@ export const scoreRoadPlacements = (
         0,
         ...Object.entries(board.players ?? {})
           .filter(([player]) => player !== context.player)
-          .map(([, player]) => player.longestRoad ?? 0),
+          .map(([player, publicPlayer]) =>
+            Math.max(
+              publicPlayer.longestRoad ?? 0,
+              longestRoadFromEdges(board, player),
+            ),
+          ),
       );
       const trophyTarget = Math.max(5, longestOpponent + 1);
       const winsOrClaimsTrophy =
@@ -917,7 +925,16 @@ export const scoreRobberPlacements = (
   const threat = context.opponentThreat ?? {};
   const stealPriority = context.stealPriority ?? {};
   return board.hexes
-    .filter((hex) => hex.resource && hex.number && !hex.blocked)
+    .filter((hex) => {
+      if (!hex.resource || !hex.number || hex.blocked) return false;
+      if (!board.friendlyRobber) return true;
+      return !board.vertices.some(
+        (vertex) =>
+          vertex.adjacentHexes.includes(hex.id) &&
+          vertex.building &&
+          (board.players?.[vertex.building.player]?.visiblePoints ?? 3) < 3,
+      );
+    })
     .map((hex) => {
       const pips = NUMBER_PIPS[hex.number!] ?? 0;
       const resourceWeight = RESOURCE_STRATEGIC_WEIGHTS[hex.resource!];
@@ -932,11 +949,6 @@ export const scoreRobberPlacements = (
       const ownImpact = players.get(context.player) ?? 0;
       const targets = [...players.entries()]
         .filter(([player]) => player !== context.player)
-        .filter(
-          ([player]) =>
-            !board.friendlyRobber ||
-            (board.players?.[player]?.visiblePoints ?? 3) >= 3,
-        )
         .map(([player, impact]) => ({
           player,
           impact,

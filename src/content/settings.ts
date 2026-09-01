@@ -10,7 +10,9 @@ export const AUTOPILOT_DELAY_OPTIONS: readonly AutopilotDelaySeconds[] = [
 export const normalizeAutopilotDelaySeconds = (
   value: unknown,
 ): AutopilotDelaySeconds =>
-  value === 0 || value === 3 || value === 5 ? value : 0;
+  AUTOPILOT_DELAY_OPTIONS.includes(value as AutopilotDelaySeconds)
+    ? (value as AutopilotDelaySeconds)
+    : 0;
 
 export interface AssistantSettings {
   enabled: boolean;

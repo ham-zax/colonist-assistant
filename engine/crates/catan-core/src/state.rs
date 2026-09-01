@@ -58,6 +58,8 @@ pub struct GameState {
     pub turn: u16,
     pub last_roll: u8,
     pub victory_target: u8,
+    pub card_discard_limit: u8,
+    pub friendly_robber: bool,
     pub setup_step: u8,
     pub discard_remaining: [u8; 4],
     pub discard_cursor: u8,
@@ -96,6 +98,8 @@ impl GameState {
             turn: 0,
             last_roll: 0,
             victory_target,
+            card_discard_limit: 7,
+            friendly_robber: false,
             setup_step: 0,
             discard_remaining: [0; 4],
             discard_cursor: 0,
@@ -423,6 +427,8 @@ impl GameState {
                 self.current_player,
                 self.last_roll,
                 self.victory_target,
+                self.card_discard_limit,
+                u8::from(self.friendly_robber),
                 self.setup_step,
                 self.discard_cursor,
                 self.free_roads,
@@ -735,7 +741,7 @@ impl GameState {
             self.discard_remaining = [0; 4];
             for player in 0..self.board.num_players {
                 let total = self.players[player as usize].resource_total();
-                if total > 7 {
+                if total > self.card_discard_limit {
                     self.discard_remaining[player as usize] = total / 2;
                 }
             }
@@ -840,6 +846,17 @@ impl GameState {
         let mut result = Vec::new();
         for hex in 0..self.board.hexes.len() as u8 {
             if hex == self.robber_hex {
+                continue;
+            }
+            if self.friendly_robber
+                && self.buildings.iter().enumerate().any(|(vertex, building)| {
+                    let Some(building) = building else {
+                        return false;
+                    };
+                    self.board.vertices[vertex].adjacent_hexes.contains(&hex)
+                        && self.players[building.player() as usize].public_victory_points < 3
+                })
+            {
                 continue;
             }
             let mut victims = 0u8;
@@ -1011,10 +1028,11 @@ impl GameState {
         }
         requests.sort_unstable();
         requests.dedup();
-        if player.resource_total() > 7 {
+        if player.resource_total() > self.card_discard_limit {
             // A high-risk hand still needs a useful request even when an
             // atomic cost is already affordable. One-card requests let the
-            // planner compare a hand-safety conversion against ending above 7.
+            // planner compare a hand-safety conversion against ending above
+            // the current discard limit.
             for index in 0..5 {
                 let mut request = [0; 5];
                 request[index] = 1;
@@ -1120,7 +1138,7 @@ impl GameState {
                     .fold(f32::INFINITY, f32::min);
                 let give_total = give.iter().copied().sum::<u8>() as f32;
                 let receive_total = receive.iter().copied().sum::<u8>() as f32;
-                let safety = if player.resource_total() > 7 {
+                let safety = if player.resource_total() > self.card_discard_limit {
                     (give_total - receive_total).max(0.0) * 0.8
                 } else {
                     0.0
@@ -1605,7 +1623,11 @@ impl GameState {
                 .map(|(amount, weight)| *amount as f32 * weight)
                 .sum::<f32>()
                 * 0.11;
-            let overflow = candidate.iter().copied().sum::<u8>().saturating_sub(7) as f32;
+            let overflow = candidate
+                .iter()
+                .copied()
+                .sum::<u8>()
+                .saturating_sub(self.card_discard_limit) as f32;
             ready + near + weighted - overflow * overflow * 0.045
         };
         let before = hand_score(hand);
@@ -2253,6 +2275,67 @@ mod tests {
             })
             .unwrap();
         assert_eq!(state.phase, Phase::MoveRobber);
+    }
+
+    #[test]
+    fn custom_discard_limit_controls_seven_resolution() {
+        let mut state = GameState::standard(18, 3);
+        play_setup(&mut state);
+        state.card_discard_limit = 9;
+        state.players[0].resources = [9, 0, 0, 0, 0];
+        state.players[1].resources = [10, 0, 0, 0, 0];
+        state.players[2].resources = [7, 0, 0, 0, 0];
+
+        state.apply(&Action::Roll).unwrap();
+        state.apply(&Action::ResolveRoll { value: 7 }).unwrap();
+
+        assert_eq!(state.discard_remaining, [0, 5, 0, 0]);
+        assert_eq!(state.phase, Phase::Discard);
+        assert_eq!(state.actor(), 1);
+    }
+
+    #[test]
+    fn friendly_robber_rejects_a_hex_touching_any_protected_player() {
+        let mut state = GameState::standard(19, 3);
+        let target = (0..state.board.hexes.len() as u8)
+            .find(|hex| *hex != state.robber_hex)
+            .unwrap();
+        let adjacent = state
+            .board
+            .vertices
+            .iter()
+            .enumerate()
+            .filter(|(_, vertex)| vertex.adjacent_hexes.contains(&target))
+            .map(|(vertex, _)| vertex)
+            .take(2)
+            .collect::<Vec<_>>();
+        assert_eq!(adjacent.len(), 2);
+
+        state.buildings.fill(None);
+        state.buildings[adjacent[0]] = Some(Building::Settlement(1));
+        state.buildings[adjacent[1]] = Some(Building::Settlement(2));
+        state.players[1].public_victory_points = 2;
+        state.players[2].public_victory_points = 4;
+        state.players[1].resources = [1, 0, 0, 0, 0];
+        state.players[2].resources = [1, 0, 0, 0, 0];
+        state.current_player = 0;
+        state.phase = Phase::MoveRobber;
+
+        state.friendly_robber = false;
+        assert!(
+            state
+                .legal_actions()
+                .iter()
+                .any(|action| matches!(action, Action::MoveRobber { hex, .. } if *hex == target))
+        );
+
+        state.friendly_robber = true;
+        assert!(
+            !state
+                .legal_actions()
+                .iter()
+                .any(|action| matches!(action, Action::MoveRobber { hex, .. } if *hex == target))
+        );
     }
 
     #[test]

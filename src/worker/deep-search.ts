@@ -258,6 +258,7 @@ const sampleIndex = (counts: number[], random: () => number): number => {
 
 const publicDevelopmentEvidence = (
   state: TrackerState,
+  board?: BoardSnapshot,
 ): [number, number, number, number, number] => {
   const result = [0, 0, 0, 0, 0] as [
     number,
@@ -274,14 +275,23 @@ const publicDevelopmentEvidence = (
     monopoly: 4,
     unknown: undefined,
   };
-  for (const player of Object.values(state.players)) {
-    for (const [card, count] of Object.entries(player.playedDevCards) as Array<
-      [DevCardKind, number]
+  const playerNames = new Set([
+    ...Object.keys(state.players),
+    ...Object.keys(board?.players ?? {}),
+  ]);
+  for (const playerName of playerNames) {
+    const tracked = state.players[playerName]?.playedDevCards;
+    for (const [card, index] of Object.entries(indexByCard) as Array<
+      [DevCardKind, number | undefined]
     >) {
-      const index = indexByCard[card];
-      if (index !== undefined) {
-        result[index] = (result[index] ?? 0) + clampCard(count);
-      }
+      if (index === undefined) continue;
+      const trackedCount = tracked?.[card] ?? 0;
+      const publicCount =
+        card === "knight"
+          ? board?.players?.[playerName]?.playedKnights ?? 0
+          : 0;
+      result[index] =
+        (result[index] ?? 0) + clampCard(Math.max(trackedCount, publicCount));
     }
   }
   return result;
@@ -297,7 +307,7 @@ const sampledDevelopmentWorld = (
   bought: Array<[number, number, number, number, number]>;
   deck: [number, number, number, number, number];
 } => {
-  const played = publicDevelopmentEvidence(state);
+  const played = publicDevelopmentEvidence(state, board);
   const remaining = DEVELOPMENT_TOTAL.map((total, index) =>
     Math.max(0, total - (played[index] ?? 0)),
   );
@@ -366,8 +376,10 @@ const playerNames = (
   state: TrackerState,
   board: BoardSnapshot,
 ): string[] => {
+  if (board.playerOrder?.length) {
+    return [...new Set(board.playerOrder)];
+  }
   const names = [
-    ...(board.playerOrder ?? []),
     ...state.playerOrder,
     ...Object.keys(board.players ?? {}),
     ...board.vertices.flatMap((vertex) =>
@@ -376,7 +388,7 @@ const playerNames = (
     ...board.edges.flatMap((edge) => (edge.player ? [edge.player] : [])),
   ];
   if (board.myPlayer) names.push(board.myPlayer);
-  return [...new Set(names)].slice(0, 4);
+  return [...new Set(names)];
 };
 
 const currentPlayerIndex = (
@@ -388,8 +400,14 @@ const currentPlayerIndex = (
     board.currentPlayer ??
     (board.isMyTurn ? board.myPlayer : state.currentTurn.player) ??
     board.myPlayer;
-  const index = current ? players.indexOf(current) : -1;
-  return index >= 0 ? index : 0;
+  if (!current) {
+    throw new Error("Deep Search could not resolve the current player");
+  }
+  const index = players.indexOf(current);
+  if (index < 0) {
+    throw new Error(`Deep Search current player is unknown: ${current}`);
+  }
+  return index;
 };
 
 const inferPhase = (
@@ -566,15 +584,66 @@ export const buildDeepSearchRequest = (
   if (players.length < 2 || players.length > 4) {
     throw new Error("Deep Search supports standard 2–4 player games");
   }
+  const discardLimits = [
+    ...new Set(
+      players
+        .map((player) => board.players?.[player]?.cardDiscardLimit)
+        .filter(
+          (limit): limit is number =>
+            typeof limit === "number" && Number.isInteger(limit),
+        ),
+    ),
+  ];
+  if (discardLimits.length > 1) {
+    throw new Error("Deep Search received inconsistent card discard limits");
+  }
+  const cardDiscardLimit = discardLimits[0] ?? 7;
   const playerIndex = new Map(players.map((player, index) => [player, index]));
   const vertexIndex = new Map(
     board.vertices.map((vertex, index) => [vertex.id, index]),
   );
   const hexIndex = new Map(board.hexes.map((hex, index) => [hex.id, index]));
-  let current = currentPlayerIndex(state, board, players);
-  const root = Math.max(0, players.indexOf(rootPlayer));
-  if (board.isMyTurn || board.action === "discard") {
-    current = root;
+  const root = players.indexOf(rootPlayer);
+  if (root < 0) {
+    throw new Error(`Deep Search root player is unknown: ${rootPlayer}`);
+  }
+  let current =
+    board.isMyTurn || board.action === "discard"
+      ? root
+      : currentPlayerIndex(state, board, players);
+
+  for (const vertex of board.vertices) {
+    for (const hexId of vertex.adjacentHexes) {
+      if (!hexIndex.has(hexId)) {
+        throw new Error(
+          `Deep Search topology has unknown hex ${hexId} adjacent to vertex ${vertex.id}`,
+        );
+      }
+    }
+    for (const vertexId of vertex.adjacentVertices) {
+      if (!vertexIndex.has(vertexId)) {
+        throw new Error(
+          `Deep Search topology has unknown vertex ${vertexId} adjacent to vertex ${vertex.id}`,
+        );
+      }
+    }
+  }
+  for (const edge of board.edges) {
+    for (const vertexId of edge.vertices) {
+      if (!vertexIndex.has(vertexId)) {
+        throw new Error(
+          `Deep Search edge ${edge.id} has unknown vertex endpoint ${vertexId}`,
+        );
+      }
+    }
+  }
+  const blockedHexes = board.hexes
+    .map((hex, index) => ({ hex, index }))
+    .filter(({ hex }) => hex.blocked);
+  if (blockedHexes.length !== 1) {
+    throw new Error(
+      `Deep Search requires exactly one robber location; found ${blockedHexes.length}`,
+    );
   }
   const phase = inferPhase(board, players[current] ?? rootPlayer);
   const activeTrade = board.activeTrades?.find(
@@ -591,13 +660,23 @@ export const buildDeepSearchRequest = (
         )
       ),
   );
-  const bitset = (names: string[] | undefined): number =>
-    (names ?? []).reduce((mask, name) => {
-      const index = players.indexOf(name);
-      return index >= 0 ? mask | (1 << index) : mask;
-    }, 0);
+  const requirePlayerIndex = (name: string, context: string): number => {
+    const index = playerIndex.get(name);
+    if (index === undefined) {
+      throw new Error(`Deep Search ${context} references unknown player: ${name}`);
+    }
+    return index;
+  };
+  const bitset = (
+    names: string[] | undefined,
+    context = "trade player",
+  ): number =>
+    (names ?? []).reduce(
+      (mask, name) => mask | (1 << requirePlayerIndex(name, context)),
+      0,
+    );
   const tradeCreator = activeTrade
-    ? Math.max(0, players.indexOf(activeTrade.creator))
+    ? requirePlayerIndex(activeTrade.creator, "trade creator")
     : 0;
   const tradeRecipients = activeTrade
     ? activeTrade.incoming
@@ -632,11 +711,8 @@ export const buildDeepSearchRequest = (
     adjacentEdges.get(edge.vertices[0])?.push(index);
     adjacentEdges.get(edge.vertices[1])?.push(index);
   });
-  const robberHex = Math.max(
-    0,
-    board.hexes.findIndex((hex) => hex.blocked),
-  );
-  const playedDevelopment = publicDevelopmentEvidence(state);
+  const robberHex = blockedHexes[0]!.index;
+  const playedDevelopment = publicDevelopmentEvidence(state, board);
   const piecesByPlayer = players.map((player) => ({
     roads: board.edges.filter((edge) => edge.player === player).length,
     settlements: board.vertices.filter(
@@ -810,10 +886,8 @@ export const buildDeepSearchRequest = (
         missing < target;
         missing += 1
       ) {
-        const choices = remainingPool.some((count) => count > 0)
-          ? remainingPool
-          : [1, 1, 1, 1, 1];
-        const index = sampleIndex(choices, random);
+        if (!remainingPool.some((count) => count > 0)) break;
+        const index = sampleIndex(remainingPool, random);
         sampled[index] = (sampled[index] ?? 0) + 1;
         remainingPool[index] = Math.max(
           0,
@@ -964,20 +1038,27 @@ export const buildDeepSearchRequest = (
         turn: Math.max(0, board.turn ?? state.currentTurn.sequence),
         lastRoll: Math.max(0, board.lastRoll ?? 0),
         victoryTarget: board.victoryTarget ?? 10,
+        cardDiscardLimit,
+        friendlyRobber: Boolean(board.friendlyRobber),
         setupStep: Math.min(
           players.length * 2,
           board.edges.filter((edge) => edge.player).length,
         ),
         discardRemaining: players
-          .map((_, index) =>
-            board.action === "discard" && index === root
-              ? board.discardCount ?? 0
-              : 0,
-          )
+          .map((player, index) => {
+            if (board.action !== "discard") return 0;
+            if (index === root && board.discardCount !== undefined) {
+              return board.discardCount;
+            }
+            const publicState = board.players?.[player];
+            const handSize = publicState?.handSize ?? 0;
+            const discardLimit = publicState?.cardDiscardLimit ?? 7;
+            return handSize > discardLimit ? Math.floor(handSize / 2) : 0;
+          })
           .concat([0, 0, 0, 0])
           .slice(0, 4),
         discardCursor: board.action === "discard" ? root : 0,
-        robberReturnPhase: "main",
+        robberReturnPhase: board.hasRolled === false ? "pre-roll" : "main",
         domesticTradeUsed,
         ...(activeTrade
           ? {
@@ -1089,6 +1170,7 @@ export const analyzeDeepSearch = async (
     )[0]?.action;
   const search: DeepSearchResult = {
     engineRevision: response.engineRevision,
+    rootIndex: root,
     learnedModelVersion: response.learnedModelVersion,
     tradeModelVersion: response.tradeModelVersion,
     algorithm: response.algorithm,

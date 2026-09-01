@@ -209,13 +209,13 @@ pub(crate) fn hand_transition_value(
     let resulting_value = hand_utility_with_weights(resulting_hand, &weights);
     let overflow = |hand: &ResourceHand| {
         let held = total(hand);
-        if held <= 7 {
+        if held <= state.card_discard_limit {
             0.0
         } else {
             // This is an immediate-transition comparison, not the full orbit
             // loss model used at search leaves. Quadratic exposure preserves
-            // the strong incentive to convert a twelve-card hand cheaply.
-            let excess = held.saturating_sub(7) as f32;
+            // the strong incentive to convert a large at-risk hand cheaply.
+            let excess = held.saturating_sub(state.card_discard_limit) as f32;
             excess * 0.20 + excess * excess * 0.045
         }
     };
@@ -291,7 +291,7 @@ pub fn expected_discard_loss(state: &GameState, player: u8) -> f32 {
     if rolls == 0 {
         // During Main the player can still convert the hand. A residual price
         // stops EndTurn from looking harmless when no conversion is selected.
-        return 0.04 * held.saturating_sub(7) as f32;
+        return 0.04 * held.saturating_sub(state.card_discard_limit) as f32;
     }
     let probability = 1.0 - (5.0_f32 / 6.0).powi(rolls as i32);
     // Condition on the first seven arriving within the available rolls and
@@ -317,9 +317,9 @@ pub fn expected_discard_loss(state: &GameState, player: u8) -> f32 {
         projected[resource] = projected[resource].saturating_add(expected.floor() as u8);
     }
     let projected_held = total(&projected);
-    if projected_held <= 7 {
+    if projected_held <= state.card_discard_limit {
         return probability
-            * (held as f32 + expected_added_total - 7.0)
+            * (held as f32 + expected_added_total - state.card_discard_limit as f32)
                 .max(0.0)
                 .powf(1.35)
             * 0.32;
@@ -328,7 +328,7 @@ pub fn expected_discard_loss(state: &GameState, player: u8) -> f32 {
     let before = hand_utility_with_weights(&projected, &weights);
     let kept = enumerate_optimal_kept_utility(&projected, projected_held / 2, &weights);
     let expected_cards_lost = probability * (projected_held / 2) as f32;
-    let overflow = projected_held.saturating_sub(7) as f32;
+    let overflow = projected_held.saturating_sub(state.card_discard_limit) as f32;
     probability * (before - kept).max(0.0)
         + expected_cards_lost * 0.22
         + probability * overflow.powf(1.35) * 0.15
@@ -1201,6 +1201,20 @@ mod tests {
         assert!(twelve > eight * 1.8);
         assert!(eight > 0.0);
         assert_eq!(safe, 0.0);
+    }
+
+    #[test]
+    fn discard_risk_respects_the_configured_limit() {
+        let mut state = after_setup(48, 4);
+        state.card_discard_limit = 9;
+        state.current_player = 0;
+        state.phase = Phase::Main;
+
+        state.players[0].resources = [9, 0, 0, 0, 0];
+        assert_eq!(expected_discard_loss(&state, 0), 0.0);
+
+        state.players[0].resources = [10, 0, 0, 0, 0];
+        assert!(expected_discard_loss(&state, 0) > 0.0);
     }
 
     #[test]

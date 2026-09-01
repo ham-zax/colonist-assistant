@@ -24,6 +24,7 @@ const searchResult = (
   alternative: DeepSearchAction,
 ): DeepSearchResult => ({
   engineRevision: "test",
+  rootIndex: 0,
   algorithm: "maxn",
   chosen,
   rootValue: [0.25, 0.25],

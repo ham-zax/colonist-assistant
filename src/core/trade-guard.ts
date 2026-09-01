@@ -118,7 +118,7 @@ export const selectUsableDeepAction = (
     );
   };
   if (usable(chosen)) return chosen;
-  const root = Math.max(0, state?.playerOrder.indexOf(player ?? "") ?? 0);
+  const root = search.rootIndex;
   const invalidCounter = chosen.kind === "counter-trade";
   return [...search.actions]
     .filter(

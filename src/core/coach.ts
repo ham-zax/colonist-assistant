@@ -384,9 +384,10 @@ const buildRecommendations = (
   actionScores?: Record<BuildKind, number>,
 ): BuildRecommendation[] => {
   const estimate = getPlayerEstimate(state, player);
-  const handRisk = estimate.totalMaximum > 7 ? 10 : 0;
   const exactness = exactnessFor(state, player);
   const profile = board ? playerBoardProfile(board, player) : undefined;
+  const handRisk =
+    estimate.totalMaximum > (profile?.cardDiscardLimit ?? 7) ? 10 : 0;
   const developmentDeck = developmentDeckFor(state, board);
   const pointsRemaining = profile
     ? Math.max(0, profile.victoryTarget - profile.visiblePoints)
@@ -688,7 +689,8 @@ export const createCoachReport = (
   if (!primary) return undefined;
   const estimate = getPlayerEstimate(state, player);
   const alerts: string[] = [];
-  if (estimate.totalMaximum > 7) {
+  const discardLimit = board?.players?.[player]?.cardDiscardLimit ?? 7;
+  if (estimate.totalMaximum > discardLimit) {
     alerts.push(
       `Seven risk: you may be holding ${estimate.totalMinimum === estimate.totalMaximum ? estimate.totalMaximum : `${estimate.totalMinimum}–${estimate.totalMaximum}`} cards`,
     );

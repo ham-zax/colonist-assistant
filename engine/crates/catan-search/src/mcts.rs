@@ -206,7 +206,7 @@ pub fn safer_end_turn_alternative(
     actions: &[ActionStats],
 ) -> Option<Action> {
     let held = state.players.get(actor)?.resource_total();
-    if held <= 7 {
+    if held <= state.card_discard_limit {
         return None;
     }
     let end_score = actions
@@ -225,10 +225,10 @@ pub fn safer_end_turn_alternative(
         let mut next = state.clone();
         next.apply(&candidate.action).is_ok() && next.players[actor].resource_total() < held
     })?;
-    // A tiny noisy search edge is not enough to justify exposing half a
-    // nine- or ten-card hand to the next orbit. Preserve EndTurn only when its
-    // modeled advantage is material; the tolerance grows with overflow.
-    let safety_tolerance = 0.015 + held.saturating_sub(7) as f32 * 0.01;
+    // A tiny noisy search edge is not enough to justify exposing an at-risk
+    // hand to the next orbit. Preserve EndTurn only when its modeled advantage
+    // is material; the tolerance grows with overflow.
+    let safety_tolerance = 0.015 + held.saturating_sub(state.card_discard_limit) as f32 * 0.01;
     (robust_root_score(alternative, actor) + safety_tolerance >= end_score)
         .then(|| alternative.action.clone())
 }

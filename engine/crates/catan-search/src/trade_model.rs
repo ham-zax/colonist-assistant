@@ -75,8 +75,16 @@ pub fn trade_acceptance_features(
         1.0,
         hand_transition_value(state, recipient, &after_hand) / 4.0,
         (received - given) / 2.0,
-        (before_hand.iter().copied().sum::<u8>().saturating_sub(7) as f32
-            - after_hand.iter().copied().sum::<u8>().saturating_sub(7) as f32)
+        (before_hand
+            .iter()
+            .copied()
+            .sum::<u8>()
+            .saturating_sub(state.card_discard_limit) as f32
+            - after_hand
+                .iter()
+                .copied()
+                .sum::<u8>()
+                .saturating_sub(state.card_discard_limit) as f32)
             / 4.0,
         (ready_builds(&after_hand) - ready_builds(&before_hand)) / 2.0,
         received_scarcity / 4.0,

@@ -42,6 +42,7 @@ export interface PlayerBoardProfile {
   };
   visiblePoints: number;
   victoryTarget: number;
+  cardDiscardLimit: number;
   blockedPips: number;
   openSettlementSites: number;
   metrics: ProductionMetrics;
@@ -269,13 +270,20 @@ export const playerBoardProfile = (
       (edge) => edge.player === player && edge.vertices.includes(vertex.id),
     );
   }).length;
-  const longestRoad =
-    publicState?.longestRoad ?? longestRoadFromEdges(board, player);
+  const longestRoad = Math.max(
+    publicState?.longestRoad ?? 0,
+    longestRoadFromEdges(board, player),
+  );
   const otherLongest = Math.max(
     0,
     ...Object.entries(board.players ?? {})
       .filter(([candidate]) => candidate !== player)
-      .map(([, candidate]) => candidate.longestRoad ?? 0),
+      .map(([candidate, publicCandidate]) =>
+        Math.max(
+          publicCandidate.longestRoad ?? 0,
+          longestRoadFromEdges(board, candidate),
+        ),
+      ),
   );
   const otherArmy = Math.max(
     0,
@@ -301,6 +309,7 @@ export const playerBoardProfile = (
     visiblePoints:
       publicState?.visiblePoints ?? settlements + cities * 2,
     victoryTarget: board.victoryTarget ?? 10,
+    cardDiscardLimit: publicState?.cardDiscardLimit ?? 7,
     blockedPips,
     openSettlementSites,
     metrics: productionMetricsFor(board, player),

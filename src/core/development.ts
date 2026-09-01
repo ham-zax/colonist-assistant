@@ -286,7 +286,12 @@ const roadBuildingRecommendation = (
     0,
     ...Object.entries(board.players ?? {})
       .filter(([candidate]) => candidate !== player)
-      .map(([, candidate]) => candidate.longestRoad ?? 0),
+      .map(([candidate, publicCandidate]) =>
+        Math.max(
+          publicCandidate.longestRoad ?? 0,
+          longestRoadFromEdges(board, candidate),
+        ),
+      ),
   );
   const claimsLongest =
     !profile.hasLongestRoad &&

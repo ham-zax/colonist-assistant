@@ -795,6 +795,7 @@ import {
         ? developmentStates[colorKey].developmentCardsUsed
         : [];
       const victoryPointsState = playerState.victoryPointsState ?? {};
+      const longestRoad = longestRoadStates[colorKey]?.longestRoad;
       publicPlayers[name] = {
         handSize: cards.length,
         tradeRatios: resourceVector(playerState.bankTradeRatiosState ?? {}),
@@ -811,7 +812,9 @@ import {
           Number(victoryPointsState[1] ?? 0) * 2 +
           Number(victoryPointsState[3] ?? 0) * 2 +
           Number(victoryPointsState[4] ?? 0) * 2,
-        longestRoad: Number(longestRoadStates[colorKey]?.longestRoad ?? 0),
+        ...(Number.isInteger(longestRoad)
+          ? { longestRoad: Number(longestRoad) }
+          : {}),
         hasLargestArmy: Number(victoryPointsState[3] ?? 0) > 0,
         hasLongestRoad: Number(victoryPointsState[4] ?? 0) > 0,
       };

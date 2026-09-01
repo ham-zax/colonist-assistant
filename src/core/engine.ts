@@ -60,6 +60,7 @@ export interface DeepSearchActionStatistics {
 
 export interface DeepSearchResult {
   engineRevision: string;
+  rootIndex: number;
   learnedModelVersion?: string;
   tradeModelVersion?: string;
   algorithm: string;
@@ -108,6 +109,7 @@ interface SimPlayer {
   hand: ResourceVector;
   production: ResourceVector;
   tradeRatios: ResourceVector;
+  cardDiscardLimit: number;
   points: number;
   settlements: number;
   cities: number;
@@ -524,6 +526,7 @@ const createSimPosition = (
       hand: cloneResources(world.hands[name] ?? emptyResources()),
       production: cloneResources(profile.activeProduction),
       tradeRatios: cloneResources(profile.tradeRatios),
+      cardDiscardLimit: profile.cardDiscardLimit,
       points: profile.visiblePoints,
       settlements: profile.settlements,
       cities: profile.cities,
@@ -955,7 +958,7 @@ const applyRobber = (
 
 const discardOnSeven = (player: SimPlayer): void => {
   let count = resourceTotal(player.hand);
-  if (count <= 7) return;
+  if (count <= player.cardDiscardLimit) return;
   let remove = Math.floor(count / 2);
   while (remove > 0) {
     const resource = [...RESOURCE_ORDER].sort(

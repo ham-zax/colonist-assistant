@@ -197,7 +197,7 @@ pub fn encode_heterogeneous_graph(
             row[30] = production.iter().sum::<f32>() / 45.0;
             row[31] = f32::from(player == observer);
             row[32] = f32::from(player == state.actor());
-            row[33] = f32::from(public.resource_total() > 7);
+            row[33] = f32::from(public.resource_total() > state.card_discard_limit);
             for (index, posterior) in public.policy_profile.iter().enumerate() {
                 row[34 + index] = *posterior as f32 / 255.0;
             }
@@ -390,7 +390,9 @@ pub fn encode_action(state: &GameState, action: &Action) -> [f32; ACTION_FEATURE
         state.players[state.actor() as usize].victory_points() as f32 / state.victory_target as f32;
     row[28] = state.turn as f32 / 200.0;
     row[29] = f32::from(state.actor() == state.current_player);
-    row[30] = f32::from(state.players[state.actor() as usize].resource_total() > 7);
+    row[30] = f32::from(
+        state.players[state.actor() as usize].resource_total() > state.card_discard_limit,
+    );
     row[31] = 1.0;
     row[45] = match action {
         Action::BuildRoad { .. } => 2.0 / 8.0,

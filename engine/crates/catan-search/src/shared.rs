@@ -230,6 +230,11 @@ pub fn select_strategic_particles(
                     .state_hash()
                     .cmp(&normalized[*right].state.state_hash())
             })
+            .then_with(|| {
+                normalized[*right]
+                    .weight
+                    .total_cmp(&normalized[*left].weight)
+            })
     });
     let mut cumulative = 0.0f32;
     let mut cursor = 0usize;

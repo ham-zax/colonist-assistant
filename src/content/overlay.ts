@@ -1746,11 +1746,16 @@ export class AssistantOverlay {
       engine: this.settings.engine,
       game: board.gameKey,
       trackerTurn: state.currentTurn.sequence,
+      eventCount: state.eventCount,
       boardTurn: board.turn,
+      lastRoll: board.lastRoll,
+      victoryTarget: board.victoryTarget,
+      friendlyRobber: board.friendlyRobber,
       player,
       action: board.action,
       hasRolled: board.hasRolled,
       discardCount: board.discardCount,
+      robberHex: board.hexes.find((hex) => hex.blocked)?.id,
       robberVictimSelection: board.robberVictimSelection,
       robberVictimPlayers: board.robberVictimPlayers,
       domesticTradeUsed: board.domesticTradeUsed,
@@ -1788,8 +1793,13 @@ export class AssistantOverlay {
           estimate.minimum,
           estimate.maximum,
           estimate.possibilities,
+          state.players[candidate]?.opponentModel.policyPosterior,
         ];
       }),
+      worlds: state.worlds.map((world) => ({
+        weight: world.weight,
+        hands: world.hands,
+      })),
       pieces: [
         ...board.vertices.flatMap((vertex) =>
           vertex.building
@@ -2364,7 +2374,7 @@ export class AssistantOverlay {
         reasons: [
           `Strategist selected this after ${search.nodes.toLocaleString()} search nodes at decision depth ${search.deepestDecisionDepth}`,
           statistic
-            ? `Its relative strategic value is ${Math.round((statistic.value[state ? state.playerOrder.indexOf(coachPlayer ?? "") : 0] ?? 0) * 100)} across the current belief set`
+            ? `Its relative strategic value is ${Math.round((statistic.value[search.rootIndex] ?? 0) * 100)} across the current belief set`
             : `It remained best across ${search.particles} legal hidden-card particles`,
           ...recommendation.reasons,
         ],

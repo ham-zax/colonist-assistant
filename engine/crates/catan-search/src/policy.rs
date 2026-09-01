@@ -102,7 +102,8 @@ pub fn trade_acceptance_probability(state: &GameState, recipient: u8) -> f32 {
     let hand_risk_relief = {
         let before = state.players[recipient as usize].resource_total();
         let after = resulting_hand.iter().copied().sum::<u8>();
-        before.saturating_sub(7) as f32 - after.saturating_sub(7) as f32
+        before.saturating_sub(state.card_discard_limit) as f32
+            - after.saturating_sub(state.card_discard_limit) as f32
     };
     let requested_bottleneck = trade.receive[Resource::Grain.index()] as f32 * 1.25
         + trade.receive[Resource::Ore.index()] as f32 * 1.15
@@ -556,7 +557,8 @@ fn maritime_trade_material(state: &GameState, actor: u8, action: &Action, prior:
         return false;
     }
     completes_build(state, *give, *receive, *ratio) > 0.0
-        || (state.players[actor as usize].resource_total() > 7 && prior >= 0.02)
+        || (state.players[actor as usize].resource_total() > state.card_discard_limit
+            && prior >= 0.02)
 }
 
 fn development_action_relevant(state: &GameState, actor: u8, action: &Action, prior: f32) -> bool {
@@ -694,7 +696,7 @@ pub(crate) fn order_scored_with_state_quotas(
     }
 
     let held = state.players[actor as usize].resource_total();
-    if held > 7
+    if held > state.card_discard_limit
         && let Some(safety) = ranked
             .iter()
             .filter_map(|candidate| {

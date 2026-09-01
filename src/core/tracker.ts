@@ -500,6 +500,16 @@ export const reduceTracker = (
   event: TrackerEvent,
   storedEvent?: StoredEvent,
 ): TrackerState => {
+  if (event.type === "roll" && event.player.trim().toLowerCase() === "dice") {
+    const matchingPlayers = event.color
+      ? previous.playerOrder.filter(
+          (player) => previous.players[player]?.color === event.color,
+        )
+      : [];
+    if (matchingPlayers.length !== 1) return previous;
+    event = { ...event, player: matchingPlayers[0]! };
+  }
+
   const state = cloneState(previous);
   state.eventCount += 1;
 

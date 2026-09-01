@@ -96,7 +96,7 @@ fn apply_action_friction(value: &mut [f32; 4], state: &GameState, action: &Actio
         _ => (0.0, None, None),
     };
     let is_hand_safety_conversion = give.zip(receive).is_some_and(|(give, receive)| {
-        state.players[actor as usize].resource_total() > 7
+        state.players[actor as usize].resource_total() > state.card_discard_limit
             && give.iter().sum::<u8>() > receive.iter().sum::<u8>()
     });
     let friction = if is_hand_safety_conversion {

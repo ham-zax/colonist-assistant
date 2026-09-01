@@ -114,12 +114,14 @@ export class DecisionTraceRecorder {
   complete(stateHash: string, analysis: DecisionAnalysis): void {
     const trace = this.traces.get(stateHash);
     if (!trace) return;
-    const rootIndex = Math.max(
-      0,
-      analysis.players.findIndex(
-        (player) => player.player === trace.rootPlayer,
-      ),
-    );
+    const rootIndex =
+      analysis.deepSearch?.rootIndex ??
+      Math.max(
+        0,
+        analysis.players.findIndex(
+          (player) => player.player === trace.rootPlayer,
+        ),
+      );
     const finishedAt = performance.now();
     trace.deepRequestFinishedAt = finishedAt;
     trace.deepLatencyMs =

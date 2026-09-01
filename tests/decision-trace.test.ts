@@ -106,6 +106,7 @@ describe("decision trace recorder", () => {
       runtime: "background-wasm",
       deepSearch: {
         engineRevision: "trace-test",
+        rootIndex: 1,
         algorithm: "puct",
         chosen: { kind: "build-city", targetId: "v1" },
         rootValue: [0.5, 0.3, 0.2],

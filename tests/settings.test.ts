@@ -150,6 +150,29 @@ describe("assistant settings", () => {
     expect(set).not.toHaveBeenCalled();
   });
 
+  it("preserves a valid one-second autopilot delay", async () => {
+    const set = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("chrome", {
+      storage: {
+        sync: {
+          get: vi.fn().mockResolvedValue({
+            [SETTINGS_KEY]: {
+              ...DEFAULT_SETTINGS,
+              autopilotDelaySeconds: 1,
+            },
+            colonistAssistantStrategistDefaultV1: true,
+          }),
+          set,
+        },
+      },
+    });
+
+    const settings = await readSettings();
+
+    expect(settings.autopilotDelaySeconds).toBe(1);
+    expect(set).not.toHaveBeenCalled();
+  });
+
   it("preserves a valid three-second autopilot delay", async () => {
     const set = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("chrome", {

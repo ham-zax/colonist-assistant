@@ -588,8 +588,9 @@ export const evaluateTradeOffer = (
     context,
   );
   const giveValue = vectorValue(trade.give, board, player, context);
+  const profile = playerBoardProfile(board, player);
   const handRiskRelief =
-    resourceTotal(hand) > 7
+    resourceTotal(hand) > profile.cardDiscardLimit
       ? Math.max(0, resourceTotal(trade.give) - resourceTotal(trade.receive)) *
         2.5
       : 0;
@@ -602,7 +603,6 @@ export const evaluateTradeOffer = (
 
   const giveSingle = singleResource(trade.give);
   const receiveSingle = singleResource(trade.receive);
-  const profile = playerBoardProfile(board, player);
   const portAlternativePenalty =
     giveSingle &&
     receiveSingle &&
