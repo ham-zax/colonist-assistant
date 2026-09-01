@@ -114,8 +114,40 @@ Validation:
 
 ## Task 15 - Root-width calibration
 
-Status: Pending Task 14 checkpoint.
+Status: **Closed with root width 8 retained.**
+
+The frozen Task 14 corpus was re-run with the exact final 24-particle posterior semantics under the three prescribed search configurations:
+
+| Configuration | Depth | Root width | Node cap | Time cap |
+| --- | ---: | ---: | ---: | ---: |
+| live | 4 | 8 | 4,000 | 350 ms |
+| reference-medium | 6 | 32 | 64,000 | 10,000 ms |
+| reference-max | 6 | 32 | 250,000 | 10,000 ms |
+
+The replay records, per fixture, the pre-truncation rank/prior of the selected root, whether it was admitted, its backed-up value, action family, node count, deadline flag, latency, and the live-root regret measured in each reference search.
+
+Disposition:
+
+- **No material F9 omission was found.** No concrete action outside the live top eight became the selected action in both reference-medium and reference-max on the same fixture.
+- Recovered turn 54 remained `BuyDevelopment`; the stable reference action ranked 4th live with prior `0.417274...` and was admitted.
+- F8 remained `BuildSettlement`; the stable reference action ranked 1st live with prior `0.593735...` and was admitted.
+- F14 remained `PlayMonopoly`; the stable reference action ranked 7th live with prior `0.085404...` and was admitted.
+- The large-bundle control's stable `BuildRoad` reference ranked 1st live and was admitted.
+- The accepted-trade and robber controls are exact/mandatory paths, so root-width admission is not applicable.
+- The port references selected different concrete maritime parameterizations, and the road control's medium/max references disagreed (`OfferTrade` versus `BuildRoad`). Neither satisfies the stable-reference omission criterion.
+- Where both reference searches backed up the live-selected root, measured live-root regret was zero on the recovered turn-54, hidden-development, F8, F14, accepted-trade, large-bundle, and robber controls. The port max reference measured `0.01043`, below the Task 14/15 material threshold. The road control showed reference regret (`0.08190` medium / `0.06210` max), but the two references did not select the same action, so it is not a stable F9 admission failure.
+- Several depth-6 references reached the prescribed 10 s cap before exhausting their node ceilings; this is retained as search-cost evidence rather than hidden by increasing the benchmark budget.
+
+Therefore F9 is closed without a production root-rescue rule, progressive widening change, or root-width increase.
+
+Validation:
+
+| Command | Result |
+| --- | --- |
+| `npm run build:wasm` | **Passed** |
+| `npm run replay:decisions -- tests/fixtures/recommendation-audit-corpus.json --rerun` | **Passed; Task 14 gate passed and Task 15 reported 0 material F9 fixtures** |
+| `npm run check` | **Passed** |
 
 ## Task 16 - Packaged integration
 
-Status: Pending Tasks 14-15.
+Status: Pending Task 15 checkpoint.

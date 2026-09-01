@@ -55,6 +55,9 @@ if (!input) {
         {
           replay: output,
           ...(replay.task14Gate ? { task14Gate: replay.task14Gate } : {}),
+          ...(replay.task15Disposition
+            ? { task15Disposition: replay.task15Disposition }
+            : {}),
         },
         null,
         2,
@@ -68,6 +71,13 @@ if (!input) {
     throw new Error("Expected an array or { traces: [...] }");
   }
 
+  const rustAuthoritySources = new Set([
+    "exact-mandatory",
+    "tactical-proven",
+    "deep-maxn",
+    "exact-family",
+    "safety-override",
+  ]);
   const sourceCounts = new Map();
   const failures = [];
   const overrides = [];
@@ -93,7 +103,7 @@ if (!input) {
     if (
       trace.deepChosenAction &&
       trace.finalAction &&
-      source !== "deep" &&
+      !rustAuthoritySources.has(source) &&
       source !== "mandatory" &&
       source !== "incoming-trade-evaluator"
     ) {
@@ -125,8 +135,7 @@ if (!input) {
             ? 0
             : traces.filter(
                 (trace) =>
-                  trace.finalActionSource === "deep" ||
-                  trace.finalActionSource === "tactical" ||
+                  rustAuthoritySources.has(trace.finalActionSource) ||
                   trace.finalActionSource === "mandatory",
               ).length / traces.length,
         fallbackRate:
