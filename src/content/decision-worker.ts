@@ -20,9 +20,22 @@ import {
 } from "./extension-context";
 
 const SLOW_DECISION_MS = 1_000;
+const OPENING_SLOW_DECISION_MS = 1_500;
+const OPENING_PONDER_SLOW_DECISION_MS = 3_000;
 const HARD_DECISION_MS = 12_000;
 const HARD_DECISION_ERROR =
   "Strategist did not return before the 12-second safety limit";
+
+const slowDecisionThresholdMs = (
+  request: Pick<DecisionRequest, "board" | "engine">,
+): number => {
+  if (request.engine !== "deep-search" || !request.board.initialPlacement) {
+    return SLOW_DECISION_MS;
+  }
+  return request.board.isMyTurn
+    ? OPENING_SLOW_DECISION_MS
+    : OPENING_PONDER_SLOW_DECISION_MS;
+};
 
 export interface DecisionServiceStatus {
   runtime: "background-wasm" | "engine-error";
@@ -139,6 +152,7 @@ export class DecisionWorkerClient {
     this.queued = undefined;
     this.active = request;
     const startedAt = performance.now();
+    const slowDecisionMs = slowDecisionThresholdMs(request);
     const message: DecisionMessage = {
       type: DECISION_MESSAGE_TYPE,
       id: request.id,
@@ -156,22 +170,25 @@ export class DecisionWorkerClient {
       const stale =
         request.generation !== this.generation ||
         request.key !== this.desiredKey;
-      console.warn("[Colonist Assistant] Decision still running", {
-        key: request.key,
-        engine: request.engine,
-        elapsedMs: Math.round(elapsedMs),
-        gameKey: request.board.gameKey,
-        turn: request.board.turn,
-        phase: request.board.action ?? "none",
-        isMyTurn: Boolean(request.board.isMyTurn),
-        currentPlayer: request.board.currentPlayer,
-        activeTrades: request.board.activeTrades?.length ?? 0,
-        stale,
-        policy: "selected-engine-only",
-        fallbackStarted: false,
-      });
+      console.warn(
+        `[Colonist Assistant] Decision still running (${request.engine}, ${Math.round(elapsedMs)} ms)`,
+        {
+          key: request.key,
+          engine: request.engine,
+          elapsedMs: Math.round(elapsedMs),
+          gameKey: request.board.gameKey,
+          turn: request.board.turn,
+          phase: request.board.action ?? "none",
+          isMyTurn: Boolean(request.board.isMyTurn),
+          currentPlayer: request.board.currentPlayer,
+          activeTrades: request.board.activeTrades?.length ?? 0,
+          stale,
+          policy: "selected-engine-only",
+          fallbackStarted: false,
+        },
+      );
       if (!stale) request.slowCallback?.(elapsedMs);
-    }, SLOW_DECISION_MS);
+    }, slowDecisionMs);
     let recoveryTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
     const response = Promise.race([
       this.send(message),
@@ -190,37 +207,40 @@ export class DecisionWorkerClient {
       .then((response) => {
         const finishedAt = performance.now();
         const totalMs = finishedAt - request.enqueuedAt;
-        if (totalMs >= 1_000) {
+        if (totalMs >= slowDecisionMs) {
           const search = response.analysis?.deepSearch;
-          console.warn("[Colonist Assistant] Slow decision", {
-            key: request.key,
-            engine: request.engine,
-            totalMs: Math.round(totalMs),
-            queueWaitMs: Math.round(startedAt - request.enqueuedAt),
-            serviceMs: Math.round(finishedAt - startedAt),
-            wasmSearchMs:
-              search?.elapsedMs === undefined
-                ? undefined
-                : Math.round(search.elapsedMs),
-            runtime: response.analysis?.runtime ?? "no-analysis",
-            selectedAction: search?.chosen?.kind ?? "none",
-            nodes: search?.nodes,
-            iterations: search?.iterations,
-            particles: search?.particles,
-            deepestDecisionDepth: search?.deepestDecisionDepth,
-            gameKey: request.board.gameKey,
-            turn: request.board.turn,
-            phase: request.board.action ?? "none",
-            isMyTurn: Boolean(request.board.isMyTurn),
-            currentPlayer: request.board.currentPlayer,
-            activeTrades: request.board.activeTrades?.length ?? 0,
-            stale:
-              request.generation !== this.generation ||
-              request.key !== this.desiredKey,
-            error:
-              response.error ??
-              response.analysis?.runtimeReason,
-          });
+          console.warn(
+            `[Colonist Assistant] Slow decision (${request.engine}, ${Math.round(totalMs)} ms total)`,
+            {
+              key: request.key,
+              engine: request.engine,
+              totalMs: Math.round(totalMs),
+              queueWaitMs: Math.round(startedAt - request.enqueuedAt),
+              serviceMs: Math.round(finishedAt - startedAt),
+              wasmSearchMs:
+                search?.elapsedMs === undefined
+                  ? undefined
+                  : Math.round(search.elapsedMs),
+              runtime: response.analysis?.runtime ?? "no-analysis",
+              selectedAction: search?.chosen?.kind ?? "none",
+              nodes: search?.nodes,
+              iterations: search?.iterations,
+              particles: search?.particles,
+              deepestDecisionDepth: search?.deepestDecisionDepth,
+              gameKey: request.board.gameKey,
+              turn: request.board.turn,
+              phase: request.board.action ?? "none",
+              isMyTurn: Boolean(request.board.isMyTurn),
+              currentPlayer: request.board.currentPlayer,
+              activeTrades: request.board.activeTrades?.length ?? 0,
+              stale:
+                request.generation !== this.generation ||
+                request.key !== this.desiredKey,
+              error:
+                response.error ??
+                response.analysis?.runtimeReason,
+            },
+          );
         }
         const stale =
           request.generation !== this.generation ||
