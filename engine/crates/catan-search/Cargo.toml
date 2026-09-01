@@ -10,9 +10,11 @@ path = "src/lib.rs"
 
 [features]
 benchmark-profile = []
+cuda-exact = ["dep:cudarc"]
 
 [dependencies]
 colonist-catan-core = { path = "../catan-core" }
+cudarc = { version = "0.19.9", optional = true, default-features = false, features = ["std", "driver", "nvrtc", "dynamic-loading", "cuda-13000"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"

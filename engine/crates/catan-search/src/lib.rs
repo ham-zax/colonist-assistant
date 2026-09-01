@@ -20,6 +20,12 @@ mod threats;
 mod trade_model;
 mod trade_safety;
 
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+mod cuda_exact;
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+pub use cuda_exact::*;
+
 pub use eval::{
     ExpansionOption, TrophyOutlook, evaluate, expansion_option_value, expected_discard_loss,
     largest_army_outlook, longest_road_outlook, marginal_development_value, production_pips,
