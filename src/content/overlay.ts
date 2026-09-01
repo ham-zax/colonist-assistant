@@ -82,13 +82,14 @@ import type {
   DomesticTradeState,
   RootTradeActionExclusion,
 } from "../core/engine";
-import { isDeepDecisionEngine } from "../core/engine";
+import { isWasmDecisionEngine } from "../core/engine";
 import type { TrackerState } from "../core/types";
 import { WinPredictionStabilizer } from "../core/win-prediction";
 import type { GameSession } from "./session";
 import {
   AUTOPILOT_DELAY_OPTIONS,
   normalizeAutopilotDelaySeconds,
+  normalizeDecisionEngine,
   readPosition,
   saveSettings,
   type AssistantSettings,
@@ -119,6 +120,7 @@ import { InteractionRenderGate } from "./render-gate";
 type ViewName = "advice" | "cards" | "settings";
 
 const STRATEGIST_LABEL = "Strategist ★";
+const WEIGHTED_LABEL = "Weighted";
 
 const resourceSupplyForPlayerCount = (playerCount: number): number =>
   playerCount > 6 ? 29 : playerCount > 4 ? 24 : 19;
@@ -723,17 +725,23 @@ export class AssistantOverlay {
         });
         return;
       }
-      if (
-        target instanceof HTMLSelectElement &&
-        target.dataset.setting === "autopilotDelaySeconds"
-      ) {
-        this.applySettings({
-          ...this.settings,
-          autopilotDelaySeconds: normalizeAutopilotDelaySeconds(
-            Number(target.value),
-          ),
-        });
-        this.renderGate.release("autopilot-delay");
+      if (target instanceof HTMLSelectElement) {
+        if (target.dataset.setting === "engine") {
+          this.applySettings({
+            ...this.settings,
+            engine: normalizeDecisionEngine(target.value),
+          });
+          return;
+        }
+        if (target.dataset.setting === "autopilotDelaySeconds") {
+          this.applySettings({
+            ...this.settings,
+            autopilotDelaySeconds: normalizeAutopilotDelaySeconds(
+              Number(target.value),
+            ),
+          });
+          this.renderGate.release("autopilot-delay");
+        }
       }
     });
 
@@ -1470,6 +1478,10 @@ export class AssistantOverlay {
     return authority;
   }
 
+  private selectedDecisionAuthority(): DecisionAuthority {
+    return this.settings.engine === "weighted" ? "weighted-policy" : "deep-maxn";
+  }
+
   private decisionSource(
     next: NextClick,
     _workflow: boolean,
@@ -1478,7 +1490,7 @@ export class AssistantOverlay {
       const authority = this.decisionAnalysis?.deepSearch?.authority;
       return authority
         ? this.decisionSourceForAuthority(authority)
-        : "deep-maxn";
+        : this.selectedDecisionAuthority();
     }
     if (next.kind === "discard" || next.kind === "player") {
       return "mandatory";
@@ -1504,7 +1516,7 @@ export class AssistantOverlay {
         )
       )
     ) {
-      return this.decisionAnalysis?.deepSearch?.authority ?? "deep-maxn";
+      return this.decisionAnalysis?.deepSearch?.authority ?? this.selectedDecisionAuthority();
     }
     if (next.kind === "turn-control" && next.control === "end") {
       return "end-turn-fallback";
@@ -1625,11 +1637,15 @@ export class AssistantOverlay {
     return false;
   }
 
+  private decisionEngineLabel(): string {
+    return this.settings.engine === "weighted" ? WEIGHTED_LABEL : STRATEGIST_LABEL;
+  }
+
   private renderEngineStrip(): string {
     const runtime = this.runtimePresentation();
     return `<button class="model-strip engine-strip ${runtime.state}" data-action="view" data-view="settings" aria-label="Open decision engine settings. Runtime: ${escapeHtml(runtime.label.toLowerCase())}">
       <span>Decision engine <small>${escapeHtml(runtime.label.toUpperCase())}</small></span>
-      <b>${STRATEGIST_LABEL}</b>
+      <b>${escapeHtml(this.decisionEngineLabel())}</b>
     </button>`;
   }
 
@@ -1659,7 +1675,7 @@ export class AssistantOverlay {
         return {
           label: "WASM · 1s+",
           detail:
-            `${STRATEGIST_LABEL} is still evaluating this position. No fallback policy is allowed to replace it.`,
+            `${this.decisionEngineLabel()} is still evaluating this position. No fallback policy is allowed to replace it.`,
           state: "slow",
         };
       }
@@ -1750,7 +1766,7 @@ export class AssistantOverlay {
       }
       if (
         this.decisionPendingKey &&
-        isDeepDecisionEngine(this.settings.engine)
+        isWasmDecisionEngine(this.settings.engine)
       ) {
         // Never paint a contradictory heuristic verdict while the
         // authoritative trade-response search is still running.
@@ -2327,7 +2343,7 @@ export class AssistantOverlay {
     if (!board?.isMyTurn || board.gameOver) return undefined;
     if (
       this.decisionRuntimeError &&
-      isDeepDecisionEngine(this.settings.engine)
+      isWasmDecisionEngine(this.settings.engine)
     ) {
       return undefined;
     }
@@ -2335,7 +2351,7 @@ export class AssistantOverlay {
       board.action !== "none" &&
       board.action !== "discard" &&
       this.decisionPendingKey &&
-      isDeepDecisionEngine(this.settings.engine)
+      isWasmDecisionEngine(this.settings.engine)
     ) {
       // Every spatial prompt is owned by the same state-locked planner. Do not
       // let a legacy coordinate score race settlement, road, city, or robber
@@ -2648,7 +2664,7 @@ export class AssistantOverlay {
             this.decisionPendingKey ||
             this.decisionAnalysis?.deepSearch
           ) &&
-          isDeepDecisionEngine(this.settings.engine)
+          isWasmDecisionEngine(this.settings.engine)
         ) {
           // A missing or stale searched response is an engine-error state, not
           // permission for the older material-gain heuristic to accept a deal.
@@ -2859,7 +2875,7 @@ export class AssistantOverlay {
 
     if (
       this.decisionPendingKey &&
-      isDeepDecisionEngine(this.settings.engine)
+      isWasmDecisionEngine(this.settings.engine)
     ) {
       // Mandatory protocol actions above remain responsive. Strategic
       // placement/build/roll/end-turn fallbacks may not race the authoritative
@@ -3160,7 +3176,7 @@ export class AssistantOverlay {
     }
     if (
       this.decisionRuntimeError &&
-      isDeepDecisionEngine(this.settings.engine)
+      isWasmDecisionEngine(this.settings.engine)
     ) {
       return `<section class="decision pending-decision" aria-live="assertive">
         <div class="decision-meta"><span>STRATEGIST PAUSED</span><span>NO FALLBACK</span></div>
@@ -3204,7 +3220,7 @@ export class AssistantOverlay {
     if (
       !next &&
       this.decisionPendingKey &&
-      isDeepDecisionEngine(this.settings.engine)
+      isWasmDecisionEngine(this.settings.engine)
     ) {
       const mandatory = Boolean(
         this.board?.action === "discard" ||
@@ -3697,7 +3713,7 @@ export class AssistantOverlay {
     }
     if (
       this.decisionPendingKey &&
-      isDeepDecisionEngine(this.settings.engine)
+      isWasmDecisionEngine(this.settings.engine)
     ) {
       return undefined;
     }
@@ -3773,7 +3789,7 @@ export class AssistantOverlay {
             affordableProbability:
               resourceTotal(fallbackDeficit) === 0 ? 1 : 0,
             reasons: [
-              `${STRATEGIST_LABEL} selected this action from the current legal position`,
+              `${this.decisionEngineLabel()} selected this action from the current legal position`,
               this.decisionAnalysis?.model ??
                 "It is the highest-value legal continuation now",
             ],
@@ -3898,10 +3914,13 @@ export class AssistantOverlay {
         <h1>How it thinks</h1>
         <p>Changes apply immediately to this game.</p>
       </header>
-      <div class="runtime-field engine-field">
-        <span><b>Decision engine</b><small>Weighted-belief Deep MaxN handles tactics, trading, and multiplayer strategy.</small></span>
-        <strong>${STRATEGIST_LABEL}</strong>
-      </div>
+      <label class="settings-field engine-field">
+        <span><b>Decision engine</b><small>Choose full MaxN search or the fast weighted heuristic policy.</small></span>
+        <select data-setting="engine" aria-label="Decision engine">
+          <option value="deep-search"${this.settings.engine === "deep-search" ? " selected" : ""}>MaxN</option>
+          <option value="weighted"${this.settings.engine === "weighted" ? " selected" : ""}>Weighted</option>
+        </select>
+      </label>
       <div class="runtime-field" data-runtime="${runtime.state}">
         <span><b>Engine runtime</b><small>${escapeHtml(runtime.detail)}</small></span>
         <strong><i></i>${escapeHtml(runtime.label)}</strong>

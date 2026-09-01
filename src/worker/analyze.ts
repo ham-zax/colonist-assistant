@@ -35,5 +35,6 @@ export const analyzeDecisionRequest = async (
     baseline,
     request.searchConstraints,
     request.playerTradesEnabled ?? true,
+    request.engine,
   );
 };

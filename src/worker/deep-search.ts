@@ -26,6 +26,7 @@ import type {
   DeepSearchAction,
   DeepSearchResult,
   DecisionAnalysis,
+  DecisionEngine,
   DecisionSearchConstraints,
 } from "../core/engine";
 
@@ -1334,6 +1335,7 @@ export const analyzeDeepSearch = async (
   fallback: DecisionAnalysis,
   searchConstraints: DecisionSearchConstraints = {},
   playerTradesEnabled = true,
+  engine: DecisionEngine = "deep-search",
 ): Promise<DecisionAnalysis> => {
   await ensureWasm();
   const { request, players, root } = buildDeepSearchRequest(
@@ -1343,7 +1345,7 @@ export const analyzeDeepSearch = async (
     searchConstraints,
     playerTradesEnabled,
   );
-  request.mode = "maxn";
+  request.mode = engine === "weighted" ? "weighted" : "maxn";
   if (board.initialPlacement) {
     // Setup is a fully public sequential draft. Spend a larger cumulative
     // budget here than on an ordinary turn: setup occurs only a handful of
@@ -1455,7 +1457,9 @@ export const analyzeDeepSearch = async (
     0.44 + visibleProgress * 0.24,
   );
   const deepPlayers =
-    deepValueTotal > Number.EPSILON
+    engine === "weighted"
+      ? fallback.players
+      : deepValueTotal > Number.EPSILON
       ? fallback.players.map((estimate) => {
           const player = players.indexOf(estimate.player);
           return player < 0
@@ -1486,14 +1490,17 @@ export const analyzeDeepSearch = async (
       : fallback.players;
   return {
     ...fallback,
-    engine: "deep-search",
+    engine,
     actionScores: {
       ...fallback.actionScores,
       ...deepActionScores(response.actions, root),
     },
     players: deepPlayers,
     simulations: response.rollouts,
-    model: `Observation-safe weighted-belief Deep MaxN (${response.particles} particles, ${response.nodes.toLocaleString()} nodes, depth ${response.deepestDecisionDepth})`,
+    model:
+      engine === "weighted"
+        ? "Weighted heuristic policy (top-5 action-prior sampling)"
+        : `Observation-safe weighted-belief Deep MaxN (${response.particles} particles, ${response.nodes.toLocaleString()} nodes, depth ${response.deepestDecisionDepth})`,
     deepSearch: search,
   };
 };
