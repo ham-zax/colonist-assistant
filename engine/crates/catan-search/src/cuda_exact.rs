@@ -103,6 +103,22 @@ impl CudaExactStats {
     }
 }
 
+pub struct CudaExactPackedState {
+    words: [u32; STATE_WORDS],
+    winner: Option<u8>,
+}
+
+impl CudaExactPackedState {
+    pub fn new(state: &GameState) -> Result<Self, CudaExactError> {
+        let mut words = [0; STATE_WORDS];
+        pack_state_words(state, &mut words)?;
+        Ok(Self {
+            words,
+            winner: state.winner(),
+        })
+    }
+}
+
 #[derive(Debug)]
 pub enum CudaExactError {
     LearnedValuePromoted,
@@ -245,6 +261,29 @@ impl CudaExactEvaluator {
         &mut self,
         states: &[GameState],
     ) -> Result<Vec<[f32; 4]>, CudaExactError> {
+        let batch_started = Instant::now();
+        let pack_started = Instant::now();
+        let packed = states
+            .iter()
+            .map(CudaExactPackedState::new)
+            .collect::<Result<Vec<_>, _>>()?;
+        let pack_nanos = pack_started.elapsed().as_nanos();
+        self.evaluate_packed_batch_inner(&packed, batch_started, pack_nanos)
+    }
+
+    pub fn evaluate_packed_batch(
+        &mut self,
+        states: &[CudaExactPackedState],
+    ) -> Result<Vec<[f32; 4]>, CudaExactError> {
+        self.evaluate_packed_batch_inner(states, Instant::now(), 0)
+    }
+
+    fn evaluate_packed_batch_inner(
+        &mut self,
+        states: &[CudaExactPackedState],
+        batch_started: Instant,
+        pack_nanos: u128,
+    ) -> Result<Vec<[f32; 4]>, CudaExactError> {
         if states.is_empty() {
             return Ok(Vec::new());
         }
@@ -252,13 +291,10 @@ impl CudaExactEvaluator {
             return Err(CudaExactError::BatchTooLarge);
         }
 
-        let batch_started = Instant::now();
-        let pack_started = Instant::now();
         let mut packed = Vec::with_capacity(states.len() * STATE_WORDS);
         for state in states {
-            self.pack_state(state, &mut packed)?;
+            packed.extend_from_slice(&state.words);
         }
-        let pack_nanos = pack_started.elapsed().as_nanos();
 
         self.ensure_capacity(states.len())?;
 
@@ -308,7 +344,7 @@ impl CudaExactEvaluator {
                     });
                 }
             }
-            if let Some(winner) = state.winner() {
+            if let Some(winner) = state.winner {
                 let winner = winner as usize;
                 if values
                     .iter()
@@ -359,84 +395,84 @@ impl CudaExactEvaluator {
         self.capacity = capacity;
         Ok(())
     }
+}
 
-    fn pack_state(&self, state: &GameState, batch: &mut Vec<u32>) -> Result<(), CudaExactError> {
-        let board = state.board.as_ref();
-        let players = board.num_players as usize;
-        if !(2..=MAX_PLAYERS).contains(&players) || state.players.len() != players {
-            return Err(CudaExactError::UnsupportedState(
-                "only 2–4 player states are supported",
-            ));
-        }
-        if board.hexes.len() != HEX_COUNT
-            || board.vertices.len() != VERTEX_COUNT
-            || board.edges.len() != EDGE_COUNT
-        {
-            return Err(CudaExactError::TopologyMismatch);
-        }
-        // `new_on_device` uploads the canonical standard topology once. The
-        // arena's state generator preserves that immutable graph topology;
-        // only the per-seed hex labels and ports are packed below. Keep this
-        // hot path allocation-free and reserve topology validation for the
-        // evaluator construction boundary.
-
-        let start = batch.len();
-        batch.resize(start + STATE_WORDS, 0);
-        let words = &mut batch[start..start + STATE_WORDS];
-        words[STATE_NUM_PLAYERS] = players as u32;
-        words[STATE_PHASE] = phase_tag(state.phase);
-        words[STATE_CURRENT_PLAYER] = state.current_player as u32;
-        words[STATE_ROBBER_HEX] = state.robber_hex as u32;
-        words[STATE_VICTORY_TARGET] = state.victory_target as u32;
-        words[STATE_DISCARD_LIMIT] = state.card_discard_limit as u32;
-        words[STATE_BANK_PUBLIC] = u32::from(state.bank_is_public);
-        words[STATE_LONGEST_HOLDER] = holder_code(state.longest_road_holder);
-        words[STATE_LARGEST_HOLDER] = holder_code(state.largest_army_holder);
-
-        for resource in 0..5 {
-            words[STATE_BANK + resource] = state.bank[resource] as u32;
-        }
-        for card in 0..5 {
-            words[STATE_DEVELOPMENT_DECK + card] = state.development_deck[card] as u32;
-            words[STATE_PLAYED_DEVELOPMENT + card] = state.played_development[card] as u32;
-        }
-        for (hex, tile) in board.hexes.iter().enumerate() {
-            words[STATE_HEX_RESOURCES + hex] = tile
-                .resource
-                .map(|resource| resource as u32 + 1)
-                .unwrap_or(0);
-            words[STATE_HEX_NUMBERS + hex] = tile.number as u32;
-        }
-        for (vertex, data) in board.vertices.iter().enumerate() {
-            words[STATE_PORTS + vertex] = match data.port {
-                None => 0,
-                Some(Port::Generic) => 1,
-                Some(Port::Resource(resource)) => resource as u32 + 2,
-            };
-        }
-        for (vertex, building) in state.buildings.iter().enumerate() {
-            words[STATE_BUILDINGS + vertex] = building.map(building_code).unwrap_or(0);
-        }
-        for (edge, owner) in state.roads.iter().enumerate() {
-            words[STATE_ROADS + edge] = owner.map(|player| player as u32 + 1).unwrap_or(0);
-        }
-        for (player, player_state) in state.players.iter().enumerate() {
-            let base = STATE_PLAYERS + player * PLAYER_STRIDE;
-            for resource in 0..5 {
-                words[base + resource] = player_state.resources[resource] as u32;
-                words[base + 5 + resource] = player_state.development[resource] as u32;
-                words[base + 10 + resource] = player_state.bought_development[resource] as u32;
-            }
-            words[base + 15] = player_state.public_victory_points as u32;
-            words[base + 16] = player_state.played_knights as u32;
-            words[base + 17] = player_state.roads_left as u32;
-            words[base + 18] = player_state.settlements_left as u32;
-            words[base + 19] = player_state.cities_left as u32;
-            words[base + 20] = u32::from(player_state.has_longest_road);
-            words[base + 21] = u32::from(player_state.has_largest_army);
-        }
-        Ok(())
+fn pack_state_words(
+    state: &GameState,
+    words: &mut [u32; STATE_WORDS],
+) -> Result<(), CudaExactError> {
+    let board = state.board.as_ref();
+    let players = board.num_players as usize;
+    if !(2..=MAX_PLAYERS).contains(&players) || state.players.len() != players {
+        return Err(CudaExactError::UnsupportedState(
+            "only 2–4 player states are supported",
+        ));
     }
+    if board.hexes.len() != HEX_COUNT
+        || board.vertices.len() != VERTEX_COUNT
+        || board.edges.len() != EDGE_COUNT
+    {
+        return Err(CudaExactError::TopologyMismatch);
+    }
+    // `new_on_device` uploads the canonical standard topology once. The
+    // arena's state generator preserves that immutable graph topology;
+    // only the per-seed hex labels and ports are packed below. Keep this
+    // hot path allocation-free and reserve topology validation for the
+    // evaluator construction boundary.
+
+    words[STATE_NUM_PLAYERS] = players as u32;
+    words[STATE_PHASE] = phase_tag(state.phase);
+    words[STATE_CURRENT_PLAYER] = state.current_player as u32;
+    words[STATE_ROBBER_HEX] = state.robber_hex as u32;
+    words[STATE_VICTORY_TARGET] = state.victory_target as u32;
+    words[STATE_DISCARD_LIMIT] = state.card_discard_limit as u32;
+    words[STATE_BANK_PUBLIC] = u32::from(state.bank_is_public);
+    words[STATE_LONGEST_HOLDER] = holder_code(state.longest_road_holder);
+    words[STATE_LARGEST_HOLDER] = holder_code(state.largest_army_holder);
+
+    for resource in 0..5 {
+        words[STATE_BANK + resource] = state.bank[resource] as u32;
+    }
+    for card in 0..5 {
+        words[STATE_DEVELOPMENT_DECK + card] = state.development_deck[card] as u32;
+        words[STATE_PLAYED_DEVELOPMENT + card] = state.played_development[card] as u32;
+    }
+    for (hex, tile) in board.hexes.iter().enumerate() {
+        words[STATE_HEX_RESOURCES + hex] = tile
+            .resource
+            .map(|resource| resource as u32 + 1)
+            .unwrap_or(0);
+        words[STATE_HEX_NUMBERS + hex] = tile.number as u32;
+    }
+    for (vertex, data) in board.vertices.iter().enumerate() {
+        words[STATE_PORTS + vertex] = match data.port {
+            None => 0,
+            Some(Port::Generic) => 1,
+            Some(Port::Resource(resource)) => resource as u32 + 2,
+        };
+    }
+    for (vertex, building) in state.buildings.iter().enumerate() {
+        words[STATE_BUILDINGS + vertex] = building.map(building_code).unwrap_or(0);
+    }
+    for (edge, owner) in state.roads.iter().enumerate() {
+        words[STATE_ROADS + edge] = owner.map(|player| player as u32 + 1).unwrap_or(0);
+    }
+    for (player, player_state) in state.players.iter().enumerate() {
+        let base = STATE_PLAYERS + player * PLAYER_STRIDE;
+        for resource in 0..5 {
+            words[base + resource] = player_state.resources[resource] as u32;
+            words[base + 5 + resource] = player_state.development[resource] as u32;
+            words[base + 10 + resource] = player_state.bought_development[resource] as u32;
+        }
+        words[base + 15] = player_state.public_victory_points as u32;
+        words[base + 16] = player_state.played_knights as u32;
+        words[base + 17] = player_state.roads_left as u32;
+        words[base + 18] = player_state.settlements_left as u32;
+        words[base + 19] = player_state.cities_left as u32;
+        words[base + 20] = u32::from(player_state.has_longest_road);
+        words[base + 21] = u32::from(player_state.has_largest_army);
+    }
+    Ok(())
 }
 
 fn topology_words(board: &Board) -> Result<Vec<u32>, CudaExactError> {

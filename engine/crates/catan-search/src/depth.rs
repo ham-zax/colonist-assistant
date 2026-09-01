@@ -1471,6 +1471,68 @@ pub fn search_weighted_belief_paranoid_bounded_timed_excluding(
 }
 
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CudaExactSearchStats {
+    pub calls: u64,
+    pub total_nanos: u64,
+    pub root_preparation_nanos: u64,
+    pub tree_build_nanos: u64,
+    pub host_packing_nanos: u64,
+    pub queue_wait_nanos: u64,
+    pub evaluation_nanos: u64,
+    pub backup_nanos: u64,
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_SEARCH_CALLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_SEARCH_TOTAL_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_ROOT_PREPARATION_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_TREE_BUILD_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_HOST_PACKING_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_QUEUE_WAIT_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_EVALUATION_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_BACKUP_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+fn record_cuda_duration(counter: &std::sync::atomic::AtomicU64, elapsed: std::time::Duration) {
+    counter.fetch_add(
+        elapsed.as_nanos().min(u64::MAX as u128) as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+pub fn cuda_exact_search_stats() -> CudaExactSearchStats {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    CudaExactSearchStats {
+        calls: CUDA_SEARCH_CALLS.load(Relaxed),
+        total_nanos: CUDA_SEARCH_TOTAL_NANOS.load(Relaxed),
+        root_preparation_nanos: CUDA_ROOT_PREPARATION_NANOS.load(Relaxed),
+        tree_build_nanos: CUDA_TREE_BUILD_NANOS.load(Relaxed),
+        host_packing_nanos: CUDA_HOST_PACKING_NANOS.load(Relaxed),
+        queue_wait_nanos: CUDA_QUEUE_WAIT_NANOS.load(Relaxed),
+        evaluation_nanos: CUDA_EVALUATION_NANOS.load(Relaxed),
+        backup_nanos: CUDA_BACKUP_NANOS.load(Relaxed),
+    }
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
 struct CudaDeferredChild {
     node: usize,
     weight: f32,
@@ -1486,7 +1548,9 @@ enum CudaDeferredNode {
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
 struct CudaDeferredTree {
     nodes: Vec<CudaDeferredNode>,
-    leaves: Vec<GameState>,
+    leaves: Vec<crate::CudaExactPackedState>,
+    packing_nanos: u64,
+    packing_failed: bool,
 }
 
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
@@ -1495,12 +1559,24 @@ impl CudaDeferredTree {
         Self {
             nodes: Vec::new(),
             leaves: Vec::new(),
+            packing_nanos: 0,
+            packing_failed: false,
         }
     }
 
     fn leaf(&mut self, state: &GameState) -> usize {
         let leaf = self.leaves.len();
-        self.leaves.push(state.clone());
+        let packing_started = std::time::Instant::now();
+        match crate::CudaExactPackedState::new(state) {
+            Ok(packed) => self.leaves.push(packed),
+            Err(_) => self.packing_failed = true,
+        }
+        self.packing_nanos = self.packing_nanos.saturating_add(
+            packing_started
+                .elapsed()
+                .as_nanos()
+                .min(u64::MAX as u128) as u64,
+        );
         let node = self.nodes.len();
         self.nodes.push(CudaDeferredNode::Leaf(leaf));
         node
@@ -1710,8 +1786,11 @@ fn cuda_belief_search_with_batch(
     particles: &[BeliefParticle],
     config: BeliefDepthConfig,
     root_exclusions: &[Action],
-    evaluate_batch: &mut dyn FnMut(&[GameState]) -> Result<Vec<[f32; 4]>, DepthBeliefError>,
+    evaluate_batch: &mut dyn FnMut(
+        &[crate::CudaExactPackedState],
+    ) -> Result<Vec<[f32; 4]>, DepthBeliefError>,
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
+    let search_started = std::time::Instant::now();
     let config = config.normalized();
     if config.time_budget_ms != 0 {
         return Err(DepthBeliefError::CudaTimeBudgetUnsupported);
@@ -1735,6 +1814,7 @@ fn cuda_belief_search_with_batch(
         return Err(DepthBeliefError::CudaOpeningUnsupported);
     }
 
+    let root_preparation_started = std::time::Instant::now();
     let maximum_depth = config.maximum_depth;
     let branch_cap = config.branch_cap;
     let maximum_nodes = config.maximum_nodes;
@@ -1836,6 +1916,12 @@ fn cuda_belief_search_with_batch(
         root_actions.len(),
         maximum_nodes / particles.len().max(1) as u32,
     );
+    record_cuda_duration(
+        &CUDA_ROOT_PREPARATION_NANOS,
+        root_preparation_started.elapsed(),
+    );
+
+    let tree_build_started = std::time::Instant::now();
     let mut tree = CudaDeferredTree::new();
     let mut root_rows = Vec::new();
     let mut nodes = 0_u32;
@@ -1900,11 +1986,23 @@ fn cuda_belief_search_with_batch(
         } else {
             None
         };
+    record_cuda_duration(
+        &CUDA_HOST_PACKING_NANOS,
+        std::time::Duration::from_nanos(tree.packing_nanos),
+    );
+    record_cuda_duration(&CUDA_TREE_BUILD_NANOS, tree_build_started.elapsed());
+    if tree.packing_failed {
+        return Err(DepthBeliefError::CudaEvaluationFailed);
+    }
+
+    let evaluation_started = std::time::Instant::now();
     let leaf_values = evaluate_batch(&tree.leaves)?;
+    record_cuda_duration(&CUDA_EVALUATION_NANOS, evaluation_started.elapsed());
     if leaf_values.len() != tree.leaves.len() {
         return Err(DepthBeliefError::CudaBatchLengthMismatch);
     }
 
+    let backup_started = std::time::Instant::now();
     struct Aggregate {
         action: Action,
         value: [f32; 4],
@@ -1986,6 +2084,9 @@ fn cuda_belief_search_with_batch(
         .map(|entry| entry.value)
         .or_else(|| fallback_node.map(|node| tree.backup(node, &leaf_values)))
         .expect("CUDA belief search must have a root value");
+    record_cuda_duration(&CUDA_BACKUP_NANOS, backup_started.elapsed());
+    record_cuda_duration(&CUDA_SEARCH_TOTAL_NANOS, search_started.elapsed());
+    CUDA_SEARCH_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Ok(BeliefDepthResult {
         chosen,
         value,
@@ -2006,9 +2107,9 @@ fn cuda_belief_search(
     config: BeliefDepthConfig,
     root_exclusions: &[Action],
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
-    let mut evaluate_batch = |states: &[GameState]| {
+    let mut evaluate_batch = |states: &[crate::CudaExactPackedState]| {
         evaluator
-            .evaluate_batch(states)
+            .evaluate_packed_batch(states)
             .map_err(|_| DepthBeliefError::CudaEvaluationFailed)
     };
     cuda_belief_search_with_batch(particles, config, root_exclusions, &mut evaluate_batch)
@@ -2021,12 +2122,14 @@ fn cuda_belief_search_mutex(
     config: BeliefDepthConfig,
     root_exclusions: &[Action],
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
-    let mut evaluate_batch = |states: &[GameState]| {
+    let mut evaluate_batch = |states: &[crate::CudaExactPackedState]| {
+        let wait_started = std::time::Instant::now();
         let result = {
             let mut evaluator = evaluator
                 .lock()
                 .map_err(|_| DepthBeliefError::CudaEvaluatorLockPoisoned)?;
-            evaluator.evaluate_batch(states)
+            record_cuda_duration(&CUDA_QUEUE_WAIT_NANOS, wait_started.elapsed());
+            evaluator.evaluate_packed_batch(states)
         };
         result.map_err(|_| DepthBeliefError::CudaEvaluationFailed)
     };

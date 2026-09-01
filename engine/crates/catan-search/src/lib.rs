@@ -88,6 +88,7 @@ pub use depth::{
 };
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
 pub use depth::{
+    CudaExactSearchStats, cuda_exact_search_stats,
     search_weighted_belief_maxn_cuda_with_config,
     search_weighted_belief_maxn_cuda_with_config_excluding,
     search_weighted_belief_maxn_cuda_with_config_mutex,

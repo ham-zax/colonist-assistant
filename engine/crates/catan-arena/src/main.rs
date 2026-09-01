@@ -23,7 +23,8 @@ use colonist_catan_search::{
 };
 #[cfg(feature = "cuda-exact")]
 use colonist_catan_search::{
-    CudaExactEvaluator, search_weighted_belief_maxn_cuda_with_config_mutex,
+    CudaExactEvaluator, cuda_exact_search_stats,
+    search_weighted_belief_maxn_cuda_with_config_mutex,
 };
 use serde::{Deserialize, Serialize};
 
@@ -62,6 +63,70 @@ impl EvaluatorBackend {
 
 #[cfg(feature = "cuda-exact")]
 static CUDA_EXACT_EVALUATOR: OnceLock<Mutex<CudaExactEvaluator>> = OnceLock::new();
+
+#[cfg(feature = "cuda-exact")]
+fn evaluator_benchmark_metrics(
+    backend: EvaluatorBackend,
+) -> (serde_json::Value, serde_json::Value, serde_json::Value) {
+    if backend != EvaluatorBackend::Cuda {
+        return (
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        );
+    }
+    let evaluator = CUDA_EXACT_EVALUATOR
+        .get()
+        .expect("CUDA evaluator initialized before metrics")
+        .lock()
+        .expect("CUDA evaluator lock poisoned before metrics");
+    let identity = evaluator.device_identity();
+    let stats = evaluator.stats();
+    let search_stats = cuda_exact_search_stats();
+    (
+        serde_json::json!({
+            "name": identity.name,
+            "ordinal": identity.ordinal,
+            "computeCapability": [identity.compute_capability.0, identity.compute_capability.1],
+            "evaluatorStatesPerSecond": stats.states_per_second(),
+            "searchCalls": search_stats.calls,
+            "evaluatorTimingMs": {
+                "total": stats.total_nanos as f64 / 1_000_000.0,
+                "pack": stats.total_pack_nanos as f64 / 1_000_000.0,
+                "hostToDevice": stats.total_upload_nanos as f64 / 1_000_000.0,
+                "kernel": stats.total_kernel_nanos as f64 / 1_000_000.0,
+                "deviceToHost": stats.total_download_nanos as f64 / 1_000_000.0,
+            },
+            "searchTimingMs": {
+                "total": search_stats.total_nanos as f64 / 1_000_000.0,
+                "rootPreparation": search_stats.root_preparation_nanos as f64 / 1_000_000.0,
+                "treeBuild": search_stats.tree_build_nanos as f64 / 1_000_000.0,
+                "hostPacking": search_stats.host_packing_nanos as f64 / 1_000_000.0,
+                "queueWait": search_stats.queue_wait_nanos as f64 / 1_000_000.0,
+                "evaluation": search_stats.evaluation_nanos as f64 / 1_000_000.0,
+                "backup": search_stats.backup_nanos as f64 / 1_000_000.0,
+            },
+        }),
+        serde_json::json!({
+            "batches": stats.batches,
+            "states": stats.states,
+            "averageBatchSize": stats.average_batch_size(),
+            "lastBatchSize": stats.last_batch_size,
+        }),
+        serde_json::json!(stats.average_batch_size()),
+    )
+}
+
+#[cfg(not(feature = "cuda-exact"))]
+fn evaluator_benchmark_metrics(
+    _backend: EvaluatorBackend,
+) -> (serde_json::Value, serde_json::Value, serde_json::Value) {
+    (
+        serde_json::Value::Null,
+        serde_json::Value::Null,
+        serde_json::Value::Null,
+    )
+}
 
 impl Engine {
     fn parse(value: &str) -> Option<Self> {
@@ -2477,6 +2542,8 @@ fn main() {
     let candidate_metrics = &engine_metrics[config.candidate as usize];
     let compact_engine_metrics = compact_engine_metrics(&engine_metrics);
     if config.json {
+        let (gpu_stats, batch_stats, average_batch_size) =
+            evaluator_benchmark_metrics(config.evaluator_backend);
         println!(
             concat!(
                 "{{",
@@ -2500,6 +2567,7 @@ fn main() {
                 "\"meanActions\":{:.4},",
                 "\"candidateMetrics\":{{",
                 "\"seatSamples\":{},",
+                "\"decisions\":{},",
                 "\"meanRank\":{:.6},",
                 "\"meanVictoryPoints\":{:.6},",
                 "\"meanRoads\":{:.6},",
@@ -2537,7 +2605,11 @@ fn main() {
                 "\"maxnNodes\":{},",
                 "\"maxnTimeMs\":{},",
                 "\"playerTradesEnabled\":{},",
+                "\"maritimeTradesEnabled\":true,",
                 "\"evaluatorBackend\":\"{}\",",
+                "\"gpuStats\":{},",
+                "\"batchStats\":{},",
+                "\"averageBatchSize\":{},",
                 "\"engineRevision\":\"{}\",",
                 "\"buildGitSha\":\"{}\",",
                 "\"buildDirty\":{},",
@@ -2580,6 +2652,7 @@ fn main() {
             mean_turns,
             mean_actions,
             candidate_metrics.seats,
+            candidate_metrics.decisions,
             candidate_metrics.ranks / candidate_metrics.seats.max(1) as f64,
             candidate_metrics.points as f64 / candidate_metrics.seats.max(1) as f64,
             candidate_metrics.roads as f64 / candidate_metrics.seats.max(1) as f64,
@@ -2624,6 +2697,9 @@ fn main() {
             config.maxn_time_ms,
             config.player_trades_enabled,
             config.evaluator_backend.as_str(),
+            gpu_stats,
+            batch_stats,
+            average_batch_size,
             ENGINE_REVISION,
             config.build_git_sha,
             config.build_dirty,
