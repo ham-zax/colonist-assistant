@@ -240,7 +240,7 @@ fn recursive_observation_policy(
     branch_cap: usize,
 ) -> Vec<(Action, f32)> {
     let observed = state.observed_state(actor);
-    let observed_ranked = normalize_observed_priors(state, actions, actor);
+    let observed_ranked = normalize_priors(&observed, actions, actor);
     let mut ranked = order_scored_with_state_quotas(&observed, actor, observed_ranked);
     ranked = truncate_root_preserving_end_turn(ranked, branch_cap.max(1));
     if ranked.is_empty() {
@@ -1685,8 +1685,17 @@ pub fn search_weighted_belief_paranoid_bounded_timed_excluding(
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CudaExactSearchStats {
     pub calls: u64,
+    pub linear_calls: u64,
+    pub deferred_calls: u64,
+    pub streamed_leaves: u64,
+    pub stream_flushes: u64,
     pub total_nanos: u64,
     pub root_preparation_nanos: u64,
+    pub linear_traversal_nanos: u64,
+    pub linear_legal_actions_nanos: u64,
+    pub linear_policy_nanos: u64,
+    pub linear_budget_nanos: u64,
+    pub linear_apply_nanos: u64,
     pub tree_build_nanos: u64,
     pub host_packing_nanos: u64,
     pub queue_wait_nanos: u64,
@@ -1695,29 +1704,45 @@ pub struct CudaExactSearchStats {
 }
 
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
-static CUDA_SEARCH_CALLS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static CUDA_SEARCH_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
-static CUDA_SEARCH_TOTAL_NANOS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static CUDA_SEARCH_TOTAL_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_LINEAR_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_DEFERRED_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_STREAMED_LEAVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_STREAM_FLUSHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
 static CUDA_ROOT_PREPARATION_NANOS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
-static CUDA_TREE_BUILD_NANOS: std::sync::atomic::AtomicU64 =
+static CUDA_LINEAR_TRAVERSAL_NANOS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
-static CUDA_HOST_PACKING_NANOS: std::sync::atomic::AtomicU64 =
+static CUDA_LINEAR_LEGAL_ACTIONS_NANOS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
-static CUDA_QUEUE_WAIT_NANOS: std::sync::atomic::AtomicU64 =
+static CUDA_LINEAR_POLICY_NANOS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
-static CUDA_EVALUATION_NANOS: std::sync::atomic::AtomicU64 =
+static CUDA_LINEAR_BUDGET_NANOS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
-static CUDA_BACKUP_NANOS: std::sync::atomic::AtomicU64 =
+static CUDA_LINEAR_APPLY_NANOS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_TREE_BUILD_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_HOST_PACKING_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_QUEUE_WAIT_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_EVALUATION_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_BACKUP_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
 fn record_cuda_duration(counter: &std::sync::atomic::AtomicU64, elapsed: std::time::Duration) {
@@ -1733,8 +1758,17 @@ pub fn cuda_exact_search_stats() -> CudaExactSearchStats {
 
     CudaExactSearchStats {
         calls: CUDA_SEARCH_CALLS.load(Relaxed),
+        linear_calls: CUDA_LINEAR_CALLS.load(Relaxed),
+        deferred_calls: CUDA_DEFERRED_CALLS.load(Relaxed),
+        streamed_leaves: CUDA_STREAMED_LEAVES.load(Relaxed),
+        stream_flushes: CUDA_STREAM_FLUSHES.load(Relaxed),
         total_nanos: CUDA_SEARCH_TOTAL_NANOS.load(Relaxed),
         root_preparation_nanos: CUDA_ROOT_PREPARATION_NANOS.load(Relaxed),
+        linear_traversal_nanos: CUDA_LINEAR_TRAVERSAL_NANOS.load(Relaxed),
+        linear_legal_actions_nanos: CUDA_LINEAR_LEGAL_ACTIONS_NANOS.load(Relaxed),
+        linear_policy_nanos: CUDA_LINEAR_POLICY_NANOS.load(Relaxed),
+        linear_budget_nanos: CUDA_LINEAR_BUDGET_NANOS.load(Relaxed),
+        linear_apply_nanos: CUDA_LINEAR_APPLY_NANOS.load(Relaxed),
         tree_build_nanos: CUDA_TREE_BUILD_NANOS.load(Relaxed),
         host_packing_nanos: CUDA_HOST_PACKING_NANOS.load(Relaxed),
         queue_wait_nanos: CUDA_QUEUE_WAIT_NANOS.load(Relaxed),
@@ -1782,12 +1816,9 @@ impl CudaDeferredTree {
             Ok(packed) => self.leaves.push(packed),
             Err(_) => self.packing_failed = true,
         }
-        self.packing_nanos = self.packing_nanos.saturating_add(
-            packing_started
-                .elapsed()
-                .as_nanos()
-                .min(u64::MAX as u128) as u64,
-        );
+        self.packing_nanos = self
+            .packing_nanos
+            .saturating_add(packing_started.elapsed().as_nanos().min(u64::MAX as u128) as u64);
         let node = self.nodes.len();
         self.nodes.push(CudaDeferredNode::Leaf(leaf));
         node
@@ -1839,6 +1870,343 @@ fn cuda_action_friction(state: &GameState, action: &Action, actor: u8) -> f32 {
     } else {
         base
     }
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+const CUDA_LINEAR_BATCH_LEAVES: usize = 32_768;
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+#[derive(Clone, Copy, Debug, Default)]
+struct CudaLinearLane {
+    value: [f32; 4],
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+#[derive(Default)]
+struct CudaLinearStaging {
+    packed: Vec<crate::CudaExactPackedState>,
+    lane_ids: Vec<usize>,
+    path_weights: Vec<f32>,
+    results: Vec<[f32; 4]>,
+    states: Vec<GameState>,
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+thread_local! {
+    static CUDA_LINEAR_STAGING_POOL: std::cell::RefCell<Vec<CudaLinearStaging>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+struct CudaLinearStagingLease {
+    staging: Option<CudaLinearStaging>,
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+impl CudaLinearStagingLease {
+    fn take() -> Self {
+        let staging = CUDA_LINEAR_STAGING_POOL.with(|pool| pool.borrow_mut().pop().unwrap_or_default());
+        Self {
+            staging: Some(staging),
+        }
+    }
+
+    fn get_mut(&mut self) -> &mut CudaLinearStaging {
+        self.staging
+            .as_mut()
+            .expect("CUDA linear staging lease must remain live")
+    }
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+impl Drop for CudaLinearStagingLease {
+    fn drop(&mut self) {
+        let Some(mut staging) = self.staging.take() else {
+            return;
+        };
+        staging.packed.clear();
+        staging.lane_ids.clear();
+        staging.path_weights.clear();
+        staging.results.clear();
+        CUDA_LINEAR_STAGING_POOL.with(|pool| pool.borrow_mut().push(staging));
+    }
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+fn cuda_checkout_state(pool: &mut Vec<GameState>, parent: &GameState) -> GameState {
+    pool.pop().unwrap_or_else(|| parent.clone())
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+fn cuda_release_state(pool: &mut Vec<GameState>, state: GameState) {
+    pool.push(state);
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+struct CudaLinearBatch<'a> {
+    packed: &'a mut Vec<crate::CudaExactPackedState>,
+    lane_ids: &'a mut Vec<usize>,
+    path_weights: &'a mut Vec<f32>,
+    results: &'a mut Vec<[f32; 4]>,
+    lanes: &'a mut Vec<CudaLinearLane>,
+    evaluate_batch: &'a mut dyn FnMut(
+        &[crate::CudaExactPackedState],
+        &mut Vec<[f32; 4]>,
+    ) -> Result<(), DepthBeliefError>,
+    packing_nanos: u64,
+    evaluation_nanos: u64,
+    leaves_emitted: u64,
+    flushes: u64,
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+impl CudaLinearBatch<'_> {
+    fn emit(
+        &mut self,
+        state: &GameState,
+        lane_id: usize,
+        path_weight: f32,
+    ) -> Result<(), DepthBeliefError> {
+        if path_weight <= 0.0 {
+            return Ok(());
+        }
+        let packing_started = std::time::Instant::now();
+        let packed = crate::CudaExactPackedState::new(state)
+            .map_err(|_| DepthBeliefError::CudaEvaluationFailed)?;
+        self.packing_nanos = self
+            .packing_nanos
+            .saturating_add(packing_started.elapsed().as_nanos().min(u64::MAX as u128) as u64);
+        self.packed.push(packed);
+        self.lane_ids.push(lane_id);
+        self.path_weights.push(path_weight);
+        self.leaves_emitted = self.leaves_emitted.saturating_add(1);
+        if self.packed.len() >= CUDA_LINEAR_BATCH_LEAVES {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), DepthBeliefError> {
+        if self.packed.is_empty() {
+            return Ok(());
+        }
+        let evaluation_started = std::time::Instant::now();
+        self.results.clear();
+        (self.evaluate_batch)(&self.packed, self.results)?;
+        self.flushes = self.flushes.saturating_add(1);
+        self.evaluation_nanos = self.evaluation_nanos.saturating_add(
+            evaluation_started
+                .elapsed()
+                .as_nanos()
+                .min(u64::MAX as u128) as u64,
+        );
+        if self.results.len() != self.packed.len() {
+            return Err(DepthBeliefError::CudaBatchLengthMismatch);
+        }
+        for ((lane_id, path_weight), value) in self
+            .lane_ids
+            .iter()
+            .copied()
+            .zip(self.path_weights.iter().copied())
+            .zip(self.results.iter().copied())
+        {
+            let lane = self
+                .lanes
+                .get_mut(lane_id)
+                .expect("CUDA linear leaf must reference an existing lane");
+            for player in 0..4 {
+                lane.value[player] += value[player] * path_weight;
+            }
+        }
+        self.packed.clear();
+        self.lane_ids.clear();
+        self.path_weights.clear();
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+struct CudaLinearSearcher<'a, 'b> {
+    batch: &'a mut CudaLinearBatch<'b>,
+    state_pool: &'a mut Vec<GameState>,
+    lane_id: usize,
+    maximum_depth: u8,
+    maximum_nodes: u32,
+    node_limit: u32,
+    branch_cap: usize,
+    nodes: u32,
+    deepest_depth: u8,
+    legal_actions_nanos: u64,
+    policy_nanos: u64,
+    budget_nanos: u64,
+    apply_nanos: u64,
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+impl CudaLinearSearcher<'_, '_> {
+    fn visit(
+        &mut self,
+        state: &GameState,
+        depth: u8,
+        actions_in_turn: u8,
+        subtree_limit: u32,
+        path_weight: f32,
+    ) -> Result<(), DepthBeliefError> {
+        let subtree_limit = subtree_limit.min(self.node_limit).min(self.maximum_nodes);
+        if self.nodes >= subtree_limit {
+            return self.batch.emit(state, self.lane_id, path_weight);
+        }
+        self.nodes += 1;
+        self.deepest_depth = self.deepest_depth.max(depth);
+        if state.is_terminal() || depth >= self.maximum_depth || actions_in_turn >= 18 {
+            return self.batch.emit(state, self.lane_id, path_weight);
+        }
+        let legal_actions_started = std::time::Instant::now();
+        let actions = state.legal_actions();
+        self.legal_actions_nanos = self.legal_actions_nanos.saturating_add(
+            legal_actions_started
+                .elapsed()
+                .as_nanos()
+                .min(u64::MAX as u128) as u64,
+        );
+        if actions.is_empty() {
+            return self.batch.emit(state, self.lane_id, path_weight);
+        }
+        match state.node_kind() {
+            NodeKind::Terminal => self.batch.emit(state, self.lane_id, path_weight),
+            NodeKind::Chance => {
+                let budget_started = std::time::Instant::now();
+                let total = actions
+                    .iter()
+                    .map(|action| state.chance_weight(action) as f32)
+                    .sum::<f32>()
+                    .max(f32::EPSILON);
+                let weighted_actions = actions
+                    .into_iter()
+                    .filter_map(|action| {
+                        let weight = state.chance_weight(&action) as f32 / total;
+                        (weight > 0.0).then_some((action, weight))
+                    })
+                    .collect::<Vec<_>>();
+                let remaining = subtree_limit.saturating_sub(self.nodes);
+                let weights = weighted_actions
+                    .iter()
+                    .map(|(_, weight)| *weight)
+                    .collect::<Vec<_>>();
+                let budgets = allocate_weighted_node_budgets(&weights, remaining);
+                self.budget_nanos = self.budget_nanos.saturating_add(
+                    budget_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                );
+                let mut carry = 0_u32;
+                for (index, (action, weight)) in weighted_actions.into_iter().enumerate() {
+                    let allowance = budgets
+                        .get(index)
+                        .copied()
+                        .unwrap_or(0)
+                        .saturating_add(carry);
+                    let before = self.nodes;
+                    let child_limit = self.nodes.saturating_add(allowance).min(subtree_limit);
+                    let mut next = cuda_checkout_state(self.state_pool, state);
+                    let apply_started = std::time::Instant::now();
+                    next.clone_from_and_apply(state, &action)
+                        .expect("legal chance action must transition");
+                    self.apply_nanos = self.apply_nanos.saturating_add(
+                        apply_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                    );
+                    let visit_result = if allowance > 0 && self.nodes < child_limit {
+                        self.visit(
+                            &next,
+                            depth,
+                            actions_in_turn.saturating_add(1),
+                            child_limit,
+                            path_weight * weight,
+                        )
+                    } else {
+                        self.batch.emit(&next, self.lane_id, path_weight * weight)
+                    };
+                    cuda_release_state(self.state_pool, next);
+                    visit_result?;
+                    let used = self.nodes.saturating_sub(before);
+                    carry = allowance.saturating_sub(used);
+                }
+                Ok(())
+            }
+            NodeKind::Decision { actor } => {
+                let remaining = subtree_limit.saturating_sub(self.nodes);
+                if remaining == 0 {
+                    return self.batch.emit(state, self.lane_id, path_weight);
+                }
+                let policy_started = std::time::Instant::now();
+                let mut ranked =
+                    recursive_observation_policy(state, &actions, actor, self.branch_cap);
+                self.policy_nanos = self.policy_nanos.saturating_add(
+                    policy_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                );
+                ranked.truncate(ranked.len().min(remaining as usize));
+                let budget_started = std::time::Instant::now();
+                let budgets = allocate_root_node_budgets(ranked.len(), remaining);
+                self.budget_nanos = self.budget_nanos.saturating_add(
+                    budget_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                );
+                let mut carry = 0_u32;
+                for (index, (action, weight)) in ranked.into_iter().enumerate() {
+                    if weight <= 0.0 {
+                        continue;
+                    }
+                    debug_assert_eq!(cuda_action_friction(state, &action, actor), 0.0);
+                    let allowance = budgets
+                        .get(index)
+                        .copied()
+                        .unwrap_or(0)
+                        .saturating_add(carry);
+                    let before = self.nodes;
+                    let child_limit = self.nodes.saturating_add(allowance).min(subtree_limit);
+                    let mut next = cuda_checkout_state(self.state_pool, state);
+                    let apply_started = std::time::Instant::now();
+                    next.clone_from_and_apply(state, &action)
+                        .expect("observation-policy action must transition");
+                    self.apply_nanos = self.apply_nanos.saturating_add(
+                        apply_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                    );
+                    let completed_turn =
+                        next.turn != state.turn || next.current_player != state.current_player;
+                    let visit_result = if allowance > 0 && self.nodes < child_limit {
+                        self.visit(
+                            &next,
+                            depth + u8::from(completed_turn),
+                            if completed_turn {
+                                0
+                            } else {
+                                actions_in_turn.saturating_add(1)
+                            },
+                            child_limit,
+                            path_weight * weight,
+                        )
+                    } else {
+                        self.batch.emit(&next, self.lane_id, path_weight * weight)
+                    };
+                    cuda_release_state(self.state_pool, next);
+                    visit_result?;
+                    let used = self.nodes.saturating_sub(before);
+                    carry = allowance.saturating_sub(used);
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+struct CudaLinearRootEntry {
+    action: Action,
+    lane_id: usize,
+    legal: bool,
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+struct CudaLinearRootRow {
+    weight: f32,
+    entries: Vec<CudaLinearRootEntry>,
 }
 
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
@@ -1999,7 +2367,8 @@ fn cuda_belief_search_with_batch(
     root_exclusions: &[Action],
     evaluate_batch: &mut dyn FnMut(
         &[crate::CudaExactPackedState],
-    ) -> Result<Vec<[f32; 4]>, DepthBeliefError>,
+        &mut Vec<[f32; 4]>,
+    ) -> Result<(), DepthBeliefError>,
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
     let search_started = std::time::Instant::now();
     let config = config.normalized();
@@ -2247,6 +2616,298 @@ fn cuda_belief_search_with_batch(
         root_preparation_started.elapsed(),
     );
 
+    if particles
+        .iter()
+        .all(|particle| !particle.state.player_trades_enabled)
+    {
+        let traversal_started = std::time::Instant::now();
+        let mut lanes = Vec::<CudaLinearLane>::with_capacity(
+            particles
+                .len()
+                .saturating_mul(root_actions.len())
+                .saturating_add(1),
+        );
+        let mut root_rows = Vec::<CudaLinearRootRow>::with_capacity(particles.len());
+        let mut nodes = 0_u32;
+        let mut depth = 0_u8;
+        let mut particles_searched = 0_usize;
+        let mut legal_actions_nanos = 0_u64;
+        let mut policy_nanos = 0_u64;
+        let mut budget_nanos = 0_u64;
+        let mut apply_nanos = 0_u64;
+        let batch_capacity = CUDA_LINEAR_BATCH_LEAVES
+            .min(maximum_nodes.max(1) as usize)
+            .max(1);
+        let mut staging_lease = CudaLinearStagingLease::take();
+        let staging = staging_lease.get_mut();
+        staging.packed.clear();
+        staging.lane_ids.clear();
+        staging.path_weights.clear();
+        staging.results.clear();
+        if staging.packed.capacity() < batch_capacity {
+            staging.packed.reserve(batch_capacity);
+        }
+        if staging.lane_ids.capacity() < batch_capacity {
+            staging.lane_ids.reserve(batch_capacity);
+        }
+        if staging.path_weights.capacity() < batch_capacity {
+            staging.path_weights.reserve(batch_capacity);
+        }
+        if staging.results.capacity() < batch_capacity {
+            staging.results.reserve(batch_capacity);
+        }
+        let CudaLinearStaging {
+            packed,
+            lane_ids,
+            path_weights,
+            results,
+            states,
+        } = staging;
+        let mut batch = CudaLinearBatch {
+            packed,
+            lane_ids,
+            path_weights,
+            results,
+            lanes: &mut lanes,
+            evaluate_batch,
+            packing_nanos: 0,
+            evaluation_nanos: 0,
+            leaves_emitted: 0,
+            flushes: 0,
+        };
+
+        for particle in particles {
+            let weight = particle.weight.max(0.0) / total_weight;
+            if weight <= 0.0 {
+                continue;
+            }
+            particles_searched += 1;
+            let mut entries = Vec::with_capacity(root_actions.len());
+            for (action_index, action) in root_actions.iter().enumerate() {
+                let lane_id = batch.lanes.len();
+                batch.lanes.push(CudaLinearLane::default());
+                let mut next = cuda_checkout_state(states, &particle.state);
+                let apply_started = std::time::Instant::now();
+                let root_apply = next.clone_from_and_apply(&particle.state, action);
+                apply_nanos = apply_nanos.saturating_add(
+                    apply_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                );
+                if root_apply.is_err() {
+                    cuda_release_state(states, next);
+                    batch.emit(&particle.state, lane_id, 1.0)?;
+                    entries.push(CudaLinearRootEntry {
+                        action: action.clone(),
+                        lane_id,
+                        legal: false,
+                    });
+                    continue;
+                }
+                debug_assert_eq!(cuda_action_friction(&particle.state, action, observer), 0.0);
+                let completed_turn = next.turn != particle.state.turn
+                    || next.current_player != particle.state.current_player;
+                let nodes_for_action = action_budgets
+                    .get(action_index)
+                    .copied()
+                    .unwrap_or(1)
+                    .max(1);
+                let mut searcher = CudaLinearSearcher {
+                    batch: &mut batch,
+                    state_pool: states,
+                    lane_id,
+                    maximum_depth,
+                    maximum_nodes: nodes_for_action,
+                    node_limit: nodes_for_action,
+                    branch_cap: branch_cap.max(1),
+                    nodes: 0,
+                    deepest_depth: 0,
+                    legal_actions_nanos: 0,
+                    policy_nanos: 0,
+                    budget_nanos: 0,
+                    apply_nanos: 0,
+                };
+                let node_limit = searcher.node_limit;
+                let visit_result = searcher.visit(
+                    &next,
+                    u8::from(completed_turn),
+                    if completed_turn { 0 } else { 1 },
+                    node_limit,
+                    1.0,
+                );
+                let searched_nodes = searcher.nodes;
+                let searched_depth = searcher.deepest_depth;
+                legal_actions_nanos = legal_actions_nanos.saturating_add(searcher.legal_actions_nanos);
+                policy_nanos = policy_nanos.saturating_add(searcher.policy_nanos);
+                budget_nanos = budget_nanos.saturating_add(searcher.budget_nanos);
+                apply_nanos = apply_nanos.saturating_add(searcher.apply_nanos);
+                drop(searcher);
+                cuda_release_state(states, next);
+                visit_result?;
+                nodes += searched_nodes;
+                depth = depth.max(searched_depth);
+                entries.push(CudaLinearRootEntry {
+                    action: action.clone(),
+                    lane_id,
+                    legal: true,
+                });
+            }
+            root_rows.push(CudaLinearRootRow { weight, entries });
+        }
+
+        let fallback_lane =
+            if root_rows.is_empty() || root_rows.iter().all(|row| row.entries.is_empty()) {
+                let lane_id = batch.lanes.len();
+                batch.lanes.push(CudaLinearLane::default());
+                batch.emit(first, lane_id, 1.0)?;
+                Some(lane_id)
+            } else {
+                None
+            };
+        batch.flush()?;
+        let packing_nanos = batch.packing_nanos;
+        let evaluation_nanos = batch.evaluation_nanos;
+        let leaves_emitted = batch.leaves_emitted;
+        let flushes = batch.flushes;
+        drop(batch);
+        record_cuda_duration(
+            &CUDA_HOST_PACKING_NANOS,
+            std::time::Duration::from_nanos(packing_nanos),
+        );
+        record_cuda_duration(
+            &CUDA_EVALUATION_NANOS,
+            std::time::Duration::from_nanos(evaluation_nanos),
+        );
+        let traversal_nanos = traversal_started
+            .elapsed()
+            .as_nanos()
+            .saturating_sub(u128::from(packing_nanos))
+            .saturating_sub(u128::from(evaluation_nanos))
+            .min(u64::MAX as u128) as u64;
+        record_cuda_duration(
+            &CUDA_LINEAR_TRAVERSAL_NANOS,
+            std::time::Duration::from_nanos(traversal_nanos),
+        );
+        record_cuda_duration(
+            &CUDA_LINEAR_LEGAL_ACTIONS_NANOS,
+            std::time::Duration::from_nanos(legal_actions_nanos),
+        );
+        record_cuda_duration(
+            &CUDA_LINEAR_POLICY_NANOS,
+            std::time::Duration::from_nanos(policy_nanos),
+        );
+        record_cuda_duration(
+            &CUDA_LINEAR_BUDGET_NANOS,
+            std::time::Duration::from_nanos(budget_nanos),
+        );
+        record_cuda_duration(
+            &CUDA_LINEAR_APPLY_NANOS,
+            std::time::Duration::from_nanos(apply_nanos),
+        );
+        CUDA_LINEAR_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        CUDA_STREAMED_LEAVES.fetch_add(leaves_emitted, std::sync::atomic::Ordering::Relaxed);
+        CUDA_STREAM_FLUSHES.fetch_add(flushes, std::sync::atomic::Ordering::Relaxed);
+
+        let backup_started = std::time::Instant::now();
+        struct Aggregate {
+            action: Action,
+            value: [f32; 4],
+            covered_weight: f32,
+            legal_weight: f32,
+            lower_bound: [f32; 4],
+        }
+        let mut aggregate = Vec::<Aggregate>::new();
+        for row in root_rows {
+            for entry in row.entries {
+                let value = lanes[entry.lane_id].value;
+                if let Some(existing) = aggregate
+                    .iter_mut()
+                    .find(|candidate| candidate.action == entry.action)
+                {
+                    for (sum, component) in existing.value.iter_mut().zip(value) {
+                        *sum += component * row.weight;
+                    }
+                    existing.covered_weight += row.weight;
+                    if entry.legal {
+                        existing.legal_weight += row.weight;
+                    }
+                    for (bound, component) in existing.lower_bound.iter_mut().zip(value) {
+                        *bound = bound.min(component);
+                    }
+                } else {
+                    aggregate.push(Aggregate {
+                        action: entry.action,
+                        value: value.map(|component| component * row.weight),
+                        covered_weight: row.weight,
+                        legal_weight: if entry.legal { row.weight } else { 0.0 },
+                        lower_bound: value,
+                    });
+                }
+            }
+        }
+        let actor = observer as usize;
+        let mut actions = aggregate
+            .into_iter()
+            .map(|entry| DepthActionValue {
+                action: entry.action,
+                value: entry
+                    .value
+                    .map(|value| value / entry.covered_weight.max(f32::EPSILON)),
+                legal_weight: entry.legal_weight.clamp(0.0, 1.0),
+                lower_confidence_value: entry.lower_bound,
+            })
+            .collect::<Vec<_>>();
+        actions.sort_by(|left, right| right.value[actor].total_cmp(&left.value[actor]));
+        let mut chosen_index = 0usize;
+        if let Some(leading) = actions.first() {
+            let leading_loss = forced_loss_weight(
+                posterior
+                    .iter()
+                    .map(|particle| (&particle.state, particle.weight)),
+                observer,
+                &leading.action,
+            );
+            if leading_loss >= 1.0 - 1e-6
+                && let Some(escape_index) = actions.iter().position(|candidate| {
+                    forced_loss_weight(
+                        posterior
+                            .iter()
+                            .map(|particle| (&particle.state, particle.weight)),
+                        observer,
+                        &candidate.action,
+                    ) <= 1e-6
+                })
+            {
+                chosen_index = escape_index;
+            }
+        }
+        if chosen_index > 0
+            && let (Some(leading), Some(replacement)) = (actions.first(), actions.get(chosen_index))
+        {
+            provenance.safety_replacement =
+                Some((leading.action.clone(), replacement.action.clone()));
+        }
+        let chosen = actions.get(chosen_index).map(|entry| entry.action.clone());
+        let value = actions
+            .get(chosen_index)
+            .map(|entry| entry.value)
+            .or_else(|| fallback_lane.map(|lane_id| lanes[lane_id].value))
+            .expect("CUDA linear belief search must have a root value");
+        record_cuda_duration(&CUDA_BACKUP_NANOS, backup_started.elapsed());
+        record_cuda_duration(&CUDA_SEARCH_TOTAL_NANOS, search_started.elapsed());
+        CUDA_SEARCH_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return Ok(BeliefDepthResult {
+            chosen,
+            value,
+            actions,
+            nodes,
+            cutoffs: 0,
+            depth,
+            particles: particles_searched,
+            posterior_particles,
+            deadline_reached: false,
+            provenance,
+        });
+    }
+
     let tree_build_started = std::time::Instant::now();
     let mut tree = CudaDeferredTree::new();
     let mut root_rows = Vec::new();
@@ -2322,7 +2983,8 @@ fn cuda_belief_search_with_batch(
     }
 
     let evaluation_started = std::time::Instant::now();
-    let leaf_values = evaluate_batch(&tree.leaves)?;
+    let mut leaf_values = Vec::with_capacity(tree.leaves.len());
+    evaluate_batch(&tree.leaves, &mut leaf_values)?;
     record_cuda_duration(&CUDA_EVALUATION_NANOS, evaluation_started.elapsed());
     if leaf_values.len() != tree.leaves.len() {
         return Err(DepthBeliefError::CudaBatchLengthMismatch);
@@ -2417,6 +3079,7 @@ fn cuda_belief_search_with_batch(
         .expect("CUDA belief search must have a root value");
     record_cuda_duration(&CUDA_BACKUP_NANOS, backup_started.elapsed());
     record_cuda_duration(&CUDA_SEARCH_TOTAL_NANOS, search_started.elapsed());
+    CUDA_DEFERRED_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     CUDA_SEARCH_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Ok(BeliefDepthResult {
         chosen,
@@ -2439,9 +3102,12 @@ fn cuda_belief_search(
     config: BeliefDepthConfig,
     root_exclusions: &[Action],
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
-    let mut evaluate_batch = |states: &[crate::CudaExactPackedState]| {
+    let mut evaluate_batch = |
+        states: &[crate::CudaExactPackedState],
+        result: &mut Vec<[f32; 4]>,
+    | {
         evaluator
-            .evaluate_packed_batch(states)
+            .evaluate_packed_batch_into(states, result)
             .map_err(|_| DepthBeliefError::CudaEvaluationFailed)
     };
     cuda_belief_search_with_batch(particles, config, root_exclusions, &mut evaluate_batch)
@@ -2454,16 +3120,19 @@ fn cuda_belief_search_mutex(
     config: BeliefDepthConfig,
     root_exclusions: &[Action],
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
-    let mut evaluate_batch = |states: &[crate::CudaExactPackedState]| {
+    let mut evaluate_batch = |
+        states: &[crate::CudaExactPackedState],
+        result: &mut Vec<[f32; 4]>,
+    | {
         let wait_started = std::time::Instant::now();
-        let result = {
+        let evaluation = {
             let mut evaluator = evaluator
                 .lock()
                 .map_err(|_| DepthBeliefError::CudaEvaluatorLockPoisoned)?;
             record_cuda_duration(&CUDA_QUEUE_WAIT_NANOS, wait_started.elapsed());
-            evaluator.evaluate_packed_batch(states)
+            evaluator.evaluate_packed_batch_into(states, result)
         };
-        result.map_err(|_| DepthBeliefError::CudaEvaluationFailed)
+        evaluation.map_err(|_| DepthBeliefError::CudaEvaluationFailed)
     };
     cuda_belief_search_with_batch(particles, config, root_exclusions, &mut evaluate_batch)
 }

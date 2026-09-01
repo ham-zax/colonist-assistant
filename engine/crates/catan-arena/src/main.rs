@@ -23,8 +23,7 @@ use colonist_catan_search::{
 };
 #[cfg(feature = "cuda-exact")]
 use colonist_catan_search::{
-    CudaExactEvaluator, cuda_exact_search_stats,
-    search_weighted_belief_maxn_cuda_with_config_mutex,
+    CudaExactEvaluator, cuda_exact_search_stats, search_weighted_belief_maxn_cuda_with_config_mutex,
 };
 use serde::{Deserialize, Serialize};
 
@@ -90,6 +89,10 @@ fn evaluator_benchmark_metrics(
             "computeCapability": [identity.compute_capability.0, identity.compute_capability.1],
             "evaluatorStatesPerSecond": stats.states_per_second(),
             "searchCalls": search_stats.calls,
+            "linearSearchCalls": search_stats.linear_calls,
+            "deferredSearchCalls": search_stats.deferred_calls,
+            "streamedLeaves": search_stats.streamed_leaves,
+            "streamFlushes": search_stats.stream_flushes,
             "evaluatorTimingMs": {
                 "total": stats.total_nanos as f64 / 1_000_000.0,
                 "pack": stats.total_pack_nanos as f64 / 1_000_000.0,
@@ -100,6 +103,11 @@ fn evaluator_benchmark_metrics(
             "searchTimingMs": {
                 "total": search_stats.total_nanos as f64 / 1_000_000.0,
                 "rootPreparation": search_stats.root_preparation_nanos as f64 / 1_000_000.0,
+                "linearTraversal": search_stats.linear_traversal_nanos as f64 / 1_000_000.0,
+                "linearLegalActions": search_stats.linear_legal_actions_nanos as f64 / 1_000_000.0,
+                "linearPolicy": search_stats.linear_policy_nanos as f64 / 1_000_000.0,
+                "linearBudget": search_stats.linear_budget_nanos as f64 / 1_000_000.0,
+                "linearApply": search_stats.linear_apply_nanos as f64 / 1_000_000.0,
                 "treeBuild": search_stats.tree_build_nanos as f64 / 1_000_000.0,
                 "hostPacking": search_stats.host_packing_nanos as f64 / 1_000_000.0,
                 "queueWait": search_stats.queue_wait_nanos as f64 / 1_000_000.0,

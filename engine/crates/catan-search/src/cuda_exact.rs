@@ -193,6 +193,8 @@ pub struct CudaExactEvaluator {
     topology_device: CudaSlice<u32>,
     state_device: CudaSlice<u32>,
     output_device: CudaSlice<f32>,
+    packed_host: Vec<u32>,
+    output_host: Vec<f32>,
     capacity: usize,
     identity: CudaDeviceIdentity,
     stats: CudaExactStats,
@@ -235,6 +237,8 @@ impl CudaExactEvaluator {
             topology_device,
             state_device,
             output_device,
+            packed_host: Vec::with_capacity(MAX_BATCH_CAPACITY * STATE_WORDS),
+            output_host: Vec::with_capacity(MAX_BATCH_CAPACITY * MAX_PLAYERS),
             capacity: MAX_BATCH_CAPACITY,
             identity,
             stats: CudaExactStats::default(),
@@ -278,28 +282,54 @@ impl CudaExactEvaluator {
         self.evaluate_packed_batch_inner(states, Instant::now(), 0)
     }
 
+    pub fn evaluate_packed_batch_into(
+        &mut self,
+        states: &[CudaExactPackedState],
+        result: &mut Vec<[f32; 4]>,
+    ) -> Result<(), CudaExactError> {
+        self.evaluate_packed_batch_into_inner(states, Instant::now(), 0, result)
+    }
+
     fn evaluate_packed_batch_inner(
         &mut self,
         states: &[CudaExactPackedState],
         batch_started: Instant,
         pack_nanos: u128,
     ) -> Result<Vec<[f32; 4]>, CudaExactError> {
+        let mut result = Vec::with_capacity(states.len());
+        self.evaluate_packed_batch_into_inner(states, batch_started, pack_nanos, &mut result)?;
+        Ok(result)
+    }
+
+    fn evaluate_packed_batch_into_inner(
+        &mut self,
+        states: &[CudaExactPackedState],
+        batch_started: Instant,
+        pack_nanos: u128,
+        result: &mut Vec<[f32; 4]>,
+    ) -> Result<(), CudaExactError> {
+        result.clear();
         if states.is_empty() {
-            return Ok(Vec::new());
+            return Ok(());
         }
         if states.len() > u32::MAX as usize {
             return Err(CudaExactError::BatchTooLarge);
         }
 
-        let mut packed = Vec::with_capacity(states.len() * STATE_WORDS);
+        self.packed_host.clear();
+        let packed_words = states.len() * STATE_WORDS;
+        if self.packed_host.capacity() < packed_words {
+            self.packed_host.reserve(packed_words);
+        }
         for state in states {
-            packed.extend_from_slice(&state.words);
+            self.packed_host.extend_from_slice(&state.words);
         }
 
         self.ensure_capacity(states.len())?;
 
         let upload_started = Instant::now();
-        self.stream.memcpy_htod(&packed, &mut self.state_device)?;
+        self.stream
+            .memcpy_htod(&self.packed_host, &mut self.state_device)?;
         let upload_nanos = upload_started.elapsed().as_nanos();
 
         let kernel_started = Instant::now();
@@ -321,18 +351,21 @@ impl CudaExactEvaluator {
         let kernel_nanos = kernel_started.elapsed().as_nanos();
 
         let download_started = Instant::now();
-        let mut flat_output = vec![0.0f32; states.len() * MAX_PLAYERS];
+        let output_values = states.len() * MAX_PLAYERS;
+        self.output_host.resize(output_values, 0.0);
         {
-            let output = self.output_device.slice(0..flat_output.len());
-            self.stream.memcpy_dtoh(&output, &mut flat_output)?;
+            let output = self.output_device.slice(0..output_values);
+            self.stream.memcpy_dtoh(&output, &mut self.output_host)?;
         }
         self.stream.synchronize()?;
         let download_nanos = download_started.elapsed().as_nanos();
 
-        let mut result = Vec::with_capacity(states.len());
+        if result.capacity() < states.len() {
+            result.reserve(states.len());
+        }
         for (index, (state, values)) in states
             .iter()
-            .zip(flat_output.chunks_exact(MAX_PLAYERS))
+            .zip(self.output_host.chunks_exact(MAX_PLAYERS))
             .enumerate()
         {
             for (player, value) in values.iter().copied().enumerate() {
@@ -377,7 +410,7 @@ impl CudaExactEvaluator {
             .total_download_nanos
             .saturating_add(download_nanos);
         self.stats.total_nanos = self.stats.total_nanos.saturating_add(batch_nanos);
-        Ok(result)
+        Ok(())
     }
 
     fn ensure_capacity(&mut self, required: usize) -> Result<(), CudaExactError> {
