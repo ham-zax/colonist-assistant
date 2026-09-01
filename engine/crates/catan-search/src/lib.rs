@@ -20,11 +20,19 @@ mod threats;
 mod trade_model;
 mod trade_safety;
 
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+mod cuda_exact;
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+pub use cuda_exact::*;
+
 pub use eval::{
     ExpansionOption, TrophyOutlook, evaluate, expansion_option_value, expected_discard_loss,
     largest_army_outlook, longest_road_outlook, marginal_development_value, production_pips,
     strategic_utility,
 };
+#[cfg(feature = "benchmark-profile")]
+pub use eval::{EvaluateProfile, evaluate_profiled};
 pub use exact::{
     ExactActionFamily, ExactActionValue, ExactDecisionResult, exact_family_for_action,
     solve_exact_belief, solve_exact_belief_excluding,
@@ -79,4 +87,12 @@ pub use depth::{
     search_weighted_belief_paranoid_bounded_timed,
     search_weighted_belief_paranoid_bounded_timed_excluding,
     search_weighted_belief_paranoid_with_config,
+};
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+pub use depth::{
+    CudaExactSearchStats, cuda_exact_search_stats,
+    search_weighted_belief_maxn_cuda_with_config,
+    search_weighted_belief_maxn_cuda_with_config_excluding,
+    search_weighted_belief_maxn_cuda_with_config_mutex,
+    search_weighted_belief_maxn_cuda_with_config_mutex_excluding,
 };

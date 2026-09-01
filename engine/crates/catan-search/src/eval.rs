@@ -990,29 +990,22 @@ pub(crate) fn public_strategic_utility(state: &GameState, player: u8) -> f32 {
         + public_army_acquire * public_army_retain * 3.2 * urgency
 }
 
-/// Returns a normalized relative strategic-value vector.
-///
-/// Terminal states are exact one-hot wins. Nonterminal values are useful for
-/// multiplayer backup and ranking, but are deliberately not described as
-/// calibrated win probabilities in the product UI.
-pub fn evaluate(state: &GameState) -> [f32; 4] {
-    let mut result = [0.0; 4];
-    if let Some(winner) = state.winner() {
-        result[winner as usize] = 1.0;
-        return result;
-    }
+fn evaluate_with_precomputed_routes(
+    state: &GameState,
+    route_maps: &[Vec<u8>],
+    arrival_scores: &[Vec<f32>],
+) -> [f32; 4] {
     let count = state.board.num_players as usize;
-    let route_maps = all_route_maps(state);
-    let arrival_scores = expansion_arrival_scores(state, None, true);
+    let mut result = [0.0; 4];
     let mut logits = [f32::NEG_INFINITY; 4];
     let mut maximum = f32::NEG_INFINITY;
     for (player, logit) in logits.iter_mut().enumerate().take(count) {
         *logit = strategic_utility_with_routes_and_knowledge(
             state,
             player as u8,
-            &route_maps,
+            route_maps,
             true,
-            Some(&arrival_scores),
+            Some(arrival_scores),
         );
         maximum = maximum.max(*logit);
     }
@@ -1032,6 +1025,58 @@ pub fn evaluate(state: &GameState) -> [f32; 4] {
         }
     }
     result
+}
+
+/// Returns a normalized relative strategic-value vector.
+///
+/// Terminal states are exact one-hot wins. Nonterminal values are useful for
+/// multiplayer backup and ranking, but are deliberately not described as
+/// calibrated win probabilities in the product UI.
+pub fn evaluate(state: &GameState) -> [f32; 4] {
+    if let Some(winner) = state.winner() {
+        let mut result = [0.0; 4];
+        result[winner as usize] = 1.0;
+        return result;
+    }
+    let route_maps = all_route_maps(state);
+    let arrival_scores = expansion_arrival_scores(state, None, true);
+    evaluate_with_precomputed_routes(state, &route_maps, &arrival_scores)
+}
+
+#[cfg(feature = "benchmark-profile")]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EvaluateProfile {
+    pub route_map_nanos: u64,
+    pub arrival_score_nanos: u64,
+    pub remaining_utility_nanos: u64,
+}
+
+#[cfg(feature = "benchmark-profile")]
+pub fn evaluate_profiled(state: &GameState) -> ([f32; 4], EvaluateProfile) {
+    use std::time::Instant;
+
+    if let Some(winner) = state.winner() {
+        let mut result = [0.0; 4];
+        result[winner as usize] = 1.0;
+        return (result, EvaluateProfile::default());
+    }
+    let started = Instant::now();
+    let route_maps = all_route_maps(state);
+    let route_map_nanos = started.elapsed().as_nanos() as u64;
+    let started = Instant::now();
+    let arrival_scores = expansion_arrival_scores(state, None, true);
+    let arrival_score_nanos = started.elapsed().as_nanos() as u64;
+    let started = Instant::now();
+    let result = evaluate_with_precomputed_routes(state, &route_maps, &arrival_scores);
+    let remaining_utility_nanos = started.elapsed().as_nanos() as u64;
+    (
+        result,
+        EvaluateProfile {
+            route_map_nanos,
+            arrival_score_nanos,
+            remaining_utility_nanos,
+        },
+    )
 }
 
 pub(crate) fn vertex_value(state: &GameState, vertex: u8, player: u8) -> f32 {

@@ -9,8 +9,21 @@ rust-version.workspace = true
 name = "colonist-arena"
 path = "src/main.rs"
 
+[[bin]]
+name = "exact-gpu-parity"
+path = "src/bin/exact-gpu-parity.rs"
+required-features = ["cuda-exact"]
+
+[[bin]]
+name = "exact-gpu-search-parity"
+path = "src/bin/exact-gpu-search-parity.rs"
+required-features = ["cuda-exact"]
+
+[features]
+cuda-exact = ["colonist-catan-search/cuda-exact"]
+
 [dependencies]
 colonist-catan-core = { path = "../catan-core" }
-colonist-catan-search = { path = "../catan-search" }
+colonist-catan-search = { path = "../catan-search", features = ["benchmark-profile"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

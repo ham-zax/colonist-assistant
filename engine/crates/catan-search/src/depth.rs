@@ -131,6 +131,16 @@ impl BeliefDepthConfig {
 pub enum DepthBeliefError {
     Empty,
     PublicStateMismatch,
+    #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+    CudaTimeBudgetUnsupported,
+    #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+    CudaOpeningUnsupported,
+    #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+    CudaEvaluationFailed,
+    #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+    CudaBatchLengthMismatch,
+    #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+    CudaEvaluatorLockPoisoned,
 }
 
 #[derive(Clone, Copy)]
@@ -1669,6 +1679,831 @@ pub fn search_weighted_belief_paranoid_bounded_timed_excluding(
         true,
         root_exclusions,
     )
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CudaExactSearchStats {
+    pub calls: u64,
+    pub total_nanos: u64,
+    pub root_preparation_nanos: u64,
+    pub tree_build_nanos: u64,
+    pub host_packing_nanos: u64,
+    pub queue_wait_nanos: u64,
+    pub evaluation_nanos: u64,
+    pub backup_nanos: u64,
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_SEARCH_CALLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_SEARCH_TOTAL_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_ROOT_PREPARATION_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_TREE_BUILD_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_HOST_PACKING_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_QUEUE_WAIT_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_EVALUATION_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+static CUDA_BACKUP_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+fn record_cuda_duration(counter: &std::sync::atomic::AtomicU64, elapsed: std::time::Duration) {
+    counter.fetch_add(
+        elapsed.as_nanos().min(u64::MAX as u128) as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+pub fn cuda_exact_search_stats() -> CudaExactSearchStats {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    CudaExactSearchStats {
+        calls: CUDA_SEARCH_CALLS.load(Relaxed),
+        total_nanos: CUDA_SEARCH_TOTAL_NANOS.load(Relaxed),
+        root_preparation_nanos: CUDA_ROOT_PREPARATION_NANOS.load(Relaxed),
+        tree_build_nanos: CUDA_TREE_BUILD_NANOS.load(Relaxed),
+        host_packing_nanos: CUDA_HOST_PACKING_NANOS.load(Relaxed),
+        queue_wait_nanos: CUDA_QUEUE_WAIT_NANOS.load(Relaxed),
+        evaluation_nanos: CUDA_EVALUATION_NANOS.load(Relaxed),
+        backup_nanos: CUDA_BACKUP_NANOS.load(Relaxed),
+    }
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+struct CudaDeferredChild {
+    node: usize,
+    weight: f32,
+    friction: Option<(u8, f32)>,
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+enum CudaDeferredNode {
+    Leaf(usize),
+    Weighted(Vec<CudaDeferredChild>),
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+struct CudaDeferredTree {
+    nodes: Vec<CudaDeferredNode>,
+    leaves: Vec<crate::CudaExactPackedState>,
+    packing_nanos: u64,
+    packing_failed: bool,
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+impl CudaDeferredTree {
+    fn new() -> Self {
+        Self {
+            nodes: Vec::new(),
+            leaves: Vec::new(),
+            packing_nanos: 0,
+            packing_failed: false,
+        }
+    }
+
+    fn leaf(&mut self, state: &GameState) -> usize {
+        let leaf = self.leaves.len();
+        let packing_started = std::time::Instant::now();
+        match crate::CudaExactPackedState::new(state) {
+            Ok(packed) => self.leaves.push(packed),
+            Err(_) => self.packing_failed = true,
+        }
+        self.packing_nanos = self.packing_nanos.saturating_add(
+            packing_started
+                .elapsed()
+                .as_nanos()
+                .min(u64::MAX as u128) as u64,
+        );
+        let node = self.nodes.len();
+        self.nodes.push(CudaDeferredNode::Leaf(leaf));
+        node
+    }
+
+    fn weighted(&mut self, children: Vec<CudaDeferredChild>) -> usize {
+        let node = self.nodes.len();
+        self.nodes.push(CudaDeferredNode::Weighted(children));
+        node
+    }
+
+    fn backup(&self, node: usize, leaf_values: &[[f32; 4]]) -> [f32; 4] {
+        match &self.nodes[node] {
+            CudaDeferredNode::Leaf(leaf) => leaf_values[*leaf],
+            CudaDeferredNode::Weighted(children) => {
+                let mut expected = [0.0; 4];
+                for child in children {
+                    let mut value = self.backup(child.node, leaf_values);
+                    if let Some((actor, friction)) = child.friction {
+                        value[actor as usize] = (value[actor as usize] - friction).max(0.0);
+                    }
+                    for player in 0..4 {
+                        expected[player] += value[player] * child.weight;
+                    }
+                }
+                expected
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+fn cuda_action_friction(state: &GameState, action: &Action, actor: u8) -> f32 {
+    let (base, give, receive) = match action {
+        Action::OfferTrade { give, receive, .. } => {
+            (DOMESTIC_OFFER_FRICTION, Some(give), Some(receive))
+        }
+        Action::CounterTrade { give, receive } => {
+            (COUNTEROFFER_FRICTION, Some(give), Some(receive))
+        }
+        _ => (0.0, None, None),
+    };
+    let is_hand_safety_conversion = give.zip(receive).is_some_and(|(give, receive)| {
+        state.players[actor as usize].resource_total() > state.card_discard_limit
+            && give.iter().sum::<u8>() > receive.iter().sum::<u8>()
+    });
+    if is_hand_safety_conversion {
+        base * 0.25
+    } else {
+        base
+    }
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+struct CudaDeferredSearcher<'a> {
+    tree: &'a mut CudaDeferredTree,
+    maximum_depth: u8,
+    maximum_nodes: u32,
+    node_limit: u32,
+    branch_cap: usize,
+    nodes: u32,
+    deepest_depth: u8,
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+impl CudaDeferredSearcher<'_> {
+    fn visit(
+        &mut self,
+        state: &GameState,
+        depth: u8,
+        actions_in_turn: u8,
+        subtree_limit: u32,
+    ) -> usize {
+        let subtree_limit = subtree_limit.min(self.node_limit).min(self.maximum_nodes);
+        if self.nodes >= subtree_limit {
+            return self.tree.leaf(state);
+        }
+        self.nodes += 1;
+        self.deepest_depth = self.deepest_depth.max(depth);
+        if state.is_terminal() || depth >= self.maximum_depth || actions_in_turn >= 18 {
+            return self.tree.leaf(state);
+        }
+        let actions = state.legal_actions();
+        if actions.is_empty() {
+            return self.tree.leaf(state);
+        }
+        match state.node_kind() {
+            NodeKind::Terminal => self.tree.leaf(state),
+            NodeKind::Chance => {
+                let total = actions
+                    .iter()
+                    .map(|action| state.chance_weight(action) as f32)
+                    .sum::<f32>()
+                    .max(f32::EPSILON);
+                let weighted_actions = actions
+                    .into_iter()
+                    .filter_map(|action| {
+                        let weight = state.chance_weight(&action) as f32 / total;
+                        (weight > 0.0).then_some((action, weight))
+                    })
+                    .collect::<Vec<_>>();
+                let remaining = subtree_limit.saturating_sub(self.nodes);
+                let weights = weighted_actions
+                    .iter()
+                    .map(|(_, weight)| *weight)
+                    .collect::<Vec<_>>();
+                let budgets = allocate_weighted_node_budgets(&weights, remaining);
+                let mut carry = 0_u32;
+                let mut children = Vec::with_capacity(weighted_actions.len());
+                for (index, (action, weight)) in weighted_actions.into_iter().enumerate() {
+                    let allowance = budgets
+                        .get(index)
+                        .copied()
+                        .unwrap_or(0)
+                        .saturating_add(carry);
+                    let before = self.nodes;
+                    let child_limit = self.nodes.saturating_add(allowance).min(subtree_limit);
+                    let mut next = state.clone();
+                    next.apply(&action)
+                        .expect("legal chance action must transition");
+                    let node = if allowance > 0 && self.nodes < child_limit {
+                        self.visit(&next, depth, actions_in_turn.saturating_add(1), child_limit)
+                    } else {
+                        self.tree.leaf(&next)
+                    };
+                    let used = self.nodes.saturating_sub(before);
+                    carry = allowance.saturating_sub(used);
+                    children.push(CudaDeferredChild {
+                        node,
+                        weight,
+                        friction: None,
+                    });
+                }
+                self.tree.weighted(children)
+            }
+            NodeKind::Decision { actor } => {
+                let remaining = subtree_limit.saturating_sub(self.nodes);
+                if remaining == 0 {
+                    return self.tree.leaf(state);
+                }
+                let mut ranked =
+                    recursive_observation_policy(state, &actions, actor, self.branch_cap);
+                ranked.truncate(ranked.len().min(remaining as usize));
+                let budgets = allocate_root_node_budgets(ranked.len(), remaining);
+                let mut carry = 0_u32;
+                let mut children = Vec::with_capacity(ranked.len());
+                for (index, (action, weight)) in ranked.into_iter().enumerate() {
+                    if weight <= 0.0 {
+                        continue;
+                    }
+                    let allowance = budgets
+                        .get(index)
+                        .copied()
+                        .unwrap_or(0)
+                        .saturating_add(carry);
+                    let before = self.nodes;
+                    let child_limit = self.nodes.saturating_add(allowance).min(subtree_limit);
+                    let mut next = state.clone();
+                    next.apply(&action)
+                        .expect("observation-policy action must transition");
+                    let completed_turn =
+                        next.turn != state.turn || next.current_player != state.current_player;
+                    let node = if allowance > 0 && self.nodes < child_limit {
+                        self.visit(
+                            &next,
+                            depth + u8::from(completed_turn),
+                            if completed_turn {
+                                0
+                            } else {
+                                actions_in_turn.saturating_add(1)
+                            },
+                            child_limit,
+                        )
+                    } else {
+                        self.tree.leaf(&next)
+                    };
+                    let used = self.nodes.saturating_sub(before);
+                    carry = allowance.saturating_sub(used);
+                    children.push(CudaDeferredChild {
+                        node,
+                        weight,
+                        friction: Some((actor, cuda_action_friction(state, &action, actor))),
+                    });
+                }
+                self.tree.weighted(children)
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+struct CudaDeferredRootEntry {
+    action: Action,
+    node: usize,
+    friction: f32,
+    legal: bool,
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+struct CudaDeferredRootRow {
+    weight: f32,
+    entries: Vec<CudaDeferredRootEntry>,
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+fn cuda_belief_search_with_batch(
+    particles: &[BeliefParticle],
+    config: BeliefDepthConfig,
+    root_exclusions: &[Action],
+    evaluate_batch: &mut dyn FnMut(
+        &[crate::CudaExactPackedState],
+    ) -> Result<Vec<[f32; 4]>, DepthBeliefError>,
+) -> Result<BeliefDepthResult, DepthBeliefError> {
+    let search_started = std::time::Instant::now();
+    let config = config.normalized();
+    if config.time_budget_ms != 0 {
+        return Err(DepthBeliefError::CudaTimeBudgetUnsupported);
+    }
+    let Some(first_particle) = particles.first() else {
+        return Err(DepthBeliefError::Empty);
+    };
+    let first = &first_particle.state;
+    let observer = first.actor();
+    let public = first.public_hash();
+    if particles
+        .iter()
+        .any(|particle| particle.state.public_hash() != public)
+    {
+        return Err(DepthBeliefError::PublicStateMismatch);
+    }
+    if matches!(
+        first.phase,
+        Phase::SetupSettlement | Phase::SetupRoad { .. }
+    ) {
+        return Err(DepthBeliefError::CudaOpeningUnsupported);
+    }
+
+    let root_preparation_started = std::time::Instant::now();
+    let maximum_depth = config.maximum_depth;
+    let branch_cap = config.branch_cap;
+    let maximum_nodes = config.maximum_nodes;
+    let posterior_particles = particles.len();
+    let posterior = particles;
+    let coalesced_storage = coalesce_identical_particles(particles);
+    let coalesced = coalesced_storage.as_slice();
+    let strategic_storage;
+    let particles = if coalesced.len() > config.strategic_particle_limit {
+        strategic_storage =
+            select_experimental_strategic_particles(coalesced, config.strategic_particle_limit);
+        strategic_storage.as_slice()
+    } else {
+        coalesced
+    };
+
+    let total_weight = particles
+        .iter()
+        .map(|particle| particle.weight.max(0.0))
+        .sum::<f32>()
+        .max(f32::EPSILON);
+    let planner_nodes = (maximum_nodes / 12).clamp(300, 4_000);
+    let ranked_diagnostics =
+        normalize_belief_root_priors_with_diagnostics(particles, observer, planner_nodes);
+    let ranked_root_count = ranked_diagnostics.len();
+    let mut pruned_roots = Vec::<PrunedRootDiagnostic>::new();
+    for candidate in &ranked_diagnostics {
+        if root_exclusions.contains(&candidate.action) {
+            pruned_roots.push(PrunedRootDiagnostic {
+                action: candidate.action.clone(),
+                pre_truncation_rank: Some(candidate.rank),
+                reason: RootPruneReason::RootExcluded,
+            });
+        }
+    }
+    let root_scored = ranked_diagnostics
+        .iter()
+        .filter(|candidate| !root_exclusions.contains(&candidate.action))
+        .map(|candidate| (candidate.action.clone(), candidate.prior))
+        .collect::<Vec<_>>();
+    let immediate_threat_weight = posterior_immediate_threat_weight(
+        posterior
+            .iter()
+            .map(|particle| (&particle.state, particle.weight)),
+        observer,
+    );
+    let verified_blockers = if immediate_threat_weight > f32::EPSILON {
+        root_scored
+            .iter()
+            .filter(|(action, _)| {
+                forced_loss_weight(
+                    posterior
+                        .iter()
+                        .map(|particle| (&particle.state, particle.weight)),
+                    observer,
+                    action,
+                ) + 1e-6
+                    < immediate_threat_weight
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let ordinarily_retained = truncate_root_preserving_end_turn(root_scored.clone(), branch_cap);
+    let mut retained = Vec::with_capacity(branch_cap.max(1));
+    for candidate in verified_blockers.into_iter().chain(ordinarily_retained) {
+        if retained.len() >= branch_cap.max(1) {
+            break;
+        }
+        if !retained.iter().any(|(action, _)| action == &candidate.0) {
+            retained.push(candidate);
+        }
+    }
+    for (action, _) in &root_scored {
+        if !retained
+            .iter()
+            .any(|(retained_action, _)| retained_action == action)
+        {
+            pruned_roots.push(PrunedRootDiagnostic {
+                action: action.clone(),
+                pre_truncation_rank: ranked_diagnostics
+                    .iter()
+                    .find(|candidate| candidate.action == *action)
+                    .map(|candidate| candidate.rank),
+                reason: RootPruneReason::BranchTruncated,
+            });
+        }
+    }
+    let mut root_actions = retained;
+    let mut exact_family_replacement = None;
+    if let Some(monopoly_slot) = root_actions
+        .iter()
+        .position(|(action, _)| matches!(action, Action::PlayMonopoly { .. }))
+    {
+        let (fallback, fallback_prior) = root_actions[monopoly_slot].clone();
+        let replacement = solve_exact_belief(particles, ExactActionFamily::Monopoly)
+            .chosen
+            .unwrap_or_else(|| fallback.clone());
+        for (action, _) in root_actions
+            .iter()
+            .filter(|(action, _)| matches!(action, Action::PlayMonopoly { .. }))
+        {
+            if action != &replacement {
+                pruned_roots.push(PrunedRootDiagnostic {
+                    action: action.clone(),
+                    pre_truncation_rank: ranked_diagnostics
+                        .iter()
+                        .find(|candidate| candidate.action == *action)
+                        .map(|candidate| candidate.rank),
+                    reason: RootPruneReason::ExactFamilyCollapsed,
+                });
+            }
+        }
+        if replacement != fallback {
+            exact_family_replacement = Some((fallback, replacement.clone()));
+        }
+        let replacement_prior = ranked_diagnostics
+            .iter()
+            .find(|candidate| candidate.action == replacement)
+            .map_or(fallback_prior, |candidate| candidate.prior);
+        root_actions.retain(|(action, _)| !matches!(action, Action::PlayMonopoly { .. }));
+        root_actions.insert(
+            monopoly_slot.min(root_actions.len()),
+            (replacement, replacement_prior),
+        );
+    }
+    let mut unique_root_actions = Vec::with_capacity(root_actions.len());
+    for candidate in root_actions {
+        if !unique_root_actions
+            .iter()
+            .any(|(action, _)| action == &candidate.0)
+        {
+            unique_root_actions.push(candidate);
+        }
+    }
+    let mut root_actions = unique_root_actions;
+    let safe_root_actions = root_actions
+        .iter()
+        .filter(|(action, _)| {
+            belief_domestic_trade_threat(
+                particles
+                    .iter()
+                    .map(|particle| (&particle.state, particle.weight)),
+                action,
+            )
+            .is_none()
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !safe_root_actions.is_empty() {
+        for (action, _) in &root_actions {
+            if !safe_root_actions
+                .iter()
+                .any(|(safe_action, _)| safe_action == action)
+            {
+                pruned_roots.push(PrunedRootDiagnostic {
+                    action: action.clone(),
+                    pre_truncation_rank: ranked_diagnostics
+                        .iter()
+                        .find(|candidate| candidate.action == *action)
+                        .map(|candidate| candidate.rank),
+                    reason: RootPruneReason::TradeSafety,
+                });
+            }
+        }
+        root_actions = safe_root_actions;
+    }
+
+    let action_budgets = allocate_root_node_budgets(
+        root_actions.len(),
+        maximum_nodes / particles.len().max(1) as u32,
+    );
+    let positive_particle_count = particles
+        .iter()
+        .filter(|particle| particle.weight > 0.0)
+        .count()
+        .max(1) as u32;
+    let retained_roots = root_actions
+        .iter()
+        .zip(action_budgets.iter().copied())
+        .map(|((action, prior), node_budget_per_particle)| {
+            let diagnostic = ranked_diagnostics
+                .iter()
+                .find(|candidate| candidate.action == *action);
+            RetainedRootDiagnostic {
+                action: action.clone(),
+                pre_truncation_rank: diagnostic.map(|candidate| candidate.rank),
+                prior: *prior,
+                node_budget_per_particle,
+                allocated_nodes: node_budget_per_particle.saturating_mul(positive_particle_count),
+                planner_value: diagnostic.and_then(|candidate| candidate.planner_value),
+                planner_completion_mass: diagnostic
+                    .and_then(|candidate| candidate.planner_completion_mass),
+            }
+        })
+        .collect::<Vec<_>>();
+    let pruned_root_count = pruned_roots.len();
+    pruned_roots.truncate(MAX_ROOT_PROVENANCE);
+    let mut provenance = BeliefSearchProvenance {
+        ranked_root_count,
+        ranked_roots: ranked_diagnostics
+            .iter()
+            .take(MAX_ROOT_PROVENANCE)
+            .cloned()
+            .collect(),
+        retained_roots,
+        pruned_root_count,
+        pruned_roots,
+        exact_family_replacement,
+        safety_replacement: None,
+    };
+    let root_actions = root_actions
+        .into_iter()
+        .map(|(action, _)| action)
+        .collect::<Vec<_>>();
+    record_cuda_duration(
+        &CUDA_ROOT_PREPARATION_NANOS,
+        root_preparation_started.elapsed(),
+    );
+
+    let tree_build_started = std::time::Instant::now();
+    let mut tree = CudaDeferredTree::new();
+    let mut root_rows = Vec::new();
+    let mut nodes = 0_u32;
+    let mut depth = 0_u8;
+    let mut particles_searched = 0_usize;
+    for particle in particles {
+        let weight = particle.weight.max(0.0) / total_weight;
+        if weight <= 0.0 {
+            continue;
+        }
+        particles_searched += 1;
+        let mut entries = Vec::with_capacity(root_actions.len());
+        for (action_index, action) in root_actions.iter().enumerate() {
+            let mut next = particle.state.clone();
+            if next.apply(action).is_err() {
+                entries.push(CudaDeferredRootEntry {
+                    action: action.clone(),
+                    node: tree.leaf(&particle.state),
+                    friction: 0.0,
+                    legal: false,
+                });
+                continue;
+            }
+            let completed_turn = next.turn != particle.state.turn
+                || next.current_player != particle.state.current_player;
+            let nodes_for_action = action_budgets
+                .get(action_index)
+                .copied()
+                .unwrap_or(1)
+                .max(1);
+            let mut searcher = CudaDeferredSearcher {
+                tree: &mut tree,
+                maximum_depth,
+                maximum_nodes: nodes_for_action,
+                node_limit: nodes_for_action,
+                branch_cap: branch_cap.max(1),
+                nodes: 0,
+                deepest_depth: 0,
+            };
+            let node_limit = searcher.node_limit;
+            let node = searcher.visit(
+                &next,
+                u8::from(completed_turn),
+                if completed_turn { 0 } else { 1 },
+                node_limit,
+            );
+            nodes += searcher.nodes;
+            depth = depth.max(searcher.deepest_depth);
+            entries.push(CudaDeferredRootEntry {
+                action: action.clone(),
+                node,
+                friction: cuda_action_friction(&particle.state, action, observer),
+                legal: true,
+            });
+        }
+        root_rows.push(CudaDeferredRootRow { weight, entries });
+    }
+
+    let fallback_node =
+        if root_rows.is_empty() || root_rows.iter().all(|row| row.entries.is_empty()) {
+            Some(tree.leaf(first))
+        } else {
+            None
+        };
+    record_cuda_duration(
+        &CUDA_HOST_PACKING_NANOS,
+        std::time::Duration::from_nanos(tree.packing_nanos),
+    );
+    record_cuda_duration(&CUDA_TREE_BUILD_NANOS, tree_build_started.elapsed());
+    if tree.packing_failed {
+        return Err(DepthBeliefError::CudaEvaluationFailed);
+    }
+
+    let evaluation_started = std::time::Instant::now();
+    let leaf_values = evaluate_batch(&tree.leaves)?;
+    record_cuda_duration(&CUDA_EVALUATION_NANOS, evaluation_started.elapsed());
+    if leaf_values.len() != tree.leaves.len() {
+        return Err(DepthBeliefError::CudaBatchLengthMismatch);
+    }
+
+    let backup_started = std::time::Instant::now();
+    struct Aggregate {
+        action: Action,
+        value: [f32; 4],
+        covered_weight: f32,
+        legal_weight: f32,
+        lower_bound: [f32; 4],
+    }
+    let mut aggregate = Vec::<Aggregate>::new();
+    for row in root_rows {
+        for entry in row.entries {
+            let mut value = tree.backup(entry.node, &leaf_values);
+            if entry.legal {
+                value[observer as usize] = (value[observer as usize] - entry.friction).max(0.0);
+            }
+            if let Some(existing) = aggregate
+                .iter_mut()
+                .find(|candidate| candidate.action == entry.action)
+            {
+                for (sum, component) in existing.value.iter_mut().zip(value) {
+                    *sum += component * row.weight;
+                }
+                existing.covered_weight += row.weight;
+                if entry.legal {
+                    existing.legal_weight += row.weight;
+                }
+                for (bound, component) in existing.lower_bound.iter_mut().zip(value) {
+                    *bound = bound.min(component);
+                }
+            } else {
+                aggregate.push(Aggregate {
+                    action: entry.action,
+                    value: value.map(|component| component * row.weight),
+                    covered_weight: row.weight,
+                    legal_weight: if entry.legal { row.weight } else { 0.0 },
+                    lower_bound: value,
+                });
+            }
+        }
+    }
+    let actor = observer as usize;
+    let mut actions = aggregate
+        .into_iter()
+        .map(|entry| DepthActionValue {
+            action: entry.action,
+            value: entry
+                .value
+                .map(|value| value / entry.covered_weight.max(f32::EPSILON)),
+            legal_weight: entry.legal_weight.clamp(0.0, 1.0),
+            lower_confidence_value: entry.lower_bound,
+        })
+        .collect::<Vec<_>>();
+    actions.sort_by(|left, right| right.value[actor].total_cmp(&left.value[actor]));
+    let mut chosen_index = 0usize;
+    if let Some(leading) = actions.first() {
+        let leading_loss = forced_loss_weight(
+            posterior
+                .iter()
+                .map(|particle| (&particle.state, particle.weight)),
+            observer,
+            &leading.action,
+        );
+        if leading_loss >= 1.0 - 1e-6
+            && let Some(escape_index) = actions.iter().position(|candidate| {
+                forced_loss_weight(
+                    posterior
+                        .iter()
+                        .map(|particle| (&particle.state, particle.weight)),
+                    observer,
+                    &candidate.action,
+                ) <= 1e-6
+            })
+        {
+            chosen_index = escape_index;
+        }
+    }
+    if chosen_index > 0
+        && let (Some(leading), Some(replacement)) = (actions.first(), actions.get(chosen_index))
+    {
+        provenance.safety_replacement = Some((leading.action.clone(), replacement.action.clone()));
+    }
+    let chosen = actions.get(chosen_index).map(|entry| entry.action.clone());
+    let value = actions
+        .get(chosen_index)
+        .map(|entry| entry.value)
+        .or_else(|| fallback_node.map(|node| tree.backup(node, &leaf_values)))
+        .expect("CUDA belief search must have a root value");
+    record_cuda_duration(&CUDA_BACKUP_NANOS, backup_started.elapsed());
+    record_cuda_duration(&CUDA_SEARCH_TOTAL_NANOS, search_started.elapsed());
+    CUDA_SEARCH_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Ok(BeliefDepthResult {
+        chosen,
+        value,
+        actions,
+        nodes,
+        cutoffs: 0,
+        depth,
+        particles: particles_searched,
+        posterior_particles,
+        deadline_reached: false,
+        provenance,
+    })
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+fn cuda_belief_search(
+    evaluator: &mut crate::CudaExactEvaluator,
+    particles: &[BeliefParticle],
+    config: BeliefDepthConfig,
+    root_exclusions: &[Action],
+) -> Result<BeliefDepthResult, DepthBeliefError> {
+    let mut evaluate_batch = |states: &[crate::CudaExactPackedState]| {
+        evaluator
+            .evaluate_packed_batch(states)
+            .map_err(|_| DepthBeliefError::CudaEvaluationFailed)
+    };
+    cuda_belief_search_with_batch(particles, config, root_exclusions, &mut evaluate_batch)
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+fn cuda_belief_search_mutex(
+    evaluator: &std::sync::Mutex<crate::CudaExactEvaluator>,
+    particles: &[BeliefParticle],
+    config: BeliefDepthConfig,
+    root_exclusions: &[Action],
+) -> Result<BeliefDepthResult, DepthBeliefError> {
+    let mut evaluate_batch = |states: &[crate::CudaExactPackedState]| {
+        let wait_started = std::time::Instant::now();
+        let result = {
+            let mut evaluator = evaluator
+                .lock()
+                .map_err(|_| DepthBeliefError::CudaEvaluatorLockPoisoned)?;
+            record_cuda_duration(&CUDA_QUEUE_WAIT_NANOS, wait_started.elapsed());
+            evaluator.evaluate_packed_batch(states)
+        };
+        result.map_err(|_| DepthBeliefError::CudaEvaluationFailed)
+    };
+    cuda_belief_search_with_batch(particles, config, root_exclusions, &mut evaluate_batch)
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+pub fn search_weighted_belief_maxn_cuda_with_config(
+    evaluator: &mut crate::CudaExactEvaluator,
+    particles: &[BeliefParticle],
+    config: BeliefDepthConfig,
+) -> Result<BeliefDepthResult, DepthBeliefError> {
+    cuda_belief_search(evaluator, particles, config, &[])
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+pub fn search_weighted_belief_maxn_cuda_with_config_mutex(
+    evaluator: &std::sync::Mutex<crate::CudaExactEvaluator>,
+    particles: &[BeliefParticle],
+    config: BeliefDepthConfig,
+) -> Result<BeliefDepthResult, DepthBeliefError> {
+    cuda_belief_search_mutex(evaluator, particles, config, &[])
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+pub fn search_weighted_belief_maxn_cuda_with_config_excluding(
+    evaluator: &mut crate::CudaExactEvaluator,
+    particles: &[BeliefParticle],
+    config: BeliefDepthConfig,
+    root_exclusions: &[Action],
+) -> Result<BeliefDepthResult, DepthBeliefError> {
+    cuda_belief_search(evaluator, particles, config, root_exclusions)
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+pub fn search_weighted_belief_maxn_cuda_with_config_mutex_excluding(
+    evaluator: &std::sync::Mutex<crate::CudaExactEvaluator>,
+    particles: &[BeliefParticle],
+    config: BeliefDepthConfig,
+    root_exclusions: &[Action],
+) -> Result<BeliefDepthResult, DepthBeliefError> {
+    cuda_belief_search_mutex(evaluator, particles, config, root_exclusions)
 }
 
 #[cfg(test)]

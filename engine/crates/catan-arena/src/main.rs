@@ -4,9 +4,12 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
+#[cfg(feature = "cuda-exact")]
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use colonist_catan_arena::belief_particles;
 use colonist_catan_core::{
     Action, Building, GameState, NodeKind, Phase, PlayerState, SplitMix64, TradeOffer,
 };
@@ -18,6 +21,11 @@ use colonist_catan_search::{
     search_weighted_belief_maxn_with_config, search_weighted_belief_paranoid_with_config,
     strategic_utility, trade_acceptance_features,
 };
+#[cfg(feature = "cuda-exact")]
+use colonist_catan_search::{
+    CudaExactEvaluator, cuda_exact_search_stats,
+    search_weighted_belief_maxn_cuda_with_config_mutex,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +36,96 @@ enum Engine {
     AlphaBeta,
     Uct,
     Puct,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EvaluatorBackend {
+    Cpu,
+    Cuda,
+}
+
+impl EvaluatorBackend {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "cpu" => Some(Self::Cpu),
+            "cuda" => Some(Self::Cuda),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu-exact",
+            Self::Cuda => "cuda-exact",
+        }
+    }
+}
+
+#[cfg(feature = "cuda-exact")]
+static CUDA_EXACT_EVALUATOR: OnceLock<Mutex<CudaExactEvaluator>> = OnceLock::new();
+
+#[cfg(feature = "cuda-exact")]
+fn evaluator_benchmark_metrics(
+    backend: EvaluatorBackend,
+) -> (serde_json::Value, serde_json::Value, serde_json::Value) {
+    if backend != EvaluatorBackend::Cuda {
+        return (
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        );
+    }
+    let evaluator = CUDA_EXACT_EVALUATOR
+        .get()
+        .expect("CUDA evaluator initialized before metrics")
+        .lock()
+        .expect("CUDA evaluator lock poisoned before metrics");
+    let identity = evaluator.device_identity();
+    let stats = evaluator.stats();
+    let search_stats = cuda_exact_search_stats();
+    (
+        serde_json::json!({
+            "name": identity.name,
+            "ordinal": identity.ordinal,
+            "computeCapability": [identity.compute_capability.0, identity.compute_capability.1],
+            "evaluatorStatesPerSecond": stats.states_per_second(),
+            "searchCalls": search_stats.calls,
+            "evaluatorTimingMs": {
+                "total": stats.total_nanos as f64 / 1_000_000.0,
+                "pack": stats.total_pack_nanos as f64 / 1_000_000.0,
+                "hostToDevice": stats.total_upload_nanos as f64 / 1_000_000.0,
+                "kernel": stats.total_kernel_nanos as f64 / 1_000_000.0,
+                "deviceToHost": stats.total_download_nanos as f64 / 1_000_000.0,
+            },
+            "searchTimingMs": {
+                "total": search_stats.total_nanos as f64 / 1_000_000.0,
+                "rootPreparation": search_stats.root_preparation_nanos as f64 / 1_000_000.0,
+                "treeBuild": search_stats.tree_build_nanos as f64 / 1_000_000.0,
+                "hostPacking": search_stats.host_packing_nanos as f64 / 1_000_000.0,
+                "queueWait": search_stats.queue_wait_nanos as f64 / 1_000_000.0,
+                "evaluation": search_stats.evaluation_nanos as f64 / 1_000_000.0,
+                "backup": search_stats.backup_nanos as f64 / 1_000_000.0,
+            },
+        }),
+        serde_json::json!({
+            "batches": stats.batches,
+            "states": stats.states,
+            "averageBatchSize": stats.average_batch_size(),
+            "lastBatchSize": stats.last_batch_size,
+        }),
+        serde_json::json!(stats.average_batch_size()),
+    )
+}
+
+#[cfg(not(feature = "cuda-exact"))]
+fn evaluator_benchmark_metrics(
+    _backend: EvaluatorBackend,
+) -> (serde_json::Value, serde_json::Value, serde_json::Value) {
+    (
+        serde_json::Value::Null,
+        serde_json::Value::Null,
+        serde_json::Value::Null,
+    )
 }
 
 impl Engine {
@@ -96,6 +194,7 @@ struct Config {
     trade_response_nodes: u32,
     trade_response_time_ms: u32,
     player_trades_enabled: bool,
+    evaluator_backend: EvaluatorBackend,
     perfect_information_search: bool,
     build_git_sha: &'static str,
     build_dirty: bool,
@@ -142,6 +241,7 @@ impl Default for Config {
             trade_response_nodes: 2_000,
             trade_response_time_ms: 350,
             player_trades_enabled: true,
+            evaluator_backend: EvaluatorBackend::Cpu,
             perfect_information_search: false,
             build_git_sha: option_env!("COLONIST_BUILD_GIT_SHA").unwrap_or("unknown"),
             build_dirty: option_env!("COLONIST_BUILD_DIRTY") == Some("1"),
@@ -277,6 +377,13 @@ fn parse_config() -> Config {
                 index += 1;
                 continue;
             }
+            "--evaluator" => {
+                config.evaluator_backend =
+                    value.and_then(EvaluatorBackend::parse).unwrap_or_else(|| {
+                        eprintln!("--evaluator must be cpu or cuda");
+                        std::process::exit(2);
+                    });
+            }
             "--help" | "-h" => {
                 println!(
                     "colonist-arena [--players 2|3|4] [--blocks N] [--seed N] \\
@@ -285,7 +392,7 @@ fn parse_config() -> Config {
                      [--iterations N] [--rollout-actions N] [--max-turns N] \\
                      [--belief-particles N] [--strategic-particles N] \\
                      [--maxn-depth N] [--maxn-branch N] [--maxn-nodes N] [--maxn-time-ms N] \\
-                     [--perfect-information] [--no-player-trades] \\
+                     [--perfect-information] [--no-player-trades] [--evaluator cpu|cuda] \\
                      [--checkpoint-output progress.jsonl] [--challenge-output challenges.jsonl] \\
                      [--takeover-input challenges.jsonl] [--takeover-output outcomes.jsonl] \\
                      [--takeover-engine control|random|weighted|maxn|alphabeta|uct|puct] \\
@@ -300,6 +407,8 @@ fn parse_config() -> Config {
                      explicitly enables oracle access to hidden state.\n\
                      --no-player-trades forbids player offers/accepts/counters/confirms while\n\
                      preserving maritime bank and port trades.\n\
+                     CUDA is opt-in and accelerates exact fixed-node MaxN leaf evaluation;\n\
+                     setup continues to use the existing exact CPU opening solver.\n\
                      Checkpoints record git SHA and ENGINE_REVISION for reproducibility."
                 );
                 std::process::exit(0);
@@ -335,6 +444,36 @@ fn parse_config() -> Config {
         eprintln!("--candidate and --baseline must be different engines");
         std::process::exit(2);
     }
+    if config.evaluator_backend == EvaluatorBackend::Cuda {
+        #[cfg(not(feature = "cuda-exact"))]
+        {
+            eprintln!(
+                "--evaluator cuda requires rebuilding colonist-arena with --features cuda-exact"
+            );
+            std::process::exit(2);
+        }
+        #[cfg(feature = "cuda-exact")]
+        {
+            if config
+                .lineup
+                .as_ref()
+                .is_none_or(|lineup| lineup.iter().any(|engine| *engine != Engine::MaxN))
+            {
+                eprintln!("--evaluator cuda currently requires an all-maxn --lineup");
+                std::process::exit(2);
+            }
+            if config.maxn_time_ms != 0 || config.trade_response_time_ms != 0 {
+                eprintln!(
+                    "--evaluator cuda requires --maxn-time-ms 0 and --trade-response-time-ms 0"
+                );
+                std::process::exit(2);
+            }
+            if config.perfect_information_search {
+                eprintln!("--evaluator cuda currently requires weighted-belief search");
+                std::process::exit(2);
+            }
+        }
+    }
     config
 }
 
@@ -364,130 +503,6 @@ impl EngineChoice {
             search: None,
         }
     }
-}
-
-/// Deterministic observer-consistent determinizations for arena play.
-///
-/// The acting player retains its exact hand. Opponent resource identities are
-/// redistributed while preserving each public hand size, the exact public bank,
-/// and global resource conservation. Opponent development identities and the
-/// deck are sampled jointly while preserving every public card count.
-fn belief_particles(
-    state: &GameState,
-    observer: u8,
-    count: usize,
-    seed: u64,
-) -> Vec<BeliefParticle> {
-    debug_assert!(count > 0);
-    let opponents = (0..state.board.num_players)
-        .filter(|player| *player != observer)
-        .collect::<Vec<_>>();
-    let resource_totals = opponents
-        .iter()
-        .map(|player| state.players[*player as usize].resource_total())
-        .collect::<Vec<_>>();
-    let development_totals = opponents
-        .iter()
-        .map(|player| {
-            state.players[*player as usize]
-                .development
-                .iter()
-                .copied()
-                .sum::<u8>()
-        })
-        .collect::<Vec<_>>();
-    let bought_totals = opponents
-        .iter()
-        .map(|player| {
-            state.players[*player as usize]
-                .bought_development
-                .iter()
-                .copied()
-                .sum::<u8>()
-        })
-        .collect::<Vec<_>>();
-    let resource_pool = opponents
-        .iter()
-        .flat_map(|player| {
-            state.players[*player as usize]
-                .resources
-                .iter()
-                .enumerate()
-                .flat_map(|(resource, count)| std::iter::repeat_n(resource as u8, *count as usize))
-        })
-        .collect::<Vec<_>>();
-    let mut development_pool = opponents
-        .iter()
-        .flat_map(|player| {
-            state.players[*player as usize]
-                .development
-                .iter()
-                .enumerate()
-                .flat_map(|(card, count)| std::iter::repeat_n(card as u8, *count as usize))
-        })
-        .collect::<Vec<_>>();
-    development_pool.extend(
-        state
-            .development_deck
-            .iter()
-            .enumerate()
-            .flat_map(|(card, count)| std::iter::repeat_n(card as u8, *count as usize)),
-    );
-
-    (0..count)
-        .map(|sample| {
-            let mut rng =
-                SplitMix64::new(seed ^ (sample as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15));
-            let mut particle = state.clone();
-            let mut resources = resource_pool.clone();
-            rng.shuffle(&mut resources);
-            let mut cursor = 0usize;
-            for (opponent_index, player) in opponents.iter().enumerate() {
-                particle.players[*player as usize].resources = [0; 5];
-                for _ in 0..resource_totals[opponent_index] {
-                    let resource = resources[cursor] as usize;
-                    particle.players[*player as usize].resources[resource] += 1;
-                    cursor += 1;
-                }
-            }
-
-            let mut development = development_pool.clone();
-            rng.shuffle(&mut development);
-            let mut development_cursor = 0usize;
-            for (opponent_index, player) in opponents.iter().enumerate() {
-                let player_state = &mut particle.players[*player as usize];
-                player_state.development = [0; 5];
-                player_state.bought_development = [0; 5];
-                for _ in 0..development_totals[opponent_index] {
-                    let card = development[development_cursor] as usize;
-                    player_state.development[card] += 1;
-                    development_cursor += 1;
-                }
-                let mut held_cards = player_state
-                    .development
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(card, count)| std::iter::repeat_n(card as u8, *count as usize))
-                    .collect::<Vec<_>>();
-                rng.shuffle(&mut held_cards);
-                for card in held_cards
-                    .into_iter()
-                    .take(bought_totals[opponent_index] as usize)
-                {
-                    player_state.bought_development[card as usize] += 1;
-                }
-            }
-            particle.development_deck = [0; 5];
-            for card in development.into_iter().skip(development_cursor) {
-                particle.development_deck[card as usize] += 1;
-            }
-            debug_assert!(particle.validate().is_ok());
-            BeliefParticle {
-                state: particle,
-                weight: 1.0 / count as f32,
-            }
-        })
-        .collect()
 }
 
 fn search_belief_particles(state: &GameState, config: &Config) -> Option<Vec<BeliefParticle>> {
@@ -990,7 +1005,37 @@ fn choose_action(
                 let report = if paranoid {
                     search_weighted_belief_paranoid_with_config(particles, depth_config)
                 } else {
-                    search_weighted_belief_maxn_with_config(particles, depth_config)
+                    match config.evaluator_backend {
+                        EvaluatorBackend::Cpu => {
+                            search_weighted_belief_maxn_with_config(particles, depth_config)
+                        }
+                        // The dedicated opening solver is public-state search,
+                        // not the recursive MaxN leaf path. Keep it on the CPU
+                        // oracle and disclose that boundary in --help/output.
+                        EvaluatorBackend::Cuda
+                            if matches!(
+                                state.phase,
+                                Phase::SetupSettlement | Phase::SetupRoad { .. }
+                            ) =>
+                        {
+                            search_weighted_belief_maxn_with_config(particles, depth_config)
+                        }
+                        EvaluatorBackend::Cuda => {
+                            #[cfg(feature = "cuda-exact")]
+                            {
+                                let evaluator = CUDA_EXACT_EVALUATOR
+                                    .get()
+                                    .expect("CUDA evaluator initialized before arena workers");
+                                search_weighted_belief_maxn_cuda_with_config_mutex(
+                                    evaluator,
+                                    particles,
+                                    depth_config,
+                                )
+                            }
+                            #[cfg(not(feature = "cuda-exact"))]
+                            unreachable!("CUDA backend is rejected during argument parsing")
+                        }
+                    }
                 }
                 .expect("arena belief particles share one public observation");
                 EngineChoice {
@@ -1406,6 +1451,7 @@ struct ArenaCheckpoint {
     trade_response_nodes: u32,
     trade_response_time_ms: u32,
     player_trades_enabled: bool,
+    evaluator_backend: &'static str,
     engine_revision: &'static str,
     build_git_sha: &'static str,
     build_dirty: bool,
@@ -1519,6 +1565,7 @@ impl PartialArenaMetrics {
             trade_response_nodes: config.trade_response_nodes,
             trade_response_time_ms: config.trade_response_time_ms,
             player_trades_enabled: config.player_trades_enabled,
+            evaluator_backend: config.evaluator_backend.as_str(),
             engine_revision: ENGINE_REVISION,
             build_git_sha: config.build_git_sha,
             build_dirty: config.build_dirty,
@@ -2195,6 +2242,24 @@ fn run_takeover_mode(config: &Config) {
 
 fn main() {
     let config = parse_config();
+    #[cfg(feature = "cuda-exact")]
+    if config.evaluator_backend == EvaluatorBackend::Cuda {
+        let evaluator = CudaExactEvaluator::new().unwrap_or_else(|error| {
+            panic!("failed to initialize requested CUDA evaluator: {error}")
+        });
+        let device = evaluator.device_identity();
+        eprintln!(
+            "evaluator={} gpu={} ordinal={} compute_capability={}.{}",
+            evaluator.backend(),
+            device.name,
+            device.ordinal,
+            device.compute_capability.0,
+            device.compute_capability.1,
+        );
+        if CUDA_EXACT_EVALUATOR.set(Mutex::new(evaluator)).is_err() {
+            panic!("CUDA evaluator initialized more than once");
+        }
+    }
     if config.takeover_input.is_some() {
         run_takeover_mode(&config);
         return;
@@ -2221,11 +2286,12 @@ fn main() {
             },
         );
         println!(
-            "arena candidate={} baseline={} lineup={} information={} player_trades={} players={} blocks={} iterations={} threads={} seed={}",
+            "arena candidate={} baseline={} lineup={} information={} evaluator={} player_trades={} players={} blocks={} iterations={} threads={} seed={}",
             config.candidate.as_str(),
             config.baseline.as_str(),
             lineup,
             information_mode(&config),
+            config.evaluator_backend.as_str(),
             config.player_trades_enabled,
             config.players,
             config.blocks,
@@ -2478,6 +2544,8 @@ fn main() {
     let candidate_metrics = &engine_metrics[config.candidate as usize];
     let compact_engine_metrics = compact_engine_metrics(&engine_metrics);
     if config.json {
+        let (gpu_stats, batch_stats, average_batch_size) =
+            evaluator_benchmark_metrics(config.evaluator_backend);
         println!(
             concat!(
                 "{{",
@@ -2501,6 +2569,7 @@ fn main() {
                 "\"meanActions\":{:.4},",
                 "\"candidateMetrics\":{{",
                 "\"seatSamples\":{},",
+                "\"decisions\":{},",
                 "\"meanRank\":{:.6},",
                 "\"meanVictoryPoints\":{:.6},",
                 "\"meanRoads\":{:.6},",
@@ -2538,6 +2607,11 @@ fn main() {
                 "\"maxnNodes\":{},",
                 "\"maxnTimeMs\":{},",
                 "\"playerTradesEnabled\":{},",
+                "\"maritimeTradesEnabled\":true,",
+                "\"evaluatorBackend\":\"{}\",",
+                "\"gpuStats\":{},",
+                "\"batchStats\":{},",
+                "\"averageBatchSize\":{},",
                 "\"engineRevision\":\"{}\",",
                 "\"buildGitSha\":\"{}\",",
                 "\"buildDirty\":{},",
@@ -2580,6 +2654,7 @@ fn main() {
             mean_turns,
             mean_actions,
             candidate_metrics.seats,
+            candidate_metrics.decisions,
             candidate_metrics.ranks / candidate_metrics.seats.max(1) as f64,
             candidate_metrics.points as f64 / candidate_metrics.seats.max(1) as f64,
             candidate_metrics.roads as f64 / candidate_metrics.seats.max(1) as f64,
@@ -2623,6 +2698,10 @@ fn main() {
                 .unwrap_or_else(|| (config.iterations * 160).clamp(4_000, 80_000)),
             config.maxn_time_ms,
             config.player_trades_enabled,
+            config.evaluator_backend.as_str(),
+            gpu_stats,
+            batch_stats,
+            average_batch_size,
             ENGINE_REVISION,
             config.build_git_sha,
             config.build_dirty,
