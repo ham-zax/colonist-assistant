@@ -764,8 +764,12 @@ import {
         return state ? [[color, state]] : [];
       }),
     ) as Record<string, any>;
+    // Colonist renders the local card inventory from the Redux game store.
+    // Do not let the placement-freshness arbitration above substitute the
+    // manager snapshot for private development-card ownership: buying or
+    // playing a development card does not change the placed-piece count.
     const developmentStates =
-      stateCandidates
+      [storeGameState, managerGameState]
         .map(
           (candidate) =>
             candidate?.mechanicDevelopmentCardsState?.players,
