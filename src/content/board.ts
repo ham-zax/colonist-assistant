@@ -168,10 +168,18 @@ const validActiveTrade = (value: unknown): value is ActiveTradeOffer => {
       trade.creator.length <= 160 &&
       typeof trade.tradeExecutor === "string" &&
       trade.tradeExecutor.length <= 160 &&
-      validResourceVector(trade.give) &&
-      validResourceVector(trade.receive) &&
+      validResourceVector(trade.creatorGive) &&
+      validResourceVector(trade.creatorReceive) &&
       typeof trade.incoming === "boolean" &&
       typeof trade.counterOffer === "boolean" &&
+      (
+        trade.counterOfferInResponseToTradeId === undefined ||
+        (
+          typeof trade.counterOfferInResponseToTradeId === "string" &&
+          trade.counterOfferInResponseToTradeId.length > 0 &&
+          trade.counterOfferInResponseToTradeId.length <= 64
+        )
+      ) &&
       typeof trade.canAccept === "boolean" &&
       (
         trade.acceptedPlayers === undefined ||

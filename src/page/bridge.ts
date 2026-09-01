@@ -858,29 +858,14 @@ import {
       tradeState?.activeOffers ?? {},
     ).flatMap((offer) => {
       if (!offer || typeof offer.id !== "string") return [];
-      const counterOffer = offer.counterOfferInResponseToTradeId != null;
-      const isTradeExecutor = (color: number) =>
-        counterOffer
-          ? currentTurnPlayers.includes(color)
-          : offer.creator === color;
-      const counterByNonExecutor =
-        counterOffer && !isTradeExecutor(Number(offer.creator));
-      const myIsExecutor = isTradeExecutor(myColor);
-      const givingCards = myIsExecutor
-        ? counterByNonExecutor
-          ? offer.wantedResources
-          : offer.offeredResources
-        : counterByNonExecutor
-          ? offer.offeredResources
-          : offer.wantedResources;
-      const receivingCards = myIsExecutor
-        ? counterByNonExecutor
-          ? offer.offeredResources
-          : offer.wantedResources
-        : counterByNonExecutor
-          ? offer.wantedResources
-          : offer.offeredResources;
-      const fullySpecified = [givingCards, receivingCards].every(
+      const counterOfferInResponseToTradeId =
+        offer.counterOfferInResponseToTradeId != null
+          ? String(offer.counterOfferInResponseToTradeId)
+          : undefined;
+      const counterOffer = counterOfferInResponseToTradeId !== undefined;
+      const creatorGiveCards = offer.offeredResources;
+      const creatorReceiveCards = offer.wantedResources;
+      const fullySpecified = [creatorGiveCards, creatorReceiveCards].every(
         (cards) =>
           Array.isArray(cards) &&
           cards.length > 0 &&
@@ -889,15 +874,17 @@ import {
               Number(card) >= 1 && Number(card) <= 5,
           ),
       );
-      const give = resourceVector(
-        Array.isArray(givingCards) ? givingCards : [],
+      const creatorGive = resourceVector(
+        Array.isArray(creatorGiveCards) ? creatorGiveCards : [],
       );
-      const receive = resourceVector(
-        Array.isArray(receivingCards) ? receivingCards : [],
+      const creatorReceive = resourceVector(
+        Array.isArray(creatorReceiveCards) ? creatorReceiveCards : [],
       );
+      const incoming = offer.creator !== myColor;
+      const localGive = incoming ? creatorReceive : creatorGive;
       const canAfford =
         ownHand &&
-        Object.entries(give).every(
+        Object.entries(localGive).every(
           ([resource, count]) =>
             (ownHand?.[resource as keyof typeof ownHand] ?? 0) >= count,
         );
@@ -940,10 +927,13 @@ import {
             gameController,
             tradeExecutorColor,
           ),
-          give,
-          receive,
-          incoming: offer.creator !== myColor,
+          creatorGive,
+          creatorReceive,
+          incoming,
           counterOffer,
+          ...(counterOfferInResponseToTradeId
+            ? { counterOfferInResponseToTradeId }
+            : {}),
           canAccept: Boolean(fullySpecified && canAfford),
           acceptedPlayers,
           pendingPlayers,

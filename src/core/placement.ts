@@ -36,10 +36,11 @@ export interface ActiveTradeOffer {
   id: string;
   creator: string;
   tradeExecutor: string;
-  give: ResourceVector;
-  receive: ResourceVector;
+  creatorGive: ResourceVector;
+  creatorReceive: ResourceVector;
   incoming: boolean;
   counterOffer: boolean;
+  counterOfferInResponseToTradeId?: string;
   canAccept: boolean;
   acceptedPlayers?: string[];
   pendingPlayers?: string[];

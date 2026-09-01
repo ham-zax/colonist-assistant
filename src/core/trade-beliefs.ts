@@ -1,23 +1,21 @@
 import type { ActiveTradeOffer } from "./placement";
 import type { ResourceVector } from "./resources";
-import { RESOURCE_ORDER, emptyResources } from "./resources";
+import { emptyResources } from "./resources";
 import type { TrackerEvent } from "./types";
 
 export interface TradeOfferSnapshot {
   id: string;
   creator: string;
-  give: ResourceVector;
-  receive: ResourceVector;
+  creatorGive: ResourceVector;
+  creatorReceive: ResourceVector;
   counterOffer: boolean;
+  counterOfferInResponseToTradeId?: string;
   acceptedPlayers: string[];
   rejectedPlayers: string[];
   pendingPlayers: string[];
   responsesComplete: boolean;
   myResponse?: ActiveTradeOffer["myResponse"];
 }
-
-const sameVector = (left: ResourceVector, right: ResourceVector): boolean =>
-  RESOURCE_ORDER.every((key) => (left[key] ?? 0) === (right[key] ?? 0));
 
 export const snapshotActiveTrades = (
   trades: readonly ActiveTradeOffer[] | undefined,
@@ -27,9 +25,15 @@ export const snapshotActiveTrades = (
     snapshots.set(trade.id, {
       id: trade.id,
       creator: trade.creator,
-      give: { ...emptyResources(), ...trade.give },
-      receive: { ...emptyResources(), ...trade.receive },
+      creatorGive: { ...emptyResources(), ...trade.creatorGive },
+      creatorReceive: { ...emptyResources(), ...trade.creatorReceive },
       counterOffer: trade.counterOffer,
+      ...(trade.counterOfferInResponseToTradeId
+        ? {
+            counterOfferInResponseToTradeId:
+              trade.counterOfferInResponseToTradeId,
+          }
+        : {}),
       acceptedPlayers: [...(trade.acceptedPlayers ?? [])],
       rejectedPlayers: [...(trade.rejectedPlayers ?? [])],
       pendingPlayers: [...(trade.pendingPlayers ?? [])],
@@ -50,21 +54,35 @@ export const tradeBeliefEventsFromDiff = (
   next: Map<string, TradeOfferSnapshot>,
 ): TrackerEvent[] => {
   const events: TrackerEvent[] = [];
+  const counterPlayersByParent = new Map<string, Set<string>>();
+  for (const trade of next.values()) {
+    const parentId = trade.counterOfferInResponseToTradeId;
+    if (!trade.counterOffer || !parentId) continue;
+    const players = counterPlayersByParent.get(parentId) ?? new Set<string>();
+    players.add(trade.creator);
+    counterPlayersByParent.set(parentId, players);
+  }
+  const counteredPreviousIds = new Set<string>();
 
   for (const [id, trade] of next) {
     const before = previous.get(id);
     if (!before) {
       if (trade.counterOffer) {
-        // A counter arrives as a new offer object; the original creator is the
-        // counterparty we are responding to when the panel still lists them.
+        const parent = trade.counterOfferInResponseToTradeId
+          ? previous.get(trade.counterOfferInResponseToTradeId)
+          : undefined;
+        if (parent) counteredPreviousIds.add(parent.id);
+        // Colonist normally creates a new offer id for a counter and exposes
+        // the parent id. If the parent snapshot predates this session attach,
+        // retain the conservative inverse fallback used before this migration.
         events.push({
           type: "trade-countered",
           player: trade.creator,
-          creator: trade.pendingPlayers[0] ?? trade.creator,
-          give: trade.receive,
-          receive: trade.give,
-          counterGive: trade.give,
-          counterReceive: trade.receive,
+          creator: parent?.creator ?? trade.pendingPlayers[0] ?? trade.creator,
+          give: parent?.creatorGive ?? trade.creatorReceive,
+          receive: parent?.creatorReceive ?? trade.creatorGive,
+          counterGive: trade.creatorGive,
+          counterReceive: trade.creatorReceive,
         });
       } else {
         events.push({
@@ -76,8 +94,8 @@ export const tradeBeliefEventsFromDiff = (
                 ...trade.acceptedPlayers,
                 ...trade.rejectedPlayers,
               ].filter((player, index, all) => all.indexOf(player) === index),
-          give: trade.give,
-          receive: trade.receive,
+          give: trade.creatorGive,
+          receive: trade.creatorReceive,
         });
       }
     }
@@ -89,21 +107,22 @@ export const tradeBeliefEventsFromDiff = (
           type: "trade-accepted",
           player,
           creator: trade.creator,
-          give: trade.give,
-          receive: trade.receive,
+          give: trade.creatorGive,
+          receive: trade.creatorReceive,
         });
       }
     }
 
     const priorRejected = new Set(before?.rejectedPlayers ?? []);
+    const counteringPlayers = counterPlayersByParent.get(id);
     for (const player of trade.rejectedPlayers) {
-      if (!priorRejected.has(player)) {
+      if (!priorRejected.has(player) && !counteringPlayers?.has(player)) {
         events.push({
           type: "trade-rejected",
           player,
           creator: trade.creator,
-          give: trade.give,
-          receive: trade.receive,
+          give: trade.creatorGive,
+          receive: trade.creatorReceive,
         });
       }
     }
@@ -111,23 +130,22 @@ export const tradeBeliefEventsFromDiff = (
     if (
       before &&
       !before.counterOffer &&
-      trade.counterOffer &&
-      sameVector(before.give, trade.give) === false
+      trade.counterOffer
     ) {
       events.push({
         type: "trade-countered",
         player: trade.creator,
         creator: before.creator,
-        give: before.give,
-        receive: before.receive,
-        counterGive: trade.give,
-        counterReceive: trade.receive,
+        give: before.creatorGive,
+        receive: before.creatorReceive,
+        counterGive: trade.creatorGive,
+        counterReceive: trade.creatorReceive,
       });
     }
   }
 
   for (const [id, trade] of previous) {
-    if (next.has(id)) continue;
+    if (next.has(id) || counteredPreviousIds.has(id)) continue;
     const completed =
       trade.acceptedPlayers.length > 0 || trade.responsesComplete;
     if (completed) continue;
@@ -138,8 +156,8 @@ export const tradeBeliefEventsFromDiff = (
         ...trade.pendingPlayers,
         ...trade.rejectedPlayers,
       ].filter((player, index, all) => all.indexOf(player) === index),
-      give: trade.give,
-      receive: trade.receive,
+      give: trade.creatorGive,
+      receive: trade.creatorReceive,
     });
   }
 

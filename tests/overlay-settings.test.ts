@@ -316,8 +316,8 @@ describe("overlay settings interaction", () => {
           id: string;
           creator: string;
           tradeExecutor: string;
-          give: ReturnType<typeof emptyResources>;
-          receive: ReturnType<typeof emptyResources>;
+          creatorGive: ReturnType<typeof emptyResources>;
+          creatorReceive: ReturnType<typeof emptyResources>;
           incoming: boolean;
           counterOffer: boolean;
           canAccept: boolean;
@@ -334,8 +334,8 @@ describe("overlay settings interaction", () => {
         id: "replacement-offer",
         creator: "Rival",
         tradeExecutor: "Rival",
-        give: emptyResources(),
-        receive: emptyResources(),
+        creatorGive: emptyResources(),
+        creatorReceive: emptyResources(),
         incoming: true,
         counterOffer: false,
         canAccept: true,
@@ -447,8 +447,8 @@ describe("overlay settings interaction", () => {
       id: "incoming-1",
       creator: "Bot",
       tradeExecutor: "Bot",
-      give: receive,
-      receive: give,
+      creatorGive: give,
+      creatorReceive: receive,
       incoming: true,
       counterOffer: false,
       canAccept: true,
@@ -458,8 +458,8 @@ describe("overlay settings interaction", () => {
       id: "counter-1",
       creator: "rodrgds",
       tradeExecutor: "rodrgds",
-      give,
-      receive,
+      creatorGive: give,
+      creatorReceive: receive,
       incoming: false,
       counterOffer: true,
       canAccept: false,

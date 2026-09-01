@@ -51,7 +51,6 @@ import {
   createTrackerState,
   getPlayerEstimate,
   reconcilePublicResourceEvidence,
-  reweightTradeEvidence,
   reduceTracker,
 } from "../core/tracker";
 import {
@@ -60,6 +59,7 @@ import {
 } from "../core/strategy";
 import {
   evaluateTradeOffer,
+  localTradeBundles,
 } from "../core/trades";
 import {
   outgoingTradeDisposition,
@@ -423,9 +423,8 @@ export class AssistantOverlay {
           }, 18_100);
           this.outgoingTradeWatchdogs.set(trade.id, timer);
         }
-        this.attemptedTradeOffers.add(
-          tradeOfferKey(trade.give, trade.receive),
-        );
+        const { give, receive } = localTradeBundles(trade);
+        this.attemptedTradeOffers.add(tradeOfferKey(give, receive));
       }
     }
     const outgoingIds = new Set(outgoingTrades.map((trade) => trade.id));
@@ -1123,7 +1122,10 @@ export class AssistantOverlay {
             (trade) =>
               !trade.incoming &&
               !baselineOfferIds.has(trade.id) &&
-              tradeOfferKey(trade.give, trade.receive) === offerKey,
+              tradeOfferKey(
+                localTradeBundles(trade).give,
+                localTradeBundles(trade).receive,
+              ) === offerKey,
           ),
         );
       };
@@ -1777,8 +1779,8 @@ export class AssistantOverlay {
         incoming: trade.incoming,
         counter: trade.counterOffer,
         canAccept: trade.canAccept,
-        give: trade.give,
-        receive: trade.receive,
+        give: localTradeBundles(trade).give,
+        receive: localTradeBundles(trade).receive,
         accepted: trade.acceptedPlayers,
         pending: trade.pendingPlayers,
         rejected: trade.rejectedPlayers,
@@ -2070,18 +2072,7 @@ export class AssistantOverlay {
         ? { bank: board.bank, resourceSupply }
         : {}),
     });
-    return reweightTradeEvidence(
-      resources,
-      (board.activeTrades ?? []).map((trade) => ({
-        id: trade.id,
-        creator: trade.creator,
-        give: trade.give,
-        receive: trade.receive,
-        acceptedPlayers: trade.acceptedPlayers,
-        rejectedPlayers: trade.rejectedPlayers,
-        counteringPlayers: trade.counterOffer ? [trade.creator] : undefined,
-      })),
-    );
+    return resources;
   }
 
   private stateFromPublicBoard(
@@ -2430,8 +2421,8 @@ export class AssistantOverlay {
         incoming: trade.incoming,
         counter: trade.counterOffer,
         canAccept: trade.canAccept,
-        give: trade.give,
-        receive: trade.receive,
+        give: localTradeBundles(trade).give,
+        receive: localTradeBundles(trade).receive,
         accepted: trade.acceptedPlayers,
         pending: trade.pendingPlayers,
         rejected: trade.rejectedPlayers,
@@ -2579,8 +2570,8 @@ export class AssistantOverlay {
             ? {
                 counterGive,
                 counterReceive,
-                existingGive: trade.give,
-                existingReceive: trade.receive,
+                existingGive: localTradeBundles(trade).give,
+                existingReceive: localTradeBundles(trade).receive,
               }
             : {}),
         };

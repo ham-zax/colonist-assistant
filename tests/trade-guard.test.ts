@@ -14,6 +14,7 @@ import {
   tradeOfferKey,
   unansweredIncomingTrades,
 } from "../src/core/trade-guard";
+import { localTradeBundles } from "../src/core/trades";
 import {
   createTrackerState,
   reduceTracker,
@@ -79,6 +80,18 @@ const stateWithBotOre = (ore: number) => {
 };
 
 describe("live trade guard", () => {
+  it("derives local trade bundles from creator-relative storage", () => {
+    const creatorGive = { ...emptyResources(), lumber: 1 };
+    const creatorReceive = { ...emptyResources(), brick: 1 };
+
+    expect(
+      localTradeBundles({ creatorGive, creatorReceive, incoming: true }),
+    ).toEqual({ give: creatorReceive, receive: creatorGive });
+    expect(
+      localTradeBundles({ creatorGive, creatorReceive, incoming: false }),
+    ).toEqual({ give: creatorGive, receive: creatorReceive });
+  });
+
   const offer: DeepSearchAction = {
     kind: "offer-trade",
     cards: [0, 1, 0, 0, 0],
@@ -201,8 +214,8 @@ describe("live trade guard", () => {
           id: "incoming",
           creator: "Bot",
           tradeExecutor: "Bot",
-          give: emptyResources(),
-          receive: emptyResources(),
+          creatorGive: emptyResources(),
+          creatorReceive: emptyResources(),
           incoming: true,
           counterOffer: false,
           canAccept: true,
@@ -259,8 +272,8 @@ describe("live trade guard", () => {
           id: "incoming-again",
           creator: "Bot",
           tradeExecutor: "Bot",
-          give: emptyResources(),
-          receive: emptyResources(),
+          creatorGive: emptyResources(),
+          creatorReceive: emptyResources(),
           incoming: true,
           counterOffer: false,
           canAccept: true,
@@ -340,8 +353,8 @@ describe("live trade guard", () => {
       id: "incoming-1",
       creator: "Bot",
       tradeExecutor: "Bot",
-      give: emptyResources(),
-      receive: emptyResources(),
+      creatorGive: emptyResources(),
+      creatorReceive: emptyResources(),
       incoming: true,
       counterOffer: false,
       canAccept: true,

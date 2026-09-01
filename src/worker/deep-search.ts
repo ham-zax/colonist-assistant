@@ -1070,18 +1070,9 @@ export const buildDeepSearchRequest = (
               trade: {
                 creator: tradeCreator,
                 recipients: tradeRecipients,
-                // Board evidence is normalized to the user's perspective.
-                // The rules engine stores creator -> recipient orientation.
-                give: resources(
-                  activeTrade.incoming
-                    ? activeTrade.receive
-                    : activeTrade.give,
-                ),
-                receive: resources(
-                  activeTrade.incoming
-                    ? activeTrade.give
-                    : activeTrade.receive,
-                ),
+                // Active trades are stored creator-relative, matching the rules engine.
+                give: resources(activeTrade.creatorGive),
+                receive: resources(activeTrade.creatorReceive),
                 accepted: bitset(activeTrade.acceptedPlayers),
                 rejected: bitset(activeTrade.rejectedPlayers),
               },

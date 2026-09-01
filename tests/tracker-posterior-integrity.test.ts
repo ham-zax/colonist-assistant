@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  snapshotActiveTrades,
+  tradeBeliefEventsFromDiff,
+} from "../src/core/trade-beliefs";
+import type { ActiveTradeOffer } from "../src/core/placement";
+import {
   createTrackerState,
   effectiveParticleCount,
   reconcilePublicResourceEvidence,
@@ -103,6 +108,50 @@ describe("tracker posterior integrity", () => {
       effectiveParticleCount(once),
       10,
     );
+  });
+
+  it("does not condition the posterior twice for an unchanged active trade", () => {
+    let state = createTrackerState();
+    for (const player of ["You", "Rival"]) {
+      state = reduceTracker(state, { type: "discover", player });
+    }
+    state.worlds = [
+      {
+        hands: {
+          You: resources(0, 1, 0, 0, 0),
+          Rival: resources(1, 0, 0, 0, 0),
+        },
+        weight: 0.5,
+      },
+      {
+        hands: {
+          You: resources(0, 1, 0, 0, 0),
+          Rival: resources(0, 1, 0, 0, 0),
+        },
+        weight: 0.5,
+      },
+    ];
+    const trade: ActiveTradeOffer = {
+      id: "incoming-idempotent",
+      creator: "Rival",
+      tradeExecutor: "Rival",
+      creatorGive: resources(1, 0, 0, 0, 0),
+      creatorReceive: resources(0, 1, 0, 0, 0),
+      incoming: true,
+      counterOffer: false,
+      canAccept: true,
+      pendingPlayers: ["You"],
+    };
+    const snapshot = snapshotActiveTrades([trade]);
+    for (const event of tradeBeliefEventsFromDiff(new Map(), snapshot)) {
+      state = reduceTracker(state, event);
+    }
+    const once = state.worlds.map((world) => world.weight);
+    const duplicateEvents = tradeBeliefEventsFromDiff(snapshot, snapshot);
+    for (const event of duplicateEvents) state = reduceTracker(state, event);
+
+    expect(duplicateEvents).toEqual([]);
+    expect(state.worlds.map((world) => world.weight)).toEqual(once);
   });
 
   it("systematically compacts more than MAX_WORLDS without injecting tail support", () => {

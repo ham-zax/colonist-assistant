@@ -485,6 +485,13 @@ export const generateTradeProposals = (
     );
 };
 
+export const localTradeBundles = (
+  trade: Pick<ActiveTradeOffer, "creatorGive" | "creatorReceive" | "incoming">,
+): { give: ResourceVector; receive: ResourceVector } =>
+  trade.incoming
+    ? { give: trade.creatorReceive, receive: trade.creatorGive }
+    : { give: trade.creatorGive, receive: trade.creatorReceive };
+
 const opponentBenefit = (
   state: TrackerState,
   board: BoardSnapshot,
@@ -502,10 +509,11 @@ const opponentBenefit = (
   const estimate = getPlayerEstimate(state, opponent);
   const before = cloneResources(estimate.average);
   const after = cloneResources(before);
-  // From the opponent's perspective, receive our "give" and surrender our
-  // "receive". Estimates can be fractional, so clamp after subtraction.
-  addResources(after, trade.receive, -1);
-  addResources(after, trade.give);
+  // Active trades are creator-relative. Estimate the creator after surrendering
+  // creatorGive and receiving creatorReceive. Estimates can be fractional, so
+  // clamp after subtraction.
+  addResources(after, trade.creatorGive, -1);
+  addResources(after, trade.creatorReceive);
   for (const resource of RESOURCE_ORDER) {
     after[resource] = Math.max(0, after[resource]);
   }
@@ -564,7 +572,8 @@ export const evaluateTradeOffer = (
       detail: "Colonist Assistant only grades fully specified offers to you.",
     };
   }
-  if (!trade.canAccept || !hasResources(hand, trade.give)) {
+  const { give, receive } = localTradeBundles(trade);
+  if (!trade.canAccept || !hasResources(hand, give)) {
     return {
       tradeId: trade.id,
       kind: "decline",
@@ -575,23 +584,23 @@ export const evaluateTradeOffer = (
     };
   }
   const after = cloneResources(hand);
-  addResources(after, trade.give, -1);
-  addResources(after, trade.receive);
+  addResources(after, give, -1);
+  addResources(after, receive);
   const completedBuild = bestNewBuild(hand, after, board, player);
   const beforePrimary = hasResources(hand, BUILD_COSTS[context.primaryKind]);
   const afterPrimary = hasResources(after, BUILD_COSTS[context.primaryKind]);
   const immediatePrimary = !beforePrimary && afterPrimary;
   const receiveValue = vectorValue(
-    trade.receive,
+    receive,
     board,
     player,
     context,
   );
-  const giveValue = vectorValue(trade.give, board, player, context);
+  const giveValue = vectorValue(give, board, player, context);
   const profile = playerBoardProfile(board, player);
   const handRiskRelief =
     resourceTotal(hand) > profile.cardDiscardLimit
-      ? Math.max(0, resourceTotal(trade.give) - resourceTotal(trade.receive)) *
+      ? Math.max(0, resourceTotal(give) - resourceTotal(receive)) *
         2.5
       : 0;
   const ownGain =
@@ -601,8 +610,8 @@ export const evaluateTradeOffer = (
     handRiskRelief;
   const opponent = opponentBenefit(state, board, player, trade);
 
-  const giveSingle = singleResource(trade.give);
-  const receiveSingle = singleResource(trade.receive);
+  const giveSingle = singleResource(give);
+  const receiveSingle = singleResource(receive);
   const portAlternativePenalty =
     giveSingle &&
     receiveSingle &&
@@ -647,7 +656,7 @@ export const evaluateTradeOffer = (
   if (
     ownGain > 2 &&
     !leaderVeto &&
-    resourceTotal(trade.give) > resourceTotal(trade.receive)
+    resourceTotal(give) > resourceTotal(receive)
   ) {
     const counter = generateTradeProposals(
       state,
@@ -657,8 +666,8 @@ export const evaluateTradeOffer = (
       trade.creator,
     ).find(
       (proposal) =>
-        vectorKey(proposal.give) !== vectorKey(trade.give) ||
-        vectorKey(proposal.receive) !== vectorKey(trade.receive),
+        vectorKey(proposal.give) !== vectorKey(give) ||
+        vectorKey(proposal.receive) !== vectorKey(receive),
     );
     if (counter) {
       return {

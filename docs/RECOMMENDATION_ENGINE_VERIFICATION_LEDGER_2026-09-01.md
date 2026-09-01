@@ -51,3 +51,44 @@ green
 ```
 
 **Task boundary:** closed. This ledger entry is included with the Task 1 implementation commit; Task 2 remains a separate worktree state and must not be folded into this commit.
+
+## Task 2 - Migrate active trades to one creator-relative contract
+
+**Status:** PASS - F2 closed
+
+**Canonical contract:** `ActiveTradeOffer` stores only `creatorGive` and `creatorReceive`. Local-user `give`/`receive` are derived with `localTradeBundles()` at UI/evaluation boundaries; no compatibility aliases remain.
+
+**Original F2 reproduction:** before the migration, the focused incoming-offer fixture (`Rival gives lumber / User gives brick`) conditioned the wrong hidden world: `P(Rival has lumber) = 0.0140845`. The tracker diff interpreted the user-relative stored `give` vector as creator-owned resources.
+
+**Change:**
+
+- `bridge.ts` now copies Colonist `offeredResources` -> `creatorGive` and `wantedResources` -> `creatorReceive` directly;
+- active-trade snapshots/diff evidence remain creator-relative through offer/accept/reject/counter/expire events;
+- `localTradeBundles()` derives incoming/outgoing local orientation without storing a second representation;
+- the WASM adapter consumes the same creator-relative contract directly;
+- runtime validation and all internal fixtures/callers migrated atomically with no `give`/`receive` aliases;
+- `overlay.reconciledState()` no longer reapplies visible active-trade Bayesian evidence. The active-trade snapshot diff/session ingestion path is the single owner of panel-derived evidence.
+
+**Acceptance evidence:**
+
+- incoming Rival-lumber offer now drives Rival-lumber posterior above 0.98 and Rival-brick below 0.02: PASS;
+- re-diffing an unchanged active-trade snapshot emits no event: PASS;
+- open -> accept, reject, and counter transitions each emit exactly one corresponding tracker event: PASS;
+- local view helper preserves incoming/outgoing UI bundle semantics: PASS;
+- TypeScript contract migration has no obsolete `ActiveTradeOffer.give`/`receive` caller: PASS (`tsc --noEmit` clean and bounded caller sweep);
+- duplicate overlay Bayesian update removed: PASS.
+
+**Focused validation:**
+
+```text
+npm test -- tests/trade-belief-board-diff.test.ts tests/tracker-posterior-integrity.test.ts tests/trade-guard.test.ts
+20 tests passed
+
+npm run check
+green
+
+git diff --check
+green
+```
+
+**Task boundary:** implementation and focused validation complete. Independent integration review reproduced the focused validation and found no blocking Task 2 defect; this ledger entry is included with the dedicated Task 2 commit.
