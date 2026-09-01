@@ -3738,7 +3738,11 @@ export class AssistantOverlay {
   }
 
   private renderSettings(): string {
-    const version = chrome.runtime.getManifest().version;
+    const manifest = chrome.runtime.getManifest();
+    const buildIdentity = manifest.version_name ?? `v${manifest.version}`;
+    const buildParts = manifest.version_name?.split(" · ");
+    const buildLabel = buildParts?.slice(0, 2).join(" · ") ?? buildIdentity;
+    const builtAt = buildParts?.[2];
     const runtime = this.runtimePresentation();
     return `<section class="settings-panel">
       <header class="settings-heading">
@@ -3775,8 +3779,9 @@ export class AssistantOverlay {
       </label>
       <div class="settings-version">
         <span>INSTALLED BUILD</span>
-        <strong>v${escapeHtml(version)}</strong>
+        <strong title="${escapeHtml(buildIdentity)}">${escapeHtml(buildLabel)}</strong>
       </div>
+      ${builtAt ? `<div class="settings-version"><span>BUILT AT</span><strong>${escapeHtml(builtAt)}</strong></div>` : ""}
       <button class="reset-link" data-action="reset">Reset this game session</button>
     </section>`;
   }

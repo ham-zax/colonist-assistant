@@ -23,7 +23,12 @@ const relativeTime = (timestamp: number): string => {
 const boot = async (): Promise<void> => {
   const version = document.querySelector("#version");
   if (version) {
-    version.textContent = `v${chrome.runtime.getManifest().version}`;
+    const manifest = chrome.runtime.getManifest();
+    const fullBuild = manifest.version_name ?? `v${manifest.version}`;
+    version.textContent = manifest.version_name
+      ? manifest.version_name.split(" · ").slice(0, 2).join(" · ")
+      : fullBuild;
+    version.setAttribute("title", fullBuild);
   }
   const [sync, local] = await Promise.all([
     chrome.storage.sync.get(SETTINGS_KEY),

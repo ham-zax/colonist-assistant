@@ -1,4 +1,5 @@
 import { build } from "esbuild";
+import { execFileSync } from "node:child_process";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +8,15 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const outdir = join(root, "dist");
 
 await import("./build-wasm.mjs");
+
+const git = (...args) =>
+  execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+const buildRevision = git("rev-parse", "--short=12", "HEAD");
+const buildBranch = git("branch", "--show-current") || "detached";
+const buildDirty = git("status", "--porcelain").length > 0;
+const builtAt = new Date().toISOString();
+const buildIdentity = `${buildBranch}@${buildRevision}${buildDirty ? "+dirty" : ""} · ${builtAt}`;
+
 await rm(outdir, { recursive: true, force: true });
 await mkdir(outdir, { recursive: true });
 
@@ -58,6 +68,9 @@ const manifestPath = join(outdir, "manifest.json");
 const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
 const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
 manifest.version = packageJson.version;
+manifest.version_name = `${packageJson.version} · ${buildIdentity}`;
 await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 
-console.log(`Built Colonist Assistant ${packageJson.version} in ${outdir}`);
+console.log(
+  `Built Colonist Assistant ${packageJson.version} (${buildIdentity}) in ${outdir}`,
+);
