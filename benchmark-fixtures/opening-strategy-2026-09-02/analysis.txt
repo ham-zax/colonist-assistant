@@ -1,0 +1,44 @@
+terminal games with pre-outcome horizon: 185
+candidate wins: 44 (0.238)
+
+WINNERS VS NON-WINNERS AT TURN 48
+setup_pips         win=15.750 nonwin=13.830 delta=+1.920
+pips               win=25.413 nonwin=15.581 delta=+9.832
+settlements_extra  win= 0.727 nonwin= 0.255 delta=+0.472
+cities             win= 0.409 nonwin= 0.170 delta=+0.239
+roads_extra        win= 3.386 nonwin= 2.553 delta=+0.833
+dev_bought         win= 1.977 nonwin= 1.461 delta=+0.516
+maritime           win= 2.977 nonwin= 2.099 delta=+0.878
+knights            win= 0.977 nonwin= 0.702 delta=+0.275
+longest            win= 0.318 nonwin= 0.255 delta=+0.063
+army               win= 0.114 nonwin= 0.035 delta=+0.078
+
+OPENING PRODUCTION BUCKETS
+pips[0,12) n= 38 win=0.079 vp=4.68 rank=3.29
+pips[12,14) n= 42 win=0.238 vp=6.19 rank=2.70
+pips[14,16) n= 34 win=0.147 vp=6.65 rank=2.60
+pips[16,18) n= 35 win=0.343 vp=7.43 rank=2.19
+pips[18,100) n= 36 win=0.389 vp=7.56 rank=2.11
+
+POLICY PROFILE OUTCOMES
+neutral          n= 30 win=0.300 vp=6.07 rank=2.78
+road-heavy       n= 31 win=0.290 vp=6.87 rank=2.32
+dev-heavy        n= 30 win=0.067 vp=5.60 rank=2.92
+trade-happy      n= 33 win=0.303 vp=6.73 rank=2.53
+trade-resistant  n= 30 win=0.233 vp=6.67 rank=2.53
+flex-general     n= 31 win=0.226 vp=6.81 rank=2.48
+
+SIMPLE PLAN CUTS AT TURN 48
+city>=1                        n= 37 win=0.459 setup=14.89 pips=26.80 vp=8.00
+city=0                         n=148 win=0.182 setup=14.14 pips=15.70 vp=6.08
+extra_settle>=1 no_city        n= 53 win=0.377 setup=15.13 pips=21.64 vp=7.98
+dev>=2 no_city no_settle       n= 44 win=0.091 setup=14.32 pips=13.34 vp=5.48
+maritime>=3 no_city no_settle  n= 28 win=0.071 setup=14.25 pips=13.43 vp=5.32
+city>=1 dev>=1                 n= 28 win=0.500 setup=15.29 pips=27.30 vp=8.14
+
+WINNER FINAL SHAPES
+final_cities             mean=1.68 median=2.00
+final_dev_bought         mean=4.39 median=4.00
+final_settlements_extra  mean=1.14 median=1.00
+final_roads_extra        mean=7.91 median=7.50
+final_maritime           mean=11.14 median=11.00
