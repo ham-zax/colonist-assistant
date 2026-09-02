@@ -15,6 +15,13 @@ pub enum ExactActionFamily {
     RoadBuilding,
 }
 
+pub const DEVELOPMENT_EXACT_FAMILIES: [ExactActionFamily; 4] = [
+    ExactActionFamily::Knight,
+    ExactActionFamily::Monopoly,
+    ExactActionFamily::YearOfPlenty,
+    ExactActionFamily::RoadBuilding,
+];
+
 pub fn exact_family_for_action(action: &Action) -> Option<ExactActionFamily> {
     match action {
         Action::PlayKnight { .. } => Some(ExactActionFamily::Knight),
@@ -414,9 +421,25 @@ pub fn solve_exact_belief_excluding(
     family: ExactActionFamily,
     root_exclusions: &[Action],
 ) -> ExactDecisionResult {
+    solve_exact_belief_excluding_controlled(particles, family, root_exclusions, || false)
+        .unwrap_or_default()
+}
+
+pub fn solve_exact_belief_excluding_controlled<F>(
+    particles: &[BeliefParticle],
+    family: ExactActionFamily,
+    root_exclusions: &[Action],
+    mut should_stop: F,
+) -> Option<ExactDecisionResult>
+where
+    F: FnMut() -> bool,
+{
     let Some(first) = particles.first() else {
-        return ExactDecisionResult::default();
+        return Some(ExactDecisionResult::default());
     };
+    if should_stop() {
+        return None;
+    }
     let actor = first.state.actor() as usize;
     // Parameter legality can itself depend on hidden state (for example Year
     // of Plenty with a non-public bank). Build the observable candidate union
@@ -426,17 +449,20 @@ pub fn solve_exact_belief_excluding(
     // exact development-card decision take multiple seconds in WASM. Cache
     // each world's legal family once and reuse it for both the candidate union
     // and legality weighting.
-    let legal_by_particle = particles
-        .iter()
-        .map(|particle| {
+    let mut legal_by_particle = Vec::with_capacity(particles.len());
+    for particle in particles {
+        if should_stop() {
+            return None;
+        }
+        legal_by_particle.push(
             particle
                 .state
                 .legal_actions()
                 .into_iter()
                 .filter(|action| matches_family(&particle.state, action, family))
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
+                .collect::<Vec<_>>(),
+        );
+    }
     let mut candidates = legal_by_particle
         .iter()
         .flat_map(|actions| actions.iter().cloned())
@@ -445,7 +471,7 @@ pub fn solve_exact_belief_excluding(
     candidates.dedup();
     candidates.retain(|action| !root_exclusions.contains(action));
     if candidates.is_empty() {
-        return ExactDecisionResult::default();
+        return Some(ExactDecisionResult::default());
     }
 
     let total_weight = particles
@@ -455,12 +481,18 @@ pub fn solve_exact_belief_excluding(
         .max(f32::EPSILON);
     let mut values = Vec::with_capacity(candidates.len());
     for action in candidates {
+        if should_stop() {
+            return None;
+        }
         let mut expected = [0.0; 4];
         let mut lower = [1.0_f32; 4];
         let mut legal_mass = 0.0;
         let mut decision_score = 0.0;
         let mut lower_score = f32::INFINITY;
         for (particle_index, particle) in particles.iter().enumerate() {
+            if should_stop() {
+                return None;
+            }
             let weight = particle.weight.max(0.0) / total_weight;
             if weight <= 1e-8 {
                 continue;
@@ -556,12 +588,12 @@ pub fn solve_exact_belief_excluding(
             .then_with(|| right.legal_weight.total_cmp(&left.legal_weight))
             .then_with(|| format!("{:?}", left.action).cmp(&format!("{:?}", right.action)))
     });
-    ExactDecisionResult {
+    Some(ExactDecisionResult {
         applicable: true,
         chosen: values.first().map(|candidate| candidate.action.clone()),
         actions: values,
         worlds: particles.len(),
-    }
+    })
 }
 
 #[cfg(test)]

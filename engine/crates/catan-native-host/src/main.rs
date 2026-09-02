@@ -1,4 +1,7 @@
+use std::collections::HashSet;
 use std::io::{self, Read, Write};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}, mpsc};
+use std::thread;
 
 use colonist_catan_wasm::{
     NATIVE_GPU_PROTOCOL_VERSION, NATIVE_GPU_STATE_SCHEMA_VERSION, NativeGpuSearchEngine,
@@ -24,6 +27,14 @@ enum HostRequest {
         id: u64,
         request: Value,
     },
+    Cancel {
+        id: u64,
+    },
+}
+
+enum Inbound {
+    Request(HostRequest),
+    Invalid(String),
 }
 
 fn read_message(reader: &mut impl Read) -> io::Result<Option<Value>> {
@@ -64,30 +75,55 @@ fn write_message(writer: &mut impl Write, value: &Value) -> io::Result<()> {
 }
 
 fn main() -> io::Result<()> {
-    let mut stdin = io::stdin().lock();
+    let cancelled = Arc::new(Mutex::new(HashSet::<u64>::new()));
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let (sender, receiver) = mpsc::channel::<Inbound>();
+    let reader_cancelled = Arc::clone(&cancelled);
+    let reader_shutdown = Arc::clone(&shutdown);
+    let reader = thread::spawn(move || -> io::Result<()> {
+        let stdin = io::stdin();
+        let mut stdin = stdin.lock();
+        while let Some(value) = read_message(&mut stdin)? {
+            match serde_json::from_value::<HostRequest>(value) {
+                Ok(HostRequest::Cancel { id }) => {
+                    reader_cancelled
+                        .lock()
+                        .map_err(|_| io::Error::other("native cancellation lock poisoned"))?
+                        .insert(id);
+                }
+                Ok(request) => {
+                    if sender.send(Inbound::Request(request)).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    if sender
+                        .send(Inbound::Invalid(format!("invalid native request: {error}")))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+        reader_shutdown.store(true, Ordering::Release);
+        Ok(())
+    });
+
     let mut stdout = io::stdout().lock();
     let mut engine = NativeGpuSearchEngine::new().map_err(|error| {
         eprintln!("[Colonist Assistant GPU] initialization failed: {error}");
         error
     });
 
-    while let Some(value) = read_message(&mut stdin)? {
-        let request = match serde_json::from_value::<HostRequest>(value) {
-            Ok(request) => request,
-            Err(error) => {
-                write_message(
-                    &mut stdout,
-                    &json!({ "id": 0, "error": format!("invalid native request: {error}") }),
-                )?;
-                continue;
-            }
-        };
-        let response = match request {
-            HostRequest::Hello {
+    while let Ok(inbound) = receiver.recv() {
+        let response = match inbound {
+            Inbound::Invalid(error) => json!({ "id": 0, "error": error }),
+            Inbound::Request(HostRequest::Hello {
                 id,
                 protocol_version,
                 state_schema_version,
-            } => {
+            }) => {
                 if protocol_version != Some(NATIVE_GPU_PROTOCOL_VERSION)
                     || state_schema_version != Some(NATIVE_GPU_STATE_SCHEMA_VERSION)
                 {
@@ -115,15 +151,34 @@ fn main() -> io::Result<()> {
                     }
                 }
             }
-            HostRequest::Analyze { id, request } => match engine.as_mut() {
-                Ok(engine) => match engine.analyze_json(request) {
+            Inbound::Request(HostRequest::Analyze { id, request }) => {
+                let result = match engine.as_mut() {
+                    Ok(engine) => engine.analyze_json_controlled(request, || {
+                        if shutdown.load(Ordering::Acquire) {
+                            return true;
+                        }
+                        cancelled
+                            .lock()
+                            .map_or(true, |ids| ids.contains(&id))
+                    }),
+                    Err(error) => Err(error.clone()),
+                };
+                if let Ok(mut ids) = cancelled.lock() {
+                    ids.remove(&id);
+                }
+                match result {
                     Ok(response) => json!({ "id": id, "response": response }),
                     Err(error) => json!({ "id": id, "error": error }),
-                },
-                Err(error) => json!({ "id": id, "error": error }),
-            },
+                }
+            }
+            Inbound::Request(HostRequest::Cancel { .. }) => unreachable!("cancel is consumed by the reader thread"),
         };
         write_message(&mut stdout, &response)?;
     }
-    Ok(())
+
+    shutdown.store(true, Ordering::Release);
+    match reader.join() {
+        Ok(result) => result,
+        Err(_) => Err(io::Error::other("native reader thread panicked")),
+    }
 }

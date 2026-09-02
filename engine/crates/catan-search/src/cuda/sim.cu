@@ -4406,4 +4406,11 @@ extern "C" __global__ void reduce_root_rollouts_kernel(
     );
     atomicAdd(&stats[5u * root_count + root], (uint64_t)actor_vp);
     atomicAdd(&stats[6u * root_count + root], (uint64_t)best_opponent_vp);
+    const long long margin = (long long)actor_vp - (long long)best_opponent_vp;
+    atomicAdd(&stats[7u * root_count + root], (uint64_t)(margin * margin));
+    atomicAdd(&stats[8u * root_count + root], (uint64_t)actor_vp * (uint64_t)actor_vp);
+    atomicAdd(
+        &stats[9u * root_count + root],
+        (uint64_t)best_opponent_vp * (uint64_t)best_opponent_vp
+    );
 }

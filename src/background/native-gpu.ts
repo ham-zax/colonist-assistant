@@ -1,7 +1,7 @@
 import type { WasmSearchResponse } from "../generated/wasm/colonist_search.js";
 
 export const NATIVE_GPU_HOST = "io.colonist_assistant.gpu";
-const NATIVE_GPU_PROTOCOL_VERSION = 2;
+const NATIVE_GPU_PROTOCOL_VERSION = 3;
 const NATIVE_GPU_STATE_SCHEMA_VERSION = 2;
 const EXPECTED_ENGINE_REVISION = "deep-maxn-v10";
 
@@ -43,6 +43,8 @@ export class NativeGpuClient {
   private unavailable = false;
   private fatalError?: Error;
   private everReady = false;
+  private activeAnalyzeId?: number;
+  private activeDecisionId?: number;
 
   async status(): Promise<NativeGpuStatus | undefined> {
     if (this.statusValue && this.port) return this.statusValue;
@@ -66,6 +68,15 @@ export class NativeGpuClient {
     this.unavailable = false;
     this.fatalError = undefined;
     this.everReady = false;
+    if (this.activeAnalyzeId !== undefined && port) {
+      try {
+        port.postMessage({ type: "cancel", id: this.activeAnalyzeId });
+      } catch {
+        // Disconnecting the port below also terminates any remaining native work.
+      }
+    }
+    this.activeAnalyzeId = undefined;
+    this.activeDecisionId = undefined;
     const error = new Error("GPU companion released");
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
@@ -76,15 +87,37 @@ export class NativeGpuClient {
     }
   }
 
-  async analyze(request: unknown): Promise<WasmSearchResponse> {
+  async analyze(request: unknown, decisionId?: number): Promise<WasmSearchResponse> {
     const status = await this.status();
     if (!status) throw new Error("GPU companion is not installed");
-    const response = await this.request({ type: "analyze", request });
-    if (response.error) throw new Error(response.error);
-    if (!response.response) {
-      throw new Error("GPU companion returned no search response");
+    if (this.activeAnalyzeId !== undefined) {
+      this.cancelAnalyze(this.activeAnalyzeId, "GPU search superseded by a newer decision");
     }
-    return response.response;
+    const { id, response } = this.beginRequest({ type: "analyze", request });
+    this.activeAnalyzeId = id;
+    this.activeDecisionId = decisionId;
+    try {
+      const result = await response;
+      if (result.error) throw new Error(result.error);
+      if (!result.response) {
+        throw new Error("GPU companion returned no search response");
+      }
+      return result.response;
+    } finally {
+      if (this.activeAnalyzeId === id) {
+        this.activeAnalyzeId = undefined;
+        this.activeDecisionId = undefined;
+      }
+    }
+  }
+
+  cancelDecision(decisionId: number): void {
+    if (
+      this.activeAnalyzeId !== undefined &&
+      this.activeDecisionId === decisionId
+    ) {
+      this.cancelAnalyze(this.activeAnalyzeId, "GPU search cancelled as stale");
+    }
   }
 
   private async connect(): Promise<NativeGpuStatus | undefined> {
@@ -144,11 +177,21 @@ export class NativeGpuClient {
   }
 
   private request(payload: Record<string, unknown>): Promise<NativeGpuResponse> {
-    if (!this.port) {
-      return Promise.reject(new Error("GPU companion is disconnected"));
-    }
+    return this.beginRequest(payload).response;
+  }
+
+  private beginRequest(payload: Record<string, unknown>): {
+    id: number;
+    response: Promise<NativeGpuResponse>;
+  } {
     const id = this.nextId++;
-    return new Promise<NativeGpuResponse>((resolve, reject) => {
+    if (!this.port) {
+      return {
+        id,
+        response: Promise.reject(new Error("GPU companion is disconnected")),
+      };
+    }
+    const response = new Promise<NativeGpuResponse>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
       try {
         this.port!.postMessage({ ...payload, id });
@@ -161,6 +204,25 @@ export class NativeGpuClient {
         );
       }
     });
+    return { id, response };
+  }
+
+  private cancelAnalyze(id: number, reason: string): void {
+    if (this.activeAnalyzeId !== id) return;
+    const pending = this.pending.get(id);
+    if (pending) {
+      this.pending.delete(id);
+      pending.reject(new Error(reason));
+    }
+    try {
+      this.port?.postMessage({ type: "cancel", id });
+    } catch {
+      // A disconnect will reject/clear every remaining request separately.
+    }
+    if (this.activeAnalyzeId === id) {
+      this.activeAnalyzeId = undefined;
+      this.activeDecisionId = undefined;
+    }
   }
 
   private onMessage(message: unknown): void {
@@ -180,6 +242,8 @@ export class NativeGpuClient {
     this.port = undefined;
     this.connectPromise = undefined;
     this.statusValue = undefined;
+    this.activeAnalyzeId = undefined;
+    this.activeDecisionId = undefined;
     const error = new Error(detail);
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();

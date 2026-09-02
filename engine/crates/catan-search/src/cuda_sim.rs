@@ -77,7 +77,7 @@ const ACTION_TAG: usize = 0;
 const ACTION_ARG0: usize = 1;
 const ACTION_WORDS: usize = 12;
 const SUMMARY_WORDS: usize = 7;
-const ROOT_STATS_WORDS: usize = 7;
+const ROOT_STATS_WORDS: usize = 10;
 const MATCHUP_PROFILE_WORDS: usize = 10;
 
 pub type CudaSimPolicyProfile = [u8; 5];
@@ -225,6 +225,9 @@ pub struct CudaSimRootActionStats {
     pub mean_turn: f32,
     pub mean_victory_points: f32,
     pub mean_best_opponent_victory_points: f32,
+    pub mean_victory_margin_squared: f32,
+    pub mean_victory_points_squared: f32,
+    pub mean_best_opponent_victory_points_squared: f32,
 }
 
 impl CudaSimRootActionStats {
@@ -238,6 +241,24 @@ impl CudaSimRootActionStats {
 
     pub fn mean_victory_margin(&self) -> f32 {
         self.mean_victory_points - self.mean_best_opponent_victory_points
+    }
+
+    pub fn victory_margin_variance(&self) -> f32 {
+        (self.mean_victory_margin_squared - self.mean_victory_margin().powi(2)).max(0.0)
+    }
+
+    pub fn victory_points_variance(&self) -> f32 {
+        (self.mean_victory_points_squared - self.mean_victory_points.powi(2)).max(0.0)
+    }
+
+    pub fn best_opponent_victory_points_variance(&self) -> f32 {
+        (self.mean_best_opponent_victory_points_squared
+            - self.mean_best_opponent_victory_points.powi(2))
+        .max(0.0)
+    }
+
+    pub fn net_terminal_variance(&self) -> f32 {
+        (self.terminal_rate() - self.net_terminal_outcome().powi(2)).max(0.0)
     }
 
     /// Terminal wins count +1, terminal losses -1, and unfinished samples 0.
@@ -348,6 +369,7 @@ pub enum CudaSimError {
     ActionCountMismatch { states: usize, actions: usize },
     RootBatchMismatch { states: usize, rows: usize },
     InvalidRolloutCount,
+    Cancelled,
     InvalidArenaChunk,
     UnsupportedAction,
     TransitionFailed {
@@ -378,6 +400,7 @@ impl fmt::Display for CudaSimError {
             Self::InvalidRolloutCount => formatter.write_str(
                 "CUDA simulation root search requires nonzero root samples and rollouts",
             ),
+            Self::Cancelled => formatter.write_str("CUDA simulation root search was cancelled"),
             Self::InvalidArenaChunk => formatter.write_str(
                 "CUDA simulation arena campaign requires a nonzero resident chunk size",
             ),
@@ -1443,6 +1466,26 @@ impl CudaSimEngine {
         rollout_steps: usize,
         seed: u64,
     ) -> Result<CudaSimRootSearchResult, CudaSimError> {
+        self.search_root_actions_controlled(
+            root_actions,
+            rollouts_per_action,
+            rollout_steps,
+            seed,
+            || false,
+        )
+    }
+
+    pub fn search_root_actions_controlled<F>(
+        &mut self,
+        root_actions: &[Vec<Action>],
+        rollouts_per_action: usize,
+        rollout_steps: usize,
+        seed: u64,
+        mut should_cancel: F,
+    ) -> Result<CudaSimRootSearchResult, CudaSimError>
+    where
+        F: FnMut() -> bool,
+    {
         let base_count = self.resident_states;
         if base_count == 0 {
             return Err(CudaSimError::NoResidentBatch);
@@ -1520,6 +1563,9 @@ impl CudaSimEngine {
 
         let mut rollout_offset = 0usize;
         while rollout_offset < rollouts_per_action {
+            if should_cancel() {
+                return Err(CudaSimError::Cancelled);
+            }
             let chunk_rollouts = (rollouts_per_action - rollout_offset).min(chunk_rollouts_cap);
             let lane_count = root_count
                 .checked_mul(chunk_rollouts)
@@ -1559,17 +1605,26 @@ impl CudaSimEngine {
                 unsafe { arguments.launch(config)? };
             }
             if rollout_steps_u32 > 0 {
-                let mut arguments = self.stream.launch_builder(&self.rollout_steps_kernel);
-                arguments.arg(&mut self.search_state_device);
-                arguments.arg(&self.topology_device);
-                arguments.arg(&mut self.search_action_device);
-                arguments.arg(&mut self.search_status_device);
-                arguments.arg(&mut self.search_rng_device);
-                arguments.arg(&mut self.search_chance_rng_device);
-                arguments.arg(&stride);
-                arguments.arg(&lane_count_u32);
-                arguments.arg(&rollout_steps_u32);
-                unsafe { arguments.launch(config)? };
+                let mut remaining_steps = rollout_steps_u32;
+                while remaining_steps > 0 {
+                    if should_cancel() {
+                        return Err(CudaSimError::Cancelled);
+                    }
+                    let step_chunk = remaining_steps.min(16);
+                    let mut arguments = self.stream.launch_builder(&self.rollout_steps_kernel);
+                    arguments.arg(&mut self.search_state_device);
+                    arguments.arg(&self.topology_device);
+                    arguments.arg(&mut self.search_action_device);
+                    arguments.arg(&mut self.search_status_device);
+                    arguments.arg(&mut self.search_rng_device);
+                    arguments.arg(&mut self.search_chance_rng_device);
+                    arguments.arg(&stride);
+                    arguments.arg(&lane_count_u32);
+                    arguments.arg(&step_chunk);
+                    unsafe { arguments.launch(config)? };
+                    self.stream.synchronize()?;
+                    remaining_steps -= step_chunk;
+                }
             }
             {
                 let mut arguments = self.stream.launch_builder(&self.reduce_roots_kernel);
@@ -1585,6 +1640,7 @@ impl CudaSimEngine {
                 arguments.arg(&lane_count_u32);
                 unsafe { arguments.launch(config)? };
             }
+            self.stream.synchronize()?;
             rollout_offset += chunk_rollouts;
         }
         let stats = self.root_stats_device.slice(0..ROOT_STATS_WORDS * root_count);
@@ -1606,6 +1662,9 @@ impl CudaSimEngine {
                 mean_turn: stat(4, root) as f32 / valid as f32,
                 mean_victory_points: stat(5, root) as f32 / valid as f32,
                 mean_best_opponent_victory_points: stat(6, root) as f32 / valid as f32,
+                mean_victory_margin_squared: stat(7, root) as f32 / valid as f32,
+                mean_victory_points_squared: stat(8, root) as f32 / valid as f32,
+                mean_best_opponent_victory_points_squared: stat(9, root) as f32 / valid as f32,
             });
         }
         let rows = row_ranges

@@ -6,6 +6,7 @@ import type {
 import type { DecisionRequest } from "./analyze";
 
 export const DECISION_MESSAGE_TYPE = "colonist-assistant:decision";
+export const DECISION_CANCEL_MESSAGE_TYPE = "colonist-assistant:decision-cancel";
 export const DECISION_STATUS_MESSAGE_TYPE =
   "colonist-assistant:decision-status";
 
@@ -19,6 +20,11 @@ export interface DecisionMessageResponse {
   analysis?: DecisionAnalysis;
   execution?: "background";
   error?: string;
+}
+
+export interface DecisionCancelMessage {
+  type: typeof DECISION_CANCEL_MESSAGE_TYPE;
+  id: number;
 }
 
 export interface DecisionStatusMessage {

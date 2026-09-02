@@ -1,8 +1,15 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use colonist_catan_core::{Action, GameState, NodeKind, Phase};
 
 use crate::deadline::CooperativeDeadline;
 use crate::eval::evaluate;
-use crate::exact::{ExactActionFamily, solve_exact_belief};
+use crate::exact::{
+    DEVELOPMENT_EXACT_FAMILIES, ExactActionFamily, ExactDecisionResult, exact_family_for_action,
+    solve_exact_belief_excluding_controlled,
+};
 use crate::mcts::BeliefParticle;
 use crate::opening::opening_adjusted_priors;
 use crate::opening::{OpeningConfig, solve_opening};
@@ -56,6 +63,7 @@ pub struct RankedRootDiagnostic {
     pub prior: f32,
     pub planner_value: Option<f32>,
     pub planner_completion_mass: Option<f32>,
+    pub(crate) quota_score: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -84,6 +92,7 @@ pub struct BeliefSearchProvenance {
     pub pruned_root_count: usize,
     pub pruned_roots: Vec<PrunedRootDiagnostic>,
     pub exact_family_replacement: Option<(Action, Action)>,
+    pub exact_family_results: Vec<(ExactActionFamily, ExactDecisionResult)>,
     pub safety_replacement: Option<(Action, Action)>,
 }
 
@@ -278,6 +287,7 @@ struct Searcher {
     /// distribution from the acting player's information set. Perfect-
     /// information diagnostic search keeps this false intentionally.
     observation_safe_recursive: bool,
+    evaluation_cache: Rc<RefCell<HashMap<u64, [f32; 4]>>>,
 }
 
 struct DecisionVisitContext {
@@ -383,6 +393,7 @@ fn normalize_belief_root_priors_with_diagnostics(
                 .then_some(candidate.planner_value / candidate.planner_weight),
             planner_completion_mass: (candidate.planner_weight > f32::EPSILON)
                 .then_some(candidate.planner_completion_mass.clamp(0.0, 1.0)),
+            quota_score: candidate.quota_score,
         })
         .collect()
 }
@@ -400,6 +411,16 @@ fn normalize_belief_root_priors(
 }
 
 impl Searcher {
+    fn evaluate_cached(&self, state: &GameState) -> [f32; 4] {
+        let hash = state.state_hash();
+        if let Some(value) = self.evaluation_cache.borrow().get(&hash) {
+            return *value;
+        }
+        let value = evaluate(state);
+        self.evaluation_cache.borrow_mut().insert(hash, value);
+        value
+    }
+
     fn visit_ranked_decision(
         &mut self,
         state: &GameState,
@@ -417,7 +438,7 @@ impl Searcher {
         canonicalize_equal_prior_siblings(&mut ranked);
         let remaining = subtree_limit.saturating_sub(self.nodes);
         if remaining == 0 || ranked.is_empty() {
-            return (evaluate(state), None);
+            return (self.evaluate_cached(state), None);
         }
         ranked.truncate(ranked.len().min(remaining as usize));
         let maximize_root = match self.algorithm {
@@ -464,12 +485,12 @@ impl Searcher {
                     child_limit,
                 )
             } else {
-                evaluate(&next)
+                self.evaluate_cached(&next)
             };
             let used = self.nodes.saturating_sub(before);
             carry = allowance.saturating_sub(used);
             if self.deadline_reached {
-                return (evaluate(state), None);
+                return (self.evaluate_cached(state), None);
             }
             apply_action_friction(&mut child, state, &action, actor);
             let scalar = child[component];
@@ -498,7 +519,7 @@ impl Searcher {
         if best_scalar.is_finite() {
             (best, chosen)
         } else {
-            (evaluate(state), None)
+            (self.evaluate_cached(state), None)
         }
     }
 
@@ -513,23 +534,23 @@ impl Searcher {
     ) -> [f32; 4] {
         let subtree_limit = subtree_limit.min(self.node_limit).min(self.maximum_nodes);
         if self.nodes >= subtree_limit {
-            return evaluate(state);
+            return self.evaluate_cached(state);
         }
         if self.deadline.expired_at_checkpoint(self.nodes, 8) {
             self.deadline_reached = true;
-            return evaluate(state);
+            return self.evaluate_cached(state);
         }
         self.nodes += 1;
         self.deepest_depth = self.deepest_depth.max(depth);
         if state.is_terminal() || depth >= self.maximum_depth || actions_in_turn >= 18 {
-            return evaluate(state);
+            return self.evaluate_cached(state);
         }
         let actions = state.legal_actions();
         if actions.is_empty() {
-            return evaluate(state);
+            return self.evaluate_cached(state);
         }
         match state.node_kind() {
-            NodeKind::Terminal => evaluate(state),
+            NodeKind::Terminal => self.evaluate_cached(state),
             NodeKind::Chance => {
                 let total = actions
                     .iter()
@@ -572,12 +593,12 @@ impl Searcher {
                             child_limit,
                         )
                     } else {
-                        evaluate(&next)
+                        self.evaluate_cached(&next)
                     };
                     let used = self.nodes.saturating_sub(before);
                     carry = allowance.saturating_sub(used);
                     if self.deadline_reached {
-                        return evaluate(state);
+                        return self.evaluate_cached(state);
                     }
                     for player in 0..4 {
                         expected[player] += child[player] * weight;
@@ -592,7 +613,7 @@ impl Searcher {
                 // prioritize actions using third-party hidden identities.
                 let remaining = subtree_limit.saturating_sub(self.nodes);
                 if remaining == 0 {
-                    return evaluate(state);
+                    return self.evaluate_cached(state);
                 }
                 let observation_safe = self.observation_safe_recursive;
                 let mut ranked = if observation_safe {
@@ -650,12 +671,12 @@ impl Searcher {
                                 child_limit,
                             )
                         } else {
-                            evaluate(&next)
+                            self.evaluate_cached(&next)
                         };
                         let used = self.nodes.saturating_sub(before);
                         carry = allowance.saturating_sub(used);
                         if self.deadline_reached {
-                            return evaluate(state);
+                            return self.evaluate_cached(state);
                         }
                         apply_action_friction(&mut child, state, action, actor);
                         for player in 0..4 {
@@ -685,7 +706,7 @@ impl Searcher {
         let NodeKind::Decision { actor } = state.node_kind() else {
             return DepthSearchResult {
                 chosen: None,
-                value: evaluate(state),
+                value: self.evaluate_cached(state),
                 actions: Vec::new(),
                 nodes: 1,
                 cutoffs: 0,
@@ -754,7 +775,7 @@ impl Searcher {
                 next.turn != state.turn || next.current_player != state.current_player;
             let mut child = if self.deadline.has_elapsed() {
                 self.deadline_reached = true;
-                evaluate(&next)
+                self.evaluate_cached(&next)
             } else {
                 self.visit(
                     &next,
@@ -803,11 +824,18 @@ impl Searcher {
     }
 }
 
+#[derive(Clone, Copy)]
+enum BeliefNodeBudgetMode {
+    Global,
+    PerDepthWave,
+}
+
 fn belief_search(
     particles: &[BeliefParticle],
     config: BeliefDepthConfig,
     paranoid: bool,
     root_exclusions: &[Action],
+    node_budget_mode: BeliefNodeBudgetMode,
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
     let config = config.normalized();
     let maximum_depth = config.maximum_depth;
@@ -984,17 +1012,19 @@ fn belief_search(
     let mut nodes = 0;
     let mut cutoffs = 0;
     let mut depth = 0;
-    let mut particles_searched = 0;
     let mut deadline_reached = false;
+    let evaluation_cache = Rc::new(RefCell::new(HashMap::new()));
     let total_weight = particles
         .iter()
         .map(|particle| particle.weight.max(0.0))
         .sum::<f32>()
         .max(f32::EPSILON);
     let planner_nodes = (maximum_nodes / 12).clamp(300, 4_000);
-    let ranked_diagnostics =
+    let mut ranked_diagnostics =
         normalize_belief_root_priors_with_diagnostics(particles, observer, planner_nodes);
-    let ranked_root_count = ranked_diagnostics.len();
+    if deadline.has_elapsed() {
+        deadline_reached = true;
+    }
     let mut pruned_roots = Vec::<PrunedRootDiagnostic>::new();
     for candidate in &ranked_diagnostics {
         if root_exclusions.contains(&candidate.action) {
@@ -1005,9 +1035,88 @@ fn belief_search(
             });
         }
     }
+    ranked_diagnostics.retain(|candidate| !root_exclusions.contains(&candidate.action));
+
+    // Parameterized development cards are strategic families, not independent
+    // root slots. Resolve each compact family over the full posterior before
+    // branch competition, merge the family's prior mass into the exact
+    // representative, then rank that one representative alongside ordinary
+    // roots. The cached exact result is reused by final arbitration.
+    let mut exact_family_results = Vec::<(ExactActionFamily, ExactDecisionResult)>::new();
+    let mut exact_family_fallbacks = Vec::<(ExactActionFamily, Action)>::new();
+    for family in DEVELOPMENT_EXACT_FAMILIES {
+        if deadline.has_elapsed() {
+            deadline_reached = true;
+            break;
+        }
+        let family_members = ranked_diagnostics
+            .iter()
+            .filter(|candidate| exact_family_for_action(&candidate.action) == Some(family))
+            .cloned()
+            .collect::<Vec<_>>();
+        let Some(fallback) = family_members.first().map(|candidate| candidate.action.clone()) else {
+            continue;
+        };
+        let Some(exact) = solve_exact_belief_excluding_controlled(
+            posterior,
+            family,
+            root_exclusions,
+            || deadline.has_elapsed(),
+        ) else {
+            deadline_reached = true;
+            break;
+        };
+        let Some(representative) = exact.chosen.clone() else {
+            continue;
+        };
+        let family_prior = family_members
+            .iter()
+            .map(|candidate| candidate.prior.max(0.0))
+            .sum::<f32>();
+        let quota_score = family_members
+            .iter()
+            .map(|candidate| candidate.quota_score)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let representative_diagnostic = family_members
+            .iter()
+            .find(|candidate| candidate.action == representative)
+            .or_else(|| family_members.first())
+            .expect("non-empty exact family has a representative diagnostic");
+        for candidate in &family_members {
+            if candidate.action != representative {
+                pruned_roots.push(PrunedRootDiagnostic {
+                    action: candidate.action.clone(),
+                    pre_truncation_rank: Some(candidate.rank),
+                    reason: RootPruneReason::ExactFamilyCollapsed,
+                });
+            }
+        }
+        ranked_diagnostics
+            .retain(|candidate| exact_family_for_action(&candidate.action) != Some(family));
+        ranked_diagnostics.push(RankedRootDiagnostic {
+            action: representative,
+            rank: 0,
+            prior: family_prior,
+            planner_value: representative_diagnostic.planner_value,
+            planner_completion_mass: representative_diagnostic.planner_completion_mass,
+            quota_score,
+        });
+        exact_family_fallbacks.push((family, fallback));
+        exact_family_results.push((family, exact));
+    }
+    ranked_diagnostics.sort_by(|left, right| {
+        right
+            .quota_score
+            .total_cmp(&left.quota_score)
+            .then_with(|| right.prior.total_cmp(&left.prior))
+            .then_with(|| format!("{:?}", left.action).cmp(&format!("{:?}", right.action)))
+    });
+    for (index, candidate) in ranked_diagnostics.iter_mut().enumerate() {
+        candidate.rank = index + 1;
+    }
+    let ranked_root_count = ranked_diagnostics.len();
     let root_scored = ranked_diagnostics
         .iter()
-        .filter(|candidate| !root_exclusions.contains(&candidate.action))
         .map(|candidate| (candidate.action.clone(), candidate.prior))
         .collect::<Vec<_>>();
     let immediate_threat_weight = posterior_immediate_threat_weight(
@@ -1059,48 +1168,7 @@ fn belief_search(
             });
         }
     }
-    let mut root_actions = retained;
-    let mut exact_family_replacement = None;
-    // Monopoly's five resource parameters share one strategic family slot.
-    // Pick that representative over the complete posterior before MaxN spends
-    // its root budget; a production-based public prior cannot know which
-    // accumulated resource the opponents are actually holding.
-    if let Some(monopoly_slot) = root_actions
-        .iter()
-        .position(|(action, _)| matches!(action, Action::PlayMonopoly { .. }))
-    {
-        let (fallback, fallback_prior) = root_actions[monopoly_slot].clone();
-        let replacement = solve_exact_belief(particles, ExactActionFamily::Monopoly)
-            .chosen
-            .unwrap_or_else(|| fallback.clone());
-        for (action, _) in root_actions
-            .iter()
-            .filter(|(action, _)| matches!(action, Action::PlayMonopoly { .. }))
-        {
-            if action != &replacement {
-                pruned_roots.push(PrunedRootDiagnostic {
-                    action: action.clone(),
-                    pre_truncation_rank: ranked_diagnostics
-                        .iter()
-                        .find(|candidate| candidate.action == *action)
-                        .map(|candidate| candidate.rank),
-                    reason: RootPruneReason::ExactFamilyCollapsed,
-                });
-            }
-        }
-        if replacement != fallback {
-            exact_family_replacement = Some((fallback, replacement.clone()));
-        }
-        let replacement_prior = ranked_diagnostics
-            .iter()
-            .find(|candidate| candidate.action == replacement)
-            .map_or(fallback_prior, |candidate| candidate.prior);
-        root_actions.retain(|(action, _)| !matches!(action, Action::PlayMonopoly { .. }));
-        root_actions.insert(
-            monopoly_slot.min(root_actions.len()),
-            (replacement, replacement_prior),
-        );
-    }
+    let root_actions = retained;
     let mut unique_root_actions = Vec::with_capacity(root_actions.len());
     for candidate in root_actions {
         if !unique_root_actions
@@ -1117,17 +1185,15 @@ fn belief_search(
             .skip(index + 1)
             .all(|(other, _)| other != action)
     }));
-    debug_assert_eq!(
-        root_actions
-            .iter()
-            .filter(|(action, _)| matches!(action, Action::PlayMonopoly { .. }))
-            .count(),
-        usize::from(
+    for family in DEVELOPMENT_EXACT_FAMILIES {
+        debug_assert!(
             root_actions
                 .iter()
-                .any(|(action, _)| matches!(action, Action::PlayMonopoly { .. }))
-        ),
-    );
+                .filter(|(action, _)| exact_family_for_action(action) == Some(family))
+                .count()
+                <= 1
+        );
+    }
     let safe_root_actions = root_actions
         .iter()
         .filter(|(action, _)| {
@@ -1202,124 +1268,41 @@ fn belief_search(
         retained_roots,
         pruned_root_count,
         pruned_roots,
-        exact_family_replacement,
+        exact_family_replacement: None,
+        exact_family_results,
         safety_replacement: None,
     };
     let root_actions = root_actions
         .into_iter()
         .map(|(action, _)| action)
         .collect::<Vec<_>>();
-    for particle in particles {
-        let weight = particle.weight.max(0.0) / total_weight;
-        if weight <= 0.0 {
-            continue;
-        }
-        particles_searched += 1;
-        let mut row = Vec::<RowEntry>::with_capacity(root_actions.len());
-        let mut row_deadline = deadline.has_elapsed();
-        deadline_reached |= row_deadline;
-        for (action_index, action) in root_actions.iter().enumerate() {
-            let mut next = particle.state.clone();
-            if next.apply(action).is_err() {
-                // An unavailable action retains the no-action baseline rather
-                // than disappearing from the denominator.
-                row.push(RowEntry {
-                    action: action.clone(),
-                    value: evaluate(&particle.state),
-                    legal: false,
-                });
-                continue;
-            }
-            let completed_turn = next.turn != particle.state.turn
-                || next.current_player != particle.state.current_player;
-            let nodes_for_action = action_budgets
-                .get(action_index)
-                .copied()
-                .unwrap_or(1)
-                .max(1);
-            let mut searcher = Searcher {
-                algorithm: if paranoid {
-                    Algorithm::Paranoid { root: observer }
-                } else {
-                    Algorithm::MaxN
-                },
-                maximum_depth,
-                maximum_nodes: nodes_for_action,
-                node_limit: nodes_for_action,
-                branch_cap: branch_cap.max(1),
-                nodes: 0,
-                cutoffs: 0,
-                deepest_depth: 0,
-                deadline: deadline.clone(),
-                deadline_reached: false,
-                observation_safe_recursive: true,
-            };
-            let mut candidate_value = if row_deadline {
-                evaluate(&next)
-            } else if searcher.nodes < searcher.node_limit {
-                searcher.visit(
-                    &next,
-                    u8::from(completed_turn),
-                    if completed_turn { 0 } else { 1 },
-                    0.0,
-                    1.0,
-                    searcher.node_limit,
-                )
-            } else {
-                evaluate(&next)
-            };
-            apply_action_friction(&mut candidate_value, &particle.state, action, observer);
-            nodes += searcher.nodes;
-            cutoffs += searcher.cutoffs;
-            depth = depth.max(searcher.deepest_depth);
-            if searcher.deadline_reached || deadline.has_elapsed() {
-                row_deadline = true;
+
+    // Always retain one complete posterior-wide one-ply table. Deeper search
+    // may replace it only after an entire depth wave completes across every
+    // weighted hidden world and retained root. This preserves particle-order
+    // invariance without throwing away the last completed strategic result
+    // when the wall clock expires during a deeper wave.
+    aggregate.clear();
+    let mut particles_searched = 0;
+    let mut floor_complete = !deadline_reached && !deadline.has_elapsed();
+    if floor_complete {
+        'floor: for particle in particles {
+            if deadline.has_elapsed() {
                 deadline_reached = true;
+                floor_complete = false;
+                break;
             }
-            row.push(RowEntry {
-                action: action.clone(),
-                value: candidate_value,
-                legal: true,
-            });
-        }
-        if row_deadline {
-            // Do not let an early action in one hidden world retain a deeper
-            // value than later actions merely because the wall clock expired
-            // midway through that world's row. Keep completed earlier worlds,
-            // but reduce every legal action in this row to the same one-ply
-            // fallback.
-            for entry in &mut row {
-                if !entry.legal {
-                    continue;
-                }
-                let mut next = particle.state.clone();
-                next.apply(&entry.action)
-                    .expect("row entry was legal before deadline fallback");
-                entry.value = evaluate(&next);
-                apply_action_friction(&mut entry.value, &particle.state, &entry.action, observer);
-            }
-        }
-        for entry in row {
-            accumulate(&mut aggregate, entry, weight);
-        }
-    }
-    deadline_reached |= deadline.has_elapsed();
-    if deadline_reached {
-        // A single posterior aggregate must never mix search depths merely
-        // because wall-clock time expired between hidden worlds. If every row
-        // did not finish under the global deadline, rebuild the complete root
-        // table from the same one-ply fallback for every particle. This makes
-        // timed values invariant to particle ordering while preserving the
-        // deeper result whenever the whole posterior completes.
-        aggregate.clear();
-        particles_searched = 0;
-        for particle in particles {
             let weight = particle.weight.max(0.0) / total_weight;
             if weight <= 0.0 {
                 continue;
             }
             particles_searched += 1;
             for action in &root_actions {
+                if deadline.has_elapsed() {
+                    deadline_reached = true;
+                    floor_complete = false;
+                    break 'floor;
+                }
                 let mut next = particle.state.clone();
                 let entry = if next.apply(action).is_ok() {
                     let mut value = evaluate(&next);
@@ -1339,7 +1322,132 @@ fn belief_search(
                 accumulate(&mut aggregate, entry, weight);
             }
         }
-        depth = 0;
+    }
+    if !floor_complete {
+        aggregate.clear();
+        particles_searched = 0;
+        let fallback = evaluate(&first.observed_state(observer));
+        for action in &root_actions {
+            accumulate(
+                &mut aggregate,
+                RowEntry {
+                    action: action.clone(),
+                    value: fallback,
+                    legal: true,
+                },
+                1.0,
+            );
+        }
+    }
+
+    for target_depth in 1..=maximum_depth {
+        if deadline.has_elapsed() {
+            deadline_reached = true;
+            break;
+        }
+        let wave_node_budget = match node_budget_mode {
+            BeliefNodeBudgetMode::Global => maximum_nodes.saturating_sub(nodes),
+            BeliefNodeBudgetMode::PerDepthWave => maximum_nodes,
+        };
+        let minimum_complete_wave_nodes = positive_particle_count
+            .saturating_mul(root_actions.len().max(1) as u32);
+        if wave_node_budget < minimum_complete_wave_nodes {
+            break;
+        }
+        let wave_action_budgets = allocate_root_node_budgets(
+            root_actions.len(),
+            wave_node_budget / positive_particle_count,
+        );
+        let mut wave = Vec::<Aggregate>::new();
+        let mut wave_particles = 0usize;
+        let mut wave_depth = 0u8;
+        let mut wave_complete = true;
+
+        'particles: for particle in particles {
+            let weight = particle.weight.max(0.0) / total_weight;
+            if weight <= 0.0 {
+                continue;
+            }
+            wave_particles += 1;
+            for (action_index, action) in root_actions.iter().enumerate() {
+                if deadline.has_elapsed() {
+                    deadline_reached = true;
+                    wave_complete = false;
+                    break 'particles;
+                }
+                let mut next = particle.state.clone();
+                if next.apply(action).is_err() {
+                    accumulate(
+                        &mut wave,
+                        RowEntry {
+                            action: action.clone(),
+                            value: evaluate(&particle.state),
+                            legal: false,
+                        },
+                        weight,
+                    );
+                    continue;
+                }
+                let completed_turn = next.turn != particle.state.turn
+                    || next.current_player != particle.state.current_player;
+                let nodes_for_action = wave_action_budgets
+                    .get(action_index)
+                    .copied()
+                    .unwrap_or(1)
+                    .max(1);
+                let mut searcher = Searcher {
+                    algorithm: if paranoid {
+                        Algorithm::Paranoid { root: observer }
+                    } else {
+                        Algorithm::MaxN
+                    },
+                    maximum_depth: target_depth,
+                    maximum_nodes: nodes_for_action,
+                    node_limit: nodes_for_action,
+                    branch_cap: branch_cap.max(1),
+                    nodes: 0,
+                    cutoffs: 0,
+                    deepest_depth: 0,
+                    deadline: deadline.clone(),
+                    deadline_reached: false,
+                    observation_safe_recursive: true,
+                    evaluation_cache: Rc::clone(&evaluation_cache),
+                };
+                let mut candidate_value = searcher.visit(
+                    &next,
+                    u8::from(completed_turn),
+                    if completed_turn { 0 } else { 1 },
+                    0.0,
+                    1.0,
+                    searcher.node_limit,
+                );
+                apply_action_friction(&mut candidate_value, &particle.state, action, observer);
+                nodes += searcher.nodes;
+                cutoffs += searcher.cutoffs;
+                wave_depth = wave_depth.max(searcher.deepest_depth);
+                if searcher.deadline_reached || deadline.has_elapsed() {
+                    deadline_reached = true;
+                    wave_complete = false;
+                    break 'particles;
+                }
+                accumulate(
+                    &mut wave,
+                    RowEntry {
+                        action: action.clone(),
+                        value: candidate_value,
+                        legal: true,
+                    },
+                    weight,
+                );
+            }
+        }
+
+        if !wave_complete {
+            break;
+        }
+        aggregate = wave;
+        particles_searched = wave_particles;
+        depth = wave_depth;
     }
     let actor = observer as usize;
     let mut actions = aggregate
@@ -1383,6 +1491,16 @@ fn belief_search(
         provenance.safety_replacement = Some((leading.action.clone(), replacement.action.clone()));
     }
     let chosen = actions.get(chosen_index).map(|entry| entry.action.clone());
+    if let Some(chosen_action) = chosen.as_ref()
+        && let Some(family) = exact_family_for_action(chosen_action)
+        && let Some((_, fallback)) = exact_family_fallbacks
+            .iter()
+            .find(|(candidate, _)| *candidate == family)
+        && fallback != chosen_action
+    {
+        provenance.exact_family_replacement =
+            Some((fallback.clone(), chosen_action.clone()));
+    }
     let value = actions
         .get(chosen_index)
         .map(|entry| entry.value)
@@ -1428,6 +1546,7 @@ fn public_opening_result(
         },
         paranoid,
         &[],
+        BeliefNodeBudgetMode::Global,
     )
     .expect("one public setup state is a valid belief");
     DepthSearchResult {
@@ -1482,6 +1601,7 @@ pub fn search_maxn_bounded_timed(
         deadline: CooperativeDeadline::start(time_budget_ms),
         deadline_reached: false,
         observation_safe_recursive: false,
+        evaluation_cache: Rc::new(RefCell::new(HashMap::new())),
     }
     .root(state)
 }
@@ -1538,6 +1658,7 @@ pub fn search_paranoid_bounded_timed(
         deadline: CooperativeDeadline::start(time_budget_ms),
         deadline_reached: false,
         observation_safe_recursive: false,
+        evaluation_cache: Rc::new(RefCell::new(HashMap::new())),
     }
     .root(state)
 }
@@ -1577,7 +1698,13 @@ pub fn search_weighted_belief_maxn_with_config(
     particles: &[BeliefParticle],
     config: BeliefDepthConfig,
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
-    belief_search(particles, config, false, &[])
+    belief_search(
+        particles,
+        config,
+        false,
+        &[],
+        BeliefNodeBudgetMode::Global,
+    )
 }
 
 pub fn search_weighted_belief_maxn_bounded(
@@ -1634,6 +1761,30 @@ pub fn search_weighted_belief_maxn_bounded_timed_excluding(
         },
         false,
         root_exclusions,
+        BeliefNodeBudgetMode::Global,
+    )
+}
+
+pub fn search_weighted_belief_maxn_iterative_timed_excluding(
+    particles: &[BeliefParticle],
+    depth: u8,
+    branch_cap: usize,
+    nodes_per_depth_wave: u32,
+    time_budget_ms: u32,
+    root_exclusions: &[Action],
+) -> Result<BeliefDepthResult, DepthBeliefError> {
+    belief_search(
+        particles,
+        BeliefDepthConfig {
+            maximum_depth: depth,
+            branch_cap,
+            maximum_nodes: nodes_per_depth_wave,
+            time_budget_ms,
+            strategic_particle_limit: usize::MAX,
+        },
+        false,
+        root_exclusions,
+        BeliefNodeBudgetMode::PerDepthWave,
     )
 }
 
@@ -1672,7 +1823,13 @@ pub fn search_weighted_belief_paranoid_with_config(
     particles: &[BeliefParticle],
     config: BeliefDepthConfig,
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
-    belief_search(particles, config, true, &[])
+    belief_search(
+        particles,
+        config,
+        true,
+        &[],
+        BeliefNodeBudgetMode::Global,
+    )
 }
 
 pub fn search_weighted_belief_paranoid_bounded(
@@ -1729,6 +1886,30 @@ pub fn search_weighted_belief_paranoid_bounded_timed_excluding(
         },
         true,
         root_exclusions,
+        BeliefNodeBudgetMode::Global,
+    )
+}
+
+pub fn search_weighted_belief_paranoid_iterative_timed_excluding(
+    particles: &[BeliefParticle],
+    depth: u8,
+    branch_cap: usize,
+    nodes_per_depth_wave: u32,
+    time_budget_ms: u32,
+    root_exclusions: &[Action],
+) -> Result<BeliefDepthResult, DepthBeliefError> {
+    belief_search(
+        particles,
+        BeliefDepthConfig {
+            maximum_depth: depth,
+            branch_cap,
+            maximum_nodes: nodes_per_depth_wave,
+            time_budget_ms,
+            strategic_particle_limit: usize::MAX,
+        },
+        true,
+        root_exclusions,
+        BeliefNodeBudgetMode::PerDepthWave,
     )
 }
 
@@ -2656,6 +2837,7 @@ fn cuda_belief_search_with_batch(
         pruned_root_count,
         pruned_roots,
         exact_family_replacement,
+        exact_family_results: Vec::new(),
         safety_replacement: None,
     };
     let root_actions = root_actions
@@ -3753,6 +3935,9 @@ mod tests {
             deadline: crate::deadline::CooperativeDeadline::start(0),
             deadline_reached: false,
             observation_safe_recursive: false,
+            evaluation_cache: std::rc::Rc::new(std::cell::RefCell::new(
+                std::collections::HashMap::new(),
+            )),
         };
         let context = || super::DecisionVisitContext {
             depth: 0,

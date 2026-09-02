@@ -1353,6 +1353,16 @@ export const buildDeepSearchRequest = (
       tacticalDepth: 14,
       tacticalNodes: 900,
       timeBudgetMs: 350,
+      effort: {
+        decisionTimeMs: 350,
+        tactical: { maxDepth: 14, nodeBudget: 900 },
+        cpu: { maxDepth: 4, rootCap: 8, nodesPerDepthWave: 4_000 },
+        gpu: {
+          rootCap: 8,
+          rolloutBudget: players.length >= 3 ? 320 : 384,
+          rolloutSteps: players.length >= 3 ? 96 : 108,
+        },
+      },
       seed,
       mode: "maxn",
       depth: 4,
@@ -1427,6 +1437,27 @@ export const analyzeDeepSearch = async (
       request.timeBudgetMs = 2_500;
     }
   }
+  // The wire contract is backend-specific even while legacy top-level knobs
+  // remain available to offline tooling. Live WASM/native execution consumes
+  // this explicit effort object so CPU nodes and GPU rollouts cannot be
+  // mistaken for the same unit.
+  request.effort = {
+    decisionTimeMs: request.timeBudgetMs,
+    tactical: {
+      maxDepth: request.tacticalDepth,
+      nodeBudget: request.tacticalNodes,
+    },
+    cpu: {
+      maxDepth: request.depth,
+      rootCap: request.branchCap,
+      nodesPerDepthWave: request.maxNodes,
+    },
+    gpu: {
+      rootCap: request.branchCap,
+      rolloutBudget: request.iterations,
+      rolloutSteps: request.rolloutActions,
+    },
+  };
   const startedAt = performance.now();
   const response = executor
     ? await executor(request)

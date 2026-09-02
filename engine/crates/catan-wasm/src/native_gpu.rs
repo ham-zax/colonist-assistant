@@ -1,22 +1,25 @@
 use colonist_catan_core::{Action, GameState};
 use colonist_catan_search::{
-    ActionStats, CudaSimAgentSearchConfig, CudaSimEngine, ExactActionFamily, SearchReport,
-    SearchStatistics, belief_domestic_trade_threat, exact_family_for_action, forced_loss_weight,
+    ActionStats, BeliefParticle, CudaSimEngine, CudaSimError, CudaSimRootActionStats,
+    DEVELOPMENT_EXACT_FAMILIES, ExactActionFamily, ExactDecisionResult, SearchReport,
+    SearchStatistics,
+    belief_domestic_trade_threat, exact_family_for_action, forced_loss_weight,
     posterior_immediate_threat_weight, safer_end_turn_alternative, shared_root_candidates,
-    solve_belief_current_turn, solve_exact_belief_excluding,
+    solve_belief_current_turn_timed, solve_exact_belief_excluding_controlled,
 };
 use serde::Serialize;
 use serde_json::Value;
 
 use super::{
-    ActionReplacementOutput, AuthorityTraceOutput, DecisionAuthority, PrunedRootOutput,
+    ActionReplacementOutput, AuthorityTraceOutput, DecisionAuthority, DecisionClock, PrunedRootOutput,
     RankedRootOutput, Request, ResponseDiagnostics, RetainedRootOutput, RootProvenanceOutput,
     action, basic_response_diagnostics, effective_particle_count, exact_family_label,
-    exact_mandatory_report, game_states, response, root_exclusion_actions,
+    exact_mandatory_report_controlled, game_states, response, root_exclusion_actions,
+    weighted_policy_report,
 };
 
 const GPU_ALGORITHM: &str = "gpu-root-rollout";
-pub const NATIVE_GPU_PROTOCOL_VERSION: u32 = 2;
+pub const NATIVE_GPU_PROTOCOL_VERSION: u32 = 3;
 pub const NATIVE_GPU_STATE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize)]
@@ -30,7 +33,6 @@ pub struct NativeGpuDeviceIdentity {
 
 pub struct NativeGpuSearchEngine {
     cuda: CudaSimEngine,
-    config: CudaSimAgentSearchConfig,
 }
 
 #[derive(Clone)]
@@ -49,10 +51,155 @@ struct AggregatedRoot {
     samples: u32,
     errors: u32,
     terminal_outcome: f32,
+    terminal_variance: f32,
     victory_margin: f32,
+    victory_margin_variance: f32,
     mean_turn: f32,
     candidate_vp: f32,
+    candidate_vp_variance: f32,
     opponent_vp: f32,
+    opponent_vp_variance: f32,
+}
+
+#[derive(Clone, Default)]
+struct RootSampleMoments {
+    samples: u32,
+    errors: u32,
+    terminal_sum: f64,
+    terminal_square_sum: f64,
+    turn_sum: f64,
+    margin_sum: f64,
+    margin_square_sum: f64,
+    candidate_vp_sum: f64,
+    candidate_vp_square_sum: f64,
+    opponent_vp_sum: f64,
+    opponent_vp_square_sum: f64,
+}
+
+impl RootSampleMoments {
+    fn add(&mut self, stat: &CudaSimRootActionStats) {
+        let valid = stat.samples.saturating_sub(stat.errors);
+        self.samples = self.samples.saturating_add(stat.samples);
+        self.errors = self.errors.saturating_add(stat.errors);
+        if valid == 0 {
+            return;
+        }
+        let valid_f64 = f64::from(valid);
+        let losses = stat.terminal_samples.saturating_sub(stat.wins);
+        self.terminal_sum += f64::from(stat.wins) - f64::from(losses);
+        self.terminal_square_sum += f64::from(stat.terminal_samples);
+        self.turn_sum += f64::from(stat.mean_turn) * valid_f64;
+        self.margin_sum += f64::from(stat.mean_victory_margin()) * valid_f64;
+        self.margin_square_sum += f64::from(stat.mean_victory_margin_squared) * valid_f64;
+        self.candidate_vp_sum += f64::from(stat.mean_victory_points) * valid_f64;
+        self.candidate_vp_square_sum +=
+            f64::from(stat.mean_victory_points_squared) * valid_f64;
+        self.opponent_vp_sum +=
+            f64::from(stat.mean_best_opponent_victory_points) * valid_f64;
+        self.opponent_vp_square_sum +=
+            f64::from(stat.mean_best_opponent_victory_points_squared) * valid_f64;
+    }
+
+    fn valid_samples(&self) -> u32 {
+        self.samples.saturating_sub(self.errors)
+    }
+}
+
+fn variance(mean: f32, second_moment: f32) -> f32 {
+    (second_moment - mean * mean).max(0.0)
+}
+
+fn confidence_width(variance: f32, samples: u32) -> f32 {
+    if samples == 0 {
+        return f32::INFINITY;
+    }
+    1.96 * (variance / samples as f32).max(0.0).sqrt()
+}
+
+fn mix_sampling_seed(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+fn allocate_systematic_counts(
+    total: usize,
+    weighted: &[(usize, f32)],
+    seed: u64,
+) -> Vec<(usize, usize)> {
+    if total == 0 || weighted.is_empty() {
+        return Vec::new();
+    }
+    let positive = weighted
+        .iter()
+        .copied()
+        .filter(|(_, weight)| *weight > f32::EPSILON)
+        .collect::<Vec<_>>();
+    if positive.is_empty() {
+        return Vec::new();
+    }
+    let mass = positive
+        .iter()
+        .map(|(_, weight)| f64::from(weight.max(0.0)))
+        .sum::<f64>()
+        .max(f64::EPSILON);
+    let unit = ((mix_sampling_seed(seed) >> 11) as f64) / ((1u64 << 53) as f64);
+    let step = 1.0 / total as f64;
+    let start = unit * step;
+    let mut counts = vec![0usize; positive.len()];
+    let mut slot = 0usize;
+    let mut cumulative = f64::from(positive[0].1.max(0.0)) / mass;
+    for sample in 0..total {
+        let target = start + sample as f64 * step;
+        while slot + 1 < positive.len() && target >= cumulative {
+            slot += 1;
+            cumulative += f64::from(positive[slot].1.max(0.0)) / mass;
+        }
+        counts[slot] += 1;
+    }
+    positive
+        .into_iter()
+        .zip(counts)
+        .filter_map(|((index, _), count)| (count > 0).then_some((index, count)))
+        .collect()
+}
+
+fn equal_budget(total: usize, active: &[usize]) -> Vec<(usize, usize)> {
+    if total == 0 || active.is_empty() {
+        return Vec::new();
+    }
+    let base = total / active.len();
+    let remainder = total % active.len();
+    active
+        .iter()
+        .copied()
+        .enumerate()
+        .filter_map(|(position, root)| {
+            let count = base + usize::from(position < remainder);
+            (count > 0).then_some((root, count))
+        })
+        .collect()
+}
+
+fn weighted_gap(report: &SearchReport, actor: usize) -> f32 {
+    let Some(first) = report.actions.first() else {
+        return 0.0;
+    };
+    let Some(second) = report.actions.get(1) else {
+        return 1.0;
+    };
+    (first.value[actor] - second.value[actor]).max(0.0)
+}
+
+fn weighted_robust_gap(report: &SearchReport, actor: usize) -> f32 {
+    let Some(first) = report.actions.first() else {
+        return 0.0;
+    };
+    let Some(second) = report.actions.get(1) else {
+        return 1.0;
+    };
+    (first.lower_confidence_value[actor] - second.value[actor]).max(0.0)
 }
 
 fn baseline_rollout_metrics(state: &GameState, actor: u8) -> (f32, f32, f32, f32, f32) {
@@ -76,6 +223,149 @@ fn baseline_rollout_metrics(state: &GameState, actor: u8) -> (f32, f32, f32, f32
         candidate_vp,
         opponent_vp,
     )
+}
+
+fn aggregate_root(
+    candidate: &RankedGpuRoot,
+    samples: &RootSampleMoments,
+    particles: &[BeliefParticle],
+    legal_by_particle: &[Vec<Action>],
+    weights: &[f32],
+    actor: u8,
+) -> AggregatedRoot {
+    let valid = samples.valid_samples();
+    let valid_f32 = valid.max(1) as f32;
+    let legal_terminal = samples.terminal_sum as f32 / valid_f32;
+    let legal_terminal_second = samples.terminal_square_sum as f32 / valid_f32;
+    let legal_turn = samples.turn_sum as f32 / valid_f32;
+    let legal_margin = samples.margin_sum as f32 / valid_f32;
+    let legal_margin_second = samples.margin_square_sum as f32 / valid_f32;
+    let legal_candidate_vp = samples.candidate_vp_sum as f32 / valid_f32;
+    let legal_candidate_vp_second = samples.candidate_vp_square_sum as f32 / valid_f32;
+    let legal_opponent_vp = samples.opponent_vp_sum as f32 / valid_f32;
+    let legal_opponent_vp_second = samples.opponent_vp_square_sum as f32 / valid_f32;
+
+    let mut terminal_outcome = candidate.legal_weight * legal_terminal;
+    let mut terminal_second = candidate.legal_weight * legal_terminal_second;
+    let mut victory_margin = candidate.legal_weight * legal_margin;
+    let mut victory_margin_second = candidate.legal_weight * legal_margin_second;
+    let mut mean_turn = candidate.legal_weight * legal_turn;
+    let mut candidate_vp = candidate.legal_weight * legal_candidate_vp;
+    let mut candidate_vp_second = candidate.legal_weight * legal_candidate_vp_second;
+    let mut opponent_vp = candidate.legal_weight * legal_opponent_vp;
+    let mut opponent_vp_second = candidate.legal_weight * legal_opponent_vp_second;
+    let mut availability = 0u32;
+
+    for ((particle, legal), weight) in particles
+        .iter()
+        .zip(legal_by_particle.iter())
+        .zip(weights.iter().copied())
+    {
+        if legal.iter().any(|action| action == &candidate.action) {
+            availability = availability.saturating_add(1);
+            continue;
+        }
+        let (terminal, margin, turn, own_vp, best_opponent_vp) =
+            baseline_rollout_metrics(&particle.state, actor);
+        terminal_outcome += terminal * weight;
+        terminal_second += terminal * terminal * weight;
+        victory_margin += margin * weight;
+        victory_margin_second += margin * margin * weight;
+        mean_turn += turn * weight;
+        candidate_vp += own_vp * weight;
+        candidate_vp_second += own_vp * own_vp * weight;
+        opponent_vp += best_opponent_vp * weight;
+        opponent_vp_second += best_opponent_vp * best_opponent_vp * weight;
+    }
+
+    AggregatedRoot {
+        action: candidate.action.clone(),
+        prior: candidate.prior,
+        availability,
+        legal_weight: candidate.legal_weight,
+        samples: samples.samples,
+        errors: samples.errors,
+        terminal_outcome,
+        terminal_variance: variance(terminal_outcome, terminal_second),
+        victory_margin,
+        victory_margin_variance: variance(victory_margin, victory_margin_second),
+        mean_turn,
+        candidate_vp,
+        candidate_vp_variance: variance(candidate_vp, candidate_vp_second),
+        opponent_vp,
+        opponent_vp_variance: variance(opponent_vp, opponent_vp_second),
+    }
+}
+
+fn compare_roots(left: &AggregatedRoot, right: &AggregatedRoot) -> std::cmp::Ordering {
+    left.terminal_outcome
+        .total_cmp(&right.terminal_outcome)
+        .then_with(|| left.victory_margin.total_cmp(&right.victory_margin))
+        .then_with(|| right.mean_turn.total_cmp(&left.mean_turn))
+        .then_with(|| left.prior.total_cmp(&right.prior))
+}
+
+fn racing_contenders(active: &[usize], roots: &[AggregatedRoot]) -> Vec<usize> {
+    if active.len() <= 1 {
+        return active.to_vec();
+    }
+    let best = active
+        .iter()
+        .copied()
+        .max_by(|left, right| compare_roots(&roots[*left], &roots[*right]))
+        .expect("non-empty active root set has a best root");
+    let best_root = &roots[best];
+    let best_terminal_lower = best_root.terminal_outcome
+        - confidence_width(best_root.terminal_variance, best_root.samples);
+    let best_margin_lower = best_root.victory_margin
+        - confidence_width(best_root.victory_margin_variance, best_root.samples);
+    let mut contenders = active
+        .iter()
+        .copied()
+        .filter(|index| {
+            let root = &roots[*index];
+            let terminal_upper = root.terminal_outcome
+                + confidence_width(root.terminal_variance, root.samples);
+            if terminal_upper + 1e-6 < best_terminal_lower {
+                return false;
+            }
+            let terminal_overlap = (root.terminal_outcome - best_root.terminal_outcome).abs()
+                <= confidence_width(root.terminal_variance, root.samples)
+                    + confidence_width(best_root.terminal_variance, best_root.samples);
+            if !terminal_overlap {
+                return true;
+            }
+            root.victory_margin
+                + confidence_width(root.victory_margin_variance, root.samples)
+                + 1e-6
+                >= best_margin_lower
+        })
+        .collect::<Vec<_>>();
+    if !contenders.contains(&best) {
+        contenders.push(best);
+    }
+    if contenders.len() > 2 {
+        contenders.sort_by(|left, right| {
+            let left_root = &roots[*left];
+            let right_root = &roots[*right];
+            let left_terminal = left_root.terminal_outcome
+                - confidence_width(left_root.terminal_variance, left_root.samples);
+            let right_terminal = right_root.terminal_outcome
+                - confidence_width(right_root.terminal_variance, right_root.samples);
+            right_terminal
+                .total_cmp(&left_terminal)
+                .then_with(|| {
+                    let left_margin = left_root.victory_margin
+                        - confidence_width(left_root.victory_margin_variance, left_root.samples);
+                    let right_margin = right_root.victory_margin
+                        - confidence_width(right_root.victory_margin_variance, right_root.samples);
+                    right_margin.total_cmp(&left_margin)
+                })
+                .then_with(|| right_root.prior.total_cmp(&left_root.prior))
+        });
+        contenders.truncate(contenders.len().div_ceil(2).max(2));
+    }
+    contenders
 }
 
 fn truncate_ranked_preserving_end_turn(ranked: &[RankedGpuRoot], cap: usize) -> Vec<RankedGpuRoot> {
@@ -102,10 +392,7 @@ fn truncate_ranked_preserving_end_turn(ranked: &[RankedGpuRoot], cap: usize) -> 
 impl NativeGpuSearchEngine {
     pub fn new() -> Result<Self, String> {
         let cuda = CudaSimEngine::new().map_err(|error| error.to_string())?;
-        Ok(Self {
-            cuda,
-            config: CudaSimAgentSearchConfig::default(),
-        })
+        Ok(Self { cuda })
     }
 
     pub fn device_identity(&self) -> NativeGpuDeviceIdentity {
@@ -119,6 +406,17 @@ impl NativeGpuSearchEngine {
     }
 
     pub fn analyze_json(&mut self, value: Value) -> Result<Value, String> {
+        self.analyze_json_controlled(value, || false)
+    }
+
+    pub fn analyze_json_controlled<F>(
+        &mut self,
+        value: Value,
+        should_cancel: F,
+    ) -> Result<Value, String>
+    where
+        F: Fn() -> bool,
+    {
         let request: Request = serde_json::from_value(value).map_err(|error| error.to_string())?;
         if matches!(request.mode.as_deref(), Some("weighted")) {
             return Err("GPU native search is reserved for the Strategist engine".into());
@@ -128,6 +426,11 @@ impl NativeGpuSearchEngine {
                 "GPU native search does not accept speculative opponent-turn pondering".into(),
             );
         }
+        let effort = request.resolved_effort();
+        let decision_clock = DecisionClock::start(effort.decision_time_ms);
+        if should_cancel() {
+            return Err("GPU native search cancelled".into());
+        }
 
         let particles = game_states(request.state, request.last_rejected_trade)?;
         if particles.is_empty() {
@@ -135,18 +438,79 @@ impl NativeGpuSearchEngine {
         }
         let root_exclusions =
             root_exclusion_actions(&request.root_exclusions, &particles[0].state)?;
-        if let Some(report) = exact_mandatory_report(&particles, &root_exclusions) {
+        match exact_mandatory_report_controlled(
+            &particles,
+            &root_exclusions,
+            || should_cancel() || decision_clock.remaining_ms() == 0,
+        ) {
+            Ok(Some(report)) => {
+                return serde_json::to_value(response(
+                    report,
+                    particles.len(),
+                    GPU_ALGORITHM,
+                    DecisionAuthority::ExactMandatory,
+                    basic_response_diagnostics(particles.len(), DecisionAuthority::ExactMandatory),
+                ))
+                .map_err(|error| error.to_string());
+            }
+            Ok(None) => {}
+            Err(()) if should_cancel() => return Err("GPU native search cancelled".into()),
+            Err(()) => return Err("GPU native decision deadline expired during exact arbitration".into()),
+        }
+
+        let actor = particles[0].state.actor();
+        let tactical_particles = particles
+            .iter()
+            .map(|particle| (&particle.state, particle.weight))
+            .collect::<Vec<_>>();
+        let tactical_budget_ms = decision_clock
+            .remaining_ms()
+            .min((effort.decision_time_ms / 3).max(1));
+        let tactical = solve_belief_current_turn_timed(
+            &tactical_particles,
+            effort.tactical.max_depth,
+            effort.tactical.node_budget,
+            tactical_budget_ms,
+        );
+        if tactical.proven {
+            let total_weight = particles
+                .iter()
+                .map(|particle| particle.weight.max(0.0))
+                .sum::<f32>()
+                .max(f32::EPSILON);
+            let root_value = particles.iter().fold([0.0; 4], |mut total, particle| {
+                let weight = particle.weight.max(0.0) / total_weight;
+                let evaluated = colonist_catan_search::evaluate(&particle.state);
+                for player in 0..4 {
+                    total[player] += evaluated[player] * weight;
+                }
+                total
+            });
+            let report = SearchReport {
+                chosen: tactical.principal_line.first().cloned(),
+                root_value,
+                actions: Vec::new(),
+                tactical: tactical.clone(),
+                exact: ExactDecisionResult::default(),
+                statistics: SearchStatistics {
+                    iterations: 0,
+                    nodes: tactical.nodes as usize,
+                    deepest_decision_depth: 0,
+                    rollouts: 0,
+                    effective_particle_count: effective_particle_count(&particles),
+                    deadline_reached: decision_clock.remaining_ms() == 0,
+                },
+            };
             return serde_json::to_value(response(
                 report,
                 particles.len(),
                 GPU_ALGORITHM,
-                DecisionAuthority::ExactMandatory,
-                basic_response_diagnostics(particles.len(), DecisionAuthority::ExactMandatory),
+                DecisionAuthority::TacticalProven,
+                basic_response_diagnostics(particles.len(), DecisionAuthority::TacticalProven),
             ))
             .map_err(|error| error.to_string());
         }
 
-        let actor = particles[0].state.actor();
         let observation = particles[0].state.observation_hash(actor);
         if particles.iter().any(|particle| {
             particle.state.actor() != actor || particle.state.observation_hash(actor) != observation
@@ -157,31 +521,18 @@ impl NativeGpuSearchEngine {
             );
         }
 
-        // Honor the live request's directly corresponding GPU search knobs
-        // instead of silently running every native decision at the arena's
-        // fixed 4 x 16 x 32 campaign budget. `iterations` is treated as a
-        // total root-rollout budget, `branchCap` as root width, and
-        // `rolloutActions` as continuation length. CPU node/time budgets are
-        // intentionally not given fake one-to-one GPU meanings.
-        let root_samples = request
-            .branch_cap
-            .unwrap_or(self.config.root_samples)
-            .clamp(2, 24);
-        let rollout_steps = request
-            .rollout_actions
-            .map(usize::from)
-            .unwrap_or(self.config.rollout_steps)
-            .clamp(24, 160);
-        let total_root_rollouts = request
-            .iterations
-            .map(|value| value as usize)
-            .unwrap_or(root_samples.saturating_mul(self.config.rollouts_per_action));
-        let rollouts_per_action = total_root_rollouts.div_ceil(root_samples).clamp(8, 96);
-        let search_config = CudaSimAgentSearchConfig {
-            root_samples,
-            rollouts_per_action,
-            rollout_steps,
-        };
+        let rollout_budget = effort.gpu.rollout_budget as usize;
+        let root_cap = effort.gpu.root_cap.min(rollout_budget.max(1));
+        let rollout_steps = effort.gpu.rollout_steps as usize;
+        if decision_clock.remaining_ms() == 0 {
+            return Err("GPU native decision deadline expired before strategic preparation".into());
+        }
+        let prepass = weighted_policy_report(&particles, &root_exclusions);
+        if decision_clock.remaining_ms() == 0 {
+            return Err("GPU native decision deadline expired during strategic prepass".into());
+        }
+        let prepass_gap = weighted_gap(&prepass, actor as usize);
+        let prepass_robust_gap = weighted_robust_gap(&prepass, actor as usize);
 
         let total_weight = particles
             .iter()
@@ -253,6 +604,80 @@ impl NativeGpuSearchEngine {
                 .then_with(|| right.legal_weight.total_cmp(&left.legal_weight))
                 .then_with(|| format!("{:?}", left.action).cmp(&format!("{:?}", right.action)))
         });
+        let mut pruned_roots = Vec::<PrunedRootOutput>::new();
+        let mut exact_family_results = Vec::<(ExactActionFamily, ExactDecisionResult)>::new();
+        for family in DEVELOPMENT_EXACT_FAMILIES {
+            if should_cancel() {
+                return Err("GPU native search cancelled".into());
+            }
+            if decision_clock.remaining_ms() == 0 {
+                break;
+            }
+            let family_members = ranked
+                .iter()
+                .enumerate()
+                .filter(|(_, candidate)| exact_family_for_action(&candidate.action) == Some(family))
+                .map(|(rank, candidate)| (rank, candidate.clone()))
+                .collect::<Vec<_>>();
+            if family_members.is_empty() {
+                continue;
+            }
+            let Some(exact) = solve_exact_belief_excluding_controlled(
+                &particles,
+                family,
+                &root_exclusions,
+                || should_cancel() || decision_clock.remaining_ms() == 0,
+            ) else {
+                if should_cancel() {
+                    return Err("GPU native search cancelled".into());
+                }
+                break;
+            };
+            let Some(representative) = exact.chosen.clone() else {
+                continue;
+            };
+            let family_prior = family_members
+                .iter()
+                .map(|(_, candidate)| candidate.prior.max(0.0))
+                .sum::<f32>();
+            let legal_weight = exact
+                .actions
+                .iter()
+                .find(|candidate| candidate.action == representative)
+                .map_or_else(
+                    || {
+                        family_members
+                            .iter()
+                            .find(|(_, candidate)| candidate.action == representative)
+                            .map_or(0.0, |(_, candidate)| candidate.legal_weight)
+                    },
+                    |candidate| candidate.legal_weight,
+                );
+            for (rank, candidate) in &family_members {
+                if candidate.action != representative {
+                    pruned_roots.push(PrunedRootOutput {
+                        action: action(candidate.action.clone()),
+                        pre_truncation_rank: Some(*rank),
+                        reason: "exact-family-collapsed",
+                    });
+                }
+            }
+            ranked.retain(|candidate| exact_family_for_action(&candidate.action) != Some(family));
+            ranked.push(RankedGpuRoot {
+                action: representative,
+                prior: family_prior,
+                legal_weight,
+            });
+            exact_family_results.push((family, exact));
+        }
+        ranked.sort_by(|left, right| {
+            right
+                .prior
+                .total_cmp(&left.prior)
+                .then_with(|| right.legal_weight.total_cmp(&left.legal_weight))
+                .then_with(|| format!("{:?}", left.action).cmp(&format!("{:?}", right.action)))
+        });
+        let ranked_root_count = ranked.len();
 
         // Match production MaxN's threat invariant: verified escapes enter the
         // root before the ordinary width cap, so a low-prior blocker cannot be
@@ -281,15 +706,13 @@ impl NativeGpuSearchEngine {
         } else {
             Vec::new()
         };
-        let ordinarily_retained =
-            truncate_ranked_preserving_end_turn(&ranked, search_config.root_samples);
-        let mut pre_trade_retained =
-            Vec::<RankedGpuRoot>::with_capacity(search_config.root_samples);
+        let ordinarily_retained = truncate_ranked_preserving_end_turn(&ranked, root_cap);
+        let mut pre_trade_retained = Vec::<RankedGpuRoot>::with_capacity(root_cap);
         for candidate in verified_blockers
             .into_iter()
             .chain(ordinarily_retained.into_iter())
         {
-            if pre_trade_retained.len() >= search_config.root_samples.max(1) {
+            if pre_trade_retained.len() >= root_cap.max(1) {
                 break;
             }
             if !pre_trade_retained
@@ -299,20 +722,21 @@ impl NativeGpuSearchEngine {
                 pre_trade_retained.push(candidate);
             }
         }
-        let mut pruned_roots = ranked
-            .iter()
-            .enumerate()
-            .filter(|(_, candidate)| {
-                !pre_trade_retained
-                    .iter()
-                    .any(|retained| retained.action == candidate.action)
-            })
-            .map(|(rank, candidate)| PrunedRootOutput {
-                action: action(candidate.action.clone()),
-                pre_truncation_rank: Some(rank),
-                reason: "branch-truncated",
-            })
-            .collect::<Vec<_>>();
+        pruned_roots.extend(
+            ranked
+                .iter()
+                .enumerate()
+                .filter(|(_, candidate)| {
+                    !pre_trade_retained
+                        .iter()
+                        .any(|retained| retained.action == candidate.action)
+                })
+                .map(|(rank, candidate)| PrunedRootOutput {
+                    action: action(candidate.action.clone()),
+                    pre_truncation_rank: Some(rank),
+                    reason: "branch-truncated",
+                }),
+        );
 
         let safe = pre_trade_retained
             .iter()
@@ -355,83 +779,132 @@ impl NativeGpuSearchEngine {
             .iter()
             .map(|candidate| candidate.action.clone())
             .collect::<Vec<_>>();
-        let root_rows = legal_by_particle
-            .iter()
-            .map(|legal| {
-                root_actions
+        if root_actions.is_empty() {
+            return Err("GPU native search retained no strategic root actions".into());
+        }
+        if decision_clock.remaining_ms() == 0 {
+            return Err("GPU native decision deadline expired before strategic sampling".into());
+        }
+
+        let mut moments = vec![RootSampleMoments::default(); root_actions.len()];
+        let mut active = (0..root_actions.len()).collect::<Vec<_>>();
+        let mut remaining_rollouts = rollout_budget;
+        let effective_particles = effective_particle_count(&particles);
+        let prepass_disagrees = prepass.chosen.as_ref() != retained.first().map(|root| &root.action);
+        let ambiguous = prepass_gap < 0.06
+            || prepass_robust_gap < 0.02
+            || effective_particles >= 32.0
+            || immediate_threat_weight > f32::EPSILON
+            || prepass_disagrees;
+        let mut samples_per_active_root = if ambiguous { 8usize } else { 4usize };
+        let base_seed = request.seed.unwrap_or(0x0043_4154_414e);
+        let mut phase = 0u64;
+        while remaining_rollouts > 0 && !active.is_empty() {
+            if should_cancel() {
+                return Err("GPU native search cancelled".into());
+            }
+            if decision_clock.remaining_ms() == 0 {
+                break;
+            }
+            let phase_total = remaining_rollouts
+                .min(active.len().saturating_mul(samples_per_active_root).max(active.len()));
+            let root_budgets = equal_budget(phase_total, &active);
+            let mut root_rows = vec![Vec::<Action>::new(); particles.len()];
+            for (root_index, budget) in root_budgets {
+                let eligible = legal_by_particle
                     .iter()
-                    .filter(|candidate| legal.iter().any(|action| action == *candidate))
-                    .cloned()
-                    .collect::<Vec<_>>()
+                    .enumerate()
+                    .filter(|(_, legal)| {
+                        legal
+                            .iter()
+                            .any(|action| action == &root_actions[root_index])
+                    })
+                    .map(|(particle_index, _)| (particle_index, weights[particle_index]))
+                    .collect::<Vec<_>>();
+                let sampling_seed = base_seed
+                    ^ (root_index as u64 + 1).wrapping_mul(0xd134_2543_de82_ef95)
+                    ^ phase.wrapping_mul(0xa409_3822_299f_31d0);
+                for (particle_index, count) in
+                    allocate_systematic_counts(budget, &eligible, sampling_seed)
+                {
+                    root_rows[particle_index]
+                        .extend(std::iter::repeat_n(root_actions[root_index].clone(), count));
+                }
+            }
+            let phase_rollouts = root_rows.iter().map(Vec::len).sum::<usize>();
+            if phase_rollouts == 0 {
+                break;
+            }
+            let phase_seed = base_seed ^ phase.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            let searched = match self.cuda.search_root_actions_controlled(
+                &root_rows,
+                1,
+                rollout_steps,
+                phase_seed,
+                || should_cancel() || decision_clock.remaining_ms() == 0,
+            ) {
+                Ok(searched) => searched,
+                Err(CudaSimError::Cancelled) if should_cancel() => {
+                    return Err("GPU native search cancelled".into());
+                }
+                Err(CudaSimError::Cancelled) if decision_clock.remaining_ms() == 0 => break,
+                Err(error) => return Err(error.to_string()),
+            };
+            for row in &searched.rows {
+                for stat in row {
+                    if let Some(root_index) = root_actions
+                        .iter()
+                        .position(|candidate| candidate == &stat.action)
+                    {
+                        moments[root_index].add(stat);
+                    }
+                }
+            }
+            remaining_rollouts = remaining_rollouts.saturating_sub(phase_rollouts);
+            let snapshot = retained
+                .iter()
+                .enumerate()
+                .map(|(index, candidate)| {
+                    aggregate_root(
+                        candidate,
+                        &moments[index],
+                        &particles,
+                        &legal_by_particle,
+                        &weights,
+                        actor,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let next_active = racing_contenders(&active, &snapshot);
+            if next_active.len() <= 1 {
+                break;
+            }
+            active = next_active;
+            samples_per_active_root = samples_per_active_root.saturating_mul(2).min(128);
+            phase = phase.wrapping_add(1);
+        }
+
+        let aggregated = retained
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| {
+                aggregate_root(
+                    candidate,
+                    &moments[index],
+                    &particles,
+                    &legal_by_particle,
+                    &weights,
+                    actor,
+                )
             })
             .collect::<Vec<_>>();
-        let searched = self
-            .cuda
-            .search_root_actions(
-                &root_rows,
-                search_config.rollouts_per_action,
-                search_config.rollout_steps,
-                request.seed.unwrap_or(0x0043_4154_414e),
-            )
-            .map_err(|error| error.to_string())?;
-
-        let mut aggregated = Vec::<AggregatedRoot>::with_capacity(root_actions.len());
-        for (root_index, candidate) in root_actions.iter().enumerate() {
-            let retained_root = &retained[root_index];
-            let mut root = AggregatedRoot {
-                action: candidate.clone(),
-                prior: retained_root.prior,
-                availability: 0,
-                legal_weight: retained_root.legal_weight,
-                samples: 0,
-                errors: 0,
-                terminal_outcome: 0.0,
-                victory_margin: 0.0,
-                mean_turn: 0.0,
-                candidate_vp: 0.0,
-                opponent_vp: 0.0,
-            };
-            for (((row, legal), weight), particle) in searched
-                .rows
-                .iter()
-                .zip(legal_by_particle.iter())
-                .zip(weights.iter().copied())
-                .zip(particles.iter())
-            {
-                if let Some(stat) = row.iter().find(|stat| stat.action == *candidate) {
-                    root.availability = root.availability.saturating_add(1);
-                    root.samples = root.samples.saturating_add(stat.samples);
-                    root.errors = root.errors.saturating_add(stat.errors);
-                    root.terminal_outcome += stat.net_terminal_outcome() * weight;
-                    root.victory_margin += stat.mean_victory_margin() * weight;
-                    root.mean_turn += stat.mean_turn * weight;
-                    root.candidate_vp += stat.mean_victory_points * weight;
-                    root.opponent_vp += stat.mean_best_opponent_victory_points * weight;
-                    continue;
-                }
-                if legal.iter().any(|action| action == candidate) {
-                    return Err("GPU native search omitted a legal retained root action".into());
-                }
-                let (terminal_outcome, victory_margin, mean_turn, candidate_vp, opponent_vp) =
-                    baseline_rollout_metrics(&particle.state, actor);
-                root.terminal_outcome += terminal_outcome * weight;
-                root.victory_margin += victory_margin * weight;
-                root.mean_turn += mean_turn * weight;
-                root.candidate_vp += candidate_vp * weight;
-                root.opponent_vp += opponent_vp * weight;
-            }
-            aggregated.push(root);
+        if aggregated.iter().all(|candidate| candidate.samples == 0) {
+            return Err("GPU native decision deadline expired before any rollout completed".into());
         }
         let chosen_root = aggregated
             .iter()
-            .filter(|candidate| candidate.errors == 0)
-            .max_by(|left, right| {
-                left.terminal_outcome
-                    .total_cmp(&right.terminal_outcome)
-                    .then_with(|| left.victory_margin.total_cmp(&right.victory_margin))
-                    .then_with(|| right.mean_turn.total_cmp(&left.mean_turn))
-                    .then_with(|| left.prior.total_cmp(&right.prior))
-            })
+            .filter(|candidate| candidate.errors == 0 && candidate.samples > 0)
+            .max_by(|left, right| compare_roots(left, right))
             .cloned()
             .ok_or_else(|| "GPU native search had no error-free root candidate".to_string())?;
 
@@ -446,6 +919,21 @@ impl NativeGpuSearchEngine {
             }
             value
         };
+        let root_lower_values = |candidate: &AggregatedRoot| {
+            let mut value = root_values(candidate);
+            value[actor as usize] = (candidate.candidate_vp
+                - confidence_width(candidate.candidate_vp_variance, candidate.samples))
+            .max(0.0);
+            let opponent_lower = (candidate.opponent_vp
+                - confidence_width(candidate.opponent_vp_variance, candidate.samples))
+            .max(0.0);
+            for (player, slot) in value.iter_mut().enumerate().take(player_count) {
+                if player != actor as usize {
+                    *slot = opponent_lower;
+                }
+            }
+            value
+        };
         let actions = aggregated
             .iter()
             .map(|candidate| ActionStats {
@@ -456,45 +944,27 @@ impl NativeGpuSearchEngine {
                 legal_weight: candidate.legal_weight,
                 prior: candidate.prior,
                 value: root_values(candidate),
-                lower_confidence_value: root_values(candidate),
+                lower_confidence_value: root_lower_values(candidate),
             })
             .collect::<Vec<_>>();
 
-        let tactical_particles = particles
-            .iter()
-            .map(|particle| (&particle.state, particle.weight))
-            .collect::<Vec<_>>();
-        let tactical = solve_belief_current_turn(
-            &tactical_particles,
-            request.tactical_depth.unwrap_or(14).clamp(4, 32),
-            request.tactical_nodes.unwrap_or(900).clamp(100, 100_000),
-        );
-        let mut exact = solve_exact_belief_excluding(
-            &particles,
-            ExactActionFamily::Mandatory,
-            &root_exclusions,
-        );
-        let mut authority = if tactical.proven {
-            DecisionAuthority::TacticalProven
-        } else {
-            DecisionAuthority::GpuRootRollout
-        };
+        let mut exact = ExactDecisionResult::default();
+        let mut authority = DecisionAuthority::GpuRootRollout;
         let initial_authority = authority;
-        let mut chosen = if tactical.proven {
-            tactical.principal_line.first().cloned()
-        } else {
-            Some(chosen_root.action.clone())
-        };
+        let mut chosen = Some(chosen_root.action.clone());
         let mut exact_family = None;
         let mut exact_family_replacement = None;
         let mut safety_replacement = None;
 
-        if !tactical.proven
-            && let Some(family) = chosen.as_ref().and_then(exact_family_for_action)
-        {
+        if let Some(family) = chosen.as_ref().and_then(exact_family_for_action) {
             exact_family = Some(exact_family_label(family));
+            if let Some((_, cached)) = exact_family_results
+                .iter()
+                .find(|(cached_family, _)| *cached_family == family)
+            {
+                exact = cached.clone();
+            }
             let before = chosen.clone();
-            exact = solve_exact_belief_excluding(&particles, family, &root_exclusions);
             if let Some(exact_chosen) = exact.chosen.clone() {
                 if before.as_ref() != Some(&exact_chosen)
                     && let Some(previous) = before
@@ -508,9 +978,7 @@ impl NativeGpuSearchEngine {
                 authority = DecisionAuthority::ExactFamily;
             }
         }
-        if !tactical.proven
-            && let Some(current) = chosen.clone()
-        {
+        if let Some(current) = chosen.clone() {
             let current_loss = forced_loss_weight(
                 particles
                     .iter()
@@ -577,7 +1045,7 @@ impl NativeGpuSearchEngine {
             .map(|candidate| candidate.samples)
             .sum::<u32>();
         let mut root_provenance = RootProvenanceOutput {
-            ranked_root_count: ranked.len(),
+            ranked_root_count,
             ranked_roots: ranked
                 .iter()
                 .enumerate()
@@ -629,11 +1097,11 @@ impl NativeGpuSearchEngine {
             exact,
             statistics: SearchStatistics {
                 iterations: total_rollouts,
-                nodes: total_rollouts as usize * search_config.rollout_steps,
+                nodes: total_rollouts as usize * rollout_steps,
                 deepest_decision_depth: 0,
                 rollouts: total_rollouts,
                 effective_particle_count: effective_particle_count(&particles),
-                deadline_reached: false,
+                deadline_reached: decision_clock.remaining_ms() == 0,
             },
         };
         serde_json::to_value(response(

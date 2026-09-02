@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use colonist_catan_core::{Action, GameState, NodeKind, Phase};
 
+use crate::deadline::CooperativeDeadline;
+
 #[derive(Clone, Debug)]
 pub struct TacticalResult {
     pub win_probability: f32,
@@ -18,12 +20,15 @@ struct Solver {
     maximum_nodes: u32,
     nodes: u32,
     aborted: bool,
+    deadline: Option<CooperativeDeadline>,
     memo: HashMap<(u64, u8), (f32, Vec<Action>)>,
 }
 
 impl Solver {
     fn visit(&mut self, state: &GameState, depth: u8) -> (f32, Vec<Action>) {
-        if self.nodes >= self.maximum_nodes {
+        if self.nodes >= self.maximum_nodes
+            || self.deadline.as_ref().is_some_and(CooperativeDeadline::has_elapsed)
+        {
             self.aborted = true;
             return (0.0, Vec::new());
         }
@@ -106,10 +111,11 @@ impl Solver {
     }
 }
 
-pub fn solve_current_turn(
+fn solve_current_turn_with_deadline(
     state: &GameState,
     maximum_depth: u8,
     maximum_nodes: u32,
+    deadline: Option<CooperativeDeadline>,
 ) -> TacticalResult {
     if !matches!(state.phase, Phase::PreRoll | Phase::Main) {
         return TacticalResult {
@@ -124,6 +130,7 @@ pub fn solve_current_turn(
         root_player: state.actor(),
         maximum_depth,
         maximum_nodes,
+        deadline,
         ..Solver::default()
     };
     let (win_probability, principal_line) = solver.visit(state, 0);
@@ -136,6 +143,14 @@ pub fn solve_current_turn(
     }
 }
 
+pub fn solve_current_turn(
+    state: &GameState,
+    maximum_depth: u8,
+    maximum_nodes: u32,
+) -> TacticalResult {
+    solve_current_turn_with_deadline(state, maximum_depth, maximum_nodes, None)
+}
+
 /// A tactical line is called proven only when the same executable continuation
 /// wins in every materially weighted hidden world and no per-world proof
 /// exhausted its bound. Requiring the complete line is deliberately
@@ -145,6 +160,38 @@ pub fn solve_belief_current_turn(
     particles: &[(&GameState, f32)],
     maximum_depth: u8,
     maximum_nodes: u32,
+) -> TacticalResult {
+    solve_belief_current_turn_with_deadline(particles, maximum_depth, maximum_nodes, None)
+}
+
+pub fn solve_belief_current_turn_timed(
+    particles: &[(&GameState, f32)],
+    maximum_depth: u8,
+    maximum_nodes: u32,
+    time_budget_ms: u32,
+) -> TacticalResult {
+    if time_budget_ms == 0 {
+        return TacticalResult {
+            win_probability: 0.0,
+            lower_bound: 0.0,
+            principal_line: Vec::new(),
+            nodes: 0,
+            proven: false,
+        };
+    }
+    solve_belief_current_turn_with_deadline(
+        particles,
+        maximum_depth,
+        maximum_nodes,
+        Some(CooperativeDeadline::start(time_budget_ms)),
+    )
+}
+
+fn solve_belief_current_turn_with_deadline(
+    particles: &[(&GameState, f32)],
+    maximum_depth: u8,
+    maximum_nodes: u32,
+    deadline: Option<CooperativeDeadline>,
 ) -> TacticalResult {
     if particles.is_empty() {
         return TacticalResult {
@@ -172,7 +219,12 @@ pub fn solve_belief_current_turn(
         if weight <= 1e-6 {
             continue;
         }
-        let result = solve_current_turn(state, maximum_depth, nodes_per_particle);
+        let result = solve_current_turn_with_deadline(
+            state,
+            maximum_depth,
+            nodes_per_particle,
+            deadline.clone(),
+        );
         expected += result.win_probability * weight;
         lower_bound += result.lower_bound * weight;
         nodes += result.nodes;

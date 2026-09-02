@@ -6,7 +6,7 @@ use std::time::Instant;
 /// `std::time::Instant::now()` traps on `wasm32-unknown-unknown`, so packaged
 /// searches use the browser clock while native arena/tests retain `Instant`.
 #[derive(Clone)]
-pub(crate) struct CooperativeDeadline {
+pub struct CooperativeDeadline {
     budget_ms: u32,
     #[cfg(not(target_arch = "wasm32"))]
     started_at: Instant,
@@ -15,7 +15,7 @@ pub(crate) struct CooperativeDeadline {
 }
 
 impl CooperativeDeadline {
-    pub(crate) fn start(budget_ms: u32) -> Self {
+    pub fn start(budget_ms: u32) -> Self {
         Self {
             budget_ms,
             #[cfg(not(target_arch = "wasm32"))]
@@ -25,7 +25,7 @@ impl CooperativeDeadline {
         }
     }
 
-    pub(crate) fn has_elapsed(&self) -> bool {
+    pub fn has_elapsed(&self) -> bool {
         if self.budget_ms == 0 {
             return false;
         }
@@ -37,6 +37,19 @@ impl CooperativeDeadline {
         {
             js_sys::Date::now() - self.started_at_ms >= f64::from(self.budget_ms)
         }
+    }
+
+    pub fn remaining_ms(&self) -> u32 {
+        if self.budget_ms == 0 {
+            return u32::MAX;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let elapsed = self.started_at.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
+        #[cfg(target_arch = "wasm32")]
+        let elapsed = (js_sys::Date::now() - self.started_at_ms)
+            .max(0.0)
+            .min(f64::from(u32::MAX)) as u32;
+        self.budget_ms.saturating_sub(elapsed)
     }
 
     pub(crate) fn expired_at_checkpoint(&self, completed_units: u32, interval: u32) -> bool {

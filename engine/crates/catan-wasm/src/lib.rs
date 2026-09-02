@@ -10,13 +10,15 @@ use colonist_catan_core::{
     Vertex,
 };
 use colonist_catan_search::{
-    ActionStats, BeliefParticle, BeliefSearchProvenance, ENGINE_REVISION, ExactActionFamily,
+    ActionStats, BeliefParticle, BeliefSearchProvenance, CooperativeDeadline, ENGINE_REVISION,
+    ExactActionFamily,
     ExactActionValue, ExactDecisionResult, Mcts, RootPruneReason, SearchConfig, SearchMode,
     SearchReport, SearchStatistics, TacticalResult, action_prior, evaluate,
     exact_family_for_action, learned_model_version, learned_trade_model_version,
-    safer_end_turn_alternative, search_weighted_belief_maxn_bounded_timed_excluding,
-    search_weighted_belief_paranoid_bounded_timed_excluding, solve_belief_current_turn,
-    solve_exact_belief_excluding,
+    safer_end_turn_alternative, search_weighted_belief_maxn_iterative_timed_excluding,
+    search_weighted_belief_paranoid_iterative_timed_excluding, solve_belief_current_turn,
+    solve_belief_current_turn_timed, solve_exact_belief_excluding,
+    solve_exact_belief_excluding_controlled,
 };
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -32,6 +34,8 @@ pub use native_gpu::{
 thread_local! {
     static PERSISTENT_SEARCH: RefCell<Vec<Mcts>> = const { RefCell::new(Vec::new()) };
 }
+
+type DecisionClock = CooperativeDeadline;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -153,10 +157,44 @@ struct RootExclusionInput {
     receive: [u8; 5],
 }
 
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TacticalEffortInput {
+    max_depth: u8,
+    node_budget: u32,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CpuEffortInput {
+    max_depth: u8,
+    root_cap: usize,
+    nodes_per_depth_wave: u32,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuEffortInput {
+    root_cap: usize,
+    rollout_budget: u32,
+    rollout_steps: u16,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchEffortInput {
+    decision_time_ms: u32,
+    tactical: TacticalEffortInput,
+    cpu: CpuEffortInput,
+    gpu: GpuEffortInput,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Request {
     state: StateInput,
+    effort: Option<SearchEffortInput>,
     last_rejected_trade: Option<RejectedTradeInput>,
     #[serde(default)]
     root_exclusions: Vec<RootExclusionInput>,
@@ -171,6 +209,45 @@ struct Request {
     depth: Option<u8>,
     branch_cap: Option<usize>,
     ponder: Option<bool>,
+}
+
+impl Request {
+    fn resolved_effort(&self) -> SearchEffortInput {
+        let effort = self.effort.unwrap_or(SearchEffortInput {
+            decision_time_ms: self.time_budget_ms.unwrap_or(2_800),
+            tactical: TacticalEffortInput {
+                max_depth: self.tactical_depth.unwrap_or(18),
+                node_budget: self.tactical_nodes.unwrap_or(12_000),
+            },
+            cpu: CpuEffortInput {
+                max_depth: self.depth.unwrap_or(3),
+                root_cap: self.branch_cap.unwrap_or(12),
+                nodes_per_depth_wave: self.max_nodes.unwrap_or(48_000) as u32,
+            },
+            gpu: GpuEffortInput {
+                root_cap: self.branch_cap.unwrap_or(12),
+                rollout_budget: self.iterations.unwrap_or(384),
+                rollout_steps: self.rollout_actions.unwrap_or(96),
+            },
+        });
+        SearchEffortInput {
+            decision_time_ms: effort.decision_time_ms.clamp(50, 10_000),
+            tactical: TacticalEffortInput {
+                max_depth: effort.tactical.max_depth.clamp(4, 32),
+                node_budget: effort.tactical.node_budget.clamp(100, 100_000),
+            },
+            cpu: CpuEffortInput {
+                max_depth: effort.cpu.max_depth.clamp(1, 6),
+                root_cap: effort.cpu.root_cap.clamp(2, 32),
+                nodes_per_depth_wave: effort.cpu.nodes_per_depth_wave.clamp(1_000, 250_000),
+            },
+            gpu: GpuEffortInput {
+                root_cap: effort.gpu.root_cap.clamp(2, 24),
+                rollout_budget: effort.gpu.rollout_budget.clamp(16, 50_000),
+                rollout_steps: effort.gpu.rollout_steps.clamp(24, 160),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1017,12 +1094,22 @@ fn exact_single_action(
 /// end-turn, discard, and robber/victim latency independent of the strategic
 /// simulation budget. Trade responses remain strategic because counteroffers
 /// are a deliberately bounded candidate family rather than an exhaustive one.
-fn exact_mandatory_report(
+fn exact_mandatory_report_controlled<F>(
     particles: &[BeliefParticle],
     root_exclusions: &[Action],
-) -> Option<SearchReport> {
-    let mandatory =
-        solve_exact_belief_excluding(particles, ExactActionFamily::Mandatory, root_exclusions);
+    mut should_stop: F,
+) -> Result<Option<SearchReport>, ()>
+where
+    F: FnMut() -> bool,
+{
+    let Some(mandatory) = solve_exact_belief_excluding_controlled(
+        particles,
+        ExactActionFamily::Mandatory,
+        root_exclusions,
+        &mut should_stop,
+    ) else {
+        return Err(());
+    };
     let exact = if mandatory.applicable {
         mandatory
     } else {
@@ -1034,12 +1121,18 @@ fn exact_mandatory_report(
             .first()
             .is_some_and(|particle| particle.state.phase == Phase::TradeResponses)
         {
-            return None;
+            return Ok(None);
         }
-        exact_single_action(particles, root_exclusions)?
+        if should_stop() {
+            return Err(());
+        }
+        let Some(exact) = exact_single_action(particles, root_exclusions) else {
+            return Ok(None);
+        };
+        exact
     };
     if !exact.applicable {
-        return None;
+        return Ok(None);
     }
     let chosen = exact.chosen.clone();
     let root_value = exact
@@ -1062,7 +1155,7 @@ fn exact_mandatory_report(
             lower_confidence_value: candidate.lower_bound,
         })
         .collect();
-    Some(SearchReport {
+    Ok(Some(SearchReport {
         chosen,
         root_value,
         actions,
@@ -1082,7 +1175,7 @@ fn exact_mandatory_report(
             effective_particle_count: effective_particle_count(particles),
             deadline_reached: false,
         },
-    })
+    }))
 }
 
 fn root_exclusion_actions(
@@ -1116,20 +1209,36 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let mode = RequestedMode::parse(request.mode.as_deref())?;
     let ponder = request.ponder.unwrap_or(false);
+    let effort = request.resolved_effort();
+    let decision_time_ms = effort.decision_time_ms;
+    let tactical_depth = effort.tactical.max_depth;
+    let tactical_nodes = effort.tactical.node_budget;
+    let cpu_depth = effort.cpu.max_depth;
+    let cpu_root_cap = effort.cpu.root_cap;
+    let cpu_nodes_per_depth_wave = effort.cpu.nodes_per_depth_wave;
+    let decision_clock = DecisionClock::start(decision_time_ms);
     let particles = game_states(request.state, request.last_rejected_trade)
         .map_err(|error| JsValue::from_str(&error))?;
     let root_exclusions = root_exclusion_actions(&request.root_exclusions, &particles[0].state)
         .map_err(|error| JsValue::from_str(&error))?;
     let algorithm = mode.label();
-    if !ponder && let Some(report) = exact_mandatory_report(&particles, &root_exclusions) {
-        return serde_wasm_bindgen::to_value(&response(
-            report,
-            particles.len(),
-            algorithm,
-            DecisionAuthority::ExactMandatory,
-            basic_response_diagnostics(particles.len(), DecisionAuthority::ExactMandatory),
-        ))
-        .map_err(|error| JsValue::from_str(&error.to_string()));
+    if !ponder {
+        let mandatory = exact_mandatory_report_controlled(
+            &particles,
+            &root_exclusions,
+            || decision_clock.remaining_ms() == 0,
+        )
+        .map_err(|_| JsValue::from_str("decision deadline expired during exact arbitration"))?;
+        if let Some(report) = mandatory {
+            return serde_wasm_bindgen::to_value(&response(
+                report,
+                particles.len(),
+                algorithm,
+                DecisionAuthority::ExactMandatory,
+                basic_response_diagnostics(particles.len(), DecisionAuthority::ExactMandatory),
+            ))
+            .map_err(|error| JsValue::from_str(&error.to_string()));
+        }
     }
     let config = SearchConfig {
         iterations: request.iterations.unwrap_or(2_400).clamp(16, 50_000),
@@ -1137,7 +1246,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
         rollout_actions: request.rollout_actions.unwrap_or(260).clamp(24, 800),
         tactical_depth: request.tactical_depth.unwrap_or(18).clamp(4, 32),
         tactical_nodes: request.tactical_nodes.unwrap_or(12_000).clamp(100, 100_000),
-        time_budget_ms: request.time_budget_ms.unwrap_or(2_800).clamp(250, 10_000),
+        time_budget_ms: decision_time_ms,
         seed: request.seed.unwrap_or(0x0043_4154_414e),
         mode: mode.mcts_mode(),
         ..SearchConfig::default()
@@ -1148,25 +1257,77 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
     );
     let (report, authority, diagnostics) =
         if matches!(mode, RequestedMode::Maxn | RequestedMode::AlphaBeta) || opening {
-            let depth = request.depth.unwrap_or(3).clamp(1, 6);
-            let branch_cap = request.branch_cap.unwrap_or(12).clamp(2, 32);
-            let maximum_nodes = request.max_nodes.unwrap_or(48_000).clamp(1_000, 250_000) as u32;
+            let tactical_particles = particles
+                .iter()
+                .map(|particle| (&particle.state, particle.weight))
+                .collect::<Vec<_>>();
+            let tactical = solve_belief_current_turn_timed(
+                &tactical_particles,
+                tactical_depth,
+                tactical_nodes,
+                decision_clock.remaining_ms(),
+            );
+            if tactical.proven {
+                let total_weight = particles
+                    .iter()
+                    .map(|particle| particle.weight.max(0.0))
+                    .sum::<f32>()
+                    .max(f32::EPSILON);
+                let root_value = particles.iter().fold([0.0; 4], |mut total, particle| {
+                    let weight = particle.weight.max(0.0) / total_weight;
+                    let evaluated = evaluate(&particle.state);
+                    for player in 0..4 {
+                        total[player] += evaluated[player] * weight;
+                    }
+                    total
+                });
+                let report = SearchReport {
+                    chosen: tactical.principal_line.first().cloned(),
+                    root_value,
+                    actions: Vec::new(),
+                    tactical: tactical.clone(),
+                    exact: ExactDecisionResult::default(),
+                    statistics: SearchStatistics {
+                        iterations: 0,
+                        nodes: tactical.nodes as usize,
+                        deepest_decision_depth: 0,
+                        rollouts: 0,
+                        effective_particle_count: effective_particle_count(&particles),
+                        deadline_reached: decision_clock.remaining_ms() == 0,
+                    },
+                };
+                return serde_wasm_bindgen::to_value(&response(
+                    report,
+                    particles.len(),
+                    algorithm,
+                    DecisionAuthority::TacticalProven,
+                    basic_response_diagnostics(
+                        particles.len(),
+                        DecisionAuthority::TacticalProven,
+                    ),
+                ))
+                .map_err(|error| JsValue::from_str(&error.to_string()));
+            }
+            let depth = cpu_depth;
+            let branch_cap = cpu_root_cap;
+            let maximum_nodes = cpu_nodes_per_depth_wave;
+            let remaining_time_ms = decision_clock.remaining_ms().max(1);
             let depth_report = if mode == RequestedMode::AlphaBeta {
-                search_weighted_belief_paranoid_bounded_timed_excluding(
+                search_weighted_belief_paranoid_iterative_timed_excluding(
                     &particles,
                     depth,
                     branch_cap,
                     maximum_nodes,
-                    config.time_budget_ms,
+                    remaining_time_ms,
                     &root_exclusions,
                 )
             } else {
-                search_weighted_belief_maxn_bounded_timed_excluding(
+                search_weighted_belief_maxn_iterative_timed_excluding(
                     &particles,
                     depth,
                     branch_cap,
                     maximum_nodes,
-                    config.time_budget_ms,
+                    remaining_time_ms,
                     &root_exclusions,
                 )
             }
@@ -1174,17 +1335,11 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
             let rust_posterior_particles = depth_report.posterior_particles;
             let rust_search_particles = depth_report.particles;
             let depth_safety_replacement = depth_report.provenance.safety_replacement.clone();
+            let depth_exact_family_replacement =
+                depth_report.provenance.exact_family_replacement.clone();
+            let exact_family_results = depth_report.provenance.exact_family_results.clone();
             let retained_root_priors = depth_report.provenance.retained_roots.clone();
             let root_provenance = root_provenance_output(depth_report.provenance.clone());
-            let tactical_particles = particles
-                .iter()
-                .map(|particle| (&particle.state, particle.weight))
-                .collect::<Vec<_>>();
-            let tactical = solve_belief_current_turn(
-                &tactical_particles,
-                request.tactical_depth.unwrap_or(18).clamp(4, 32),
-                request.tactical_nodes.unwrap_or(12_000).clamp(100, 100_000),
-            );
             let actions = depth_report
                 .actions
                 .into_iter()
@@ -1206,47 +1361,29 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
                     }
                 })
                 .collect::<Vec<_>>();
-            let mut exact = solve_exact_belief_excluding(
-                &particles,
-                ExactActionFamily::Mandatory,
-                &root_exclusions,
-            );
-            let mut authority = if exact.applicable {
-                DecisionAuthority::ExactMandatory
-            } else if tactical.proven {
-                DecisionAuthority::TacticalProven
-            } else if depth_safety_replacement.is_some() {
+            // Mandatory exact authority was already checked before any
+            // expensive work. Development-family exact results were resolved
+            // before branch competition inside belief MaxN and are reused here.
+            let mut exact = ExactDecisionResult::default();
+            let mut authority = if depth_safety_replacement.is_some() {
                 DecisionAuthority::SafetyOverride
             } else {
                 DecisionAuthority::DeepMaxn
             };
             let initial_authority = authority;
             let mut exact_family = None;
-            let mut exact_family_replacement = None;
+            let exact_family_replacement =
+                depth_exact_family_replacement.map(replacement_output);
             let mut safety_replacement = depth_safety_replacement.map(replacement_output);
-            let mut chosen = if exact.applicable {
-                exact.chosen.clone()
-            } else if tactical.proven {
-                tactical.principal_line.first().cloned()
-            } else {
-                depth_report.chosen
-            };
-            if !exact.applicable
-                && !tactical.proven
-                && let Some(family) = chosen.as_ref().and_then(exact_family_for_action)
+            let mut chosen = depth_report.chosen;
+            if let Some(family) = chosen.as_ref().and_then(exact_family_for_action)
+                && let Some((_, cached)) = exact_family_results
+                    .iter()
+                    .find(|(candidate, _)| *candidate == family)
             {
                 exact_family = Some(exact_family_label(family));
-                let before = chosen.clone();
-                exact = solve_exact_belief_excluding(&particles, family, &root_exclusions);
+                exact = cached.clone();
                 if let Some(exact_chosen) = exact.chosen.clone() {
-                    if before.as_ref() != Some(&exact_chosen)
-                        && let Some(previous) = before
-                    {
-                        exact_family_replacement = Some(ActionReplacementOutput {
-                            from: action(previous),
-                            to: action(exact_chosen.clone()),
-                        });
-                    }
                     chosen = Some(exact_chosen);
                     authority = DecisionAuthority::ExactFamily;
                 }
@@ -1309,8 +1446,8 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
                 .collect::<Vec<_>>();
             report.tactical = solve_belief_current_turn(
                 &tactical_particles,
-                request.tactical_depth.unwrap_or(18).clamp(4, 32),
-                request.tactical_nodes.unwrap_or(12_000).clamp(100, 100_000),
+                tactical_depth,
+                tactical_nodes,
             );
             let mut exact = solve_exact_belief_excluding(
                 &particles,

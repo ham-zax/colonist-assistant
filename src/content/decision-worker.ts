@@ -6,8 +6,10 @@ import type {
 import type { BoardSnapshot } from "../core/placement";
 import type { TrackerState } from "../core/types";
 import {
+  DECISION_CANCEL_MESSAGE_TYPE,
   DECISION_MESSAGE_TYPE,
   DECISION_STATUS_MESSAGE_TYPE,
+  type DecisionCancelMessage,
   type DecisionMessage,
   type DecisionMessageResponse,
   type DecisionStatusMessage,
@@ -160,6 +162,7 @@ export class DecisionWorkerClient {
       return "duplicate";
     }
     if (key === this.completedKey) return "completed";
+    if (this.active) this.cancelDecision(this.active.id);
     const waitedForActive = Boolean(this.active);
     this.queued = {
       id: this.nextId++,
@@ -232,14 +235,13 @@ export class DecisionWorkerClient {
     const response = Promise.race([
       this.send(message),
       new Promise<DecisionMessageResponse>((resolve) => {
-        recoveryTimer = globalThis.setTimeout(
-          () =>
-            resolve({
-              id: request.id,
-              error: HARD_DECISION_ERROR,
-            }),
-          HARD_DECISION_MS,
-        );
+        recoveryTimer = globalThis.setTimeout(() => {
+          this.cancelDecision(request.id);
+          resolve({
+            id: request.id,
+            error: HARD_DECISION_ERROR,
+          });
+        }, HARD_DECISION_MS);
       }),
     ]);
     void response
@@ -350,6 +352,18 @@ export class DecisionWorkerClient {
     }
   }
 
+  private cancelDecision(id: number): void {
+    const message: DecisionCancelMessage = {
+      type: DECISION_CANCEL_MESSAGE_TYPE,
+      id,
+    };
+    void chrome.runtime.sendMessage(message).catch((error: unknown) => {
+      if (isExtensionContextInvalidatedError(error)) {
+        this.contextInvalidated = true;
+      }
+    });
+  }
+
   private queryStatus(
     engine: DecisionEngine,
   ): Promise<DecisionStatusMessageResponse> {
@@ -362,6 +376,7 @@ export class DecisionWorkerClient {
   }
 
   reset(): void {
+    if (this.active) this.cancelDecision(this.active.id);
     this.generation += 1;
     this.queued = undefined;
     this.completedKey = "";

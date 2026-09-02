@@ -4,8 +4,10 @@ import {
 import { warmDeepSearchEngine } from "../worker/deep-search";
 import { NativeGpuClient } from "./native-gpu";
 import {
+  DECISION_CANCEL_MESSAGE_TYPE,
   DECISION_MESSAGE_TYPE,
   DECISION_STATUS_MESSAGE_TYPE,
+  type DecisionCancelMessage,
   type DecisionMessage,
   type DecisionMessageResponse,
   type DecisionStatusMessage,
@@ -15,34 +17,36 @@ import {
 const nativeGpu = new NativeGpuClient();
 
 const NATIVE_GPU_ROOT_ACTIONS = 12;
-const NATIVE_GPU_ROLLOUTS_PER_ROOT = 32;
+const NATIVE_GPU_GLOBAL_ROLLOUTS = 12 * 32;
 const NATIVE_GPU_ROLLOUT_STEPS = 96;
 
 const withNativeGpuStrengthProfile = (request: unknown): unknown => {
   if (!request || typeof request !== "object") return request;
   const typed = request as {
-    iterations?: number;
-    branchCap?: number;
-    rolloutActions?: number;
+    effort?: {
+      decisionTimeMs: number;
+      tactical: { maxDepth: number; nodeBudget: number };
+      cpu: { maxDepth: number; rootCap: number; nodesPerDepthWave: number };
+      gpu: { rootCap: number; rolloutBudget: number; rolloutSteps: number };
+    };
   };
-  const rootActions = Math.max(
-    NATIVE_GPU_ROOT_ACTIONS,
-    typed.branchCap ?? 0,
-  );
-  const rolloutSteps = Math.max(
-    NATIVE_GPU_ROLLOUT_STEPS,
-    typed.rolloutActions ?? 0,
-  );
-  const totalRollouts = Math.max(
-    NATIVE_GPU_ROOT_ACTIONS * NATIVE_GPU_ROLLOUTS_PER_ROOT,
-    typed.iterations ?? 0,
-    rootActions * NATIVE_GPU_ROLLOUTS_PER_ROOT,
-  );
+  if (!typed.effort) return request;
   return {
     ...typed,
-    branchCap: rootActions,
-    iterations: totalRollouts,
-    rolloutActions: rolloutSteps,
+    effort: {
+      ...typed.effort,
+      gpu: {
+        rootCap: Math.max(NATIVE_GPU_ROOT_ACTIONS, typed.effort.gpu.rootCap),
+        rolloutBudget: Math.max(
+          NATIVE_GPU_GLOBAL_ROLLOUTS,
+          typed.effort.gpu.rolloutBudget,
+        ),
+        rolloutSteps: Math.max(
+          NATIVE_GPU_ROLLOUT_STEPS,
+          typed.effort.gpu.rolloutSteps,
+        ),
+      },
+    },
   };
 };
 
@@ -88,6 +92,16 @@ const isDecisionMessage = (value: unknown): value is DecisionMessage => {
 
 chrome.runtime.onMessage.addListener(
   (message: unknown, _sender, sendResponse) => {
+    if (
+      message &&
+      typeof message === "object" &&
+      (message as Partial<DecisionCancelMessage>).type ===
+        DECISION_CANCEL_MESSAGE_TYPE &&
+      typeof (message as Partial<DecisionCancelMessage>).id === "number"
+    ) {
+      nativeGpu.cancelDecision((message as DecisionCancelMessage).id);
+      return undefined;
+    }
     if (
       message &&
       typeof message === "object" &&
@@ -137,7 +151,8 @@ chrome.runtime.onMessage.addListener(
         if (gpu) {
           const analysis = await analyzeDecisionRequest(
             message,
-            (request) => nativeGpu.analyze(withNativeGpuStrengthProfile(request)),
+            (request) =>
+              nativeGpu.analyze(withNativeGpuStrengthProfile(request), message.id),
           );
           return {
             ...analysis,

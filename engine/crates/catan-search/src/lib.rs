@@ -30,6 +30,7 @@ pub use cuda_exact::*;
 #[cfg(all(feature = "cuda-sim", not(target_arch = "wasm32")))]
 pub use cuda_sim::*;
 
+pub use deadline::CooperativeDeadline;
 pub use eval::{
     ExpansionOption, TrophyOutlook, evaluate, expansion_option_value, expected_discard_loss,
     largest_army_outlook, longest_road_outlook, marginal_development_value, production_pips,
@@ -38,8 +39,9 @@ pub use eval::{
 #[cfg(feature = "benchmark-profile")]
 pub use eval::{EvaluateProfile, evaluate_profiled};
 pub use exact::{
-    ExactActionFamily, ExactActionValue, ExactDecisionResult, exact_family_for_action,
-    solve_exact_belief, solve_exact_belief_excluding,
+    DEVELOPMENT_EXACT_FAMILIES, ExactActionFamily, ExactActionValue, ExactDecisionResult,
+    exact_family_for_action, solve_exact_belief, solve_exact_belief_excluding,
+    solve_exact_belief_excluding_controlled,
 };
 pub use features::{
     ACTION_FEATURES, EDGE_FEATURES, GLOBAL_FEATURES, HEX_FEATURES, HeterogeneousGraphFeatures,
@@ -65,7 +67,9 @@ pub use shared::{
     group_particles_by_observation, select_experimental_strategic_particles,
     shared_root_candidates,
 };
-pub use tactical::{TacticalResult, solve_belief_current_turn, solve_current_turn};
+pub use tactical::{
+    TacticalResult, solve_belief_current_turn, solve_belief_current_turn_timed, solve_current_turn,
+};
 pub use threats::{
     OpponentThreat, OpponentThreatKind, action_blocks_threat, detect_opponent_threats,
     force_threat_blocking_actions, forced_loss_weight, posterior_immediate_threat_weight,
@@ -87,9 +91,10 @@ pub use depth::{
     search_maxn_bounded_timed, search_paranoid, search_paranoid_bounded,
     search_paranoid_bounded_timed, search_weighted_belief_maxn_bounded,
     search_weighted_belief_maxn_bounded_timed, search_weighted_belief_maxn_bounded_timed_excluding,
-    search_weighted_belief_maxn_with_config, search_weighted_belief_paranoid_bounded,
-    search_weighted_belief_paranoid_bounded_timed,
+    search_weighted_belief_maxn_iterative_timed_excluding, search_weighted_belief_maxn_with_config,
+    search_weighted_belief_paranoid_bounded, search_weighted_belief_paranoid_bounded_timed,
     search_weighted_belief_paranoid_bounded_timed_excluding,
+    search_weighted_belief_paranoid_iterative_timed_excluding,
     search_weighted_belief_paranoid_with_config,
 };
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
