@@ -42,6 +42,10 @@ pub struct ExactActionValue {
     pub lower_score: f32,
 }
 
+pub fn exact_action_comparator_score(decision_score: f32, lower_score: f32) -> f32 {
+    decision_score * 0.82 + lower_score * 0.18
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ExactDecisionResult {
     pub applicable: bool,
@@ -581,8 +585,8 @@ where
         });
     }
     values.sort_by(|left, right| {
-        let left_score = left.decision_score * 0.82 + left.lower_score * 0.18;
-        let right_score = right.decision_score * 0.82 + right.lower_score * 0.18;
+        let left_score = exact_action_comparator_score(left.decision_score, left.lower_score);
+        let right_score = exact_action_comparator_score(right.decision_score, right.lower_score);
         right_score
             .total_cmp(&left_score)
             .then_with(|| right.legal_weight.total_cmp(&left.legal_weight))

@@ -17,6 +17,17 @@ import {
 } from "./dom";
 import { isExtensionContextInvalidatedError } from "./extension-context";
 
+export interface UnmatchedLogSample {
+  signature: string;
+  count: number;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  firstLogIndex?: number;
+  lastLogIndex?: number;
+  reason: "unrecognized-log-format";
+  sample: string;
+}
+
 interface StoredSession {
   schema: 3;
   id: string;
@@ -28,6 +39,7 @@ interface StoredSession {
   seenIds: string[];
   partialHistory: boolean;
   unmatchedCount: number;
+  unmatchedSamples?: UnmatchedLogSample[];
 }
 
 export interface SessionSummary {
@@ -42,6 +54,8 @@ export interface SessionSummary {
 
 const MAX_STORED_EVENTS = 1600;
 const MAX_SEEN_IDS = 2600;
+const MAX_UNMATCHED_SAMPLES = 24;
+const MAX_UNMATCHED_SAMPLE_CHARS = 220;
 
 let storageOperations: Promise<void> = Promise.resolve();
 
@@ -137,6 +151,7 @@ export class GameSession {
   events: StoredEvent[] = [];
   partialHistory = false;
   unmatchedCount = 0;
+  unmatchedSamples: UnmatchedLogSample[] = [];
   startedAt = Date.now();
   gameKey?: string;
 
@@ -234,6 +249,7 @@ export class GameSession {
     this.events = [];
     this.partialHistory = false;
     this.unmatchedCount = 0;
+    this.unmatchedSamples = [];
     this.seenIds.clear();
     this.syntheticSequence = 0;
     if (rescan) this.scan(true);
@@ -259,6 +275,7 @@ export class GameSession {
     this.events = [];
     this.partialHistory = false;
     this.unmatchedCount = 0;
+    this.unmatchedSamples = [];
     try {
       await enqueueStorage(clearCurrentGameStorage);
     } catch (error) {
@@ -341,6 +358,7 @@ export class GameSession {
       this.events = [];
       this.partialHistory = false;
       this.unmatchedCount = 0;
+      this.unmatchedSamples = [];
       this.startedAt = Date.now();
       this.seenIds.clear();
     }
@@ -363,6 +381,7 @@ export class GameSession {
       const parsed = parseLogSnapshot(snapshot);
       if (!parsed) {
         this.unmatchedCount += 1;
+        this.recordUnmatched(snapshot.serialText, snapshot.index);
         changed = true;
         continue;
       }
@@ -393,6 +412,46 @@ export class GameSession {
     }
   }
 
+  private recordUnmatched(serialText: string, logIndex?: number): void {
+    const normalized = serialText.replace(/\s+/gu, " ").trim();
+    const signature = hashString(normalized);
+    const now = Date.now();
+    const existing = this.unmatchedSamples.find(
+      (sample) => sample.signature === signature,
+    );
+    if (existing) {
+      existing.count += 1;
+      existing.lastSeenAt = now;
+      if (logIndex !== undefined) existing.lastLogIndex = logIndex;
+      return;
+    }
+    if (this.unmatchedSamples.length >= MAX_UNMATCHED_SAMPLES) {
+      let replacement = 0;
+      for (let index = 1; index < this.unmatchedSamples.length; index += 1) {
+        const candidate = this.unmatchedSamples[index]!;
+        const current = this.unmatchedSamples[replacement]!;
+        if (
+          candidate.count < current.count ||
+          (candidate.count === current.count && candidate.lastSeenAt < current.lastSeenAt)
+        ) {
+          replacement = index;
+        }
+      }
+      this.unmatchedSamples.splice(replacement, 1);
+    }
+    this.unmatchedSamples.push({
+      signature,
+      count: 1,
+      firstSeenAt: now,
+      lastSeenAt: now,
+      ...(logIndex !== undefined
+        ? { firstLogIndex: logIndex, lastLogIndex: logIndex }
+        : {}),
+      reason: "unrecognized-log-format",
+      sample: normalized.slice(0, MAX_UNMATCHED_SAMPLE_CHARS),
+    });
+  }
+
   private async restore(): Promise<void> {
     const key = sessionStorageKey(this.id);
     let result: Record<string, unknown>;
@@ -410,6 +469,9 @@ export class GameSession {
     this.events = stored.events;
     this.partialHistory = stored.partialHistory;
     this.unmatchedCount = stored.unmatchedCount;
+    this.unmatchedSamples = (stored.unmatchedSamples ?? [])
+      .slice(-MAX_UNMATCHED_SAMPLES)
+      .map((sample) => ({ ...sample }));
     this.state = replayEvents(stored.events);
     for (const id of stored.seenIds) this.seenIds.add(id);
   }
@@ -436,6 +498,7 @@ export class GameSession {
       seenIds: [...this.seenIds].slice(-MAX_SEEN_IDS),
       partialHistory: this.partialHistory,
       unmatchedCount: this.unmatchedCount,
+      unmatchedSamples: this.unmatchedSamples.map((sample) => ({ ...sample })),
     };
     const summary: SessionSummary = {
       active: true,

@@ -156,7 +156,8 @@ chrome.runtime.onMessage.addListener(
     }
     if (!isDecisionMessage(message)) return undefined;
     void (async () => {
-      if (shouldUseNativeGpu(message)) {
+      const nativeGpuEligible = shouldUseNativeGpu(message);
+      if (nativeGpuEligible) {
         const gpu = await nativeGpu.status();
         if (gpu) {
           const analysis = await analyzeDecisionRequest(
@@ -173,11 +174,24 @@ chrome.runtime.onMessage.addListener(
       }
       if (message.engine === "weighted") nativeGpu.release();
       const analysis = await analyzeDecisionRequest(message);
+      const runtime = analysis.deepSearch
+        ? ("background-wasm" as const)
+        : ("background-rollout" as const);
+      const runtimeReason =
+        analysis.runtimeReason ??
+        (runtime === "background-wasm"
+          ? message.engine === "deep-search" && message.board.initialPlacement
+            ? "Dedicated opening solver runs on WASM/CPU"
+            : nativeGpuEligible
+              ? "Native GPU unavailable; using WASM Deep MaxN"
+              : message.engine === "weighted"
+                ? "Weighted mode runs on WASM"
+                : undefined
+          : undefined);
       return {
         ...analysis,
-        runtime: analysis.deepSearch
-          ? ("background-wasm" as const)
-          : ("background-rollout" as const),
+        runtime,
+        ...(runtimeReason ? { runtimeReason } : {}),
       };
     })()
       .then((analysis) => {

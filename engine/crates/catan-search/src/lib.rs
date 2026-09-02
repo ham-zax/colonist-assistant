@@ -40,7 +40,8 @@ pub use eval::{
 pub use eval::{EvaluateProfile, evaluate_profiled};
 pub use exact::{
     DEVELOPMENT_EXACT_FAMILIES, ExactActionFamily, ExactActionValue, ExactDecisionResult,
-    exact_family_for_action, solve_exact_belief, solve_exact_belief_excluding,
+    exact_action_comparator_score, exact_family_for_action, solve_exact_belief,
+    solve_exact_belief_excluding,
     solve_exact_belief_excluding_controlled,
 };
 pub use features::{
@@ -84,7 +85,8 @@ pub use trade_safety::{
 
 pub const ENGINE_REVISION: &str = "deep-maxn-v10";
 pub use depth::{
-    BeliefDepthConfig, BeliefDepthResult, BeliefSearchProvenance, DepthActionValue,
+    BeliefDepthConfig, BeliefDepthResult, BeliefSearchProvenance, BeliefSearchStageTimings,
+    DepthActionValue,
     DepthBeliefError, DepthSearchResult, PrunedRootDiagnostic, RankedRootDiagnostic,
     RetainedRootDiagnostic, RootPruneReason, search_belief_maxn, search_belief_maxn_bounded,
     search_belief_paranoid, search_belief_paranoid_bounded, search_maxn, search_maxn_bounded,

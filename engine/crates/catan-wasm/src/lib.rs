@@ -10,11 +10,12 @@ use colonist_catan_core::{
     Vertex,
 };
 use colonist_catan_search::{
-    ActionStats, BeliefParticle, BeliefSearchProvenance, CooperativeDeadline, ENGINE_REVISION,
-    ExactActionFamily,
+    ActionStats, BeliefParticle, BeliefSearchProvenance, BeliefSearchStageTimings,
+    CooperativeDeadline, ENGINE_REVISION, ExactActionFamily,
     ExactActionValue, ExactDecisionResult, Mcts, RootPruneReason, SearchConfig, SearchMode,
     SearchReport, SearchStatistics, TacticalResult, action_prior, evaluate,
-    exact_family_for_action, learned_model_version, learned_trade_model_version,
+    exact_action_comparator_score, exact_family_for_action, learned_model_version,
+    learned_trade_model_version,
     safer_end_turn_alternative, search_weighted_belief_maxn_iterative_timed_excluding,
     search_weighted_belief_paranoid_iterative_timed_excluding, solve_belief_current_turn,
     solve_belief_current_turn_timed, solve_exact_belief_excluding,
@@ -319,6 +320,18 @@ struct ActionStatisticsOutput {
     lower_confidence_value: [f32; 4],
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExactActionDiagnosticOutput {
+    action: ActionOutput,
+    value: [f32; 4],
+    lower_bound: [f32; 4],
+    legal_weight: f32,
+    decision_score: f32,
+    lower_score: f32,
+    comparator_score: f32,
+}
+
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum DecisionAuthority {
@@ -383,6 +396,34 @@ struct RootProvenanceOutput {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct SearchStagesOutput {
+    particle_preparation_ms: u32,
+    root_scoring_ms: u32,
+    exact_families_ms: u32,
+    threat_safety_ms: u32,
+    one_ply_floor_ms: u32,
+    deep_waves_ms: u32,
+    floor_complete: bool,
+    attempted_depth: u8,
+}
+
+impl From<BeliefSearchStageTimings> for SearchStagesOutput {
+    fn from(value: BeliefSearchStageTimings) -> Self {
+        Self {
+            particle_preparation_ms: value.particle_preparation_ms,
+            root_scoring_ms: value.root_scoring_ms,
+            exact_families_ms: value.exact_families_ms,
+            threat_safety_ms: value.threat_safety_ms,
+            one_ply_floor_ms: value.one_ply_floor_ms,
+            deep_waves_ms: value.deep_waves_ms,
+            floor_complete: value.floor_complete,
+            attempted_depth: value.attempted_depth,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AuthorityTraceOutput {
     initial_authority: DecisionAuthority,
     exact_family: Option<&'static str>,
@@ -393,6 +434,7 @@ struct AuthorityTraceOutput {
 struct ResponseDiagnostics {
     rust_posterior_particles: usize,
     rust_search_particles: usize,
+    search_stages: Option<SearchStagesOutput>,
     root_provenance: RootProvenanceOutput,
     authority_trace: AuthorityTraceOutput,
 }
@@ -413,6 +455,7 @@ struct Response {
     tactical_line: Vec<ActionOutput>,
     exact_decision: bool,
     exact_worlds: usize,
+    exact_actions: Vec<ExactActionDiagnosticOutput>,
     actions: Vec<ActionStatisticsOutput>,
     iterations: u32,
     nodes: usize,
@@ -422,6 +465,7 @@ struct Response {
     wasm_particles: usize,
     rust_posterior_particles: usize,
     rust_search_particles: usize,
+    search_stages: Option<SearchStagesOutput>,
     root_provenance: RootProvenanceOutput,
     authority_trace: AuthorityTraceOutput,
     effective_particle_count: f32,
@@ -980,6 +1024,7 @@ fn basic_response_diagnostics(
     ResponseDiagnostics {
         rust_posterior_particles: particles,
         rust_search_particles: particles,
+        search_stages: None,
         root_provenance: RootProvenanceOutput::default(),
         authority_trace: AuthorityTraceOutput {
             initial_authority: authority,
@@ -1016,6 +1061,23 @@ fn response(
             .collect(),
         exact_decision: report.exact.applicable,
         exact_worlds: report.exact.worlds,
+        exact_actions: report
+            .exact
+            .actions
+            .into_iter()
+            .map(|candidate| ExactActionDiagnosticOutput {
+                action: action(candidate.action),
+                value: candidate.value,
+                lower_bound: candidate.lower_bound,
+                legal_weight: candidate.legal_weight,
+                decision_score: candidate.decision_score,
+                lower_score: candidate.lower_score,
+                comparator_score: exact_action_comparator_score(
+                    candidate.decision_score,
+                    candidate.lower_score,
+                ),
+            })
+            .collect(),
         actions: report
             .actions
             .into_iter()
@@ -1038,6 +1100,7 @@ fn response(
         wasm_particles: particles,
         rust_posterior_particles: diagnostics.rust_posterior_particles,
         rust_search_particles: diagnostics.rust_search_particles,
+        search_stages: diagnostics.search_stages,
         root_provenance: diagnostics.root_provenance,
         authority_trace: diagnostics.authority_trace,
         effective_particle_count: report.statistics.effective_particle_count,
@@ -1369,6 +1432,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
             .map_err(|error| JsValue::from_str(&format!("{error:?}")))?;
             let rust_posterior_particles = depth_report.posterior_particles;
             let rust_search_particles = depth_report.particles;
+            let search_stages = Some(SearchStagesOutput::from(depth_report.stage_timings));
             let depth_safety_replacement = depth_report.provenance.safety_replacement.clone();
             let depth_exact_family_replacement =
                 depth_report.provenance.exact_family_replacement.clone();
@@ -1446,6 +1510,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
             let diagnostics = ResponseDiagnostics {
                 rust_posterior_particles,
                 rust_search_particles,
+                search_stages,
                 root_provenance,
                 authority_trace: AuthorityTraceOutput {
                     initial_authority,
@@ -1549,6 +1614,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
             let diagnostics = ResponseDiagnostics {
                 rust_posterior_particles: particles.len(),
                 rust_search_particles: particles.len(),
+                search_stages: None,
                 root_provenance: RootProvenanceOutput::default(),
                 authority_trace: AuthorityTraceOutput {
                     initial_authority,

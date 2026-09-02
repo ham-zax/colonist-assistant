@@ -51,6 +51,27 @@ export interface DeepSearchAction {
   accept?: boolean;
 }
 
+export interface DeepSearchExactActionDiagnostic {
+  action: DeepSearchAction;
+  value: number[];
+  lowerBound: number[];
+  legalWeight: number;
+  decisionScore: number;
+  lowerScore: number;
+  comparatorScore: number;
+}
+
+export interface DeepSearchStageTimings {
+  particlePreparationMs: number;
+  rootScoringMs: number;
+  exactFamiliesMs: number;
+  threatSafetyMs: number;
+  onePlyFloorMs: number;
+  deepWavesMs: number;
+  floorComplete: boolean;
+  attemptedDepth: number;
+}
+
 export interface DeepSearchActionStatistics {
   action: DeepSearchAction;
   visits: number;
@@ -142,6 +163,10 @@ export interface DeepSearchResult {
   tradeModelVersion?: string;
   algorithm: string;
   authority: DecisionAuthority;
+  requestedTimeBudgetMs?: number;
+  requestedMaxDepth?: number;
+  requestedRootCap?: number;
+  requestedNodesPerDepthWave?: number;
   chosen?: DeepSearchAction;
   rootValue: number[];
   tacticalWinProbability: number;
@@ -149,6 +174,7 @@ export interface DeepSearchResult {
   tacticalProven: boolean;
   exactDecision: boolean;
   exactWorlds: number;
+  exactActions?: DeepSearchExactActionDiagnostic[];
   tacticalLine: DeepSearchAction[];
   actions: DeepSearchActionStatistics[];
   iterations: number;
@@ -161,6 +187,7 @@ export interface DeepSearchResult {
   wasmParticleCount: number;
   rustPosteriorParticleCount: number;
   rustSearchParticleCount: number;
+  searchStages?: DeepSearchStageTimings;
   rootProvenance: DeepSearchRootProvenance;
   authorityTrace: DeepSearchAuthorityTrace;
   mappingFailureReason?: string;

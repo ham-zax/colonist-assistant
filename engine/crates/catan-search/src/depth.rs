@@ -96,6 +96,18 @@ pub struct BeliefSearchProvenance {
     pub safety_replacement: Option<(Action, Action)>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BeliefSearchStageTimings {
+    pub particle_preparation_ms: u32,
+    pub root_scoring_ms: u32,
+    pub exact_families_ms: u32,
+    pub threat_safety_ms: u32,
+    pub one_ply_floor_ms: u32,
+    pub deep_waves_ms: u32,
+    pub floor_complete: bool,
+    pub attempted_depth: u8,
+}
+
 #[derive(Clone, Debug)]
 pub struct BeliefDepthResult {
     pub chosen: Option<Action>,
@@ -109,6 +121,7 @@ pub struct BeliefDepthResult {
     /// Weighted particles supplied to this Rust belief search before coalescing.
     pub posterior_particles: usize,
     pub deadline_reached: bool,
+    pub stage_timings: BeliefSearchStageTimings,
     pub provenance: BeliefSearchProvenance,
 }
 
@@ -830,6 +843,15 @@ enum BeliefNodeBudgetMode {
     PerDepthWave,
 }
 
+fn elapsed_stage_ms(deadline: &CooperativeDeadline, started_remaining_ms: u32) -> u32 {
+    let remaining_ms = deadline.remaining_ms();
+    if started_remaining_ms == u32::MAX || remaining_ms == u32::MAX {
+        0
+    } else {
+        started_remaining_ms.saturating_sub(remaining_ms)
+    }
+}
+
 fn belief_search(
     particles: &[BeliefParticle],
     config: BeliefDepthConfig,
@@ -842,6 +864,7 @@ fn belief_search(
     let branch_cap = config.branch_cap;
     let maximum_nodes = config.maximum_nodes;
     let deadline = CooperativeDeadline::start(config.time_budget_ms);
+    let particle_preparation_started = deadline.remaining_ms();
     let Some(first_particle) = particles.first() else {
         return Err(DepthBeliefError::Empty);
     };
@@ -942,6 +965,7 @@ fn belief_search(
             particles: particles.len(),
             posterior_particles: particles.len(),
             deadline_reached: report.deadline_reached,
+            stage_timings: BeliefSearchStageTimings::default(),
             provenance: BeliefSearchProvenance::default(),
         });
     }
@@ -971,6 +995,8 @@ fn belief_search(
     } else {
         coalesced
     };
+    let particle_preparation_ms = elapsed_stage_ms(&deadline, particle_preparation_started);
+    let root_scoring_started = deadline.remaining_ms();
     struct Aggregate {
         action: Action,
         value: [f32; 4],
@@ -1022,6 +1048,8 @@ fn belief_search(
     let planner_nodes = (maximum_nodes / 12).clamp(300, 4_000);
     let mut ranked_diagnostics =
         normalize_belief_root_priors_with_diagnostics(particles, observer, planner_nodes);
+    let root_scoring_ms = elapsed_stage_ms(&deadline, root_scoring_started);
+    let exact_families_started = deadline.remaining_ms();
     if deadline.has_elapsed() {
         deadline_reached = true;
     }
@@ -1118,6 +1146,8 @@ fn belief_search(
             })
         });
     }
+    let exact_families_ms = elapsed_stage_ms(&deadline, exact_families_started);
+    let threat_safety_started = deadline.remaining_ms();
     ranked_diagnostics.sort_by(|left, right| {
         right
             .quota_score
@@ -1290,6 +1320,8 @@ fn belief_search(
         .into_iter()
         .map(|(action, _)| action)
         .collect::<Vec<_>>();
+    let threat_safety_ms = elapsed_stage_ms(&deadline, threat_safety_started);
+    let one_ply_floor_started = deadline.remaining_ms();
 
     // Always retain one complete posterior-wide one-ply table. Deeper search
     // may replace it only after an entire depth wave completes across every
@@ -1353,6 +1385,9 @@ fn belief_search(
             );
         }
     }
+    let one_ply_floor_ms = elapsed_stage_ms(&deadline, one_ply_floor_started);
+    let deep_waves_started = deadline.remaining_ms();
+    let mut attempted_depth = 0u8;
 
     for target_depth in 1..=maximum_depth {
         if deadline.has_elapsed() {
@@ -1368,6 +1403,7 @@ fn belief_search(
         if wave_node_budget < minimum_complete_wave_nodes {
             break;
         }
+        attempted_depth = target_depth;
         let wave_action_budgets = allocate_root_node_budgets(
             root_actions.len(),
             wave_node_budget / positive_particle_count,
@@ -1463,6 +1499,7 @@ fn belief_search(
         particles_searched = wave_particles;
         depth = wave_depth;
     }
+    let deep_waves_ms = elapsed_stage_ms(&deadline, deep_waves_started);
     let actor = observer as usize;
     let mut actions = aggregate
         .into_iter()
@@ -1529,6 +1566,16 @@ fn belief_search(
         particles: particles_searched,
         posterior_particles,
         deadline_reached,
+        stage_timings: BeliefSearchStageTimings {
+            particle_preparation_ms,
+            root_scoring_ms,
+            exact_families_ms,
+            threat_safety_ms,
+            one_ply_floor_ms,
+            deep_waves_ms,
+            floor_complete,
+            attempted_depth,
+        },
         provenance,
     })
 }
@@ -3151,6 +3198,7 @@ fn cuda_belief_search_with_batch(
             particles: particles_searched,
             posterior_particles,
             deadline_reached: false,
+            stage_timings: BeliefSearchStageTimings::default(),
             provenance,
         });
     }
@@ -3338,6 +3386,7 @@ fn cuda_belief_search_with_batch(
         particles: particles_searched,
         posterior_particles,
         deadline_reached: false,
+        stage_timings: BeliefSearchStageTimings::default(),
         provenance,
     })
 }

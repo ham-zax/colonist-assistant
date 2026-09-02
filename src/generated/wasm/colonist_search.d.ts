@@ -10,6 +10,27 @@ export interface WasmAction {
   accept?: boolean;
 }
 
+export interface WasmExactActionDiagnostic {
+  action: WasmAction;
+  value: [number, number, number, number];
+  lowerBound: [number, number, number, number];
+  legalWeight: number;
+  decisionScore: number;
+  lowerScore: number;
+  comparatorScore: number;
+}
+
+export interface WasmSearchStages {
+  particlePreparationMs: number;
+  rootScoringMs: number;
+  exactFamiliesMs: number;
+  threatSafetyMs: number;
+  onePlyFloorMs: number;
+  deepWavesMs: number;
+  floorComplete: boolean;
+  attemptedDepth: number;
+}
+
 export interface WasmActionStatistics {
   action: WasmAction;
   visits: number;
@@ -94,6 +115,7 @@ export interface WasmSearchResponse {
   tacticalLine: WasmAction[];
   exactDecision: boolean;
   exactWorlds: number;
+  exactActions: WasmExactActionDiagnostic[];
   actions: WasmActionStatistics[];
   iterations: number;
   nodes: number;
@@ -103,6 +125,7 @@ export interface WasmSearchResponse {
   wasmParticles: number;
   rustPosteriorParticles: number;
   rustSearchParticles: number;
+  searchStages?: WasmSearchStages;
   rootProvenance: WasmRootProvenance;
   authorityTrace: WasmAuthorityTrace;
   effectiveParticleCount: number;

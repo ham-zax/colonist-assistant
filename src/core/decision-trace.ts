@@ -8,6 +8,7 @@ import type {
   DeepSearchRootProvenance,
   DecisionAnalysis,
   DecisionAuthority,
+  DecisionSearchConstraints,
 } from "./engine";
 import type { TrackerState } from "./types";
 
@@ -28,6 +29,49 @@ export interface DecisionTraceCandidate {
   legalWeight?: number;
   lowerConfidenceValue?: number;
   prior?: number;
+  source?: "strategic" | "exact";
+  decisionScore?: number;
+  lowerScore?: number;
+  comparatorScore?: number;
+}
+
+export interface DecisionTraceSettings {
+  engine: string;
+  disablePlayerTrades: boolean;
+  autopilot: boolean;
+}
+
+export interface DecisionTraceSearchConstraints {
+  lastRejectedTrade?: {
+    give: [number, number, number, number, number];
+    receive: [number, number, number, number, number];
+  };
+  rootExclusions: Array<{
+    kind: "offer-trade" | "counter-trade";
+    give: [number, number, number, number, number];
+    receive: [number, number, number, number, number];
+  }>;
+}
+
+export interface DecisionTraceSearchStages {
+  particlePreparationMs: number;
+  rootScoringMs: number;
+  exactFamiliesMs: number;
+  threatSafetyMs: number;
+  onePlyFloorMs: number;
+  deepWavesMs: number;
+  floorComplete: boolean;
+  attemptedDepth: number;
+}
+
+export interface DecisionExecutionDiagnostic {
+  actionKind: string;
+  tradeId?: string;
+  offerIndex?: number;
+  boardTradeIds?: string[];
+  boardTradeAtIndex?: string;
+  visibleTradeCount?: number;
+  visibleTradeFingerprints?: string[];
 }
 
 export interface DecisionSearchAttempt {
@@ -63,6 +107,8 @@ export interface DecisionTrace {
   phase: string;
   hand: [number, number, number, number, number];
   publicVictoryPoints: number[];
+  settings?: DecisionTraceSettings;
+  searchConstraints?: DecisionTraceSearchConstraints;
   beliefParticleCount: number;
   sourceWorldCount: number;
   beliefSummary?: DecisionBeliefSummary;
@@ -82,7 +128,12 @@ export interface DecisionTrace {
   runtimeReason?: string;
   engineRevision?: string;
   algorithm?: string;
+  requestedTimeBudgetMs?: number;
+  requestedMaxDepth?: number;
+  requestedRootCap?: number;
+  requestedNodesPerDepthWave?: number;
   searchElapsedMs?: number;
+  searchStages?: DecisionTraceSearchStages;
   iterations?: number;
   nodes?: number;
   deepestDecisionDepth?: number;
@@ -104,6 +155,7 @@ export interface DecisionTrace {
   executionFinishedAt?: number;
   executionSucceeded?: boolean;
   executionFailureReason?: string;
+  executionDiagnostic?: DecisionExecutionDiagnostic;
   engine?: string;
   runtime?: string;
   learnedModelVersion?: string;
@@ -124,6 +176,27 @@ const resourceTuple = (
 
 const tuple = (board: BoardSnapshot): DecisionResourceTuple =>
   resourceTuple(board.ownHand);
+
+const searchConstraintSnapshot = (
+  constraints?: DecisionSearchConstraints,
+): DecisionTraceSearchConstraints | undefined => {
+  if (!constraints) return undefined;
+  return {
+    ...(constraints.lastRejectedTrade
+      ? {
+          lastRejectedTrade: {
+            give: resourceTuple(constraints.lastRejectedTrade.give),
+            receive: resourceTuple(constraints.lastRejectedTrade.receive),
+          },
+        }
+      : {}),
+    rootExclusions: (constraints.rootExclusions ?? []).map((exclusion) => ({
+      kind: exclusion.kind,
+      give: resourceTuple(exclusion.give),
+      receive: resourceTuple(exclusion.receive),
+    })),
+  };
+};
 
 const summarizeBeliefs = (
   state: TrackerState,
@@ -196,6 +269,10 @@ export class DecisionTraceRecorder {
     state: TrackerState,
     board: BoardSnapshot,
     startedAt = performance.now(),
+    context?: {
+      settings?: DecisionTraceSettings;
+      searchConstraints?: DecisionSearchConstraints;
+    },
   ): void {
     const existing = this.traces.get(stateHash);
     if (existing) {
@@ -207,6 +284,12 @@ export class DecisionTraceRecorder {
       existing.deepStatus = "pending";
       existing.deepFailureReason = undefined;
       existing.deepTimedOut = false;
+      existing.settings = context?.settings
+        ? { ...context.settings }
+        : existing.settings;
+      existing.searchConstraints = context?.searchConstraints
+        ? searchConstraintSnapshot(context.searchConstraints)
+        : existing.searchConstraints;
       existing.deepAttempts ??= [];
       existing.deepAttempts.push({
         startedAt,
@@ -247,6 +330,10 @@ export class DecisionTraceRecorder {
       hand: tuple(board),
       publicVictoryPoints: (board.playerOrder ?? Object.keys(board.players ?? {}))
         .map((player) => board.players?.[player]?.visiblePoints ?? 0),
+      ...(context?.settings ? { settings: { ...context.settings } } : {}),
+      ...(context?.searchConstraints
+        ? { searchConstraints: searchConstraintSnapshot(context.searchConstraints) }
+        : {}),
       beliefParticleCount: state.worlds.length,
       sourceWorldCount: state.worlds.length,
       beliefSummary: summarizeBeliefs(state, board.myPlayer),
@@ -300,7 +387,12 @@ export class DecisionTraceRecorder {
     trace.runtime = analysis.runtime;
     trace.engineRevision = analysis.deepSearch?.engineRevision;
     trace.algorithm = analysis.deepSearch?.algorithm;
+    trace.requestedTimeBudgetMs = analysis.deepSearch?.requestedTimeBudgetMs;
+    trace.requestedMaxDepth = analysis.deepSearch?.requestedMaxDepth;
+    trace.requestedRootCap = analysis.deepSearch?.requestedRootCap;
+    trace.requestedNodesPerDepthWave = analysis.deepSearch?.requestedNodesPerDepthWave;
     trace.searchElapsedMs = analysis.deepSearch?.elapsedMs;
+    trace.searchStages = analysis.deepSearch?.searchStages;
     trace.iterations = analysis.deepSearch?.iterations;
     trace.nodes = analysis.deepSearch?.nodes;
     trace.deepestDecisionDepth = analysis.deepSearch?.deepestDecisionDepth;
@@ -327,17 +419,33 @@ export class DecisionTraceRecorder {
     trace.rootProvenance = analysis.deepSearch?.rootProvenance;
     trace.mappingFailureReason = analysis.deepSearch?.mappingFailureReason;
     trace.deepChosenAction = analysis.deepSearch?.chosen;
-    trace.deepCandidates = analysis.deepSearch?.actions.map((candidate) => ({
+    const strategicCandidates =
+      analysis.deepSearch?.authority === "exact-mandatory"
+        ? []
+        : analysis.deepSearch?.actions.map((candidate) => ({
+            action: candidate.action,
+            value: candidate.value[rootIndex] ?? candidate.value[0] ?? 0,
+            visits: candidate.visits,
+            availabilityWeight: candidate.availabilityWeight,
+            legalWeight: candidate.legalWeight,
+            lowerConfidenceValue:
+              candidate.lowerConfidenceValue[rootIndex] ??
+              candidate.lowerConfidenceValue[0],
+            prior: candidate.prior,
+            source: "strategic" as const,
+          })) ?? [];
+    const exactCandidates = analysis.deepSearch?.exactActions?.map((candidate) => ({
       action: candidate.action,
       value: candidate.value[rootIndex] ?? candidate.value[0] ?? 0,
-      visits: candidate.visits,
-      availabilityWeight: candidate.availabilityWeight,
       legalWeight: candidate.legalWeight,
       lowerConfidenceValue:
-        candidate.lowerConfidenceValue[rootIndex] ??
-        candidate.lowerConfidenceValue[0],
-      prior: candidate.prior,
-    }));
+        candidate.lowerBound[rootIndex] ?? candidate.lowerBound[0],
+      source: "exact" as const,
+      decisionScore: candidate.decisionScore,
+      lowerScore: candidate.lowerScore,
+      comparatorScore: candidate.comparatorScore,
+    })) ?? [];
+    trace.deepCandidates = [...strategicCandidates, ...exactCandidates];
     this.schedulePersist();
   }
 
@@ -415,12 +523,16 @@ export class DecisionTraceRecorder {
     stateHash: string,
     succeeded: boolean,
     failureReason?: string,
+    diagnostic?: DecisionExecutionDiagnostic,
   ): void {
     const trace = this.traces.get(stateHash);
     if (!trace) return;
     trace.executionFinishedAt = Date.now();
     trace.executionSucceeded = succeeded;
     trace.executionFailureReason = failureReason;
+    trace.executionDiagnostic = diagnostic
+      ? structuredClone(diagnostic)
+      : undefined;
     this.schedulePersist();
   }
 

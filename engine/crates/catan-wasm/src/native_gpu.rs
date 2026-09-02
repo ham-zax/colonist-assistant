@@ -19,7 +19,7 @@ use super::{
 };
 
 const GPU_ALGORITHM: &str = "gpu-root-rollout";
-pub const NATIVE_GPU_PROTOCOL_VERSION: u32 = 3;
+pub const NATIVE_GPU_PROTOCOL_VERSION: u32 = 4;
 pub const NATIVE_GPU_STATE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize)]
@@ -1090,6 +1090,7 @@ impl NativeGpuSearchEngine {
         let diagnostics = ResponseDiagnostics {
             rust_posterior_particles: particles.len(),
             rust_search_particles: particles.len(),
+            search_stages: None,
             root_provenance,
             authority_trace: AuthorityTraceOutput {
                 initial_authority,

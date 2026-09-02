@@ -105,6 +105,14 @@ export type NextClick =
       confidence: number;
     };
 
+export interface ActionExecutionDiagnostic {
+  actionKind: string;
+  tradeId?: string;
+  offerIndex?: number;
+  visibleTradeCount?: number;
+  visibleTradeFingerprints?: string[];
+}
+
 export interface ActionGuideOptions {
   highlight: boolean;
   autonomous: boolean;
@@ -133,6 +141,7 @@ export interface ActionGuideOptions {
     succeeded: boolean;
     signature: string;
     reason?: string;
+    diagnostic?: ActionExecutionDiagnostic;
   }) => void;
 }
 
@@ -387,6 +396,39 @@ const findDevelopmentCard = (
     }
   }
   return undefined;
+};
+
+const tradeExecutionDiagnostic = (
+  action: NextClick,
+): ActionExecutionDiagnostic => {
+  const diagnostic: ActionExecutionDiagnostic = { actionKind: action.kind };
+  if (
+    action.kind !== "trade" &&
+    action.kind !== "trade-partner" &&
+    action.kind !== "trade-cancel"
+  ) {
+    return diagnostic;
+  }
+  const nestedOffers = [
+    ...document.querySelectorAll<HTMLElement>(
+      "[class*='gameTradeOffersWrapper-'] [class*='tradeContainer-']",
+    ),
+  ].filter(visible);
+  const offers = nestedOffers.length
+    ? nestedOffers
+    : [
+        ...document.querySelectorAll<HTMLElement>("[class*='tradeContainer-']"),
+      ].filter(visible);
+  return {
+    actionKind: action.kind,
+    tradeId: action.tradeId,
+    offerIndex: action.offerIndex,
+    visibleTradeCount: offers.length,
+    visibleTradeFingerprints: offers.slice(0, 8).map((offer, index) => {
+      const text = normalized(offer.textContent ?? "").slice(0, 120);
+      return `${index}:${text || "<no-text>"}`;
+    }),
+  };
 };
 
 const findTradeControl = (
@@ -1200,6 +1242,7 @@ const dispatchAutoclick = (
           succeeded: false,
           signature: action.signature,
           reason: "Recommended Colonist control was not present after bounded retries",
+          diagnostic: tradeExecutionDiagnostic(action),
         });
       }
     }
@@ -1617,6 +1660,7 @@ const startWorkflow = (
       succeeded: false,
       signature: action.signature,
       reason,
+      diagnostic: tradeExecutionDiagnostic(action),
     });
     if (tradeTransaction) {
       const closeTradePanel = (attempt = 0): void => {

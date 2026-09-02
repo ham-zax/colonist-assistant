@@ -1106,6 +1106,7 @@ export class AssistantOverlay {
       partialHistory:
         this.session.partialHistory || Boolean(this.session.state.warnings.length),
       unmatchedCount: this.session.unmatchedCount,
+      unmatchedSamples: this.session.unmatchedSamples.map((sample) => ({ ...sample })),
       playerOrder: [...this.session.state.playerOrder],
       assistant: {
         engine: this.settings.engine,
@@ -1352,7 +1353,7 @@ export class AssistantOverlay {
       onExecutionStart: () => {
         if (traceKey) this.decisionTraces.executionStarted(traceKey);
       },
-      onExecution: ({ succeeded, reason }) => {
+      onExecution: ({ succeeded, reason, diagnostic }) => {
         if (succeeded && next?.kind === "build") {
           this.rememberBuildPlacement(next, spatial);
         }
@@ -1360,10 +1361,30 @@ export class AssistantOverlay {
           this.registerPendingPlacement(next);
         }
         if (traceKey) {
+          const offerIndex =
+            next && "offerIndex" in next ? next.offerIndex : undefined;
+          const tradeId = next && "tradeId" in next ? next.tradeId : undefined;
+          const boardTradeIds = this.board?.activeTrades?.map((trade) => trade.id);
           this.decisionTraces.execution(
             traceKey,
             succeeded,
             reason,
+            !succeeded
+              ? {
+                  actionKind: next?.kind ?? diagnostic?.actionKind ?? "unknown",
+                  ...(diagnostic ?? {}),
+                  ...(tradeId ? { tradeId } : {}),
+                  ...(boardTradeIds ? { boardTradeIds } : {}),
+                  ...(offerIndex !== undefined
+                    ? {
+                        offerIndex,
+                        ...(this.board?.activeTrades?.[offerIndex]?.id
+                          ? { boardTradeAtIndex: this.board.activeTrades[offerIndex]!.id }
+                          : {}),
+                      }
+                    : {}),
+                }
+              : undefined,
           );
         }
         if (!succeeded && next?.kind === "trade-builder") {
@@ -2248,7 +2269,14 @@ export class AssistantOverlay {
         this.decisionPendingKey = "";
         this.decisionSlowKey = "";
         this.decisionRuntimeError = "";
-        this.decisionTraces.begin(traceKey, state, board);
+        this.decisionTraces.begin(traceKey, state, board, performance.now(), {
+          settings: {
+            engine: this.settings.engine,
+            disablePlayerTrades: this.settings.disablePlayerTrades,
+            autopilot: this.settings.autonomousPrivateGames,
+          },
+          searchConstraints,
+        });
         // This is the parameterized continuation of the already-completed
         // deep build/development action, not a fresh strategic position.
         this.decisionTraces.complete(traceKey, retainedAnalysis);
@@ -2283,7 +2311,14 @@ export class AssistantOverlay {
       this.decisionWaitingForPreviousSearch = false;
       this.decisionRuntimeError = "";
       if (board.isMyTurn || hasPendingIncomingTrade) {
-        this.decisionTraces.begin(traceKey, state, board);
+        this.decisionTraces.begin(traceKey, state, board, performance.now(), {
+          settings: {
+            engine: this.settings.engine,
+            disablePlayerTrades: this.settings.disablePlayerTrades,
+            autopilot: this.settings.autonomousPrivateGames,
+          },
+          searchConstraints,
+        });
       }
     }
     const requestDisposition = this.decisionWorker.request(
@@ -2385,7 +2420,14 @@ export class AssistantOverlay {
       // A failed request may be retried for the same decision key. Associate
       // each accepted worker request with a bounded attempt record instead of
       // letting a later success overwrite the earlier failure evidence.
-      this.decisionTraces.begin(traceKey, state, board);
+      this.decisionTraces.begin(traceKey, state, board, performance.now(), {
+        settings: {
+          engine: this.settings.engine,
+          disablePlayerTrades: this.settings.disablePlayerTrades,
+          autopilot: this.settings.autonomousPrivateGames,
+        },
+        searchConstraints,
+      });
       this.decisionPendingKey = key;
       this.decisionSlowKey = "";
       this.decisionWaitingForPreviousSearch = requestDisposition === "queued";

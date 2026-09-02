@@ -20,7 +20,7 @@ const normalizeRecordedGame = (value: unknown): RecordedGame | undefined => {
   if (!value || typeof value !== "object") return undefined;
   const record = value as Partial<RecordedGame>;
   if (
-    record.schema !== "catan-evidence/1" ||
+    record.schema !== "catan-evidence/2" ||
     !record.scope ||
     !record.sessionId ||
     !record.contracts ||
@@ -192,6 +192,9 @@ export class GameRecordRecorder {
     return {
       ...input,
       ...(input.playerOrder ? { playerOrder: [...input.playerOrder] } : {}),
+      ...(input.unmatchedSamples
+        ? { unmatchedSamples: input.unmatchedSamples.map((sample) => ({ ...sample })) }
+        : {}),
       assistant: { ...input.assistant },
       events: structuredClone(input.events),
       // snapshotForRecord() already returns detached changed evidence,
