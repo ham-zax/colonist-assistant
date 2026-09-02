@@ -1,8 +1,10 @@
 use colonist_catan_core::{Action, GameState, NodeKind, Resource, SplitMix64};
 
 use crate::eval::{
-    city_value, hand_transition_value, observed_marginal_development_value, production_pips,
-    road_frontier_value, robber_denial, vertex_value,
+    RoadFrontierContext, RobberDenialContext, city_value, hand_transition_value,
+    observed_marginal_development_value, prepare_road_frontier_context,
+    prepare_robber_denial_context, production_pips, road_frontier_value,
+    road_frontier_value_with_context, robber_denial, robber_denial_with_context, vertex_value,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -222,12 +224,21 @@ fn road_pair_coherence(state: &GameState, first: u8, second: Option<u8>, actor: 
     let Some(second) = second else {
         return first_value;
     };
+    road_pair_coherence_from_values(state, first, second, first_value, road_frontier_value(state, second, actor))
+}
+
+fn road_pair_coherence_from_values(
+    state: &GameState,
+    first: u8,
+    second: u8,
+    first_value: f32,
+    second_value: f32,
+) -> f32 {
     let first_vertices = state.board.edges[first as usize].vertices;
     let second_vertices = state.board.edges[second as usize].vertices;
     let connected = first_vertices
         .iter()
         .any(|vertex| second_vertices.contains(vertex));
-    let second_value = road_frontier_value(state, second, actor);
     if connected {
         first_value.max(second_value) + first_value.min(second_value) * 0.42 + 1.2
     } else {
@@ -235,6 +246,39 @@ fn road_pair_coherence(state: &GameState, first: u8, second: Option<u8>, actor: 
         // independently strong, immediately useful frontier.
         first_value.max(second_value) + first_value.min(second_value) * 0.12 - 2.4
     }
+}
+
+fn cached_road_frontier_value(
+    state: &GameState,
+    edge: u8,
+    actor: u8,
+    cache: &mut [Option<f32>],
+    context: &mut Option<RoadFrontierContext>,
+) -> f32 {
+    let slot = &mut cache[edge as usize];
+    if let Some(value) = *slot {
+        return value;
+    }
+    let context = context.get_or_insert_with(|| prepare_road_frontier_context(state, actor));
+    let value = road_frontier_value_with_context(state, edge, actor, context);
+    *slot = Some(value);
+    value
+}
+
+fn road_pair_coherence_cached(
+    state: &GameState,
+    first: u8,
+    second: Option<u8>,
+    actor: u8,
+    cache: &mut [Option<f32>],
+    context: &mut Option<RoadFrontierContext>,
+) -> f32 {
+    let first_value = cached_road_frontier_value(state, first, actor, cache, context);
+    let Some(second) = second else {
+        return first_value;
+    };
+    let second_value = cached_road_frontier_value(state, second, actor, cache, context);
+    road_pair_coherence_from_values(state, first, second, first_value, second_value)
 }
 
 /// Strategic prior used for PUCT and the stochastic rollout policy.
@@ -250,6 +294,10 @@ pub fn action_prior(state: &GameState, action: &Action, actor: u8) -> f32 {
     if next.apply(action).is_ok() && next.winner() == Some(actor) {
         return 10_000.0;
     }
+    action_prior_nonwinning(state, action, actor)
+}
+
+fn action_prior_nonwinning(state: &GameState, action: &Action, actor: u8) -> f32 {
     let base = match action {
         Action::PlaceSettlement { vertex } | Action::BuildSettlement { vertex } => {
             3.0 + vertex_value(state, *vertex, actor)
@@ -364,6 +412,10 @@ pub fn action_prior(state: &GameState, action: &Action, actor: u8) -> f32 {
         Action::CancelTrade => 0.5,
         Action::EndTurn => 0.12,
     };
+    personalize_action_prior(state, action, actor, base)
+}
+
+fn personalize_action_prior(state: &GameState, action: &Action, actor: u8, base: f32) -> f32 {
     let profile = state.players[actor as usize].policy_profile;
     let normalized = |index: usize| profile[index] as f32 / 51.0;
     let personality = match action_class(action) {
@@ -378,6 +430,45 @@ pub fn action_prior(state: &GameState, action: &Action, actor: u8) -> f32 {
         _ => 0.78 + normalized(0) * 0.22,
     };
     base * personality.clamp(0.45, 1.75)
+}
+
+fn action_prior_nonwinning_cached(
+    state: &GameState,
+    action: &Action,
+    actor: u8,
+    road_cache: &mut [Option<f32>],
+    road_context: &mut Option<RoadFrontierContext>,
+    robber_context: &mut Option<RobberDenialContext>,
+) -> f32 {
+    let base = match action {
+        Action::PlaceRoad { edge } | Action::BuildRoad { edge } => {
+            0.02 + cached_road_frontier_value(state, *edge, actor, road_cache, road_context)
+        }
+        Action::PlayRoadBuilding { first, second } => {
+            1.0
+                + road_pair_coherence_cached(
+                    state,
+                    *first,
+                    *second,
+                    actor,
+                    road_cache,
+                    road_context,
+                )
+        }
+        Action::MoveRobber { hex, victim } | Action::PlayKnight { hex, victim } => {
+            let context = robber_context
+                .get_or_insert_with(|| prepare_robber_denial_context(state, actor));
+            let steal = victim
+                .map(|player| {
+                    state.players[player as usize].resource_total() as f32 * 0.12
+                        + state.players[player as usize].public_victory_points as f32 * 0.22
+                })
+                .unwrap_or(0.0);
+            0.2 + robber_denial_with_context(state, *hex, actor, context).max(-0.1) + steal
+        }
+        _ => return action_prior_nonwinning(state, action, actor),
+    };
+    personalize_action_prior(state, action, actor, base)
 }
 
 pub fn choose_rollout_action(
@@ -425,6 +516,10 @@ pub(crate) fn normalize_priors(
 ) -> Vec<(Action, f32)> {
     let learned = crate::model::learned_action_logits(state, actions);
     let mut family_counts = [0_u16; 21];
+    let mut scratch = state.clone();
+    let mut road_cache = vec![None; state.board.edges.len()];
+    let mut road_context = None;
+    let mut robber_context = None;
     for action in actions {
         family_counts[policy_family(action)] += 1;
     }
@@ -440,8 +535,23 @@ pub(crate) fn normalize_priors(
             // normalization, ten equivalent roads or ninety trade bundles get
             // ten/ninety times the aggregate prior mass of EndTurn.
             let family_size = family_counts[policy_family(action)].max(1) as f32;
-            let score =
-                (action_prior(state, action, actor) * learned_multiplier / family_size).max(0.0001);
+            let prior = if state.node_kind() == NodeKind::Chance {
+                state.chance_weight(action) as f32
+            } else if scratch.clone_from_and_apply(state, action).is_ok()
+                && scratch.winner() == Some(actor)
+            {
+                10_000.0
+            } else {
+                action_prior_nonwinning_cached(
+                    state,
+                    action,
+                    actor,
+                    &mut road_cache,
+                    &mut road_context,
+                    &mut robber_context,
+                )
+            };
+            let score = (prior * learned_multiplier / family_size).max(0.0001);
             (action.clone(), score)
         })
         .collect::<Vec<_>>();

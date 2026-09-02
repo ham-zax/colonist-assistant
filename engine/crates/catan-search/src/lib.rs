@@ -22,9 +22,13 @@ mod trade_safety;
 
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
 mod cuda_exact;
+#[cfg(all(feature = "cuda-sim", not(target_arch = "wasm32")))]
+mod cuda_sim;
 
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
 pub use cuda_exact::*;
+#[cfg(all(feature = "cuda-sim", not(target_arch = "wasm32")))]
+pub use cuda_sim::*;
 
 pub use eval::{
     ExpansionOption, TrophyOutlook, evaluate, expansion_option_value, expected_discard_loss,

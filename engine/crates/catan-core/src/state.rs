@@ -627,6 +627,25 @@ impl GameState {
         Ok(())
     }
 
+    /// Reuses this state's existing allocations to branch from `source` and
+    /// apply one action. On failure, this state is restored to `source`.
+    ///
+    /// Search code can use this after checking out a disposable scratch state
+    /// instead of paying for `source.clone()` plus `GameState::apply()`'s
+    /// transactional clone on every explored edge.
+    pub fn clone_from_and_apply(
+        &mut self,
+        source: &GameState,
+        action: &Action,
+    ) -> Result<(), RuleError> {
+        self.clone_from(source);
+        if let Err(error) = self.apply_in_place(action) {
+            self.clone_from(source);
+            return Err(error);
+        }
+        Ok(())
+    }
+
     fn apply_in_place(&mut self, action: &Action) -> Result<(), RuleError> {
         if self.phase == Phase::Finished {
             return Err(RuleError::GameFinished);

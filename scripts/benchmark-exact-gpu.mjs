@@ -510,6 +510,11 @@ function metrics(result, checkpoint, elapsedMs, discovery) {
       memoryUsedBytes: number(gpu.memoryUsedBytes ?? result.gpuMemoryUsedBytes),
       memoryTotalBytes: number(gpu.memoryTotalBytes ?? result.gpuMemoryTotalBytes),
       evaluatorStatesPerSecond: number(gpu.evaluatorStatesPerSecond),
+      searchCalls: number(gpu.searchCalls),
+      linearSearchCalls: number(gpu.linearSearchCalls),
+      deferredSearchCalls: number(gpu.deferredSearchCalls),
+      streamedLeaves: number(gpu.streamedLeaves),
+      streamFlushes: number(gpu.streamFlushes),
       evaluatorTimingMs: evaluatorTiming,
       searchTimingMs: gpu.searchTimingMs ?? null,
       rulesAndSearchMs: reportedElapsedMs !== null && evaluatorTotalMs !== null

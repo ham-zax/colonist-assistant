@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [features]
 benchmark-profile = []
 cuda-exact = ["dep:cudarc"]
+cuda-sim = ["dep:cudarc"]
 
 [dependencies]
 colonist-catan-core = { path = "../catan-core" }

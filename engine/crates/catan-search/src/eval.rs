@@ -1022,6 +1022,15 @@ pub fn strategic_utility(state: &GameState, player: u8) -> f32 {
 /// totals. Plan priors may compare against this value without learning a
 /// sampled opponent resource identity that the acting player cannot observe.
 pub(crate) fn public_strategic_utility(state: &GameState, player: u8) -> f32 {
+    let route_maps = all_route_maps(state);
+    public_strategic_utility_with_routes(state, player, &route_maps)
+}
+
+fn public_strategic_utility_with_routes(
+    state: &GameState,
+    player: u8,
+    route_maps: &[Vec<u8>],
+) -> f32 {
     let public = &state.players[player as usize];
     let production = production_pips(state, player);
     let weighted_production = production
@@ -1047,11 +1056,10 @@ pub(crate) fn public_strategic_utility(state: &GameState, player: u8) -> f32 {
         sigmoid((army_potential - army_threshold + 0.35) * 1.05)
     };
     let public_army_retain = sigmoid((army_potential - best_other_army - 0.45) * 0.95);
-    let route_maps = all_route_maps(state);
     let expansion = expansion_option_value_with_routes_and_weights(
         state,
         player,
-        &route_maps,
+        route_maps,
         &BASE_RESOURCE_WEIGHTS,
         None,
         false,
@@ -1203,22 +1211,49 @@ pub(crate) fn city_value(state: &GameState, vertex: u8, player: u8) -> f32 {
         .sum()
 }
 
-pub(crate) fn robber_denial(state: &GameState, hex: u8, actor: u8) -> f32 {
-    if hex == state.robber_hex {
-        return -100.0;
+#[derive(Clone, Debug)]
+pub(crate) struct RobberDenialContext {
+    public_logits: [f32; 4],
+    maximum: f32,
+    denominator: f32,
+    actor_resource_weights: [f32; 5],
+}
+
+pub(crate) fn prepare_robber_denial_context(
+    state: &GameState,
+    actor: u8,
+) -> RobberDenialContext {
+    let route_maps = all_route_maps(state);
+    let mut public_logits = [f32::NEG_INFINITY; 4];
+    let mut maximum = f32::NEG_INFINITY;
+    for player in 0..state.board.num_players {
+        let value = public_strategic_utility_with_routes(state, player, &route_maps);
+        public_logits[player as usize] = value;
+        maximum = maximum.max(value);
     }
-    let public_logits = (0..state.board.num_players)
-        .map(|player| public_strategic_utility(state, player))
-        .collect::<Vec<_>>();
-    let maximum = public_logits
-        .iter()
-        .copied()
-        .fold(f32::NEG_INFINITY, f32::max);
     let denominator = public_logits
         .iter()
+        .take(state.board.num_players as usize)
         .map(|logit| ((*logit - maximum) * 0.50).exp())
         .sum::<f32>()
         .max(f32::EPSILON);
+    RobberDenialContext {
+        public_logits,
+        maximum,
+        denominator,
+        actor_resource_weights: dynamic_resource_weights(state, actor),
+    }
+}
+
+pub(crate) fn robber_denial_with_context(
+    state: &GameState,
+    hex: u8,
+    actor: u8,
+    context: &RobberDenialContext,
+) -> f32 {
+    if hex == state.robber_hex {
+        return -100.0;
+    }
     let mut score = 0.0;
     for (vertex, building) in state.buildings.iter().enumerate() {
         let Some(building) = building else {
@@ -1234,14 +1269,15 @@ pub(crate) fn robber_denial(state: &GameState, hex: u8, actor: u8) -> f32 {
             .resource
             .map(|resource| {
                 if owner == actor {
-                    dynamic_resource_weights(state, owner)[resource.index()]
+                    context.actor_resource_weights[resource.index()]
                 } else {
                     let port_ratio = state.trade_ratios(owner)[resource.index()];
                     BASE_RESOURCE_WEIGHTS[resource.index()] * (1.0 + (4 - port_ratio) as f32 * 0.12)
                 }
             })
             .unwrap_or(0.0);
-        let threat = ((public_logits[owner as usize] - maximum) * 0.50).exp() / denominator;
+        let threat = ((context.public_logits[owner as usize] - context.maximum) * 0.50).exp()
+            / context.denominator;
         let denial =
             PIPS[tile.number as usize] * multiplier * resource_weight * (1.0 + threat * 1.4);
         if owner == actor {
@@ -1253,42 +1289,86 @@ pub(crate) fn robber_denial(state: &GameState, hex: u8, actor: u8) -> f32 {
     score
 }
 
-pub(crate) fn road_frontier_value(state: &GameState, edge: u8, actor: u8) -> f32 {
+pub(crate) fn robber_denial(state: &GameState, hex: u8, actor: u8) -> f32 {
+    if hex == state.robber_hex {
+        return -100.0;
+    }
+    let context = prepare_robber_denial_context(state, actor);
+    robber_denial_with_context(state, hex, actor, &context)
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RoadFrontierContext {
+    before: ExpansionOption,
+    road_before: TrophyOutlook,
+    resource_weights: [f32; 5],
+}
+
+pub(crate) fn prepare_road_frontier_context(
+    state: &GameState,
+    actor: u8,
+) -> RoadFrontierContext {
+    let route_maps = all_route_maps(state);
+    let resource_weights = dynamic_resource_weights(state, actor);
+    let before = expansion_option_value_with_routes_and_weights(
+        state,
+        actor,
+        &route_maps,
+        &resource_weights,
+        Some(actor),
+        false,
+        None,
+    );
+    RoadFrontierContext {
+        before,
+        road_before: longest_road_outlook(state, actor),
+        resource_weights,
+    }
+}
+
+pub(crate) fn road_frontier_value_with_context(
+    state: &GameState,
+    edge: u8,
+    actor: u8,
+    context: &RoadFrontierContext,
+) -> f32 {
     if state.roads.get(edge as usize).is_none_or(Option::is_some) {
         return 0.0;
     }
-    let observed_option = |position: &GameState| {
-        let route_maps = all_route_maps(position);
-        let weights = dynamic_resource_weights(position, actor);
-        expansion_option_value_with_routes_and_weights(
-            position,
-            actor,
-            &route_maps,
-            &weights,
-            Some(actor),
-            false,
-            None,
-        )
-    };
-    // Road priors are selected from the acting player's information set.
-    // Rival exact resource identities belong only in leaf determinizations,
-    // never in the simulated opponent's action policy.
-    let before = observed_option(state);
     let mut after = state.clone();
     after.roads[edge as usize] = Some(actor);
-    let option = observed_option(&after);
+    let route_maps = all_route_maps(&after);
+    let option = expansion_option_value_with_routes_and_weights(
+        &after,
+        actor,
+        &route_maps,
+        &context.resource_weights,
+        Some(actor),
+        false,
+        None,
+    );
     // `ExpansionOption::value` already prices road distance; adding another
     // fixed reward for the same distance reduction double-counted every link
     // in a speculative chain.
-    let progress = (option.value - before.value).clamp(0.0, 2.2);
-    let road_before = longest_road_outlook(state, actor);
+    let progress = (option.value - context.before.value).clamp(0.0, 2.2);
     let road_after = longest_road_outlook(&after, actor);
     let trophy = ((road_after.acquire * road_after.retain)
-        - (road_before.acquire * road_before.retain))
+        - (context.road_before.acquire * context.road_before.retain))
         .max(0.0)
         * 3.0
         / (1.0 + road_after.additional_cost * 0.32);
     progress + trophy
+}
+
+pub(crate) fn road_frontier_value(state: &GameState, edge: u8, actor: u8) -> f32 {
+    if state.roads.get(edge as usize).is_none_or(Option::is_some) {
+        return 0.0;
+    }
+    // Road priors are selected from the acting player's information set.
+    // Rival exact resource identities belong only in leaf determinizations,
+    // never in the simulated opponent's action policy.
+    let context = prepare_road_frontier_context(state, actor);
+    road_frontier_value_with_context(state, edge, actor, &context)
 }
 
 #[cfg(test)]
