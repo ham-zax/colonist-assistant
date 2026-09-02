@@ -1104,6 +1104,20 @@ fn belief_search(
         exact_family_fallbacks.push((family, fallback));
         exact_family_results.push((family, exact));
     }
+    if deadline_reached {
+        // Exact-family preparation is atomic at the family boundary. If the
+        // shared deadline expires, keep only representatives whose complete
+        // posterior exact result was already cached; unresolved parameterized
+        // families must not re-enter strategic branch competition.
+        ranked_diagnostics.retain(|candidate| {
+            let Some(family) = exact_family_for_action(&candidate.action) else {
+                return true;
+            };
+            exact_family_results.iter().any(|(resolved_family, exact)| {
+                *resolved_family == family && exact.chosen.as_ref() == Some(&candidate.action)
+            })
+        });
+    }
     ranked_diagnostics.sort_by(|left, right| {
         right
             .quota_score

@@ -847,57 +847,91 @@ fn weighted_policy_report(
     particles: &[BeliefParticle],
     root_exclusions: &[Action],
 ) -> SearchReport {
+    weighted_policy_report_for_actions_controlled(
+        particles,
+        root_exclusions,
+        None,
+        || false,
+    )
+    .expect("uncontrolled weighted policy report cannot stop")
+}
+
+fn weighted_policy_report_for_actions_controlled<F>(
+    particles: &[BeliefParticle],
+    root_exclusions: &[Action],
+    candidate_actions: Option<&[Action]>,
+    mut should_stop: F,
+) -> Result<SearchReport, ()>
+where
+    F: FnMut() -> bool,
+{
+    if should_stop() {
+        return Err(());
+    }
     let state = &particles[0].state;
     let actor = state.actor();
     let observed = state.observed_state(actor);
-    let actions = observed
-        .legal_actions()
-        .into_iter()
-        .filter(|action| !root_exclusions.contains(action))
-        .collect::<Vec<_>>();
+    let actions = if let Some(candidate_actions) = candidate_actions {
+        candidate_actions
+            .iter()
+            .filter(|action| !root_exclusions.contains(action))
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        observed
+            .legal_actions()
+            .into_iter()
+            .filter(|action| !root_exclusions.contains(action))
+            .collect::<Vec<_>>()
+    };
+    let action_count = actions.len();
     let total_weight = particles
         .iter()
         .map(|particle| particle.weight.max(0.0))
         .sum::<f32>()
         .max(f32::EPSILON);
-    let mut statistics = actions
-        .into_iter()
-        .map(|selected| {
-            let prior = action_prior(&observed, &selected, actor);
-            let mut value = [0.0; 4];
-            let mut lower_confidence_value = [f32::INFINITY; 4];
-            let mut legal_weight = 0.0_f32;
-            for particle in particles {
-                let weight = particle.weight.max(0.0) / total_weight;
-                if weight <= f32::EPSILON {
-                    continue;
-                }
-                let mut next = particle.state.clone();
-                let legal = next.apply(&selected).is_ok();
-                let evaluated = if legal {
-                    legal_weight += weight;
-                    evaluate(&next)
-                } else {
-                    evaluate(&particle.state)
-                };
-                for player in 0..4 {
-                    value[player] += evaluated[player] * weight;
-                    lower_confidence_value[player] =
-                        lower_confidence_value[player].min(evaluated[player]);
-                }
+    let mut statistics = Vec::with_capacity(action_count);
+    for selected in actions {
+        if should_stop() {
+            return Err(());
+        }
+        let prior = action_prior(&observed, &selected, actor);
+        let mut value = [0.0; 4];
+        let mut lower_confidence_value = [f32::INFINITY; 4];
+        let mut legal_weight = 0.0_f32;
+        for particle in particles {
+            if should_stop() {
+                return Err(());
             }
-            ActionStats {
-                action: selected,
-                visits: particles.len() as u32,
-                availability: (legal_weight * particles.len() as f32).round() as u32,
-                availability_weight: legal_weight,
-                legal_weight,
-                prior,
-                value,
-                lower_confidence_value,
+            let weight = particle.weight.max(0.0) / total_weight;
+            if weight <= f32::EPSILON {
+                continue;
             }
-        })
-        .collect::<Vec<_>>();
+            let mut next = particle.state.clone();
+            let legal = next.apply(&selected).is_ok();
+            let evaluated = if legal {
+                legal_weight += weight;
+                evaluate(&next)
+            } else {
+                evaluate(&particle.state)
+            };
+            for player in 0..4 {
+                value[player] += evaluated[player] * weight;
+                lower_confidence_value[player] =
+                    lower_confidence_value[player].min(evaluated[player]);
+            }
+        }
+        statistics.push(ActionStats {
+            action: selected,
+            visits: particles.len() as u32,
+            availability: (legal_weight * particles.len() as f32).round() as u32,
+            availability_weight: legal_weight,
+            legal_weight,
+            prior,
+            value,
+            lower_confidence_value,
+        });
+    }
     statistics.sort_by(|left, right| {
         right.value[actor as usize]
             .total_cmp(&left.value[actor as usize])
@@ -905,15 +939,18 @@ fn weighted_policy_report(
             .then_with(|| format!("{:?}", left.action).cmp(&format!("{:?}", right.action)))
     });
     let chosen = statistics.first().map(|candidate| candidate.action.clone());
-    let root_value = particles.iter().fold([0.0; 4], |mut total, particle| {
+    let mut root_value = [0.0; 4];
+    for particle in particles {
+        if should_stop() {
+            return Err(());
+        }
         let weight = particle.weight.max(0.0) / total_weight;
         let evaluated = evaluate(&particle.state);
         for player in 0..4 {
-            total[player] += evaluated[player] * weight;
+            root_value[player] += evaluated[player] * weight;
         }
-        total
-    });
-    SearchReport {
+    }
+    Ok(SearchReport {
         chosen,
         root_value,
         actions: statistics,
@@ -927,15 +964,13 @@ fn weighted_policy_report(
         exact: ExactDecisionResult::default(),
         statistics: SearchStatistics {
             iterations: particles.len() as u32,
-            nodes: particles
-                .len()
-                .saturating_mul(observed.legal_actions().len()),
+            nodes: particles.len().saturating_mul(action_count),
             deepest_decision_depth: 1,
             rollouts: 0,
             effective_particle_count: effective_particle_count(particles),
             deadline_reached: false,
         },
-    }
+    })
 }
 
 fn basic_response_diagnostics(

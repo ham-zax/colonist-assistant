@@ -15,7 +15,7 @@ use super::{
     RankedRootOutput, Request, ResponseDiagnostics, RetainedRootOutput, RootProvenanceOutput,
     action, basic_response_diagnostics, effective_particle_count, exact_family_label,
     exact_mandatory_report_controlled, game_states, response, root_exclusion_actions,
-    weighted_policy_report,
+    weighted_policy_report_for_actions_controlled,
 };
 
 const GPU_ALGORITHM: &str = "gpu-root-rollout";
@@ -527,12 +527,6 @@ impl NativeGpuSearchEngine {
         if decision_clock.remaining_ms() == 0 {
             return Err("GPU native decision deadline expired before strategic preparation".into());
         }
-        let prepass = weighted_policy_report(&particles, &root_exclusions);
-        if decision_clock.remaining_ms() == 0 {
-            return Err("GPU native decision deadline expired during strategic prepass".into());
-        }
-        let prepass_gap = weighted_gap(&prepass, actor as usize);
-        let prepass_robust_gap = weighted_robust_gap(&prepass, actor as usize);
 
         let total_weight = particles
             .iter()
@@ -785,6 +779,20 @@ impl NativeGpuSearchEngine {
         if decision_clock.remaining_ms() == 0 {
             return Err("GPU native decision deadline expired before strategic sampling".into());
         }
+        let prepass = match weighted_policy_report_for_actions_controlled(
+            &particles,
+            &root_exclusions,
+            Some(&root_actions),
+            || should_cancel() || decision_clock.remaining_ms() == 0,
+        ) {
+            Ok(report) => report,
+            Err(()) if should_cancel() => return Err("GPU native search cancelled".into()),
+            Err(()) => {
+                return Err("GPU native decision deadline expired during strategic prepass".into());
+            }
+        };
+        let prepass_gap = weighted_gap(&prepass, actor as usize);
+        let prepass_robust_gap = weighted_robust_gap(&prepass, actor as usize);
 
         let mut moments = vec![RootSampleMoments::default(); root_actions.len()];
         let mut active = (0..root_actions.len()).collect::<Vec<_>>();
@@ -876,10 +884,10 @@ impl NativeGpuSearchEngine {
                 })
                 .collect::<Vec<_>>();
             let next_active = racing_contenders(&active, &snapshot);
-            if next_active.len() <= 1 {
+            active = next_active;
+            if active.len() <= 1 {
                 break;
             }
-            active = next_active;
             samples_per_active_root = samples_per_active_root.saturating_mul(2).min(128);
             phase = phase.wrapping_add(1);
         }
@@ -901,12 +909,13 @@ impl NativeGpuSearchEngine {
         if aggregated.iter().all(|candidate| candidate.samples == 0) {
             return Err("GPU native decision deadline expired before any rollout completed".into());
         }
-        let chosen_root = aggregated
+        let chosen_root = active
             .iter()
+            .filter_map(|index| aggregated.get(*index))
             .filter(|candidate| candidate.errors == 0 && candidate.samples > 0)
             .max_by(|left, right| compare_roots(left, right))
             .cloned()
-            .ok_or_else(|| "GPU native search had no error-free root candidate".to_string())?;
+            .ok_or_else(|| "GPU native search had no error-free surviving root candidate".to_string())?;
 
         let player_count = particles[0].state.board.num_players as usize;
         let root_values = |candidate: &AggregatedRoot| {
