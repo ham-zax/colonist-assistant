@@ -14,6 +14,53 @@ import {
 
 const nativeGpu = new NativeGpuClient();
 
+const NATIVE_GPU_ROOT_ACTIONS = 12;
+const NATIVE_GPU_ROLLOUTS_PER_ROOT = 32;
+const NATIVE_GPU_ROLLOUT_STEPS = 96;
+
+const withNativeGpuStrengthProfile = (request: unknown): unknown => {
+  if (!request || typeof request !== "object") return request;
+  const typed = request as {
+    iterations?: number;
+    branchCap?: number;
+    rolloutActions?: number;
+  };
+  const rootActions = Math.max(
+    NATIVE_GPU_ROOT_ACTIONS,
+    typed.branchCap ?? 0,
+  );
+  const rolloutSteps = Math.max(
+    NATIVE_GPU_ROLLOUT_STEPS,
+    typed.rolloutActions ?? 0,
+  );
+  const totalRollouts = Math.max(
+    NATIVE_GPU_ROOT_ACTIONS * NATIVE_GPU_ROLLOUTS_PER_ROOT,
+    typed.iterations ?? 0,
+    rootActions * NATIVE_GPU_ROLLOUTS_PER_ROOT,
+  );
+  return {
+    ...typed,
+    branchCap: rootActions,
+    iterations: totalRollouts,
+    rolloutActions: rolloutSteps,
+  };
+};
+
+const hasPendingIncomingTrade = (message: DecisionMessage): boolean =>
+  Boolean(
+    message.board.activeTrades?.some(
+      (trade) =>
+        trade.incoming &&
+        !trade.responsesComplete &&
+        (trade.myResponse === undefined || trade.myResponse === "pending"),
+    ),
+  );
+
+const shouldUseNativeGpu = (message: DecisionMessage): boolean =>
+  message.engine === "deep-search" &&
+  !message.board.initialPlacement &&
+  (Boolean(message.board.isMyTurn) || hasPendingIncomingTrade(message));
+
 const errorDetail = (error: unknown, fallback: string): string => {
   if (error instanceof Error) return error.message;
   if (typeof error === "string" && error.trim()) return error;
@@ -85,12 +132,12 @@ chrome.runtime.onMessage.addListener(
     }
     if (!isDecisionMessage(message)) return undefined;
     void (async () => {
-      if (message.engine === "deep-search") {
+      if (shouldUseNativeGpu(message)) {
         const gpu = await nativeGpu.status();
         if (gpu) {
           const analysis = await analyzeDecisionRequest(
             message,
-            (request) => nativeGpu.analyze(request),
+            (request) => nativeGpu.analyze(withNativeGpuStrengthProfile(request)),
           );
           return {
             ...analysis,
