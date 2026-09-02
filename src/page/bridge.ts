@@ -870,6 +870,10 @@ import {
       const counterOffer = counterOfferInResponseToTradeId !== undefined;
       const creatorGiveCards = offer.offeredResources;
       const creatorReceiveCards = offer.wantedResources;
+      const creatorGiveOpenEnded =
+        Array.isArray(creatorGiveCards) && creatorGiveCards.length === 0;
+      const creatorReceiveOpenEnded =
+        Array.isArray(creatorReceiveCards) && creatorReceiveCards.length === 0;
       const fullySpecified = [creatorGiveCards, creatorReceiveCards].every(
         (cards) =>
           Array.isArray(cards) &&
@@ -909,7 +913,10 @@ import {
         .filter((response) => response.status === 0)
         .map((response) => response.player);
       const rejectedPlayers = responses
-        .filter((response) => response.status === 2 || response.status === 3)
+        .filter((response) => response.status === 2)
+        .map((response) => response.player);
+      const embargoedPlayers = responses
+        .filter((response) => response.status === 3)
         .map((response) => response.player);
       const myResponseStatus = Number(
         offer.playerResponses?.[myColor],
@@ -934,6 +941,8 @@ import {
           ),
           creatorGive,
           creatorReceive,
+          ...(creatorGiveOpenEnded ? { creatorGiveOpenEnded: true } : {}),
+          ...(creatorReceiveOpenEnded ? { creatorReceiveOpenEnded: true } : {}),
           incoming,
           counterOffer,
           ...(counterOfferInResponseToTradeId
@@ -943,6 +952,7 @@ import {
           acceptedPlayers,
           pendingPlayers,
           rejectedPlayers,
+          embargoedPlayers,
           responsesComplete:
             responses.length > 0 && pendingPlayers.length === 0,
           ...(myResponse ? { myResponse } : {}),

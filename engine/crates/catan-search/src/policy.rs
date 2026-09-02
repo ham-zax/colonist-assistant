@@ -154,7 +154,10 @@ fn public_offer_acceptance_probability(
 ) -> f32 {
     let creator_points = state.players[actor as usize].public_victory_points as f32;
     (0..state.board.num_players)
-        .filter(|recipient| recipients & (1 << recipient) != 0)
+        .filter(|recipient| {
+            recipients & (1 << recipient) != 0
+                && state.domestic_trade_pair_allowed(actor, *recipient)
+        })
         .map(|recipient| {
             let player = &state.players[recipient as usize];
             let hand_size = player.resource_total() as f32;

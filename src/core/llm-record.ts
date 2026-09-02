@@ -297,6 +297,9 @@ const encodeEvent = (
         toResourceVector(event.counterGive),
         toResourceVector(event.counterReceive),
       );
+    case "trade-embargoed":
+    case "trade-embargo-cleared":
+      return row(alias(event.player) ?? NA, alias(event.creator) ?? NA);
     case "trade-expired":
       return row(
         alias(event.player) ?? NA,
@@ -649,6 +652,9 @@ const contracts = (): CompactRecordContracts => ({
     "accepted",
     "pending",
     "rejected",
+    "embargoed",
+    "giveOpenEnded",
+    "receiveOpenEnded",
     "complete",
     "myResponse",
   ],
@@ -1264,6 +1270,9 @@ export class CompactGameBuilder {
         trade.acceptedPlayers?.map((player) => alias(player) ?? NA) ?? [],
         trade.pendingPlayers?.map((player) => alias(player) ?? NA) ?? [],
         trade.rejectedPlayers?.map((player) => alias(player) ?? NA) ?? [],
+        trade.embargoedPlayers?.map((player) => alias(player) ?? NA) ?? [],
+        trade.creatorGiveOpenEnded ?? false,
+        trade.creatorReceiveOpenEnded ?? false,
         trade.responsesComplete ?? false,
         trade.myResponse ?? NA,
       ]);
@@ -1483,7 +1492,7 @@ export const formatCompactGameRecord = (record: CompactGameRecord): string => {
     `@ops=${JSON.stringify({ "+": "add", "^": "replace-or-upgrade", "-": "remove" })}`,
     `@time=${JSON.stringify({ frames: "dtMs since previous frame; first since start", decisions: "dtMs since start", events: "dtMs since start" })}`,
     `@actionKeys=${JSON.stringify({ t: "targetId", t2: "secondTargetId", r: "resource", r2: "otherResource", q: "ratio", b: "build", ctl: "control", card: "development card", v: "verdict", accept: "boolean", mode: "trade mode", ba: "board action", oi: "offer index", tid: "trade id", ai: "accepted-player index", c: "confidence", p: "player alias", fp: "follow-up player alias", pt: "screen point x,y", cards: "resource vector", recv: "receive resource vector", give: "give resource vector", get: "receive resource vector", cg: "counter give resource vector", cr: "counter receive resource vector", eg: "existing give resource vector", er: "existing receive resource vector", to: "recipient aliases", fr: "follow-up resource sequence" })}`,
-    `@eventArgs=${JSON.stringify({ discover: "[P]", gain: "[P,R,reason]", spend: "[P,R,reason]", transfer: "[from,to,R,reason]", trade: "[P,acceptor,giveR,getR,bank]", "trade-offered": "[P,recipients,giveR,getR]", "trade-accepted": "[P,creator,giveR,getR]", "trade-rejected": "[P,creator,giveR,getR]", "trade-countered": "[P,creator,giveR,getR,counterGiveR,counterGetR]", "trade-expired": "[P,recipients,giveR,getR]", "unknown-transfer": "[from,to,count]", "unknown-discard": "[P,count]", monopoly: "[P,resource,amount]", "buy-dev": "[P]", "play-dev": "[P,card]", roll: "[P,dice]" })}`,
+    `@eventArgs=${JSON.stringify({ discover: "[P]", gain: "[P,R,reason]", spend: "[P,R,reason]", transfer: "[from,to,R,reason]", trade: "[P,acceptor,giveR,getR,bank]", "trade-offered": "[P,recipients,giveR,getR]", "trade-accepted": "[P,creator,giveR,getR]", "trade-rejected": "[P,creator,giveR,getR]", "trade-countered": "[P,creator,giveR,getR,counterGiveR,counterGetR]", "trade-embargoed": "[P,creator]", "trade-embargo-cleared": "[P,creator]", "trade-expired": "[P,recipients,giveR,getR]", "unknown-transfer": "[from,to,count]", "unknown-discard": "[P,count]", monopoly: "[P,resource,amount]", "buy-dev": "[P]", "play-dev": "[P,card]", roll: "[P,dice]" })}`,
     `@beliefWorlds=${JSON.stringify("handRefs follow the player order declared by each @beliefs row")}`,
     `@aliases=${JSON.stringify(record.aliases)}`,
     `@assistant=${JSON.stringify(record.assistant)}`,

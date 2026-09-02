@@ -457,6 +457,7 @@ export class AssistantOverlay {
       const tradeEvents = tradeBeliefEventsFromDiff(
         this.tradeOfferSnapshots,
         nextSnapshots,
+        this.session.state.tradeEmbargoes,
       );
       this.tradeOfferSnapshots = nextSnapshots;
       if (tradeEvents.length) {
@@ -1444,10 +1445,25 @@ export class AssistantOverlay {
   private preferredDeepAction(
     _state: TrackerState | undefined,
     _player: string | undefined,
+    tradeId?: string,
   ): NonNullable<
     NonNullable<DecisionAnalysis["deepSearch"]>["chosen"]
   > | undefined {
-    return this.decisionAnalysis?.deepSearch?.chosen;
+    const action = this.decisionAnalysis?.deepSearch?.chosen;
+    if (!tradeId) return action;
+    if (
+      !action ||
+      (
+        action.kind !== "respond-trade" &&
+        action.kind !== "counter-trade" &&
+        action.kind !== "confirm-trade" &&
+        action.kind !== "cancel-trade"
+      ) ||
+      action.tradeId !== tradeId
+    ) {
+      return undefined;
+    }
+    return action;
   }
 
   private nextClickStillLegal(next: NextClick): boolean {
@@ -1954,10 +1970,10 @@ export class AssistantOverlay {
         renderTradeVerdicts(activeTrades, new Map());
         return;
       }
-      const deepAction = this.preferredDeepAction(state, player);
       const verdicts = new Map(
         pendingIncoming
           .flatMap((trade) => {
+            const deepAction = this.preferredDeepAction(state, player, trade.id);
             const searchedKind =
               deepAction?.kind === "counter-trade"
                 ? "counter"
@@ -1966,7 +1982,11 @@ export class AssistantOverlay {
                     ? "accept"
                     : "decline"
                   : undefined;
-            if (this.decisionAnalysis?.deepSearch && !searchedKind) {
+            if (
+              isFullySpecifiedTrade(trade) &&
+              this.decisionAnalysis?.deepSearch &&
+              !searchedKind
+            ) {
               return [];
             }
             const verdict: TradeVerdict = searchedKind
@@ -2128,6 +2148,16 @@ export class AssistantOverlay {
       this.decisionWaitingForPreviousSearch = false;
       return;
     }
+    const decisionBoard = board.activeTrades
+      ? {
+          ...board,
+          activeTrades: board.activeTrades.filter(
+            (trade) =>
+              !trade.incoming ||
+              !this.completedIncomingTradeIds.has(trade.id),
+          ),
+        }
+      : board;
     if (this.decisionContextInvalidated) {
       this.decisionPendingKey = "";
       this.decisionSlowKey = "";
@@ -2206,7 +2236,12 @@ export class AssistantOverlay {
       isSearchDecisionRuntime(retainedAnalysis.runtime)
     ) {
       const searchConstraints = this.decisionSearchConstraints();
-      const key = this.decisionSignature(state, board, player, searchConstraints);
+      const key = this.decisionSignature(
+        state,
+        decisionBoard,
+        player,
+        searchConstraints,
+      );
       const traceKey = decisionStateDigest(key);
       if (key !== this.decisionKey) {
         this.decisionKey = key;
@@ -2233,7 +2268,12 @@ export class AssistantOverlay {
       return;
     }
     const searchConstraints = this.decisionSearchConstraints();
-    const key = this.decisionSignature(state, board, player, searchConstraints);
+    const key = this.decisionSignature(
+      state,
+      decisionBoard,
+      player,
+      searchConstraints,
+    );
     const traceKey = decisionStateDigest(key);
     if (key !== this.decisionKey) {
       this.decisionKey = key;
@@ -2250,9 +2290,9 @@ export class AssistantOverlay {
       key,
       state,
       {
-        ...board,
+        ...decisionBoard,
         hasRolled:
-          board.hasRolled ??
+          decisionBoard.hasRolled ??
           visibleTurnControl() !== "roll",
       },
       player,
@@ -2880,7 +2920,11 @@ export class AssistantOverlay {
           };
         }
         if (!report) continue;
-        const deepAction = this.preferredDeepAction(state, report.player);
+        const deepAction = this.preferredDeepAction(
+          state,
+          report.player,
+          trade.id,
+        );
         const deepVerdict =
           deepAction?.kind === "respond-trade"
             ? deepAction.accept
@@ -2890,6 +2934,7 @@ export class AssistantOverlay {
               ? "counter"
               : undefined;
         if (
+          isFullySpecifiedTrade(trade) &&
           !deepVerdict &&
           (
             this.decisionPendingKey ||

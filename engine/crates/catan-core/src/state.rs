@@ -74,6 +74,10 @@ pub struct GameState {
     /// other seats continue to use the normal game rule. Bit N corresponds to
     /// player N. This remains zero for ordinary arena/rules simulations.
     pub domestic_trade_disabled: u8,
+    /// Directed pairwise embargoes. Bit (A * 4 + B) means player A has
+    /// embargoed player B. A domestic trade is allowed only when neither
+    /// direction for the pair is embargoed.
+    pub domestic_trade_embargoes: u16,
     pub last_rejected_trade: Option<TradeOffer>,
     pub trade: Option<TradeOffer>,
     pub trade_cursor: u8,
@@ -116,6 +120,7 @@ impl GameState {
             domestic_trade_count: 0,
             player_trades_enabled: true,
             domestic_trade_disabled: 0,
+            domestic_trade_embargoes: 0,
             last_rejected_trade: None,
             trade: None,
             trade_cursor: 0,
@@ -148,6 +153,24 @@ impl GameState {
 
     fn domestic_trade_allowed_for(&self, player: u8) -> bool {
         self.player_trades_enabled && self.domestic_trade_disabled & (1 << player) == 0
+    }
+
+    pub fn domestic_trade_pair_allowed(&self, left: u8, right: u8) -> bool {
+        if left == right || left >= self.board.num_players || right >= self.board.num_players {
+            return false;
+        }
+        if !self.domestic_trade_allowed_for(left) || !self.domestic_trade_allowed_for(right) {
+            return false;
+        }
+        let left_to_right = 1u16 << (left as u16 * 4 + right as u16);
+        let right_to_left = 1u16 << (right as u16 * 4 + left as u16);
+        self.domestic_trade_embargoes & (left_to_right | right_to_left) == 0
+    }
+
+    fn domestic_trade_recipients_for(&self, creator: u8) -> u8 {
+        (0..self.board.num_players)
+            .filter(|recipient| self.domestic_trade_pair_allowed(creator, *recipient))
+            .fold(0u8, |mask, recipient| mask | (1 << recipient))
     }
 
     pub fn winner(&self) -> Option<u8> {
@@ -239,6 +262,15 @@ impl GameState {
         }
         if self.domestic_trade_disabled >> players != 0 {
             return Err("domestic-trade policy references a nonexistent player".into());
+        }
+        let valid_embargo_mask = (0..players)
+            .flat_map(|left| (0..players).map(move |right| (left, right)))
+            .filter(|(left, right)| left != right)
+            .fold(0u16, |mask, (left, right)| {
+                mask | (1u16 << (left * 4 + right))
+            });
+        if self.domestic_trade_embargoes & !valid_embargo_mask != 0 {
+            return Err("domestic-trade embargo references an invalid player pair".into());
         }
         for resource in Resource::ALL {
             let total = self.bank[resource.index()] as u16
@@ -467,6 +499,13 @@ impl GameState {
             byte(&mut hash, 0x44);
             byte(&mut hash, self.domestic_trade_disabled);
         }
+        if self.domestic_trade_embargoes != 0 {
+            byte(&mut hash, 0x50);
+            byte(&mut hash, 0x45);
+            for byte_value in self.domestic_trade_embargoes.to_le_bytes() {
+                byte(&mut hash, byte_value);
+            }
+        }
         for byte_value in self.turn.to_le_bytes() {
             byte(&mut hash, byte_value);
         }
@@ -491,6 +530,7 @@ impl GameState {
         }
         if let Some(trade) = self.last_rejected_trade {
             byte(&mut hash, 1);
+            byte(&mut hash, trade.creator);
             hand(&mut hash, &trade.give);
             hand(&mut hash, &trade.receive);
         } else {
@@ -1030,7 +1070,10 @@ impl GameState {
 
     fn generated_domestic_trade_offers(&self) -> Vec<Action> {
         let player = &self.players[self.current_player as usize];
-        let recipients = ((1u8 << self.board.num_players) - 1) & !(1u8 << self.current_player);
+        let recipients = self.domestic_trade_recipients_for(self.current_player);
+        if recipients == 0 {
+            return Vec::new();
+        }
         // Generate deficits from complete conversion plans as well as atomic
         // builds. This makes an offer able to unlock road → settlement and
         // two-road → settlement endpoints instead of asking only for the next
@@ -1169,10 +1212,11 @@ impl GameState {
                 {
                     continue;
                 }
-                if self
-                    .last_rejected_trade
-                    .is_some_and(|trade| trade.give == *give && trade.receive == receive)
-                {
+                if self.last_rejected_trade.is_some_and(|trade| {
+                    trade.creator == self.current_player
+                        && trade.give == *give
+                        && trade.receive == receive
+                }) {
                     continue;
                 }
                 let give_total = give.iter().copied().sum::<u8>();
@@ -1577,9 +1621,11 @@ impl GameState {
         give: ResourceHand,
         receive: ResourceHand,
     ) -> Result<(), RuleError> {
+        let allowed_recipients = self.domestic_trade_recipients_for(self.current_player);
         if !self.domestic_trade_allowed_for(self.current_player)
             || self.phase != Phase::Main
             || recipients == 0
+            || recipients & !allowed_recipients != 0
             || recipients & (1 << self.current_player) != 0
             || recipients >> self.board.num_players != 0
             || give.iter().copied().sum::<u8>() == 0
@@ -1613,17 +1659,22 @@ impl GameState {
         let Some(trade) = self.trade else {
             return Vec::new();
         };
-        if !self.domestic_trade_allowed_for(self.actor()) {
-            return if self.trade_responses_complete(trade) {
+        let responses_complete = self.trade_responses_complete(trade);
+        if !self.domestic_trade_allowed_for(self.actor())
+            || (!responses_complete
+                && !self.domestic_trade_pair_allowed(trade.creator, self.trade_cursor))
+        {
+            return if responses_complete {
                 vec![Action::CancelTrade]
             } else {
                 vec![Action::RespondTrade { accept: false }]
             };
         }
-        if self.trade_responses_complete(trade) {
+        if responses_complete {
             let mut actions = vec![Action::CancelTrade];
             for partner in 0..self.board.num_players {
                 if trade.accepted & (1 << partner) != 0
+                    && self.domestic_trade_pair_allowed(trade.creator, partner)
                     && contains(&self.players[trade.creator as usize].resources, &trade.give)
                     && contains(&self.players[partner as usize].resources, &trade.receive)
                 {
@@ -1647,6 +1698,9 @@ impl GameState {
 
     fn generated_counteroffers(&self, trade: TradeOffer) -> Vec<Action> {
         let actor = self.trade_cursor;
+        if !self.domestic_trade_pair_allowed(trade.creator, actor) {
+            return Vec::new();
+        }
         let hand = self.players[actor as usize].resources;
         let mut give_options = vec![trade.receive];
         let mut receive_options = vec![trade.give];
@@ -1775,13 +1829,13 @@ impl GameState {
     }
 
     fn respond_trade(&mut self, accept: bool) -> Result<(), RuleError> {
-        if accept && !self.domestic_trade_allowed_for(self.trade_cursor) {
-            return Err(RuleError::InvalidTrade);
-        }
         if self.phase != Phase::TradeResponses {
             return Err(RuleError::WrongPhase);
         }
         let mut trade = self.trade.ok_or(RuleError::InvalidTrade)?;
+        if accept && !self.domestic_trade_pair_allowed(trade.creator, self.trade_cursor) {
+            return Err(RuleError::InvalidTrade);
+        }
         if self.trade_responses_complete(trade) || trade.recipients & (1 << self.trade_cursor) == 0
         {
             return Err(RuleError::WrongActor);
@@ -1821,7 +1875,8 @@ impl GameState {
         }
         let previous = self.trade.ok_or(RuleError::InvalidTrade)?;
         let actor = self.trade_cursor;
-        if self.trade_responses_complete(previous)
+        if !self.domestic_trade_pair_allowed(previous.creator, actor)
+            || self.trade_responses_complete(previous)
             || !contains(&self.players[actor as usize].resources, &give)
             || give.iter().copied().sum::<u8>() == 0
             || receive.iter().copied().sum::<u8>() == 0
@@ -1831,7 +1886,10 @@ impl GameState {
         {
             return Err(RuleError::InvalidTrade);
         }
-        let recipients = ((1u8 << self.board.num_players) - 1) & !(1u8 << actor);
+        let recipients = self.domestic_trade_recipients_for(actor);
+        if recipients == 0 {
+            return Err(RuleError::InvalidTrade);
+        }
         self.trade = Some(TradeOffer {
             creator: actor,
             recipients,
@@ -1860,6 +1918,7 @@ impl GameState {
         }
         let trade = self.trade.ok_or(RuleError::InvalidTrade)?;
         if !self.trade_responses_complete(trade)
+            || !self.domestic_trade_pair_allowed(trade.creator, partner)
             || trade.accepted & (1 << partner) == 0
             || !contains(&self.players[trade.creator as usize].resources, &trade.give)
             || !contains(&self.players[partner as usize].resources, &trade.receive)

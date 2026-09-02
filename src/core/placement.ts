@@ -38,6 +38,8 @@ export interface ActiveTradeOffer {
   tradeExecutor: string;
   creatorGive: ResourceVector;
   creatorReceive: ResourceVector;
+  creatorGiveOpenEnded?: boolean;
+  creatorReceiveOpenEnded?: boolean;
   incoming: boolean;
   counterOffer: boolean;
   counterOfferInResponseToTradeId?: string;
@@ -45,6 +47,7 @@ export interface ActiveTradeOffer {
   acceptedPlayers?: string[];
   pendingPlayers?: string[];
   rejectedPlayers?: string[];
+  embargoedPlayers?: string[];
   responsesComplete?: boolean;
   myResponse?: "pending" | "accepted" | "rejected" | "embargoed";
 }

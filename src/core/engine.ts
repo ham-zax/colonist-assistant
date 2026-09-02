@@ -38,6 +38,7 @@ export const isSearchDecisionRuntime = (
 
 export interface DeepSearchAction {
   kind: string;
+  tradeId?: string;
   targetId?: string;
   secondTargetId?: string;
   player?: string;

@@ -70,7 +70,8 @@ const STATE_ROADS: usize = STATE_BUILDINGS + VERTEX_COUNT;
 const STATE_PLAYERS: usize = STATE_ROADS + EDGE_COUNT;
 const PLAYER_STRIDE: usize = 28;
 const STATE_DOMESTIC_TRADE_DISABLED: usize = STATE_PLAYERS + MAX_PLAYERS * PLAYER_STRIDE;
-const STATE_WORDS: usize = STATE_DOMESTIC_TRADE_DISABLED + 1;
+const STATE_DOMESTIC_TRADE_EMBARGOES: usize = STATE_DOMESTIC_TRADE_DISABLED + 1;
+const STATE_WORDS: usize = STATE_DOMESTIC_TRADE_EMBARGOES + 1;
 
 const ACTION_TAG: usize = 0;
 const ACTION_ARG0: usize = 1;
@@ -1990,6 +1991,7 @@ fn pack_state_words(state: &GameState, words: &mut [u32; STATE_WORDS]) -> Result
     words[STATE_DOMESTIC_TRADE_COUNT] = state.domestic_trade_count as u32;
     words[STATE_PLAYER_TRADES_ENABLED] = u32::from(state.player_trades_enabled);
     words[STATE_DOMESTIC_TRADE_DISABLED] = state.domestic_trade_disabled as u32;
+    words[STATE_DOMESTIC_TRADE_EMBARGOES] = state.domestic_trade_embargoes as u32;
     words[STATE_TRADE_CURSOR] = state.trade_cursor as u32;
     words[STATE_TRADE_NEGOTIATION_ROUND] = state.trade_negotiation_round as u32;
     pack_trade_words(state.trade, words, STATE_TRADE);

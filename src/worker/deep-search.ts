@@ -467,7 +467,11 @@ const isProtocolActiveTrade = (
   ((trade.incoming && (!trade.myResponse || trade.myResponse === "pending")) ||
     (!trade.incoming &&
       trade.responsesComplete === true &&
-      Boolean(trade.acceptedPlayers?.length || trade.rejectedPlayers?.length)));
+      Boolean(
+        trade.acceptedPlayers?.length ||
+          trade.rejectedPlayers?.length ||
+          trade.embargoedPlayers?.length,
+      )));
 
 const inferPhase = (
   board: BoardSnapshot,
@@ -554,8 +558,15 @@ const mapAction = (
     action.otherResource === undefined
       ? undefined
       : RESOURCE_ORDER[action.otherResource];
+  const activeTradeId = board.activeTrades?.find(isProtocolActiveTrade)?.id;
+  const tradeBound =
+    action.kind === "respond-trade" ||
+    action.kind === "counter-trade" ||
+    action.kind === "confirm-trade" ||
+    action.kind === "cancel-trade";
   return {
     kind: action.kind,
+    ...(tradeBound && activeTradeId ? { tradeId: activeTradeId } : {}),
     ...(first ? { targetId: first } : {}),
     ...(second ? { secondTargetId: second } : {}),
     ...(action.player !== undefined && players[action.player]
@@ -933,11 +944,33 @@ export const buildDeepSearchRequest = (
   const tradeCreator = activeTrade
     ? requirePlayerIndex(activeTrade.creator, "trade creator")
     : 0;
+  const embargoBit = (embargoer: number, blocked: number): number =>
+    1 << (embargoer * 4 + blocked);
+  let domesticTradeEmbargoes = 0;
+  for (const [embargoer, blockedPlayers] of Object.entries(state.tradeEmbargoes ?? {})) {
+    const embargoerIndex = playerIndex.get(embargoer);
+    if (embargoerIndex === undefined) continue;
+    for (const blocked of blockedPlayers) {
+      const blockedIndex = playerIndex.get(blocked);
+      if (blockedIndex === undefined || blockedIndex === embargoerIndex) continue;
+      domesticTradeEmbargoes |= embargoBit(embargoerIndex, blockedIndex);
+    }
+  }
+  for (const trade of board.activeTrades ?? []) {
+    const creatorIndex = playerIndex.get(trade.creator);
+    if (creatorIndex === undefined) continue;
+    for (const embargoer of trade.embargoedPlayers ?? []) {
+      const embargoerIndex = playerIndex.get(embargoer);
+      if (embargoerIndex === undefined || embargoerIndex === creatorIndex) continue;
+      domesticTradeEmbargoes |= embargoBit(embargoerIndex, creatorIndex);
+    }
+  }
   const observedTradeRecipients = activeTrade
     ? bitset([
         ...(activeTrade.acceptedPlayers ?? []),
         ...(activeTrade.pendingPlayers ?? []),
         ...(activeTrade.rejectedPlayers ?? []),
+        ...(activeTrade.embargoedPlayers ?? []),
       ]) & ~(1 << tradeCreator)
     : 0;
   const tradeRecipients = activeTrade
@@ -955,6 +988,7 @@ export const buildDeepSearchRequest = (
                   bitset([
                     ...(activeTrade.acceptedPlayers ?? []),
                     ...(activeTrade.rejectedPlayers ?? []),
+                    ...(activeTrade.embargoedPlayers ?? []),
                   ]) & (1 << index),
                 ),
               )
@@ -1280,6 +1314,7 @@ export const buildDeepSearchRequest = (
         // trade with each other, and disable only the local/root seat.
         playerTradesEnabled: true,
         domesticTradeDisabled: playerTradesEnabled ? 0 : 1 << root,
+        domesticTradeEmbargoes,
         ...(activeTrade
           ? {
               trade: {
@@ -1289,7 +1324,12 @@ export const buildDeepSearchRequest = (
                 give: resources(activeTrade.creatorGive),
                 receive: resources(activeTrade.creatorReceive),
                 accepted: bitset(activeTrade.acceptedPlayers),
-                rejected: bitset(activeTrade.rejectedPlayers),
+                // Embargo is distinct belief evidence, but it is still a
+                // completed negative response for the live trade protocol.
+                rejected: bitset([
+                  ...(activeTrade.rejectedPlayers ?? []),
+                  ...(activeTrade.embargoedPlayers ?? []),
+                ]),
               },
             }
           : {}),

@@ -98,6 +98,9 @@ export const canonicalizeBoardPlayerAliases = (
             ...(trade.rejectedPlayers
               ? { rejectedPlayers: trade.rejectedPlayers.map(player) }
               : {}),
+            ...(trade.embargoedPlayers
+              ? { embargoedPlayers: trade.embargoedPlayers.map(player) }
+              : {}),
           })),
         }
       : {}),
@@ -182,6 +185,14 @@ const validActiveTrade = (value: unknown): value is ActiveTradeOffer => {
       ) &&
       typeof trade.canAccept === "boolean" &&
       (
+        trade.creatorGiveOpenEnded === undefined ||
+        typeof trade.creatorGiveOpenEnded === "boolean"
+      ) &&
+      (
+        trade.creatorReceiveOpenEnded === undefined ||
+        typeof trade.creatorReceiveOpenEnded === "boolean"
+      ) &&
+      (
         trade.acceptedPlayers === undefined ||
         (
           Array.isArray(trade.acceptedPlayers) &&
@@ -200,6 +211,13 @@ const validActiveTrade = (value: unknown): value is ActiveTradeOffer => {
         (
           Array.isArray(trade.rejectedPlayers) &&
           trade.rejectedPlayers.every((player) => typeof player === "string")
+        )
+      ) &&
+      (
+        trade.embargoedPlayers === undefined ||
+        (
+          Array.isArray(trade.embargoedPlayers) &&
+          trade.embargoedPlayers.every((player) => typeof player === "string")
         )
       ) &&
       (

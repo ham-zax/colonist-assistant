@@ -65,7 +65,8 @@ typedef unsigned long long uint64_t;
 #define STATE_PLAYERS 290u
 #define PLAYER_STRIDE 28u
 #define STATE_DOMESTIC_TRADE_DISABLED 402u
-#define STATE_WORDS 403u
+#define STATE_DOMESTIC_TRADE_EMBARGOES 403u
+#define STATE_WORDS 404u
 
 #define PLAYER_RESOURCES 0u
 #define PLAYER_DEVELOPMENT 5u
@@ -641,6 +642,43 @@ static inline __device__ int domestic_trade_allowed_for(
     return state_get(states, stride, STATE_PLAYER_TRADES_ENABLED, lane) != 0u
         && (state_get(states, stride, STATE_DOMESTIC_TRADE_DISABLED, lane)
             & (1u << player)) == 0u;
+}
+
+static inline __device__ int domestic_trade_pair_allowed(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t left,
+    uint32_t right
+) {
+    const uint32_t players = state_get(states, stride, STATE_NUM_PLAYERS, lane);
+    if (left == right || left >= players || right >= players
+        || !domestic_trade_allowed_for(states, stride, lane, left)
+        || !domestic_trade_allowed_for(states, stride, lane, right)) {
+        return 0;
+    }
+    const uint32_t embargoes = state_get(
+        states, stride, STATE_DOMESTIC_TRADE_EMBARGOES, lane
+    );
+    const uint32_t left_to_right = 1u << (left * 4u + right);
+    const uint32_t right_to_left = 1u << (right * 4u + left);
+    return (embargoes & (left_to_right | right_to_left)) == 0u;
+}
+
+static inline __device__ uint32_t domestic_trade_recipients_for(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t creator
+) {
+    const uint32_t players = state_get(states, stride, STATE_NUM_PLAYERS, lane);
+    uint32_t recipients = 0u;
+    for (uint32_t recipient = 0u; recipient < players; ++recipient) {
+        if (domestic_trade_pair_allowed(states, stride, lane, creator, recipient)) {
+            recipients |= 1u << recipient;
+        }
+    }
+    return recipients;
 }
 
 static inline __device__ int phase_is_chance(uint32_t phase) {
@@ -1390,7 +1428,9 @@ static inline __device__ int rejected_trade_matches(
     const uint32_t give[5],
     const uint32_t receive[5]
 ) {
-    if (trade_get(states, stride, lane, STATE_LAST_REJECTED_TRADE, TRADE_PRESENT) == 0u) {
+    if (trade_get(states, stride, lane, STATE_LAST_REJECTED_TRADE, TRADE_PRESENT) == 0u
+        || trade_get(states, stride, lane, STATE_LAST_REJECTED_TRADE, TRADE_CREATOR)
+            != state_get(states, stride, STATE_CURRENT_PLAYER, lane)) {
         return 0;
     }
     for (uint32_t resource = 0u; resource < 5u; ++resource) {
@@ -2834,7 +2874,10 @@ static inline __device__ void generate_rollout_action_lane(
         // search lazy: first let the domestic family compete using a cheap
         // build-readiness weight, and only materialize/rank the top CPU-admitted
         // offer when that family actually wins the weighted draw.
-        if (domestic_trade_allowed_for(states, stride, lane, current)
+        const uint32_t domestic_recipients = domestic_trade_recipients_for(
+            states, stride, lane, current
+        );
+        if (domestic_recipients != 0u
             && state_get(states, stride, STATE_DOMESTIC_TRADE_COUNT, lane) < 2u
             && resource_total(states, stride, lane, current) > 0u) {
             uint32_t nearest_missing = 0xffffffffu;
@@ -2866,8 +2909,9 @@ static inline __device__ void generate_rollout_action_lane(
                 if (choose_best_domestic_trade_offer(
                     states, stride, lane, current, give, receive
                 )) {
-                    const uint32_t recipients = ((1u << players) - 1u) & ~(1u << current);
-                    write_offer_trade(actions, stride, lane, recipients, give, receive);
+                    write_offer_trade(
+                        actions, stride, lane, domestic_recipients, give, receive
+                    );
                 }
             }
         }
@@ -2907,6 +2951,9 @@ static inline __device__ void generate_rollout_action_lane(
                         : 0u;
                     for (uint32_t partner = 0u; partner < players; ++partner) {
                         if ((accepted & (1u << partner)) == 0u
+                            || !domestic_trade_pair_allowed(
+                                states, stride, lane, creator, partner
+                            )
                             || !player_contains_trade_hand(
                                 states, stride, lane, creator, STATE_TRADE, TRADE_GIVE
                             )
@@ -2948,7 +2995,10 @@ static inline __device__ void generate_rollout_action_lane(
                         0u,
                         0u
                     );
-                    if (domestic_trade_allowed_for(states, stride, lane, actor)
+                    const uint32_t creator = trade_get(
+                        states, stride, lane, STATE_TRADE, TRADE_CREATOR
+                    );
+                    if (domestic_trade_pair_allowed(states, stride, lane, creator, actor)
                         && player_contains_trade_hand(
                             states, stride, lane, actor, STATE_TRADE, TRADE_RECEIVE
                         )) {
@@ -2976,7 +3026,7 @@ static inline __device__ void generate_rollout_action_lane(
                             0u
                         );
                     }
-                    if (domestic_trade_allowed_for(states, stride, lane, actor)
+                    if (domestic_trade_pair_allowed(states, stride, lane, creator, actor)
                         && state_get(
                             states, stride, STATE_TRADE_NEGOTIATION_ROUND, lane
                         ) < 1u) {
@@ -3552,9 +3602,13 @@ static inline __device__ void apply_transition_lane(
         const uint32_t recipients = action_get(actions, stride, ACTION_ARG0, lane);
         const uint32_t give_start = ACTION_ARG0 + 1u;
         const uint32_t receive_start = ACTION_ARG0 + 6u;
+        const uint32_t allowed_recipients = domestic_trade_recipients_for(
+            states, stride, lane, current
+        );
         if (!domestic_trade_allowed_for(states, stride, lane, current)
             || phase != PHASE_MAIN
             || recipients == 0u
+            || (recipients & ~allowed_recipients) != 0u
             || (recipients & (1u << current)) != 0u
             || (recipients >> players) != 0u
             || action_hand_total(actions, stride, lane, give_start) == 0u
@@ -3620,9 +3674,14 @@ static inline __device__ void apply_transition_lane(
             status[lane] = STATUS_INVALID_PHASE;
             return;
         }
+        const uint32_t creator = trade_get(
+            states, stride, lane, STATE_TRADE, TRADE_CREATOR
+        );
         if (accept > 1u
             || (accept != 0u
-                && !domestic_trade_allowed_for(states, stride, lane, cursor))) {
+                && !domestic_trade_pair_allowed(
+                    states, stride, lane, creator, cursor
+                ))) {
             status[lane] = STATUS_INVALID_ACTION;
             return;
         }
@@ -3666,7 +3725,12 @@ static inline __device__ void apply_transition_lane(
         const uint32_t give_start = ACTION_ARG0;
         const uint32_t receive_start = ACTION_ARG0 + 5u;
         const uint32_t actor = state_get(states, stride, STATE_TRADE_CURSOR, lane);
-        if (!domestic_trade_allowed_for(states, stride, lane, actor)
+        const uint32_t previous_creator = trade_get(
+            states, stride, lane, STATE_TRADE, TRADE_CREATOR
+        );
+        if (!domestic_trade_pair_allowed(
+                states, stride, lane, previous_creator, actor
+            )
             || phase != PHASE_TRADE_RESPONSES
             || state_get(states, stride, STATE_TRADE_NEGOTIATION_ROUND, lane) >= 1u
             || trade_get(states, stride, lane, STATE_TRADE, TRADE_PRESENT) == 0u
@@ -3686,13 +3750,16 @@ static inline __device__ void apply_transition_lane(
             status[lane] = STATUS_INVALID_ACTION;
             return;
         }
-        const uint32_t previous_creator = trade_get(
-            states, stride, lane, STATE_TRADE, TRADE_CREATOR
-        );
         clear_trade(states, stride, lane, STATE_TRADE);
         trade_set(states, stride, lane, STATE_TRADE, TRADE_PRESENT, 1u);
         trade_set(states, stride, lane, STATE_TRADE, TRADE_CREATOR, actor);
-        const uint32_t recipients = ((1u << players) - 1u) & ~(1u << actor);
+        const uint32_t recipients = domestic_trade_recipients_for(
+            states, stride, lane, actor
+        );
+        if (recipients == 0u) {
+            status[lane] = STATUS_INVALID_ACTION;
+            return;
+        }
         trade_set(
             states,
             stride,
@@ -3743,6 +3810,7 @@ static inline __device__ void apply_transition_lane(
         const uint32_t accepted = trade_get(states, stride, lane, STATE_TRADE, TRADE_ACCEPTED);
         if (creator >= players
             || partner >= players
+            || !domestic_trade_pair_allowed(states, stride, lane, creator, partner)
             || (accepted & (1u << partner)) == 0u
             || !player_contains_trade_hand(
                 states, stride, lane, creator, STATE_TRADE, TRADE_GIVE

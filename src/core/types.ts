@@ -47,6 +47,8 @@ export type TrackerEvent =
       recipients: string[];
       give: ResourceVector;
       receive: ResourceVector;
+      giveOpenEnded?: boolean;
+      receiveOpenEnded?: boolean;
       color?: string;
     }
   | {
@@ -55,6 +57,8 @@ export type TrackerEvent =
       creator: string;
       give: ResourceVector;
       receive: ResourceVector;
+      giveOpenEnded?: boolean;
+      receiveOpenEnded?: boolean;
       color?: string;
     }
   | {
@@ -63,6 +67,8 @@ export type TrackerEvent =
       creator: string;
       give: ResourceVector;
       receive: ResourceVector;
+      giveOpenEnded?: boolean;
+      receiveOpenEnded?: boolean;
       color?: string;
     }
   | {
@@ -71,8 +77,22 @@ export type TrackerEvent =
       creator: string;
       give: ResourceVector;
       receive: ResourceVector;
+      giveOpenEnded?: boolean;
+      receiveOpenEnded?: boolean;
       counterGive: ResourceVector;
       counterReceive: ResourceVector;
+      color?: string;
+    }
+  | {
+      type: "trade-embargoed";
+      player: string;
+      creator: string;
+      color?: string;
+    }
+  | {
+      type: "trade-embargo-cleared";
+      player: string;
+      creator: string;
       color?: string;
     }
   | {
@@ -81,6 +101,8 @@ export type TrackerEvent =
       recipients?: string[];
       give: ResourceVector;
       receive: ResourceVector;
+      giveOpenEnded?: boolean;
+      receiveOpenEnded?: boolean;
       color?: string;
     }
   | {
@@ -167,6 +189,8 @@ export interface TrackerState {
   recentEvents: StoredEvent[];
   /** Panel observations waiting for a matching public-log completion. */
   pendingTradeBehaviour: Record<string, number>;
+  /** Directed embargo observations: embargoing player -> blocked players. */
+  tradeEmbargoes?: Record<string, string[]>;
 }
 
 export interface ResourceEstimate {

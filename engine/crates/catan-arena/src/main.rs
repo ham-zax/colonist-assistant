@@ -734,6 +734,8 @@ struct GameStateSnapshot {
     domestic_trade_count: u8,
     #[serde(default = "player_trades_enabled_default")]
     player_trades_enabled: bool,
+    #[serde(default)]
+    domestic_trade_embargoes: u16,
     last_rejected_trade: Option<TradeOfferSnapshot>,
     trade: Option<TradeOfferSnapshot>,
     trade_cursor: u8,
@@ -776,6 +778,7 @@ impl GameStateSnapshot {
             domestic_trade_used: state.domestic_trade_used,
             domestic_trade_count: state.domestic_trade_count,
             player_trades_enabled: state.player_trades_enabled,
+            domestic_trade_embargoes: state.domestic_trade_embargoes,
             last_rejected_trade: state.last_rejected_trade.map(TradeOfferSnapshot::from),
             trade: state.trade.map(TradeOfferSnapshot::from),
             trade_cursor: state.trade_cursor,
@@ -814,6 +817,7 @@ impl GameStateSnapshot {
         state.domestic_trade_used = self.domestic_trade_used;
         state.domestic_trade_count = self.domestic_trade_count;
         state.player_trades_enabled = self.player_trades_enabled;
+        state.domestic_trade_embargoes = self.domestic_trade_embargoes;
         state.last_rejected_trade = self.last_rejected_trade.map(TradeOffer::from);
         state.trade = self.trade.map(TradeOffer::from);
         state.trade_cursor = self.trade_cursor;

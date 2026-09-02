@@ -63,6 +63,7 @@ export const createTrackerState = (): TrackerState => ({
   warnings: [],
   recentEvents: [],
   pendingTradeBehaviour: {},
+  tradeEmbargoes: {},
 });
 
 const cloneState = (state: TrackerState): TrackerState => ({
@@ -94,6 +95,12 @@ const cloneState = (state: TrackerState): TrackerState => ({
   recentEvents: [...state.recentEvents],
   currentTurn: { ...state.currentTurn },
   pendingTradeBehaviour: { ...(state.pendingTradeBehaviour ?? {}) },
+  tradeEmbargoes: Object.fromEntries(
+    Object.entries(state.tradeEmbargoes ?? {}).map(([player, blocked]) => [
+      player,
+      [...blocked],
+    ]),
+  ),
 });
 
 const resourceBundleKey = (cards: ResourceVector): string =>
@@ -436,7 +443,9 @@ export const reduceTracker = (
         ? [event.player, event.acceptingPlayer]
         : event.type === "trade-accepted" ||
             event.type === "trade-rejected" ||
-            event.type === "trade-countered"
+            event.type === "trade-countered" ||
+            event.type === "trade-embargoed" ||
+            event.type === "trade-embargo-cleared"
           ? [event.player, event.creator]
           : event.type === "trade-offered"
             ? [event.player, ...event.recipients]
@@ -496,6 +505,8 @@ export const reduceTracker = (
         creator: event.player,
         give: event.give,
         receive: event.receive,
+        ...(event.giveOpenEnded ? { giveOpenEnded: true } : {}),
+        ...(event.receiveOpenEnded ? { receiveOpenEnded: true } : {}),
       }]);
       state.worlds = offered.worlds;
       break;
@@ -515,6 +526,8 @@ export const reduceTracker = (
         creator: event.creator,
         give: event.give,
         receive: event.receive,
+        ...(event.giveOpenEnded ? { giveOpenEnded: true } : {}),
+        ...(event.receiveOpenEnded ? { receiveOpenEnded: true } : {}),
         acceptedPlayers: [event.player],
       }]);
       state.worlds = accepted.worlds;
@@ -527,11 +540,28 @@ export const reduceTracker = (
           creator: event.creator,
           give: event.give,
           receive: event.receive,
+          ...(event.giveOpenEnded ? { giveOpenEnded: true } : {}),
+          ...(event.receiveOpenEnded ? { receiveOpenEnded: true } : {}),
           rejectedPlayers: [event.player],
         },
       ]);
       state.worlds = rejected.worlds;
       state.players = rejected.players;
+      break;
+    }
+    case "trade-embargoed": {
+      const embargoes = (state.tradeEmbargoes ??= {});
+      const blocked = new Set(embargoes[event.player] ?? []);
+      blocked.add(event.creator);
+      embargoes[event.player] = [...blocked].sort();
+      break;
+    }
+    case "trade-embargo-cleared": {
+      const embargoes = (state.tradeEmbargoes ??= {});
+      const blocked = new Set(embargoes[event.player] ?? []);
+      blocked.delete(event.creator);
+      if (blocked.size) embargoes[event.player] = [...blocked].sort();
+      else delete embargoes[event.player];
       break;
     }
     case "trade-countered": {
@@ -541,6 +571,8 @@ export const reduceTracker = (
           creator: event.creator,
           give: event.give,
           receive: event.receive,
+          ...(event.giveOpenEnded ? { giveOpenEnded: true } : {}),
+          ...(event.receiveOpenEnded ? { receiveOpenEnded: true } : {}),
           counteringPlayers: [event.player],
         },
       ]);
@@ -916,6 +948,8 @@ export interface TradeBeliefEvidence {
   creator?: string;
   give: ResourceVector;
   receive: ResourceVector;
+  giveOpenEnded?: boolean;
+  receiveOpenEnded?: boolean;
   acceptedPlayers?: string[];
   rejectedPlayers?: string[];
   counteringPlayers?: string[];
@@ -936,32 +970,34 @@ export const reweightTradeEvidence = (
   for (const trade of evidence) {
     for (const world of worlds) {
       let likelihood = 1;
-      for (const player of trade.acceptedPlayers ?? []) {
-        likelihood *= hasResources(
-          world.hands[player] ?? emptyResources(),
-          trade.receive,
-        )
-          ? 0.98
-          : 0.001;
+      if (!trade.receiveOpenEnded) {
+        for (const player of trade.acceptedPlayers ?? []) {
+          likelihood *= hasResources(
+            world.hands[player] ?? emptyResources(),
+            trade.receive,
+          )
+            ? 0.98
+            : 0.001;
+        }
+        for (const player of trade.rejectedPlayers ?? []) {
+          likelihood *= hasResources(
+            world.hands[player] ?? emptyResources(),
+            trade.receive,
+          )
+            ? 0.38
+            : 0.82;
+        }
+        for (const player of trade.counteringPlayers ?? []) {
+          const hand = world.hands[player] ?? emptyResources();
+          const requestedPressure = RESOURCE_ORDER.reduce(
+            (sum, resource) =>
+              sum + Math.min(hand[resource], trade.receive[resource]),
+            0,
+          );
+          likelihood *= 0.45 + Math.min(0.5, requestedPressure * 0.16);
+        }
       }
-      for (const player of trade.rejectedPlayers ?? []) {
-        likelihood *= hasResources(
-          world.hands[player] ?? emptyResources(),
-          trade.receive,
-        )
-          ? 0.38
-          : 0.82;
-      }
-      for (const player of trade.counteringPlayers ?? []) {
-        const hand = world.hands[player] ?? emptyResources();
-        const requestedPressure = RESOURCE_ORDER.reduce(
-          (sum, resource) =>
-            sum + Math.min(hand[resource], trade.receive[resource]),
-          0,
-        );
-        likelihood *= 0.45 + Math.min(0.5, requestedPressure * 0.16);
-      }
-      if (trade.creator && world.hands[trade.creator]) {
+      if (trade.creator && world.hands[trade.creator] && !trade.giveOpenEnded) {
         const creatorHand = world.hands[trade.creator]!;
         if (!hasResources(creatorHand, trade.give)) {
           likelihood *= 0.01;
@@ -976,13 +1012,15 @@ export const reweightTradeEvidence = (
                 trade.give[resource],
             0,
           );
-          const requestedScarcity = RESOURCE_ORDER.reduce(
-            (sum, resource) =>
-              sum +
-              trade.receive[resource] /
-                Math.max(1, creatorHand[resource] + 1),
-            0,
-          );
+          const requestedScarcity = trade.receiveOpenEnded
+            ? 0
+            : RESOURCE_ORDER.reduce(
+                (sum, resource) =>
+                  sum +
+                  trade.receive[resource] /
+                    Math.max(1, creatorHand[resource] + 1),
+                0,
+              );
           // An offer is soft evidence of surplus in what is given and a
           // bottleneck in what is requested. Keep the likelihood deliberately
           // broad: players bluff, clean up seven-risk, and make speculative

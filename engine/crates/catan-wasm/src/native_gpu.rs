@@ -17,7 +17,7 @@ use super::{
 
 const GPU_ALGORITHM: &str = "gpu-root-rollout";
 pub const NATIVE_GPU_PROTOCOL_VERSION: u32 = 2;
-pub const NATIVE_GPU_STATE_SCHEMA_VERSION: u32 = 1;
+pub const NATIVE_GPU_STATE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

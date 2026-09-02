@@ -96,7 +96,9 @@ export const canonicalizeEvent = (
   if (
     event.type === "trade-accepted" ||
     event.type === "trade-rejected" ||
-    event.type === "trade-countered"
+    event.type === "trade-countered" ||
+    event.type === "trade-embargoed" ||
+    event.type === "trade-embargo-cleared"
   ) {
     return {
       ...event,

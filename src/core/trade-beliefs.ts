@@ -8,10 +8,13 @@ export interface TradeOfferSnapshot {
   creator: string;
   creatorGive: ResourceVector;
   creatorReceive: ResourceVector;
+  creatorGiveOpenEnded: boolean;
+  creatorReceiveOpenEnded: boolean;
   counterOffer: boolean;
   counterOfferInResponseToTradeId?: string;
   acceptedPlayers: string[];
   rejectedPlayers: string[];
+  embargoedPlayers: string[];
   pendingPlayers: string[];
   responsesComplete: boolean;
   myResponse?: ActiveTradeOffer["myResponse"];
@@ -27,6 +30,8 @@ export const snapshotActiveTrades = (
       creator: trade.creator,
       creatorGive: { ...emptyResources(), ...trade.creatorGive },
       creatorReceive: { ...emptyResources(), ...trade.creatorReceive },
+      creatorGiveOpenEnded: Boolean(trade.creatorGiveOpenEnded),
+      creatorReceiveOpenEnded: Boolean(trade.creatorReceiveOpenEnded),
       counterOffer: trade.counterOffer,
       ...(trade.counterOfferInResponseToTradeId
         ? {
@@ -36,6 +41,7 @@ export const snapshotActiveTrades = (
         : {}),
       acceptedPlayers: [...(trade.acceptedPlayers ?? [])],
       rejectedPlayers: [...(trade.rejectedPlayers ?? [])],
+      embargoedPlayers: [...(trade.embargoedPlayers ?? [])],
       pendingPlayers: [...(trade.pendingPlayers ?? [])],
       responsesComplete: Boolean(trade.responsesComplete),
       ...(trade.myResponse ? { myResponse: trade.myResponse } : {}),
@@ -52,6 +58,7 @@ export const snapshotActiveTrades = (
 export const tradeBeliefEventsFromDiff = (
   previous: Map<string, TradeOfferSnapshot>,
   next: Map<string, TradeOfferSnapshot>,
+  knownEmbargoes: Readonly<Record<string, readonly string[]>> = {},
 ): TrackerEvent[] => {
   const events: TrackerEvent[] = [];
   const counterPlayersByParent = new Map<string, Set<string>>();
@@ -81,6 +88,12 @@ export const tradeBeliefEventsFromDiff = (
           creator: parent?.creator ?? trade.pendingPlayers[0] ?? trade.creator,
           give: parent?.creatorGive ?? trade.creatorReceive,
           receive: parent?.creatorReceive ?? trade.creatorGive,
+          ...((parent?.creatorGiveOpenEnded ?? trade.creatorReceiveOpenEnded)
+            ? { giveOpenEnded: true }
+            : {}),
+          ...((parent?.creatorReceiveOpenEnded ?? trade.creatorGiveOpenEnded)
+            ? { receiveOpenEnded: true }
+            : {}),
           counterGive: trade.creatorGive,
           counterReceive: trade.creatorReceive,
         });
@@ -93,9 +106,39 @@ export const tradeBeliefEventsFromDiff = (
             : [
                 ...trade.acceptedPlayers,
                 ...trade.rejectedPlayers,
+                ...trade.embargoedPlayers,
               ].filter((player, index, all) => all.indexOf(player) === index),
           give: trade.creatorGive,
           receive: trade.creatorReceive,
+          ...(trade.creatorGiveOpenEnded ? { giveOpenEnded: true } : {}),
+          ...(trade.creatorReceiveOpenEnded ? { receiveOpenEnded: true } : {}),
+        });
+      }
+    }
+
+    const priorEmbargoed = new Set(before?.embargoedPlayers ?? []);
+    for (const player of trade.embargoedPlayers) {
+      if (!priorEmbargoed.has(player)) {
+        events.push({
+          type: "trade-embargoed",
+          player,
+          creator: trade.creator,
+        });
+      }
+    }
+    const nonEmbargoedResponders = [
+      ...trade.acceptedPlayers,
+      ...trade.pendingPlayers,
+      ...trade.rejectedPlayers,
+    ].filter((player, index, all) => all.indexOf(player) === index);
+    for (const player of nonEmbargoedResponders) {
+      const wasEmbargoed = priorEmbargoed.has(player);
+      const knownEmbargo = knownEmbargoes[player]?.includes(trade.creator) ?? false;
+      if (wasEmbargoed || (!before && knownEmbargo)) {
+        events.push({
+          type: "trade-embargo-cleared",
+          player,
+          creator: trade.creator,
         });
       }
     }
@@ -109,6 +152,8 @@ export const tradeBeliefEventsFromDiff = (
           creator: trade.creator,
           give: trade.creatorGive,
           receive: trade.creatorReceive,
+          ...(trade.creatorGiveOpenEnded ? { giveOpenEnded: true } : {}),
+          ...(trade.creatorReceiveOpenEnded ? { receiveOpenEnded: true } : {}),
         });
       }
     }
@@ -123,6 +168,8 @@ export const tradeBeliefEventsFromDiff = (
           creator: trade.creator,
           give: trade.creatorGive,
           receive: trade.creatorReceive,
+          ...(trade.creatorGiveOpenEnded ? { giveOpenEnded: true } : {}),
+          ...(trade.creatorReceiveOpenEnded ? { receiveOpenEnded: true } : {}),
         });
       }
     }
@@ -138,6 +185,8 @@ export const tradeBeliefEventsFromDiff = (
         creator: before.creator,
         give: before.creatorGive,
         receive: before.creatorReceive,
+        ...(before.creatorGiveOpenEnded ? { giveOpenEnded: true } : {}),
+        ...(before.creatorReceiveOpenEnded ? { receiveOpenEnded: true } : {}),
         counterGive: trade.creatorGive,
         counterReceive: trade.creatorReceive,
       });
@@ -155,9 +204,12 @@ export const tradeBeliefEventsFromDiff = (
       recipients: [
         ...trade.pendingPlayers,
         ...trade.rejectedPlayers,
+        ...trade.embargoedPlayers,
       ].filter((player, index, all) => all.indexOf(player) === index),
       give: trade.creatorGive,
       receive: trade.creatorReceive,
+      ...(trade.creatorGiveOpenEnded ? { giveOpenEnded: true } : {}),
+      ...(trade.creatorReceiveOpenEnded ? { receiveOpenEnded: true } : {}),
     });
   }
 
