@@ -136,6 +136,11 @@ const WEIGHTED_LABEL = "Weighted";
 const resourceSupplyForPlayerCount = (playerCount: number): number =>
   playerCount > 6 ? 29 : playerCount > 4 ? 24 : 19;
 
+const boardPlayerRoster = (board?: BoardSnapshot): string[] => {
+  if (board?.playerOrder?.length) return [...new Set(board.playerOrder)];
+  return Object.keys(board?.players ?? {});
+};
+
 const publicResourceSeed = (value: string): number => {
   let hash = 0x811c9dc5;
   for (let index = 0; index < value.length; index += 1) {
@@ -2689,7 +2694,19 @@ export class AssistantOverlay {
     const board = this.board;
     const sessionState = this.session?.state;
     const hasTrackedPlayers = Boolean(sessionState?.playerOrder.length);
-    const state = hasTrackedPlayers
+    const boardRoster = boardPlayerRoster(board);
+    const boardRosterSet = new Set(boardRoster);
+    const sessionRoster = sessionState
+      ? new Set([
+          ...sessionState.playerOrder,
+          ...Object.keys(sessionState.players),
+        ])
+      : new Set<string>();
+    const trackerRosterMatchesBoard =
+      boardRoster.length < 2 ||
+      (sessionRoster.size === boardRosterSet.size &&
+        [...sessionRoster].every((player) => boardRosterSet.has(player)));
+    const state = hasTrackedPlayers && trackerRosterMatchesBoard
       ? sessionState
       : this.stateFromPublicBoard(board);
     if (!state || !board) return state;
@@ -2735,10 +2752,7 @@ export class AssistantOverlay {
     board?: BoardSnapshot,
   ): TrackerState | undefined {
     if (!board?.players || !Object.keys(board.players).length) return undefined;
-    const players = [
-      ...(board.playerOrder ?? []),
-      ...Object.keys(board.players),
-    ].filter((player, index, all) => all.indexOf(player) === index);
+    const players = boardPlayerRoster(board);
     if (players.length < 2) return undefined;
     let state = createTrackerState();
     for (const player of players) {

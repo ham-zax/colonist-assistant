@@ -268,7 +268,8 @@ const sampledCountIndex = (counts: number[], unit: number): number =>
 
 const publicDevelopmentEvidence = (
   state: TrackerState,
-  board?: BoardSnapshot,
+  board: BoardSnapshot | undefined,
+  players: string[],
 ): [number, number, number, number, number] => {
   const result = [0, 0, 0, 0, 0] as [
     number,
@@ -277,11 +278,7 @@ const publicDevelopmentEvidence = (
     number,
     number,
   ];
-  const playerNames = new Set([
-    ...Object.keys(state.players),
-    ...Object.keys(board?.players ?? {}),
-  ]);
-  for (const playerName of playerNames) {
+  for (const playerName of players) {
     const tracked = state.players[playerName]?.playedDevCards;
     const publicPlayed = board?.players?.[playerName]?.playedDevelopmentCards;
     DEVELOPMENT_ORDER.forEach((card, index) => {
@@ -316,7 +313,7 @@ const developmentSamplingBase = (
   board: BoardSnapshot,
   players: string[],
 ): DevelopmentSamplingBase => {
-  const played = publicDevelopmentEvidence(state, board);
+  const played = publicDevelopmentEvidence(state, board, players);
   const remaining = DEVELOPMENT_TOTAL.map((total, index) => {
     const playedCount = played[index] ?? 0;
     const available = total - playedCount;
@@ -1069,7 +1066,7 @@ export const buildDeepSearchRequest = (
     adjacentEdges.get(edge.vertices[1])?.push(index);
   });
   const robberHex = blockedHexes[0]!.index;
-  const playedDevelopment = publicDevelopmentEvidence(state, board);
+  const playedDevelopment = publicDevelopmentEvidence(state, board, players);
   const piecesByPlayer = players.map((player) => ({
     roads: board.edges.filter((edge) => edge.player === player).length,
     settlements: board.vertices.filter(
