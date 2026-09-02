@@ -86,6 +86,7 @@ interface LegacyGameRecord {
   completedAt?: number;
   partialHistory: boolean;
   unmatchedCount: number;
+  playerOrder?: string[];
   assistant: RecordedGame["assistant"];
   events: StoredEvent[];
   decisions: DecisionTrace[];
@@ -147,6 +148,9 @@ const migrateLegacyRecordedGame = (value: unknown): RecordedGame | undefined => 
     startedAt: legacy.startedAt,
     partialHistory: Boolean(legacy.partialHistory),
     unmatchedCount: legacy.unmatchedCount ?? 0,
+    ...(legacy.playerOrder?.length
+      ? { playerOrder: [...legacy.playerOrder] }
+      : {}),
     assistant: legacy.assistant,
   };
   for (const frame of legacy.boardTimeline) {
@@ -187,6 +191,7 @@ export class GameRecordRecorder {
   private snapshotCapture(input: GameRecordCapture): GameRecordCapture {
     return {
       ...input,
+      ...(input.playerOrder ? { playerOrder: [...input.playerOrder] } : {}),
       assistant: { ...input.assistant },
       events: structuredClone(input.events),
       // snapshotForRecord() already returns detached changed evidence,

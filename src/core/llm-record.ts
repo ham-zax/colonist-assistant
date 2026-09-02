@@ -101,6 +101,7 @@ export interface CompactGameCapture {
   startedAt: number;
   partialHistory: boolean;
   unmatchedCount: number;
+  playerOrder?: string[];
   assistant: CompactGameRecord["assistant"];
   events: StoredEvent[];
   decisions: DecisionTrace[];
@@ -318,10 +319,17 @@ const encodeEvent = (
   }
 };
 
-const canonicalRoster = (board?: BoardSnapshot): string[] =>
-  board?.playerOrder?.length
+const canonicalRoster = (
+  board?: BoardSnapshot,
+  fallback: string[] = [],
+): string[] => {
+  const boardRoster = board?.playerOrder?.length
     ? [...new Set(board.playerOrder.filter((name) => Boolean(name)))]
     : [];
+  return boardRoster.length >= 2
+    ? boardRoster
+    : [...new Set(fallback.filter((name) => Boolean(name)))];
+};
 
 const aliasManager = (
   existing?: Record<string, string>,
@@ -862,10 +870,10 @@ export class CompactGameBuilder {
   apply(input: CompactGameCapture, completed: boolean): CompactGameRecord {
     const now = Date.now();
     const existing = this.record;
-    const roster = canonicalRoster(input.board);
+    const roster = canonicalRoster(input.board, input.playerOrder ?? []);
     const aliasing = aliasManager(existing?.aliases, roster);
     for (const name of existing?.meta.unresolvedPlayers ?? []) {
-      if (!roster.includes(name)) aliasing.unresolved.add(name);
+      aliasing.unresolved.add(name);
     }
     if (existing && roster.length) {
       rebindRecordAliases(existing, aliasing.aliases, aliasing.unresolved);
@@ -940,7 +948,6 @@ export class CompactGameBuilder {
     for (const trace of input.decisions) {
       this.appendDecision(trace, aliasing.alias);
     }
-    for (const name of roster) aliasing.unresolved.delete(name);
     record.meta.unresolvedPlayers = [...aliasing.unresolved].sort();
     updateRecordIntegrity(record);
     return record;
