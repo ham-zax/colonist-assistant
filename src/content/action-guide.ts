@@ -596,11 +596,39 @@ const findTradeControl = (
   if (verdict === "counter") {
     return findControl(["counter", "edit"], ["accept", "reject"], offer);
   }
-  return findControl(
+  const explicitDecline = findControl(
     ["decline", "reject", "cancel", "close", "no"],
     ["accept", "counter"],
     offer,
   );
+  if (explicitDecline) return explicitDecline;
+
+  // Colonist commonly renders incoming trade responses as icon-only controls.
+  // The reject action is the active X. Resolve that semantic icon before
+  // falling back to the stable three-button incoming-offer layout. Accept
+  // intentionally has no positional fallback because accepting the wrong or
+  // open-ended offer is materially unsafe; declining is fail-closed.
+  const activeXControls = [
+    ...offer.querySelectorAll<HTMLImageElement>("img[src*='icon_x']"),
+  ]
+    .map((image) =>
+      activeColonistControl(
+        image.closest<HTMLElement>("[class*='tradeButton-']") ?? undefined,
+      ),
+    )
+    .filter((element): element is HTMLElement => Boolean(element))
+    .filter((element, index, all) => all.indexOf(element) === index);
+  if (activeXControls.length === 1) return activeXControls[0];
+
+  const tradeButtons = [
+    ...offer.querySelectorAll<HTMLElement>(
+      "[class*='tradeButton-'], button, [role='button']",
+    ),
+  ]
+    .map((element) => activeColonistControl(element) ?? element)
+    .filter(visible)
+    .filter((element, index, all) => all.indexOf(element) === index);
+  return tradeButtons.length === 3 ? tradeButtons[1] : undefined;
 };
 
 const findTradeCancelControl = (
