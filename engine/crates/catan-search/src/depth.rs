@@ -13,17 +13,22 @@ use crate::exact::{
 use crate::mcts::BeliefParticle;
 use crate::opening::opening_adjusted_priors;
 use crate::opening::{OpeningConfig, solve_opening};
-use crate::planner::{plan_adjusted_priors, plan_adjusted_priors_with_plans};
+use crate::planner::{TurnPlan, plan_adjusted_priors, plan_adjusted_priors_with_plans};
 use crate::policy::{
     allocate_root_node_budgets, normalize_observed_priors, normalize_priors,
     order_scored_with_state_quotas, rank_with_class_quotas, truncate_root_preserving_end_turn,
 };
-use crate::root_impact::compute_spatial_root_impacts;
+use crate::root_impact::{
+    RootPromotionReason, apply_closeout_root_impacts, compute_spatial_root_impacts,
+};
 use crate::shared::{
     admit_promoted_roots, coalesce_identical_particles, select_experimental_strategic_particles,
 };
 use crate::threats::{forced_loss_weight, posterior_immediate_threat_weight};
-use crate::trade_safety::belief_domestic_trade_threat;
+use crate::trade_safety::{
+    DomesticTradeThreat, HARD_VETO_POSTERIOR, belief_domestic_trade_assessment,
+    belief_domestic_trade_threat,
+};
 
 // Convenience APIs must remain safe in UI/tests. Production callers that
 // explicitly want a larger budget use the `_bounded` variants.
@@ -66,6 +71,8 @@ pub struct RankedRootDiagnostic {
     pub prior: f32,
     pub planner_value: Option<f32>,
     pub planner_completion_mass: Option<f32>,
+    pub planner_decisive_completion_mass: Option<f32>,
+    pub planner_response_windows: Option<f32>,
     pub(crate) quota_score: f32,
 }
 
@@ -78,6 +85,8 @@ pub struct RetainedRootDiagnostic {
     pub allocated_nodes: u32,
     pub planner_value: Option<f32>,
     pub planner_completion_mass: Option<f32>,
+    pub planner_decisive_completion_mass: Option<f32>,
+    pub planner_response_windows: Option<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -87,16 +96,55 @@ pub struct PrunedRootDiagnostic {
     pub reason: RootPruneReason,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
+pub struct RootCausalEvidence {
+    pub action: Action,
+    pub promotion_reason: Option<RootPromotionReason>,
+    /// True only when adding measured promotion reasons changed this root from
+    /// outside to inside the shared admission result.
+    pub admitted_by_promotion: bool,
+    pub closeout_gain: f32,
+    pub response_windows: Option<f32>,
+    pub decisive_completion_mass: f32,
+    pub trade_threat: Option<DomesticTradeThreat>,
+    pub trade_risk_posterior: f32,
+    pub dirty_monopoly_posterior: f32,
+    pub trade_hard_veto_posterior: f32,
+    pub trade_hard_veto: bool,
+}
+
+#[derive(Clone, Debug)]
 pub struct BeliefSearchProvenance {
     pub ranked_root_count: usize,
     pub ranked_roots: Vec<RankedRootDiagnostic>,
     pub retained_roots: Vec<RetainedRootDiagnostic>,
     pub pruned_root_count: usize,
     pub pruned_roots: Vec<PrunedRootDiagnostic>,
+    pub root_evidence: Vec<RootCausalEvidence>,
+    pub trade_hard_veto_threshold: f32,
+    /// Ordinary backed-up search winner before any later safety replacement.
+    pub search_winner: Option<Action>,
     pub exact_family_replacement: Option<(Action, Action)>,
     pub exact_family_results: Vec<(ExactActionFamily, ExactDecisionResult)>,
     pub safety_replacement: Option<(Action, Action)>,
+}
+
+impl Default for BeliefSearchProvenance {
+    fn default() -> Self {
+        Self {
+            ranked_root_count: 0,
+            ranked_roots: Vec::new(),
+            retained_roots: Vec::new(),
+            pruned_root_count: 0,
+            pruned_roots: Vec::new(),
+            root_evidence: Vec::new(),
+            trade_hard_veto_threshold: HARD_VETO_POSTERIOR,
+            search_winner: None,
+            exact_family_replacement: None,
+            exact_family_results: Vec::new(),
+            safety_replacement: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -325,6 +373,9 @@ fn normalize_belief_root_priors_with_diagnostics(
         quota_score: f32,
         planner_value: f32,
         planner_completion_mass: f32,
+        planner_decisive_completion_mass: f32,
+        planner_weighted_response_windows: f32,
+        planner_response_weight: f32,
         planner_weight: f32,
     }
 
@@ -361,6 +412,14 @@ fn normalize_belief_root_priors_with_diagnostics(
             let planner_weight = planner.map_or(0.0, |_| weight);
             let planner_value = planner.map_or(0.0, |plan| plan.value * weight);
             let planner_completion_mass = planner.map_or(0.0, |plan| plan.completion_mass * weight);
+            let planner_decisive_completion_mass =
+                planner.map_or(0.0, |plan| plan.decisive_completion_mass * weight);
+            let planner_weighted_response_windows = planner
+                .and_then(|plan| plan.response_windows)
+                .map_or(0.0, |windows| windows * weight);
+            let planner_response_weight = planner
+                .and_then(|plan| plan.response_windows)
+                .map_or(0.0, |_| weight);
             if let Some(existing) = aggregate
                 .iter_mut()
                 .find(|candidate| candidate.action == action)
@@ -369,6 +428,9 @@ fn normalize_belief_root_priors_with_diagnostics(
                 existing.quota_score += quota_score * weight;
                 existing.planner_value += planner_value;
                 existing.planner_completion_mass += planner_completion_mass;
+                existing.planner_decisive_completion_mass += planner_decisive_completion_mass;
+                existing.planner_weighted_response_windows += planner_weighted_response_windows;
+                existing.planner_response_weight += planner_response_weight;
                 existing.planner_weight += planner_weight;
             } else {
                 aggregate.push(Aggregate {
@@ -377,6 +439,9 @@ fn normalize_belief_root_priors_with_diagnostics(
                     quota_score: quota_score * weight,
                     planner_value,
                     planner_completion_mass,
+                    planner_decisive_completion_mass,
+                    planner_weighted_response_windows,
+                    planner_response_weight,
                     planner_weight,
                 });
             }
@@ -409,6 +474,12 @@ fn normalize_belief_root_priors_with_diagnostics(
                 .then_some(candidate.planner_value / candidate.planner_weight),
             planner_completion_mass: (candidate.planner_weight > f32::EPSILON)
                 .then_some(candidate.planner_completion_mass.clamp(0.0, 1.0)),
+            planner_decisive_completion_mass: (candidate.planner_weight > f32::EPSILON)
+                .then_some(candidate.planner_decisive_completion_mass.clamp(0.0, 1.0)),
+            planner_response_windows: (candidate.planner_response_weight > f32::EPSILON).then_some(
+                (candidate.planner_weighted_response_windows / candidate.planner_response_weight)
+                    .max(0.0),
+            ),
             quota_score: candidate.quota_score,
         })
         .collect()
@@ -1114,15 +1185,17 @@ fn belief_search(
             .filter(|candidate| exact_family_for_action(&candidate.action) == Some(family))
             .cloned()
             .collect::<Vec<_>>();
-        let Some(fallback) = family_members.first().map(|candidate| candidate.action.clone()) else {
+        let Some(fallback) = family_members
+            .first()
+            .map(|candidate| candidate.action.clone())
+        else {
             continue;
         };
-        let Some(exact) = solve_exact_belief_excluding_controlled(
-            posterior,
-            family,
-            root_exclusions,
-            || deadline.has_elapsed(),
-        ) else {
+        let Some(exact) =
+            solve_exact_belief_excluding_controlled(posterior, family, root_exclusions, || {
+                deadline.has_elapsed()
+            })
+        else {
             deadline_reached = true;
             break;
         };
@@ -1159,6 +1232,9 @@ fn belief_search(
             prior: family_prior,
             planner_value: representative_diagnostic.planner_value,
             planner_completion_mass: representative_diagnostic.planner_completion_mass,
+            planner_decisive_completion_mass: representative_diagnostic
+                .planner_decisive_completion_mass,
+            planner_response_windows: representative_diagnostic.planner_response_windows,
             quota_score,
         });
         exact_family_fallbacks.push((family, fallback));
@@ -1220,9 +1296,25 @@ fn belief_search(
         Vec::new()
     };
     let root_actions_list: Vec<Action> = root_scored.iter().map(|(a, _)| a.clone()).collect();
-    let spatial_impact_report = particles
-        .first()
-        .map(|first| compute_spatial_root_impacts(&first.state, observer, &root_actions_list));
+    let closeout_plans = ranked_diagnostics
+        .iter()
+        .filter_map(|candidate| {
+            Some(TurnPlan {
+                first_action: candidate.action.clone(),
+                actions: Vec::new(),
+                value: candidate.planner_value?,
+                nodes: 0,
+                completion_mass: candidate.planner_completion_mass?,
+                decisive_completion_mass: candidate.planner_decisive_completion_mass.unwrap_or(0.0),
+                response_windows: candidate.planner_response_windows,
+            })
+        })
+        .collect::<Vec<_>>();
+    let spatial_impact_report = particles.first().map(|first| {
+        let mut report = compute_spatial_root_impacts(&first.state, observer, &root_actions_list);
+        apply_closeout_root_impacts(&mut report, &closeout_plans);
+        report
+    });
     let promoted_spatial_actions: Vec<Action> = spatial_impact_report
         .as_ref()
         .map(|report| {
@@ -1234,12 +1326,53 @@ fn belief_search(
                 .collect()
         })
         .unwrap_or_default();
+    let retained_without_promotions =
+        admit_promoted_roots(&root_scored, &verified_blockers, &[], branch_cap);
     let retained = admit_promoted_roots(
         &root_scored,
         &verified_blockers,
         &promoted_spatial_actions,
         branch_cap,
     );
+    let mut root_evidence = ranked_diagnostics
+        .iter()
+        .map(|candidate| {
+            let impact = spatial_impact_report.as_ref().and_then(|report| {
+                report
+                    .actions
+                    .iter()
+                    .find(|impact| impact.action == candidate.action)
+            });
+            let trade = belief_domestic_trade_assessment(
+                particles
+                    .iter()
+                    .map(|particle| (&particle.state, particle.weight)),
+                &candidate.action,
+            );
+            RootCausalEvidence {
+                action: candidate.action.clone(),
+                promotion_reason: impact.and_then(|impact| impact.promotion),
+                admitted_by_promotion: impact.is_some_and(|impact| {
+                    impact.promotion.is_some()
+                        && retained
+                            .iter()
+                            .any(|(action, _)| action == &candidate.action)
+                        && !retained_without_promotions
+                            .iter()
+                            .any(|(action, _)| action == &candidate.action)
+                }),
+                closeout_gain: impact.map_or(0.0, |impact| impact.closeout_gain),
+                response_windows: impact.and_then(|impact| impact.response_windows),
+                decisive_completion_mass: impact
+                    .map_or(0.0, |impact| impact.decisive_completion_mass),
+                trade_threat: trade.threat,
+                trade_risk_posterior: trade.posterior,
+                dirty_monopoly_posterior: trade.dirty_monopoly_posterior,
+                trade_hard_veto_posterior: trade.hard_veto_posterior,
+                trade_hard_veto: trade.hard_veto,
+            }
+        })
+        .collect::<Vec<_>>();
     for (action, _) in &root_scored {
         if !retained
             .iter()
@@ -1340,11 +1473,16 @@ fn belief_search(
                 planner_value: diagnostic.and_then(|candidate| candidate.planner_value),
                 planner_completion_mass: diagnostic
                     .and_then(|candidate| candidate.planner_completion_mass),
+                planner_decisive_completion_mass: diagnostic
+                    .and_then(|candidate| candidate.planner_decisive_completion_mass),
+                planner_response_windows: diagnostic
+                    .and_then(|candidate| candidate.planner_response_windows),
             }
         })
         .collect::<Vec<_>>();
     let pruned_root_count = pruned_roots.len();
     pruned_roots.truncate(MAX_ROOT_PROVENANCE);
+    root_evidence.truncate(MAX_ROOT_PROVENANCE);
     let mut provenance = BeliefSearchProvenance {
         ranked_root_count,
         ranked_roots: ranked_diagnostics
@@ -1355,6 +1493,9 @@ fn belief_search(
         retained_roots,
         pruned_root_count,
         pruned_roots,
+        root_evidence,
+        trade_hard_veto_threshold: HARD_VETO_POSTERIOR,
+        search_winner: None,
         exact_family_replacement: None,
         exact_family_results,
         safety_replacement: None,
@@ -1420,8 +1561,8 @@ fn belief_search(
             BeliefNodeBudgetMode::Global => maximum_nodes.saturating_sub(nodes),
             BeliefNodeBudgetMode::PerDepthWave => maximum_nodes,
         };
-        let minimum_complete_wave_nodes = positive_particle_count
-            .saturating_mul(root_actions.len().max(1) as u32);
+        let minimum_complete_wave_nodes =
+            positive_particle_count.saturating_mul(root_actions.len().max(1) as u32);
         if wave_node_budget < minimum_complete_wave_nodes {
             break;
         }
@@ -1470,9 +1611,8 @@ fn belief_search(
                     .copied()
                     .unwrap_or(1)
                     .max(1);
-                let remaining_cells = total_wave_cells
-                    .saturating_sub(completed_wave_cells)
-                    .max(1) as u32;
+                let remaining_cells =
+                    total_wave_cells.saturating_sub(completed_wave_cells).max(1) as u32;
                 let remaining_ms = deadline.remaining_ms();
                 if remaining_ms != u32::MAX && remaining_ms < remaining_cells {
                     wave_complete = false;
@@ -1552,6 +1692,7 @@ fn belief_search(
         })
         .collect::<Vec<_>>();
     actions.sort_by(|left, right| right.value[actor].total_cmp(&left.value[actor]));
+    provenance.search_winner = actions.first().map(|entry| entry.action.clone());
     let mut chosen_index = 0usize;
     if let Some(leading) = actions.first() {
         let leading_loss = forced_loss_weight(
@@ -1588,8 +1729,7 @@ fn belief_search(
             .find(|(candidate, _)| *candidate == family)
         && fallback != chosen_action
     {
-        provenance.exact_family_replacement =
-            Some((fallback.clone(), chosen_action.clone()));
+        provenance.exact_family_replacement = Some((fallback.clone(), chosen_action.clone()));
     }
     let value = actions
         .get(chosen_index)
@@ -1798,13 +1938,7 @@ pub fn search_weighted_belief_maxn_with_config(
     particles: &[BeliefParticle],
     config: BeliefDepthConfig,
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
-    belief_search(
-        particles,
-        config,
-        false,
-        &[],
-        BeliefNodeBudgetMode::Global,
-    )
+    belief_search(particles, config, false, &[], BeliefNodeBudgetMode::Global)
 }
 
 pub fn search_weighted_belief_maxn_bounded(
@@ -1923,13 +2057,7 @@ pub fn search_weighted_belief_paranoid_with_config(
     particles: &[BeliefParticle],
     config: BeliefDepthConfig,
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
-    belief_search(
-        particles,
-        config,
-        true,
-        &[],
-        BeliefNodeBudgetMode::Global,
-    )
+    belief_search(particles, config, true, &[], BeliefNodeBudgetMode::Global)
 }
 
 pub fn search_weighted_belief_paranoid_bounded(
@@ -2063,8 +2191,7 @@ static CUDA_LINEAR_POLICY_NANOS: std::sync::atomic::AtomicU64 =
 static CUDA_LINEAR_BUDGET_NANOS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
-static CUDA_LINEAR_APPLY_NANOS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static CUDA_LINEAR_APPLY_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
 static CUDA_TREE_BUILD_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
@@ -2237,7 +2364,8 @@ struct CudaLinearStagingLease {
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
 impl CudaLinearStagingLease {
     fn take() -> Self {
-        let staging = CUDA_LINEAR_STAGING_POOL.with(|pool| pool.borrow_mut().pop().unwrap_or_default());
+        let staging =
+            CUDA_LINEAR_STAGING_POOL.with(|pool| pool.borrow_mut().pop().unwrap_or_default());
         Self {
             staging: Some(staging),
         }
@@ -2792,9 +2920,25 @@ fn cuda_belief_search_with_batch(
         Vec::new()
     };
     let root_actions_list: Vec<Action> = root_scored.iter().map(|(a, _)| a.clone()).collect();
-    let spatial_impact_report = particles
-        .first()
-        .map(|first| compute_spatial_root_impacts(&first.state, observer, &root_actions_list));
+    let closeout_plans = ranked_diagnostics
+        .iter()
+        .filter_map(|candidate| {
+            Some(TurnPlan {
+                first_action: candidate.action.clone(),
+                actions: Vec::new(),
+                value: candidate.planner_value?,
+                nodes: 0,
+                completion_mass: candidate.planner_completion_mass?,
+                decisive_completion_mass: candidate.planner_decisive_completion_mass.unwrap_or(0.0),
+                response_windows: candidate.planner_response_windows,
+            })
+        })
+        .collect::<Vec<_>>();
+    let spatial_impact_report = particles.first().map(|first| {
+        let mut report = compute_spatial_root_impacts(&first.state, observer, &root_actions_list);
+        apply_closeout_root_impacts(&mut report, &closeout_plans);
+        report
+    });
     let promoted_spatial_actions: Vec<Action> = spatial_impact_report
         .as_ref()
         .map(|report| {
@@ -2806,12 +2950,53 @@ fn cuda_belief_search_with_batch(
                 .collect()
         })
         .unwrap_or_default();
+    let retained_without_promotions =
+        admit_promoted_roots(&root_scored, &verified_blockers, &[], branch_cap);
     let retained = admit_promoted_roots(
         &root_scored,
         &verified_blockers,
         &promoted_spatial_actions,
         branch_cap,
     );
+    let mut root_evidence = ranked_diagnostics
+        .iter()
+        .map(|candidate| {
+            let impact = spatial_impact_report.as_ref().and_then(|report| {
+                report
+                    .actions
+                    .iter()
+                    .find(|impact| impact.action == candidate.action)
+            });
+            let trade = belief_domestic_trade_assessment(
+                particles
+                    .iter()
+                    .map(|particle| (&particle.state, particle.weight)),
+                &candidate.action,
+            );
+            RootCausalEvidence {
+                action: candidate.action.clone(),
+                promotion_reason: impact.and_then(|impact| impact.promotion),
+                admitted_by_promotion: impact.is_some_and(|impact| {
+                    impact.promotion.is_some()
+                        && retained
+                            .iter()
+                            .any(|(action, _)| action == &candidate.action)
+                        && !retained_without_promotions
+                            .iter()
+                            .any(|(action, _)| action == &candidate.action)
+                }),
+                closeout_gain: impact.map_or(0.0, |impact| impact.closeout_gain),
+                response_windows: impact.and_then(|impact| impact.response_windows),
+                decisive_completion_mass: impact
+                    .map_or(0.0, |impact| impact.decisive_completion_mass),
+                trade_threat: trade.threat,
+                trade_risk_posterior: trade.posterior,
+                dirty_monopoly_posterior: trade.dirty_monopoly_posterior,
+                trade_hard_veto_posterior: trade.hard_veto_posterior,
+                trade_hard_veto: trade.hard_veto,
+            }
+        })
+        .collect::<Vec<_>>();
     for (action, _) in &root_scored {
         if !retained
             .iter()
@@ -2932,11 +3117,16 @@ fn cuda_belief_search_with_batch(
                 planner_value: diagnostic.and_then(|candidate| candidate.planner_value),
                 planner_completion_mass: diagnostic
                     .and_then(|candidate| candidate.planner_completion_mass),
+                planner_decisive_completion_mass: diagnostic
+                    .and_then(|candidate| candidate.planner_decisive_completion_mass),
+                planner_response_windows: diagnostic
+                    .and_then(|candidate| candidate.planner_response_windows),
             }
         })
         .collect::<Vec<_>>();
     let pruned_root_count = pruned_roots.len();
     pruned_roots.truncate(MAX_ROOT_PROVENANCE);
+    root_evidence.truncate(MAX_ROOT_PROVENANCE);
     let mut provenance = BeliefSearchProvenance {
         ranked_root_count,
         ranked_roots: ranked_diagnostics
@@ -2947,6 +3137,9 @@ fn cuda_belief_search_with_batch(
         retained_roots,
         pruned_root_count,
         pruned_roots,
+        root_evidence,
+        trade_hard_veto_threshold: HARD_VETO_POSTERIOR,
+        search_winner: None,
         exact_family_replacement,
         exact_family_results: Vec::new(),
         safety_replacement: None,
@@ -3033,7 +3226,8 @@ fn cuda_belief_search_with_batch(
                 let mut next = cuda_checkout_state(states, &particle.state);
                 let apply_started = std::time::Instant::now();
                 let root_apply = next.clone_from_and_apply(&particle.state, action);
-                apply_nanos = apply_nanos.saturating_add(
+                apply_nanos =
+                    apply_nanos.saturating_add(
                     apply_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
                 );
                 if root_apply.is_err() {
@@ -3079,7 +3273,8 @@ fn cuda_belief_search_with_batch(
                 );
                 let searched_nodes = searcher.nodes;
                 let searched_depth = searcher.deepest_depth;
-                legal_actions_nanos = legal_actions_nanos.saturating_add(searcher.legal_actions_nanos);
+                legal_actions_nanos =
+                    legal_actions_nanos.saturating_add(searcher.legal_actions_nanos);
                 policy_nanos = policy_nanos.saturating_add(searcher.policy_nanos);
                 budget_nanos = budget_nanos.saturating_add(searcher.budget_nanos);
                 apply_nanos = apply_nanos.saturating_add(searcher.apply_nanos);
@@ -3229,6 +3424,7 @@ fn cuda_belief_search_with_batch(
             provenance.safety_replacement =
                 Some((leading.action.clone(), replacement.action.clone()));
         }
+        provenance.search_winner = actions.first().map(|entry| entry.action.clone());
         let chosen = actions.get(chosen_index).map(|entry| entry.action.clone());
         let value = actions
             .get(chosen_index)
@@ -3416,6 +3612,7 @@ fn cuda_belief_search_with_batch(
     {
         provenance.safety_replacement = Some((leading.action.clone(), replacement.action.clone()));
     }
+    provenance.search_winner = actions.first().map(|entry| entry.action.clone());
     let chosen = actions.get(chosen_index).map(|entry| entry.action.clone());
     let value = actions
         .get(chosen_index)
@@ -3448,10 +3645,8 @@ fn cuda_belief_search(
     config: BeliefDepthConfig,
     root_exclusions: &[Action],
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
-    let mut evaluate_batch = |
-        states: &[crate::CudaExactPackedState],
-        result: &mut Vec<[f32; 4]>,
-    | {
+    let mut evaluate_batch = |states: &[crate::CudaExactPackedState],
+                              result: &mut Vec<[f32; 4]>| {
         evaluator
             .evaluate_packed_batch_into(states, result)
             .map_err(|_| DepthBeliefError::CudaEvaluationFailed)
@@ -3466,10 +3661,8 @@ fn cuda_belief_search_mutex(
     config: BeliefDepthConfig,
     root_exclusions: &[Action],
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
-    let mut evaluate_batch = |
-        states: &[crate::CudaExactPackedState],
-        result: &mut Vec<[f32; 4]>,
-    | {
+    let mut evaluate_batch = |states: &[crate::CudaExactPackedState],
+                              result: &mut Vec<[f32; 4]>| {
         let wait_started = std::time::Instant::now();
         let evaluation = {
             let mut evaluator = evaluator

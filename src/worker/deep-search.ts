@@ -633,6 +633,15 @@ const mapRootProvenance = (
       ...(candidate.plannerCompletionMass !== undefined
         ? { plannerCompletionMass: candidate.plannerCompletionMass }
         : {}),
+      ...(typeof candidate.plannerDecisiveCompletionMass === "number"
+        ? {
+            plannerDecisiveCompletionMass:
+              candidate.plannerDecisiveCompletionMass,
+          }
+        : {}),
+      ...(typeof candidate.plannerResponseWindows === "number"
+        ? { plannerResponseWindows: candidate.plannerResponseWindows }
+        : {}),
     })),
     retainedRoots: provenance.retainedRoots.map((candidate) => ({
       action: mapAction(candidate.action, players, board),
@@ -647,6 +656,15 @@ const mapRootProvenance = (
         : {}),
       ...(candidate.plannerCompletionMass !== undefined
         ? { plannerCompletionMass: candidate.plannerCompletionMass }
+        : {}),
+      ...(typeof candidate.plannerDecisiveCompletionMass === "number"
+        ? {
+            plannerDecisiveCompletionMass:
+              candidate.plannerDecisiveCompletionMass,
+          }
+        : {}),
+      ...(typeof candidate.plannerResponseWindows === "number"
+        ? { plannerResponseWindows: candidate.plannerResponseWindows }
         : {}),
       ...(typeof candidate.finalRank === "number"
         ? { finalRank: candidate.finalRank }
@@ -681,6 +699,27 @@ const mapRootProvenance = (
         : {}),
       reason: candidate.reason,
     })),
+    rootEvidence: provenance.rootEvidence.map((evidence) => ({
+      action: mapAction(evidence.action, players, board),
+      ...(evidence.promotionReason
+        ? { promotionReason: evidence.promotionReason }
+        : {}),
+      admittedByPromotion: evidence.admittedByPromotion,
+      closeoutGain: evidence.closeoutGain,
+      ...(typeof evidence.responseWindows === "number"
+        ? { responseWindows: evidence.responseWindows }
+        : {}),
+      decisiveCompletionMass: evidence.decisiveCompletionMass,
+      ...(evidence.tradeThreat ? { tradeThreat: evidence.tradeThreat } : {}),
+      tradeRiskPosterior: evidence.tradeRiskPosterior,
+      dirtyMonopolyPosterior: evidence.dirtyMonopolyPosterior,
+      tradeHardVetoPosterior: evidence.tradeHardVetoPosterior,
+      tradeHardVeto: evidence.tradeHardVeto,
+    })),
+    tradeHardVetoThreshold: provenance.tradeHardVetoThreshold,
+    ...(provenance.searchWinner
+      ? { searchWinner: mapAction(provenance.searchWinner, players, board) }
+      : {}),
     ...(exactFamilyReplacement ? { exactFamilyReplacement } : {}),
     ...(safetyReplacement ? { safetyReplacement } : {}),
   };

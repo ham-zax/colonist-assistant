@@ -162,7 +162,7 @@ fn progress_action_win_probability(state: &GameState, opponent: u8, action: &Act
     }
 }
 
-fn progress_threat_kind(action: &Action) -> Option<OpponentThreatKind> {
+pub(crate) fn progress_threat_kind(action: &Action) -> Option<OpponentThreatKind> {
     match action {
         Action::PlayRoadBuilding { .. } => Some(OpponentThreatKind::RoadBuildingWin),
         Action::PlayYearOfPlenty { .. } => Some(OpponentThreatKind::YearOfPlentyWin),

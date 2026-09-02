@@ -9,7 +9,13 @@
 
 use colonist_catan_core::{Action, Building, GameState};
 
-use crate::resilience::{analyze_road_resilience, RoadResilience};
+use crate::planner::TurnPlan;
+use crate::resilience::{RoadResilience, analyze_road_resilience};
+
+/// Closeout may affect coverage only when planner endpoints are effectively a
+/// strategic tie. One public VP is ~7.4 utility in `eval`, so this band is
+/// deliberately much smaller than a material score/build difference.
+const CLOSEOUT_COMPARABLE_VALUE_DELTA: f32 = 0.20;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RoadImpactDelta {
@@ -24,12 +30,18 @@ pub enum RootPromotionReason {
     RoadAwardProtection,
     CriticalExpansionProtection,
     OpponentRouteCut,
+    CloseoutCompression,
 }
 
 #[derive(Clone, Debug)]
 pub struct RootStrategicImpact {
     pub action: Action,
     pub road_delta: RoadImpactDelta,
+    /// Normalized reduction in opponent response windows among materially
+    /// comparable planner endpoints. Diagnostic/coverage evidence only.
+    pub closeout_gain: f32,
+    pub response_windows: Option<f32>,
+    pub decisive_completion_mass: f32,
     pub promotion: Option<RootPromotionReason>,
 }
 
@@ -70,7 +82,11 @@ pub fn compute_spatial_root_impacts(
                 // 1. Check the actual actor-specific settlement consequence for each
                 // opponent whose route or expansion portfolio touches this vertex.
                 for &(opp, ref opp_res) in &opponent_resiliences {
-                    if let Some(cut) = opp_res.critical_vertices.iter().find(|c| c.vertex == *vertex) {
+                    if let Some(cut) = opp_res
+                        .critical_vertices
+                        .iter()
+                        .find(|c| c.vertex == *vertex)
+                    {
                         let road_loss = state
                             .longest_road_length(opp)
                             .saturating_sub(probe.longest_road_length(opp));
@@ -98,7 +114,11 @@ pub fn compute_spatial_root_impacts(
                 }
 
                 // 2. Check if building this settlement protects actor's own road network from cuts
-                if let Some(own_cut) = baseline_road.critical_vertices.iter().find(|c| c.vertex == *vertex) {
+                if let Some(own_cut) = baseline_road
+                    .critical_vertices
+                    .iter()
+                    .find(|c| c.vertex == *vertex)
+                {
                     road_delta.longest_road_loss_prevented = own_cut.road_loss as i8;
                     if own_cut.award_loss {
                         road_delta.award_vp_swing = 2;
@@ -115,7 +135,9 @@ pub fn compute_spatial_root_impacts(
                 probe.roads[*edge as usize] = Some(actor);
                 probe.update_longest_road();
 
-                if state.longest_road_holder != Some(actor) && probe.longest_road_holder == Some(actor) {
+                if state.longest_road_holder != Some(actor)
+                    && probe.longest_road_holder == Some(actor)
+                {
                     road_delta.award_vp_swing = 2;
                     promotion = Some(RootPromotionReason::RoadAwardProtection);
                 }
@@ -123,9 +145,12 @@ pub fn compute_spatial_root_impacts(
                 // 2. Check if building this road establishes a bypass for an existing cut
                 if baseline_road.maximum_longest_road_loss > 0 {
                     let after_res = analyze_road_resilience(&probe, actor);
-                    if after_res.maximum_longest_road_loss < baseline_road.maximum_longest_road_loss {
-                        road_delta.longest_road_loss_prevented =
-                            (baseline_road.maximum_longest_road_loss - after_res.maximum_longest_road_loss) as i8;
+                    if after_res.maximum_longest_road_loss < baseline_road.maximum_longest_road_loss
+                    {
+                        road_delta.longest_road_loss_prevented = (baseline_road
+                            .maximum_longest_road_loss
+                            - after_res.maximum_longest_road_loss)
+                            as i8;
                         if promotion.is_none() {
                             promotion = Some(RootPromotionReason::RoadAwardProtection);
                         }
@@ -133,14 +158,19 @@ pub fn compute_spatial_root_impacts(
                 }
 
                 // 3. Check if building this road protects actor's own critical edge
-                if let Some(own_cut) = baseline_road.critical_edges.iter().find(|c| c.edge == *edge) {
+                if let Some(own_cut) = baseline_road
+                    .critical_edges
+                    .iter()
+                    .find(|c| c.edge == *edge)
+                {
                     if own_cut.award_loss {
                         road_delta.award_vp_swing = 2;
                         promotion = Some(RootPromotionReason::RoadAwardProtection);
                     }
                     if own_cut.expansion_loss > 0.35 {
-                        road_delta.expansion_portfolio_delta =
-                            road_delta.expansion_portfolio_delta.max(own_cut.expansion_loss);
+                        road_delta.expansion_portfolio_delta = road_delta
+                            .expansion_portfolio_delta
+                            .max(own_cut.expansion_loss);
                         if promotion.is_none() {
                             promotion = Some(RootPromotionReason::CriticalExpansionProtection);
                         }
@@ -155,8 +185,9 @@ pub fn compute_spatial_root_impacts(
                     if let Some(cut_edge) = opp_res.critical_edges.iter().find(|c| c.edge == *edge)
                         && cut_edge.expansion_loss > 0.35
                     {
-                        road_delta.expansion_portfolio_delta =
-                            road_delta.expansion_portfolio_delta.max(cut_edge.expansion_loss);
+                        road_delta.expansion_portfolio_delta = road_delta
+                            .expansion_portfolio_delta
+                            .max(cut_edge.expansion_loss);
                         if promotion.is_none() {
                             promotion = Some(RootPromotionReason::OpponentRouteCut);
                         }
@@ -170,6 +201,9 @@ pub fn compute_spatial_root_impacts(
         impacts.push(RootStrategicImpact {
             action: action.clone(),
             road_delta,
+            closeout_gain: 0.0,
+            response_windows: None,
+            decisive_completion_mass: 0.0,
             promotion,
         });
     }
@@ -177,6 +211,53 @@ pub fn compute_spatial_root_impacts(
     RootImpactReport {
         baseline_road,
         actions: impacts,
+    }
+}
+
+/// Attach bounded closeout evidence to an already-computed root-impact report.
+/// This function never changes planner/search utility. `CloseoutCompression`
+/// can only preserve a materially comparable decisive root through width
+/// truncation; ordinary MaxN/GPU comparison still decides whether it wins.
+pub fn apply_closeout_root_impacts(report: &mut RootImpactReport, plans: &[TurnPlan]) {
+    let covered = plans
+        .iter()
+        .filter(|plan| plan.completion_mass > f32::EPSILON && plan.response_windows.is_some())
+        .collect::<Vec<_>>();
+    let Some(best_value) = covered.iter().map(|plan| plan.value).reduce(f32::max) else {
+        return;
+    };
+    let comparable = covered
+        .iter()
+        .copied()
+        .filter(|plan| plan.value + CLOSEOUT_COMPARABLE_VALUE_DELTA >= best_value)
+        .collect::<Vec<_>>();
+    let maximum_windows = comparable
+        .iter()
+        .filter_map(|plan| plan.response_windows)
+        .fold(0.0_f32, f32::max);
+
+    for impact in &mut report.actions {
+        let Some(plan) = plans.iter().find(|plan| plan.first_action == impact.action) else {
+            continue;
+        };
+        impact.response_windows = plan.response_windows;
+        impact.decisive_completion_mass = plan.decisive_completion_mass.clamp(0.0, 1.0);
+        if plan.value + CLOSEOUT_COMPARABLE_VALUE_DELTA < best_value
+            || impact.decisive_completion_mass <= f32::EPSILON
+        {
+            continue;
+        }
+        let Some(windows) = plan.response_windows else {
+            continue;
+        };
+        if maximum_windows <= f32::EPSILON || windows >= maximum_windows {
+            continue;
+        }
+        impact.closeout_gain = ((maximum_windows - windows) / maximum_windows).clamp(0.0, 1.0)
+            * impact.decisive_completion_mass;
+        if impact.closeout_gain > f32::EPSILON && impact.promotion.is_none() {
+            impact.promotion = Some(RootPromotionReason::CloseoutCompression);
+        }
     }
 }
 
@@ -200,7 +281,11 @@ mod tests {
             .unwrap() as usize;
         state.roads[e1] = Some(1);
         let [_, v2] = state.board.edges[e1].vertices;
-        let v2 = if v2 == v1 { state.board.edges[e1].vertices[0] } else { v2 };
+        let v2 = if v2 == v1 {
+            state.board.edges[e1].vertices[0]
+        } else {
+            v2
+        };
 
         let e2 = *state.board.vertices[v2 as usize]
             .adjacent_edges
@@ -209,7 +294,11 @@ mod tests {
             .unwrap() as usize;
         state.roads[e2] = Some(1);
         let [_, v3] = state.board.edges[e2].vertices;
-        let v3 = if v3 == v2 { state.board.edges[e2].vertices[0] } else { v3 };
+        let v3 = if v3 == v2 {
+            state.board.edges[e2].vertices[0]
+        } else {
+            v3
+        };
 
         let e3 = *state.board.vertices[v3 as usize]
             .adjacent_edges
@@ -218,7 +307,11 @@ mod tests {
             .unwrap() as usize;
         state.roads[e3] = Some(1);
         let [_, v4] = state.board.edges[e3].vertices;
-        let v4 = if v4 == v3 { state.board.edges[e3].vertices[0] } else { v4 };
+        let v4 = if v4 == v3 {
+            state.board.edges[e3].vertices[0]
+        } else {
+            v4
+        };
 
         let e4 = *state.board.vertices[v4 as usize]
             .adjacent_edges
@@ -235,9 +328,94 @@ mod tests {
         let other_action = Action::Roll;
         let report = compute_spatial_root_impacts(&state, 0, &[cut_action.clone(), other_action]);
 
-        let cut_impact = report.actions.iter().find(|i| i.action == cut_action).unwrap();
-        assert_eq!(cut_impact.promotion, Some(RootPromotionReason::OpponentRouteCut));
+        let cut_impact = report
+            .actions
+            .iter()
+            .find(|i| i.action == cut_action)
+            .unwrap();
+        assert_eq!(
+            cut_impact.promotion,
+            Some(RootPromotionReason::OpponentRouteCut)
+        );
         assert!(cut_impact.road_delta.longest_road_loss_inflicted > 0);
+    }
+
+    #[test]
+    fn comparable_same_turn_closeout_gets_coverage_promotion() {
+        let state = GameState::standard(421, 3);
+        let fast = Action::Roll;
+        let slow = Action::EndTurn;
+        let mut report = compute_spatial_root_impacts(&state, 0, &[fast.clone(), slow.clone()]);
+        let plans = vec![
+            TurnPlan {
+                first_action: fast.clone(),
+                actions: vec![fast.clone()],
+                value: 10.0,
+                nodes: 0,
+                completion_mass: 1.0,
+                decisive_completion_mass: 1.0,
+                response_windows: Some(0.0),
+            },
+            TurnPlan {
+                first_action: slow.clone(),
+                actions: vec![slow],
+                value: 10.1,
+                nodes: 0,
+                completion_mass: 1.0,
+                decisive_completion_mass: 0.0,
+                response_windows: Some(2.0),
+            },
+        ];
+        apply_closeout_root_impacts(&mut report, &plans);
+
+        let impact = report
+            .actions
+            .iter()
+            .find(|impact| impact.action == fast)
+            .unwrap();
+        assert_eq!(
+            impact.promotion,
+            Some(RootPromotionReason::CloseoutCompression)
+        );
+        assert_eq!(impact.response_windows, Some(0.0));
+        assert!((impact.closeout_gain - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn materially_weaker_same_turn_line_gets_no_closeout_promotion() {
+        let state = GameState::standard(423, 3);
+        let fast = Action::Roll;
+        let slow = Action::EndTurn;
+        let mut report = compute_spatial_root_impacts(&state, 0, &[fast.clone(), slow.clone()]);
+        let plans = vec![
+            TurnPlan {
+                first_action: fast.clone(),
+                actions: vec![fast.clone()],
+                value: 9.0,
+                nodes: 0,
+                completion_mass: 1.0,
+                decisive_completion_mass: 1.0,
+                response_windows: Some(0.0),
+            },
+            TurnPlan {
+                first_action: slow.clone(),
+                actions: vec![slow],
+                value: 10.0,
+                nodes: 0,
+                completion_mass: 1.0,
+                decisive_completion_mass: 0.0,
+                response_windows: Some(2.0),
+            },
+        ];
+        apply_closeout_root_impacts(&mut report, &plans);
+
+        let impact = report
+            .actions
+            .iter()
+            .find(|impact| impact.action == fast)
+            .unwrap();
+        assert_eq!(impact.promotion, None);
+        assert_eq!(impact.closeout_gain, 0.0);
     }
 
     #[test]
@@ -250,8 +428,15 @@ mod tests {
         // An edge that doesn't claim award or cut anyone
         let road_action = Action::BuildRoad { edge: 1 };
         let report = compute_spatial_root_impacts(&state, 0, &[road_action.clone()]);
-        let impact = report.actions.iter().find(|i| i.action == road_action).unwrap();
-        assert_eq!(impact.promotion, None, "vanity road branch must not receive synthetic promotion");
+        let impact = report
+            .actions
+            .iter()
+            .find(|i| i.action == road_action)
+            .unwrap();
+        assert_eq!(
+            impact.promotion, None,
+            "vanity road branch must not receive synthetic promotion"
+        );
     }
 
     #[test]

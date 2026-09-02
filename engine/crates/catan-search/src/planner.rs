@@ -12,6 +12,13 @@ pub struct TurnPlan {
     pub value: f32,
     pub nodes: u32,
     pub completion_mass: f32,
+    /// Probability mass whose next material build/award/win occurs before
+    /// control leaves the root player's turn.
+    pub decisive_completion_mass: f32,
+    /// Expected opponent decision windows before the next material
+    /// build/award/win or, when the current-turn planner cannot reach one,
+    /// before control returns to the root player. This is diagnostic only.
+    pub response_windows: Option<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -38,6 +45,9 @@ struct PlanValue {
     value: f32,
     actions: Vec<Action>,
     completion_mass: f32,
+    decisive_completion_mass: f32,
+    response_window_mass: f32,
+    weighted_response_windows: f32,
 }
 
 struct Planner {
@@ -58,6 +68,37 @@ impl Planner {
         own - strongest_opponent.max(0.0) * 0.24
     }
 
+    fn opponent_turn_windows(&self, state: &GameState) -> f32 {
+        if state.current_player == self.root {
+            return 0.0;
+        }
+        let players = state.board.num_players.max(1);
+        let mut player = state.current_player;
+        let mut windows = 0u8;
+        while player != self.root && windows < players {
+            windows = windows.saturating_add(1);
+            player = (player + 1) % players;
+        }
+        windows as f32
+    }
+
+    fn materially_decisive_transition(
+        &self,
+        before: &GameState,
+        after: &GameState,
+        action: &Action,
+    ) -> bool {
+        after.winner() == Some(self.root)
+            || matches!(
+                action,
+                Action::BuildSettlement { .. } | Action::BuildCity { .. }
+            )
+            || (before.longest_road_holder != Some(self.root)
+                && after.longest_road_holder == Some(self.root))
+            || (before.largest_army_holder != Some(self.root)
+                && after.largest_army_holder == Some(self.root))
+    }
+
     fn visit(&mut self, state: &GameState, depth: u8) -> PlanValue {
         if self.nodes >= self.node_limit
             || depth >= self.config.maximum_actions
@@ -67,10 +108,19 @@ impl Planner {
             let completed_endpoint = state.is_terminal()
                 || (state.current_player != self.root
                     && !matches!(state.phase, Phase::TradeResponses));
+            let completed_mass = if completed_endpoint { 1.0 } else { 0.0 };
+            let terminal_win = state.is_terminal() && state.winner() == Some(self.root);
             return PlanValue {
                 value: self.endpoint_value(state),
                 actions: Vec::new(),
-                completion_mass: if completed_endpoint { 1.0 } else { 0.0 },
+                completion_mass: completed_mass,
+                decisive_completion_mass: if terminal_win { 1.0 } else { 0.0 },
+                response_window_mass: completed_mass,
+                weighted_response_windows: if completed_endpoint && !state.is_terminal() {
+                    self.opponent_turn_windows(state)
+                } else {
+                    0.0
+                },
             };
         }
         self.nodes += 1;
@@ -83,6 +133,9 @@ impl Planner {
                 value: self.endpoint_value(state),
                 actions: Vec::new(),
                 completion_mass: 0.0,
+                decisive_completion_mass: 0.0,
+                response_window_mass: 0.0,
+                weighted_response_windows: 0.0,
             };
         }
         let result = match state.node_kind() {
@@ -90,6 +143,13 @@ impl Planner {
                 value: self.endpoint_value(state),
                 actions: Vec::new(),
                 completion_mass: 1.0,
+                decisive_completion_mass: if state.winner() == Some(self.root) {
+                    1.0
+                } else {
+                    0.0
+                },
+                response_window_mass: 1.0,
+                weighted_response_windows: 0.0,
             },
             NodeKind::Chance => {
                 let total = legal
@@ -99,10 +159,16 @@ impl Planner {
                     .max(1.0);
                 let mut value = 0.0;
                 let mut completion_mass = 0.0;
+                let mut decisive_completion_mass = 0.0;
+                let mut response_window_mass = 0.0;
+                let mut weighted_response_windows = 0.0;
                 let mut representative = PlanValue {
                     value: f32::NEG_INFINITY,
                     actions: Vec::new(),
                     completion_mass: 0.0,
+                    decisive_completion_mass: 0.0,
+                    response_window_mass: 0.0,
+                    weighted_response_windows: 0.0,
                 };
                 for action in legal {
                     let probability = state.chance_weight(&action) as f32 / total;
@@ -120,10 +186,16 @@ impl Planner {
                             value: self.endpoint_value(&next),
                             actions: Vec::new(),
                             completion_mass: 0.0,
+                            decisive_completion_mass: 0.0,
+                            response_window_mass: 0.0,
+                            weighted_response_windows: 0.0,
                         }
                     };
                     value += child.value * probability;
                     completion_mass += child.completion_mass * probability;
+                    decisive_completion_mass += child.decisive_completion_mass * probability;
+                    response_window_mass += child.response_window_mass * probability;
+                    weighted_response_windows += child.weighted_response_windows * probability;
                     if child.value > representative.value {
                         representative = child;
                     }
@@ -132,6 +204,9 @@ impl Planner {
                     value,
                     actions: representative.actions,
                     completion_mass: completion_mass.clamp(0.0, 1.0),
+                    decisive_completion_mass: decisive_completion_mass.clamp(0.0, 1.0),
+                    response_window_mass: response_window_mass.clamp(0.0, 1.0),
+                    weighted_response_windows,
                 }
             }
             NodeKind::Decision { actor } if actor == self.root => {
@@ -140,12 +215,16 @@ impl Planner {
                     value: f32::NEG_INFINITY,
                     actions: Vec::new(),
                     completion_mass: 0.0,
+                    decisive_completion_mass: 0.0,
+                    response_window_mass: 0.0,
+                    weighted_response_windows: 0.0,
                 };
                 for (action, _) in ranked {
                     let mut next = state.clone();
                     if next.apply(&action).is_err() {
                         continue;
                     }
+                    let decisive_now = self.materially_decisive_transition(state, &next, &action);
                     let mut child = if self.nodes < self.node_limit {
                         self.visit(&next, depth + 1)
                     } else if next.is_terminal()
@@ -159,10 +238,28 @@ impl Planner {
                             value: self.endpoint_value(&next),
                             actions: Vec::new(),
                             completion_mass: 1.0,
+                            decisive_completion_mass: if next.is_terminal()
+                                && next.winner() == Some(self.root)
+                            {
+                                1.0
+                            } else {
+                                0.0
+                            },
+                            response_window_mass: 1.0,
+                            weighted_response_windows: if next.is_terminal() {
+                                0.0
+                            } else {
+                                self.opponent_turn_windows(&next)
+                            },
                         }
                     } else {
                         continue;
                     };
+                    if decisive_now {
+                        child.decisive_completion_mass = 1.0;
+                        child.response_window_mass = 1.0;
+                        child.weighted_response_windows = 0.0;
+                    }
                     if child.value > best.value {
                         child.actions.insert(0, action);
                         best = child;
@@ -175,6 +272,9 @@ impl Planner {
                         value: self.endpoint_value(state),
                         actions: Vec::new(),
                         completion_mass: 0.0,
+                        decisive_completion_mass: 0.0,
+                        response_window_mass: 0.0,
+                        weighted_response_windows: 0.0,
                     }
                 }
             }
@@ -184,10 +284,16 @@ impl Planner {
                 // outcomes, not adversarial omniscient choices.
                 let mut weighted = 0.0;
                 let mut completion_mass = 0.0;
+                let mut decisive_completion_mass = 0.0;
+                let mut response_window_mass = 0.0;
+                let mut weighted_response_windows = 0.0;
                 let mut representative = PlanValue {
                     value: f32::NEG_INFINITY,
                     actions: Vec::new(),
                     completion_mass: 0.0,
+                    decisive_completion_mass: 0.0,
+                    response_window_mass: 0.0,
+                    weighted_response_windows: 0.0,
                 };
                 let accept_probability = trade_acceptance_probability(state, actor);
                 let counter_count = legal
@@ -233,10 +339,20 @@ impl Planner {
                             value: self.endpoint_value(&next),
                             actions: Vec::new(),
                             completion_mass: 0.0,
+                            decisive_completion_mass: 0.0,
+                            response_window_mass: 0.0,
+                            weighted_response_windows: 0.0,
                         }
                     };
                     weighted += child.value * probability;
                     completion_mass += child.completion_mass * probability;
+                    decisive_completion_mass += child.decisive_completion_mass * probability;
+                    response_window_mass += child.response_window_mass * probability;
+                    // Reaching this branch consumed one real opponent decision
+                    // opportunity inside the root player's current turn.
+                    weighted_response_windows += (child.weighted_response_windows
+                        + child.response_window_mass)
+                        * probability;
                     if child.value > representative.value {
                         representative = child;
                     }
@@ -249,6 +365,9 @@ impl Planner {
                     },
                     actions: representative.actions,
                     completion_mass: completion_mass.clamp(0.0, 1.0),
+                    decisive_completion_mass: decisive_completion_mass.clamp(0.0, 1.0),
+                    response_window_mass: response_window_mass.clamp(0.0, 1.0),
+                    weighted_response_windows,
                 }
             }
         };
@@ -378,14 +497,24 @@ pub fn plan_current_turn(state: &GameState, config: TurnPlanConfig) -> Vec<TurnP
         if next.apply(&action).is_err() {
             continue;
         }
+        let decisive_now = planner.materially_decisive_transition(state, &next, &action);
         let mut result = planner.visit(&next, 1);
+        if decisive_now {
+            result.decisive_completion_mass = 1.0;
+            result.response_window_mass = 1.0;
+            result.weighted_response_windows = 0.0;
+        }
         result.actions.insert(0, action.clone());
+        let response_windows = (result.response_window_mass > f32::EPSILON)
+            .then_some((result.weighted_response_windows / result.response_window_mass).max(0.0));
         plans.push(TurnPlan {
             first_action: action,
             actions: result.actions,
             value: result.value,
             nodes: planner.nodes - before,
             completion_mass: result.completion_mass.clamp(0.0, 1.0),
+            decisive_completion_mass: result.decisive_completion_mass.clamp(0.0, 1.0),
+            response_windows,
         });
     }
     plans.sort_by(|left, right| right.value.total_cmp(&left.value));
@@ -590,6 +719,43 @@ mod tests {
             .find(|plan| plan.first_action == trade.first_action)
             .expect("increasing planner budget must retain the live trade root");
         assert!(same_trade.completion_mass + 1e-6 >= trade.completion_mass);
+    }
+
+    #[test]
+    fn closeout_diagnostics_distinguish_same_turn_completion_from_response_windows() {
+        let mut state = GameState::standard(421, 3);
+        while matches!(
+            state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        ) {
+            let action = state.legal_actions()[0].clone();
+            state.apply(&action).unwrap();
+        }
+        state.phase = Phase::Main;
+        state.current_player = 0;
+        state.players[0].resources = [0, 0, 0, 2, 3];
+
+        let plans = plan_current_turn(
+            &state,
+            TurnPlanConfig {
+                maximum_nodes: 4_000,
+                root_cap: 64,
+                ..TurnPlanConfig::default()
+            },
+        );
+        let city = plans
+            .iter()
+            .find(|plan| matches!(plan.first_action, Action::BuildCity { .. }))
+            .expect("city conversion must be planned");
+        assert!(city.decisive_completion_mass > 0.99);
+        assert_eq!(city.response_windows, Some(0.0));
+
+        let end_turn = plans
+            .iter()
+            .find(|plan| matches!(plan.first_action, Action::EndTurn))
+            .expect("end turn remains a planner root");
+        assert!(end_turn.decisive_completion_mass <= 1e-6);
+        assert_eq!(end_turn.response_windows, Some(2.0));
     }
 
     #[test]

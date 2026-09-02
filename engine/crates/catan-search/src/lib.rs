@@ -71,7 +71,7 @@ pub use resilience::{
 };
 pub use root_impact::{
     RoadImpactDelta, RootImpactReport, RootPromotionReason, RootStrategicImpact,
-    compute_spatial_root_impacts,
+    apply_closeout_root_impacts, compute_spatial_root_impacts,
 };
 pub use shared::{
     EXPERIMENTAL_STRATEGIC_PARTICLE_TARGET, STRATEGIC_ROOT_WIDTH, admit_promoted_roots,
@@ -91,7 +91,8 @@ pub use trade_model::{
     trade_acceptance_features,
 };
 pub use trade_safety::{
-    DomesticTradeThreat, HARD_VETO_POSTERIOR, belief_domestic_trade_threat, domestic_trade_threat,
+    DomesticTradeAssessment, DomesticTradeThreat, HARD_VETO_POSTERIOR,
+    belief_domestic_trade_assessment, belief_domestic_trade_threat, domestic_trade_threat,
 };
 
 pub const ENGINE_REVISION: &str = "deep-maxn-v10";
@@ -99,9 +100,9 @@ pub use depth::{
     BeliefDepthConfig, BeliefDepthResult, BeliefSearchProvenance, BeliefSearchStageTimings,
     DepthActionValue,
     DepthBeliefError, DepthSearchResult, PrunedRootDiagnostic, RankedRootDiagnostic,
-    RetainedRootDiagnostic, RootPruneReason, search_belief_maxn, search_belief_maxn_bounded,
-    search_belief_paranoid, search_belief_paranoid_bounded, search_maxn, search_maxn_bounded,
-    search_maxn_bounded_timed, search_paranoid, search_paranoid_bounded,
+    RetainedRootDiagnostic, RootCausalEvidence, RootPruneReason, search_belief_maxn,
+    search_belief_maxn_bounded, search_belief_paranoid, search_belief_paranoid_bounded, search_maxn,
+    search_maxn_bounded, search_maxn_bounded_timed, search_paranoid, search_paranoid_bounded,
     search_paranoid_bounded_timed, search_weighted_belief_maxn_bounded,
     search_weighted_belief_maxn_bounded_timed, search_weighted_belief_maxn_bounded_timed_excluding,
     search_weighted_belief_maxn_iterative_timed_excluding, search_weighted_belief_maxn_with_config,

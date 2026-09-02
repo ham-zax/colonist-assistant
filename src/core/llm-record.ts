@@ -880,6 +880,17 @@ const contracts = (): CompactRecordContracts => ({
     "marginLcb",
     "marginUcb",
     "meanTurn",
+    "decisiveCompletionMass",
+    "responseWindows",
+    "promotionReason",
+    "admittedByPromotion",
+    "closeoutGain",
+    "tradeThreat",
+    "tradeRiskPosterior",
+    "dirtyMonopolyPosterior",
+    "tradeHardVetoPosterior",
+    "tradeHardVeto",
+    "tradeVetoThreshold",
   ],
   replacementColumns: ["decision", "kind", "from", "to"],
   beliefColumns: [
@@ -1696,6 +1707,17 @@ export class CompactGameBuilder {
           null,
           null,
           null,
+          compactNumber(root.plannerDecisiveCompletionMass),
+          compactNumber(root.plannerResponseWindows),
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
         ]);
       });
     provenance?.retainedRoots
@@ -1719,6 +1741,17 @@ export class CompactGameBuilder {
           compactNumber(root.victoryMarginLowerBound),
           compactNumber(root.victoryMarginUpperBound),
           compactNumber(root.meanTurn),
+          compactNumber(root.plannerDecisiveCompletionMass),
+          compactNumber(root.plannerResponseWindows),
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
         ]);
       });
     provenance?.prunedRoots
@@ -1742,8 +1775,61 @@ export class CompactGameBuilder {
           null,
           null,
           null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
         ]);
       });
+    provenance?.rootEvidence
+      ?.slice(0, MAX_ROOTS_PER_BUCKET)
+      .forEach((evidence) => {
+        record.roots.push([
+          id,
+          "evidence",
+          null,
+          actionLabel(evidence.action, alias),
+          null,
+          null,
+          null,
+          null,
+          NA,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          compactNumber(evidence.decisiveCompletionMass),
+          compactNumber(evidence.responseWindows),
+          evidence.promotionReason ?? NA,
+          evidence.admittedByPromotion,
+          compactNumber(evidence.closeoutGain),
+          evidence.tradeThreat ?? NA,
+          compactNumber(evidence.tradeRiskPosterior),
+          compactNumber(evidence.dirtyMonopolyPosterior),
+          compactNumber(evidence.tradeHardVetoPosterior),
+          evidence.tradeHardVeto,
+          compactNumber(provenance.tradeHardVetoThreshold),
+        ]);
+      });
+    if (provenance?.searchWinner) {
+      record.replacements.push([
+        id,
+        "search-winner",
+        actionLabel(provenance.searchWinner, alias),
+        NA,
+      ]);
+    }
 
     const exactReplacement =
       trace.authorityTrace?.exactFamilyReplacement ??

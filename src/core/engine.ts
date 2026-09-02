@@ -131,6 +131,8 @@ export interface DeepSearchRankedRoot {
   prior: number;
   plannerValue?: number;
   plannerCompletionMass?: number;
+  plannerDecisiveCompletionMass?: number;
+  plannerResponseWindows?: number;
 }
 
 export interface DeepSearchRetainedRoot {
@@ -141,6 +143,8 @@ export interface DeepSearchRetainedRoot {
   allocatedNodes: number;
   plannerValue?: number;
   plannerCompletionMass?: number;
+  plannerDecisiveCompletionMass?: number;
+  plannerResponseWindows?: number;
   finalRank?: number;
   terminalOutcome?: number;
   terminalLowerBound?: number;
@@ -161,12 +165,42 @@ export interface DeepSearchPrunedRoot {
     | "exact-family-collapsed";
 }
 
+export type DeepSearchRootPromotionReason =
+  | "road-award-protection"
+  | "critical-expansion-protection"
+  | "opponent-route-cut"
+  | "closeout-compression";
+
+export type DeepSearchDomesticTradeThreat =
+  | "dirty-monopoly"
+  | "immediate-win"
+  | "award-swing"
+  | "contested-settlement"
+  | "material-build";
+
+export interface DeepSearchRootCausalEvidence {
+  action: DeepSearchAction;
+  promotionReason?: DeepSearchRootPromotionReason;
+  admittedByPromotion: boolean;
+  closeoutGain: number;
+  responseWindows?: number;
+  decisiveCompletionMass: number;
+  tradeThreat?: DeepSearchDomesticTradeThreat;
+  tradeRiskPosterior: number;
+  dirtyMonopolyPosterior: number;
+  tradeHardVetoPosterior: number;
+  tradeHardVeto: boolean;
+}
+
 export interface DeepSearchRootProvenance {
   rankedRootCount: number;
   rankedRoots: DeepSearchRankedRoot[];
   retainedRoots: DeepSearchRetainedRoot[];
   prunedRootCount: number;
   prunedRoots: DeepSearchPrunedRoot[];
+  rootEvidence?: DeepSearchRootCausalEvidence[];
+  tradeHardVetoThreshold?: number;
+  searchWinner?: DeepSearchAction;
   exactFamilyReplacement?: DeepSearchActionReplacement;
   safetyReplacement?: DeepSearchActionReplacement;
 }

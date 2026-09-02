@@ -69,6 +69,8 @@ export interface WasmRankedRoot {
   prior: number;
   plannerValue?: number;
   plannerCompletionMass?: number;
+  plannerDecisiveCompletionMass?: number;
+  plannerResponseWindows?: number;
 }
 
 export interface WasmRetainedRoot {
@@ -79,6 +81,8 @@ export interface WasmRetainedRoot {
   allocatedNodes: number;
   plannerValue?: number;
   plannerCompletionMass?: number;
+  plannerDecisiveCompletionMass?: number;
+  plannerResponseWindows?: number;
   finalRank?: number;
   terminalOutcome?: number;
   terminalLowerBound?: number;
@@ -99,12 +103,42 @@ export interface WasmPrunedRoot {
     | "exact-family-collapsed";
 }
 
+export type WasmRootPromotionReason =
+  | "road-award-protection"
+  | "critical-expansion-protection"
+  | "opponent-route-cut"
+  | "closeout-compression";
+
+export type WasmDomesticTradeThreat =
+  | "dirty-monopoly"
+  | "immediate-win"
+  | "award-swing"
+  | "contested-settlement"
+  | "material-build";
+
+export interface WasmRootCausalEvidence {
+  action: WasmAction;
+  promotionReason?: WasmRootPromotionReason;
+  admittedByPromotion: boolean;
+  closeoutGain: number;
+  responseWindows?: number;
+  decisiveCompletionMass: number;
+  tradeThreat?: WasmDomesticTradeThreat;
+  tradeRiskPosterior: number;
+  dirtyMonopolyPosterior: number;
+  tradeHardVetoPosterior: number;
+  tradeHardVeto: boolean;
+}
+
 export interface WasmRootProvenance {
   rankedRootCount: number;
   rankedRoots: WasmRankedRoot[];
   retainedRoots: WasmRetainedRoot[];
   prunedRootCount: number;
   prunedRoots: WasmPrunedRoot[];
+  rootEvidence: WasmRootCausalEvidence[];
+  tradeHardVetoThreshold: number;
+  searchWinner?: WasmAction;
   exactFamilyReplacement?: WasmActionReplacement;
   safetyReplacement?: WasmActionReplacement;
 }

@@ -1,22 +1,23 @@
 use colonist_catan_core::{Action, GameState};
 use colonist_catan_search::{
     ActionStats, BeliefParticle, CudaSimEngine, CudaSimError, CudaSimRootActionStats,
-    DEVELOPMENT_EXACT_FAMILIES, ExactActionFamily, ExactDecisionResult, SearchReport,
-    SearchStatistics,
-    admit_promoted_roots, belief_domestic_trade_threat, compute_spatial_root_impacts,
-    exact_family_for_action, forced_loss_weight,
-    posterior_immediate_threat_weight, safer_end_turn_alternative, shared_root_candidates,
-    solve_belief_current_turn_timed, solve_exact_belief_excluding_controlled,
+    DEVELOPMENT_EXACT_FAMILIES, ExactActionFamily, ExactDecisionResult, HARD_VETO_POSTERIOR,
+    SearchReport, SearchStatistics, admit_promoted_roots, belief_domestic_trade_assessment,
+    belief_domestic_trade_threat, compute_spatial_root_impacts, exact_family_for_action,
+    forced_loss_weight, posterior_immediate_threat_weight, safer_end_turn_alternative,
+    shared_root_candidates, solve_belief_current_turn_timed,
+    solve_exact_belief_excluding_controlled,
 };
 use serde::Serialize;
 use serde_json::Value;
 
 use super::{
-    ActionReplacementOutput, AuthorityTraceOutput, DecisionAuthority, DecisionClock, PrunedRootOutput,
-    RankedRootOutput, Request, ResponseDiagnostics, RetainedRootOutput, RootProvenanceOutput,
-    action, basic_response_diagnostics, effective_particle_count, exact_family_label,
+    ActionReplacementOutput, AuthorityTraceOutput, DecisionAuthority, DecisionClock,
+    PrunedRootOutput, RankedRootOutput, Request, ResponseDiagnostics, RetainedRootOutput,
+    RootCausalEvidenceOutput, RootProvenanceOutput, action, basic_response_diagnostics,
+    domestic_trade_threat_label, effective_particle_count, exact_family_label,
     exact_mandatory_report_controlled, game_states, response, root_exclusion_actions,
-    weighted_policy_report_for_actions_controlled,
+    root_promotion_reason, weighted_policy_report_for_actions_controlled,
 };
 
 const GPU_ALGORITHM: &str = "gpu-root-rollout";
@@ -93,10 +94,8 @@ impl RootSampleMoments {
         self.margin_sum += f64::from(stat.mean_victory_margin()) * valid_f64;
         self.margin_square_sum += f64::from(stat.mean_victory_margin_squared) * valid_f64;
         self.candidate_vp_sum += f64::from(stat.mean_victory_points) * valid_f64;
-        self.candidate_vp_square_sum +=
-            f64::from(stat.mean_victory_points_squared) * valid_f64;
-        self.opponent_vp_sum +=
-            f64::from(stat.mean_best_opponent_victory_points) * valid_f64;
+        self.candidate_vp_square_sum += f64::from(stat.mean_victory_points_squared) * valid_f64;
+        self.opponent_vp_sum += f64::from(stat.mean_best_opponent_victory_points) * valid_f64;
         self.opponent_vp_square_sum +=
             f64::from(stat.mean_best_opponent_victory_points_squared) * valid_f64;
     }
@@ -325,8 +324,8 @@ fn racing_contenders(active: &[usize], roots: &[AggregatedRoot]) -> Vec<usize> {
         .copied()
         .filter(|index| {
             let root = &roots[*index];
-            let terminal_upper = root.terminal_outcome
-                + confidence_width(root.terminal_variance, root.samples);
+            let terminal_upper =
+                root.terminal_outcome + confidence_width(root.terminal_variance, root.samples);
             if terminal_upper + 1e-6 < best_terminal_lower {
                 return false;
             }
@@ -368,7 +367,6 @@ fn racing_contenders(active: &[usize], roots: &[AggregatedRoot]) -> Vec<usize> {
     }
     contenders
 }
-
 
 impl NativeGpuSearchEngine {
     pub fn new() -> Result<Self, String> {
@@ -419,11 +417,9 @@ impl NativeGpuSearchEngine {
         }
         let root_exclusions =
             root_exclusion_actions(&request.root_exclusions, &particles[0].state)?;
-        match exact_mandatory_report_controlled(
-            &particles,
-            &root_exclusions,
-            || should_cancel() || decision_clock.remaining_ms() == 0,
-        ) {
+        match exact_mandatory_report_controlled(&particles, &root_exclusions, || {
+            should_cancel() || decision_clock.remaining_ms() == 0
+        }) {
             Ok(Some(report)) => {
                 return serde_json::to_value(response(
                     report,
@@ -440,7 +436,9 @@ impl NativeGpuSearchEngine {
             }
             Ok(None) => {}
             Err(()) if should_cancel() => return Err("GPU native search cancelled".into()),
-            Err(()) => return Err("GPU native decision deadline expired during exact arbitration".into()),
+            Err(()) => {
+                return Err("GPU native decision deadline expired during exact arbitration".into());
+            }
         }
 
         let actor = particles[0].state.actor();
@@ -689,10 +687,8 @@ impl NativeGpuSearchEngine {
         } else {
             Vec::new()
         };
-        let ranked_tuples: Vec<(Action, f32)> = ranked
-            .iter()
-            .map(|r| (r.action.clone(), r.prior))
-            .collect();
+        let ranked_tuples: Vec<(Action, f32)> =
+            ranked.iter().map(|r| (r.action.clone(), r.prior)).collect();
         let root_actions_list: Vec<Action> = ranked.iter().map(|r| r.action.clone()).collect();
         let spatial_impact_report = particles
             .first()
@@ -708,15 +704,57 @@ impl NativeGpuSearchEngine {
                     .collect()
             })
             .unwrap_or_default();
+        let admitted_without_promotions =
+            admit_promoted_roots(&ranked_tuples, &verified_blockers, &[], root_cap);
         let admitted = admit_promoted_roots(
             &ranked_tuples,
             &verified_blockers,
             &promoted_spatial_actions,
             root_cap,
         );
+        let root_evidence = ranked
+            .iter()
+            .map(|candidate| {
+                let impact = spatial_impact_report.as_ref().and_then(|report| {
+                    report
+                        .actions
+                        .iter()
+                        .find(|impact| impact.action == candidate.action)
+                });
+                let trade = belief_domestic_trade_assessment(
+                    particles
+                        .iter()
+                        .map(|particle| (&particle.state, particle.weight)),
+                    &candidate.action,
+                );
+                RootCausalEvidenceOutput {
+                    action: action(candidate.action.clone()),
+                    promotion_reason: impact
+                        .and_then(|impact| impact.promotion)
+                        .map(root_promotion_reason),
+                    admitted_by_promotion: impact.is_some_and(|impact| {
+                        impact.promotion.is_some()
+                            && admitted
+                                .iter()
+                                .any(|(action, _)| action == &candidate.action)
+                            && !admitted_without_promotions
+                                .iter()
+                                .any(|(action, _)| action == &candidate.action)
+                    }),
+                    closeout_gain: 0.0,
+                    response_windows: None,
+                    decisive_completion_mass: 0.0,
+                    trade_threat: trade.threat.map(domestic_trade_threat_label),
+                    trade_risk_posterior: trade.posterior,
+                    dirty_monopoly_posterior: trade.dirty_monopoly_posterior,
+                    trade_hard_veto_posterior: trade.hard_veto_posterior,
+                    trade_hard_veto: trade.hard_veto,
+                }
+            })
+            .collect::<Vec<_>>();
         let mut pre_trade_retained = Vec::with_capacity(admitted.len());
-        for (action, _) in admitted {
-            if let Some(r) = ranked.iter().find(|r| r.action == action) {
+        for (candidate_action, _) in &admitted {
+            if let Some(r) = ranked.iter().find(|r| r.action == *candidate_action) {
                 pre_trade_retained.push(r.clone());
             }
         }
@@ -803,7 +841,8 @@ impl NativeGpuSearchEngine {
         let mut active = (0..root_actions.len()).collect::<Vec<_>>();
         let mut remaining_rollouts = rollout_budget;
         let effective_particles = effective_particle_count(&particles);
-        let prepass_disagrees = prepass.chosen.as_ref() != retained.first().map(|root| &root.action);
+        let prepass_disagrees =
+            prepass.chosen.as_ref() != retained.first().map(|root| &root.action);
         let ambiguous = prepass_gap < 0.06
             || prepass_robust_gap < 0.02
             || effective_particles >= 32.0
@@ -819,8 +858,12 @@ impl NativeGpuSearchEngine {
             if decision_clock.remaining_ms() == 0 {
                 break;
             }
-            let phase_total = remaining_rollouts
-                .min(active.len().saturating_mul(samples_per_active_root).max(active.len()));
+            let phase_total = remaining_rollouts.min(
+                active
+                    .len()
+                    .saturating_mul(samples_per_active_root)
+                    .max(active.len()),
+            );
             let root_budgets = equal_budget(phase_total, &active);
             let mut root_rows = vec![Vec::<Action>::new(); particles.len()];
             for (root_index, budget) in root_budgets {
@@ -920,7 +963,9 @@ impl NativeGpuSearchEngine {
             .filter(|candidate| candidate.errors == 0 && candidate.samples > 0)
             .max_by(|left, right| compare_roots(left, right))
             .cloned()
-            .ok_or_else(|| "GPU native search had no error-free surviving root candidate".to_string())?;
+            .ok_or_else(|| {
+                "GPU native search had no error-free surviving root candidate".to_string()
+            })?;
         let mut final_root_order = active
             .iter()
             .copied()
@@ -1080,6 +1125,8 @@ impl NativeGpuSearchEngine {
                     prior: candidate.prior,
                     planner_value: None,
                     planner_completion_mass: None,
+                    planner_decisive_completion_mass: None,
+                    planner_response_windows: None,
                 })
                 .collect(),
             retained_roots: retained
@@ -1095,13 +1142,17 @@ impl NativeGpuSearchEngine {
                         action: action(candidate.action.clone()),
                         pre_truncation_rank: ranked
                             .iter()
-                            .position(|ranked_candidate| ranked_candidate.action == candidate.action)
+                            .position(|ranked_candidate| {
+                                ranked_candidate.action == candidate.action
+                            })
                             .map(|rank| rank + 1),
                         prior: candidate.prior,
                         node_budget_per_particle: 0,
                         allocated_nodes: 0,
                         planner_value: None,
                         planner_completion_mass: None,
+                        planner_decisive_completion_mass: None,
+                        planner_response_windows: None,
                         final_rank: final_root_order
                             .iter()
                             .position(|candidate_index| *candidate_index == index)
@@ -1118,6 +1169,9 @@ impl NativeGpuSearchEngine {
                 .collect(),
             pruned_root_count: pruned_roots.len(),
             pruned_roots,
+            root_evidence,
+            trade_hard_veto_threshold: HARD_VETO_POSTERIOR,
+            search_winner: Some(action(chosen_root.action.clone())),
             exact_family_replacement: None,
             safety_replacement: None,
         };

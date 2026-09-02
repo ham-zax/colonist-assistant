@@ -11,12 +11,12 @@ use colonist_catan_core::{
 };
 use colonist_catan_search::{
     ActionStats, BeliefParticle, BeliefSearchProvenance, BeliefSearchStageTimings,
-    CooperativeDeadline, ENGINE_REVISION, ExactActionFamily,
-    ExactActionValue, ExactDecisionResult, Mcts, RootPruneReason, SearchConfig, SearchMode,
-    SearchReport, SearchStatistics, TacticalResult, action_prior, evaluate,
-    exact_action_comparator_score, exact_family_for_action, learned_model_version,
-    learned_trade_model_version,
-    safer_end_turn_alternative, search_weighted_belief_maxn_iterative_timed_excluding,
+    CooperativeDeadline, DomesticTradeThreat, ENGINE_REVISION, ExactActionFamily, ExactActionValue,
+    ExactDecisionResult, HARD_VETO_POSTERIOR, Mcts, RootPromotionReason, RootPruneReason,
+    SearchConfig, SearchMode, SearchReport, SearchStatistics, TacticalResult, action_prior,
+    evaluate, exact_action_comparator_score, exact_family_for_action, learned_model_version,
+    learned_trade_model_version, safer_end_turn_alternative,
+    search_weighted_belief_maxn_iterative_timed_excluding,
     search_weighted_belief_paranoid_iterative_timed_excluding, solve_belief_current_turn,
     solve_belief_current_turn_timed, solve_exact_belief_excluding,
     solve_exact_belief_excluding_controlled,
@@ -157,7 +157,6 @@ struct RootExclusionInput {
     give: [u8; 5],
     receive: [u8; 5],
 }
-
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -360,6 +359,8 @@ struct RankedRootOutput {
     prior: f32,
     planner_value: Option<f32>,
     planner_completion_mass: Option<f32>,
+    planner_decisive_completion_mass: Option<f32>,
+    planner_response_windows: Option<f32>,
 }
 
 #[derive(Serialize)]
@@ -372,6 +373,8 @@ struct RetainedRootOutput {
     allocated_nodes: u32,
     planner_value: Option<f32>,
     planner_completion_mass: Option<f32>,
+    planner_decisive_completion_mass: Option<f32>,
+    planner_response_windows: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     final_rank: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -398,7 +401,23 @@ struct PrunedRootOutput {
     reason: &'static str,
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RootCausalEvidenceOutput {
+    action: ActionOutput,
+    promotion_reason: Option<&'static str>,
+    admitted_by_promotion: bool,
+    closeout_gain: f32,
+    response_windows: Option<f32>,
+    decisive_completion_mass: f32,
+    trade_threat: Option<&'static str>,
+    trade_risk_posterior: f32,
+    dirty_monopoly_posterior: f32,
+    trade_hard_veto_posterior: f32,
+    trade_hard_veto: bool,
+}
+
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RootProvenanceOutput {
     ranked_root_count: usize,
@@ -406,8 +425,28 @@ struct RootProvenanceOutput {
     retained_roots: Vec<RetainedRootOutput>,
     pruned_root_count: usize,
     pruned_roots: Vec<PrunedRootOutput>,
+    root_evidence: Vec<RootCausalEvidenceOutput>,
+    trade_hard_veto_threshold: f32,
+    search_winner: Option<ActionOutput>,
     exact_family_replacement: Option<ActionReplacementOutput>,
     safety_replacement: Option<ActionReplacementOutput>,
+}
+
+impl Default for RootProvenanceOutput {
+    fn default() -> Self {
+        Self {
+            ranked_root_count: 0,
+            ranked_roots: Vec::new(),
+            retained_roots: Vec::new(),
+            pruned_root_count: 0,
+            pruned_roots: Vec::new(),
+            root_evidence: Vec::new(),
+            trade_hard_veto_threshold: HARD_VETO_POSTERIOR,
+            search_winner: None,
+            exact_family_replacement: None,
+            safety_replacement: None,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -856,6 +895,25 @@ fn exact_family_label(family: ExactActionFamily) -> &'static str {
     }
 }
 
+fn root_promotion_reason(reason: RootPromotionReason) -> &'static str {
+    match reason {
+        RootPromotionReason::RoadAwardProtection => "road-award-protection",
+        RootPromotionReason::CriticalExpansionProtection => "critical-expansion-protection",
+        RootPromotionReason::OpponentRouteCut => "opponent-route-cut",
+        RootPromotionReason::CloseoutCompression => "closeout-compression",
+    }
+}
+
+fn domestic_trade_threat_label(threat: DomesticTradeThreat) -> &'static str {
+    match threat {
+        DomesticTradeThreat::DirtyMonopoly => "dirty-monopoly",
+        DomesticTradeThreat::ImmediateWin => "immediate-win",
+        DomesticTradeThreat::AwardSwing => "award-swing",
+        DomesticTradeThreat::ContestedSettlement => "contested-settlement",
+        DomesticTradeThreat::MaterialBuild => "material-build",
+    }
+}
+
 fn replacement_output(replacement: (Action, Action)) -> ActionReplacementOutput {
     ActionReplacementOutput {
         from: action(replacement.0),
@@ -875,6 +933,8 @@ fn root_provenance_output(provenance: BeliefSearchProvenance) -> RootProvenanceO
                 prior: candidate.prior,
                 planner_value: candidate.planner_value,
                 planner_completion_mass: candidate.planner_completion_mass,
+                planner_decisive_completion_mass: candidate.planner_decisive_completion_mass,
+                planner_response_windows: candidate.planner_response_windows,
             })
             .collect(),
         retained_roots: provenance
@@ -888,6 +948,8 @@ fn root_provenance_output(provenance: BeliefSearchProvenance) -> RootProvenanceO
                 allocated_nodes: candidate.allocated_nodes,
                 planner_value: candidate.planner_value,
                 planner_completion_mass: candidate.planner_completion_mass,
+                planner_decisive_completion_mass: candidate.planner_decisive_completion_mass,
+                planner_response_windows: candidate.planner_response_windows,
                 final_rank: None,
                 terminal_outcome: None,
                 terminal_lower_bound: None,
@@ -908,6 +970,25 @@ fn root_provenance_output(provenance: BeliefSearchProvenance) -> RootProvenanceO
                 reason: root_prune_reason(candidate.reason),
             })
             .collect(),
+        root_evidence: provenance
+            .root_evidence
+            .into_iter()
+            .map(|evidence| RootCausalEvidenceOutput {
+                action: action(evidence.action),
+                promotion_reason: evidence.promotion_reason.map(root_promotion_reason),
+                admitted_by_promotion: evidence.admitted_by_promotion,
+                closeout_gain: evidence.closeout_gain,
+                response_windows: evidence.response_windows,
+                decisive_completion_mass: evidence.decisive_completion_mass,
+                trade_threat: evidence.trade_threat.map(domestic_trade_threat_label),
+                trade_risk_posterior: evidence.trade_risk_posterior,
+                dirty_monopoly_posterior: evidence.dirty_monopoly_posterior,
+                trade_hard_veto_posterior: evidence.trade_hard_veto_posterior,
+                trade_hard_veto: evidence.trade_hard_veto,
+            })
+            .collect(),
+        trade_hard_veto_threshold: provenance.trade_hard_veto_threshold,
+        search_winner: provenance.search_winner.map(action),
         exact_family_replacement: provenance.exact_family_replacement.map(replacement_output),
         safety_replacement: provenance.safety_replacement.map(replacement_output),
     }
@@ -917,13 +998,8 @@ fn weighted_policy_report(
     particles: &[BeliefParticle],
     root_exclusions: &[Action],
 ) -> SearchReport {
-    weighted_policy_report_for_actions_controlled(
-        particles,
-        root_exclusions,
-        None,
-        || false,
-    )
-    .expect("uncontrolled weighted policy report cannot stop")
+    weighted_policy_report_for_actions_controlled(particles, root_exclusions, None, || false)
+        .expect("uncontrolled weighted policy report cannot stop")
 }
 
 fn weighted_policy_report_for_actions_controlled<F>(
@@ -1350,11 +1426,9 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
         .map_err(|error| JsValue::from_str(&error))?;
     let algorithm = mode.label();
     if !ponder {
-        let mandatory = exact_mandatory_report_controlled(
-            &particles,
-            &root_exclusions,
-            || decision_clock.remaining_ms() == 0,
-        )
+        let mandatory = exact_mandatory_report_controlled(&particles, &root_exclusions, || {
+            decision_clock.remaining_ms() == 0
+        })
         .map_err(|_| JsValue::from_str("decision deadline expired during exact arbitration"))?;
         if let Some(report) = mandatory {
             return serde_wasm_bindgen::to_value(&response(
@@ -1505,8 +1579,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
             };
             let initial_authority = authority;
             let mut exact_family = None;
-            let exact_family_replacement =
-                depth_exact_family_replacement.map(replacement_output);
+            let exact_family_replacement = depth_exact_family_replacement.map(replacement_output);
             let mut safety_replacement = depth_safety_replacement.map(replacement_output);
             let mut chosen = depth_report.chosen;
             if let Some(family) = chosen.as_ref().and_then(exact_family_for_action)
@@ -1579,11 +1652,8 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
                 .iter()
                 .map(|particle| (&particle.state, particle.weight))
                 .collect::<Vec<_>>();
-            report.tactical = solve_belief_current_turn(
-                &tactical_particles,
-                tactical_depth,
-                tactical_nodes,
-            );
+            report.tactical =
+                solve_belief_current_turn(&tactical_particles, tactical_depth, tactical_nodes);
             let mut exact = solve_exact_belief_excluding(
                 &particles,
                 ExactActionFamily::Mandatory,
