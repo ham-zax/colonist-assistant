@@ -6,13 +6,13 @@
 use std::cell::RefCell;
 
 use colonist_catan_core::{
-    Action, Board, Building, Edge, GameState, Phase, PlayerState, Port, Resource, SplitMix64,
-    TradeOffer, Vertex,
+    Action, Board, Building, Edge, GameState, Phase, PlayerState, Port, Resource, TradeOffer,
+    Vertex,
 };
 use colonist_catan_search::{
     ActionStats, BeliefParticle, BeliefSearchProvenance, ENGINE_REVISION, ExactActionFamily,
     ExactActionValue, ExactDecisionResult, Mcts, RootPruneReason, SearchConfig, SearchMode,
-    SearchReport, SearchStatistics, TacticalResult, choose_rollout_action, evaluate,
+    SearchReport, SearchStatistics, TacticalResult, action_prior, evaluate,
     exact_family_for_action, learned_model_version, learned_trade_model_version,
     safer_end_turn_alternative, search_weighted_belief_maxn_bounded_timed_excluding,
     search_weighted_belief_paranoid_bounded_timed_excluding, solve_belief_current_turn,
@@ -757,7 +757,6 @@ fn root_provenance_output(provenance: BeliefSearchProvenance) -> RootProvenanceO
 fn weighted_policy_report(
     particles: &[BeliefParticle],
     root_exclusions: &[Action],
-    seed: u64,
 ) -> SearchReport {
     let state = &particles[0].state;
     let actor = state.actor();
@@ -767,31 +766,64 @@ fn weighted_policy_report(
         .into_iter()
         .filter(|action| !root_exclusions.contains(action))
         .collect::<Vec<_>>();
-    let mut rng = SplitMix64::new(seed);
-    let chosen =
-        (!actions.is_empty()).then(|| choose_rollout_action(&observed, &actions, &mut rng));
-    let root_value = evaluate(&observed);
-    let statistics = chosen
+    let total_weight = particles
         .iter()
+        .map(|particle| particle.weight.max(0.0))
+        .sum::<f32>()
+        .max(f32::EPSILON);
+    let mut statistics = actions
+        .into_iter()
         .map(|selected| {
-            let mut next = observed.clone();
-            let value = if next.apply(selected).is_ok() {
-                evaluate(&next)
-            } else {
-                root_value
-            };
+            let prior = action_prior(&observed, &selected, actor);
+            let mut value = [0.0; 4];
+            let mut lower_confidence_value = [f32::INFINITY; 4];
+            let mut legal_weight = 0.0_f32;
+            for particle in particles {
+                let weight = particle.weight.max(0.0) / total_weight;
+                if weight <= f32::EPSILON {
+                    continue;
+                }
+                let mut next = particle.state.clone();
+                let legal = next.apply(&selected).is_ok();
+                let evaluated = if legal {
+                    legal_weight += weight;
+                    evaluate(&next)
+                } else {
+                    evaluate(&particle.state)
+                };
+                for player in 0..4 {
+                    value[player] += evaluated[player] * weight;
+                    lower_confidence_value[player] =
+                        lower_confidence_value[player].min(evaluated[player]);
+                }
+            }
             ActionStats {
-                action: selected.clone(),
-                visits: 1,
-                availability: particles.len() as u32,
-                availability_weight: 1.0,
-                legal_weight: 1.0,
-                prior: 1.0,
+                action: selected,
+                visits: particles.len() as u32,
+                availability: (legal_weight * particles.len() as f32).round() as u32,
+                availability_weight: legal_weight,
+                legal_weight,
+                prior,
                 value,
-                lower_confidence_value: value,
+                lower_confidence_value,
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
+    statistics.sort_by(|left, right| {
+        right.value[actor as usize]
+            .total_cmp(&left.value[actor as usize])
+            .then_with(|| right.prior.total_cmp(&left.prior))
+            .then_with(|| format!("{:?}", left.action).cmp(&format!("{:?}", right.action)))
+    });
+    let chosen = statistics.first().map(|candidate| candidate.action.clone());
+    let root_value = particles.iter().fold([0.0; 4], |mut total, particle| {
+        let weight = particle.weight.max(0.0) / total_weight;
+        let evaluated = evaluate(&particle.state);
+        for player in 0..4 {
+            total[player] += evaluated[player] * weight;
+        }
+        total
+    });
     SearchReport {
         chosen,
         root_value,
@@ -805,9 +837,11 @@ fn weighted_policy_report(
         },
         exact: ExactDecisionResult::default(),
         statistics: SearchStatistics {
-            iterations: 1,
-            nodes: 1,
-            deepest_decision_depth: 0,
+            iterations: particles.len() as u32,
+            nodes: particles
+                .len()
+                .saturating_mul(observed.legal_actions().len()),
+            deepest_decision_depth: 1,
             rollouts: 0,
             effective_particle_count: effective_particle_count(particles),
             deadline_reached: false,
@@ -1061,22 +1095,6 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
     let particles = game_states(request.state, request.last_rejected_trade)?;
     let root_exclusions = root_exclusion_actions(&request.root_exclusions, &particles[0].state)?;
     let algorithm = mode.label();
-    if mode == RequestedMode::Weighted {
-        let authority = DecisionAuthority::WeightedPolicy;
-        let report = weighted_policy_report(
-            &particles,
-            &root_exclusions,
-            request.seed.unwrap_or(0x0043_4154_414e),
-        );
-        return serde_wasm_bindgen::to_value(&response(
-            report,
-            particles.len(),
-            algorithm,
-            authority,
-            basic_response_diagnostics(particles.len(), authority),
-        ))
-        .map_err(|error| JsValue::from_str(&error.to_string()));
-    }
     if !ponder && let Some(report) = exact_mandatory_report(&particles, &root_exclusions) {
         return serde_wasm_bindgen::to_value(&response(
             report,
@@ -1257,6 +1275,91 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
                 authority,
                 diagnostics,
             )
+        } else if mode == RequestedMode::Weighted {
+            let mut report = weighted_policy_report(&particles, &root_exclusions);
+            let tactical_particles = particles
+                .iter()
+                .map(|particle| (&particle.state, particle.weight))
+                .collect::<Vec<_>>();
+            report.tactical = solve_belief_current_turn(
+                &tactical_particles,
+                request.tactical_depth.unwrap_or(18).clamp(4, 32),
+                request.tactical_nodes.unwrap_or(12_000).clamp(100, 100_000),
+            );
+            let mut exact = solve_exact_belief_excluding(
+                &particles,
+                ExactActionFamily::Mandatory,
+                &root_exclusions,
+            );
+            let mut authority = if exact.applicable {
+                DecisionAuthority::ExactMandatory
+            } else if report.tactical.proven {
+                DecisionAuthority::TacticalProven
+            } else {
+                DecisionAuthority::WeightedPolicy
+            };
+            let initial_authority = authority;
+            let mut exact_family = None;
+            let mut exact_family_replacement = None;
+            let mut safety_replacement = None;
+            let mut chosen = if exact.applicable {
+                exact.chosen.clone()
+            } else if report.tactical.proven {
+                report.tactical.principal_line.first().cloned()
+            } else {
+                report.chosen.clone()
+            };
+            if !exact.applicable
+                && !report.tactical.proven
+                && let Some(family) = chosen.as_ref().and_then(exact_family_for_action)
+            {
+                exact_family = Some(exact_family_label(family));
+                let before = chosen.clone();
+                exact = solve_exact_belief_excluding(&particles, family, &root_exclusions);
+                if let Some(exact_chosen) = exact.chosen.clone() {
+                    if before.as_ref() != Some(&exact_chosen)
+                        && let Some(previous) = before
+                    {
+                        exact_family_replacement = Some(ActionReplacementOutput {
+                            from: action(previous),
+                            to: action(exact_chosen.clone()),
+                        });
+                    }
+                    chosen = Some(exact_chosen);
+                    authority = DecisionAuthority::ExactFamily;
+                }
+            }
+            if chosen == Some(Action::EndTurn)
+                && let Some(safer) = safer_end_turn_alternative(
+                    &particles[0].state,
+                    particles[0].state.actor() as usize,
+                    &report.actions,
+                    Some(&particles),
+                )
+            {
+                if safer != Action::EndTurn {
+                    safety_replacement = Some(ActionReplacementOutput {
+                        from: action(Action::EndTurn),
+                        to: action(safer.clone()),
+                    });
+                }
+                chosen = Some(safer);
+                authority = DecisionAuthority::SafetyOverride;
+            }
+            report.chosen = chosen;
+            report.exact = exact;
+            let diagnostics = ResponseDiagnostics {
+                rust_posterior_particles: particles.len(),
+                rust_search_particles: particles.len(),
+                root_provenance: RootProvenanceOutput::default(),
+                authority_trace: AuthorityTraceOutput {
+                    initial_authority,
+                    exact_family,
+                    exact_family_replacement,
+                    safety_replacement,
+                },
+            };
+            (report, authority, diagnostics)
         } else {
             let mut groups = Vec::<(u64, Vec<BeliefParticle>)>::new();
             for particle in &particles {
