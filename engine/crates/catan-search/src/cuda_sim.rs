@@ -3,7 +3,9 @@
 use std::fmt;
 use std::sync::Arc;
 
-use colonist_catan_core::{Action, Board, Building, DevCard, GameState, Phase, Port, Resource};
+use colonist_catan_core::{
+    Action, Board, Building, DevCard, GameState, Phase, Port, Resource, TradeOffer,
+};
 use cudarc::driver::{
     CudaContext, CudaFunction, CudaModule, CudaSlice, DriverError, LaunchConfig, PushKernelArg,
 };
@@ -41,7 +43,17 @@ const STATE_DOMESTIC_TRADE_COUNT: usize = 19;
 const STATE_PLAYER_TRADES_ENABLED: usize = 20;
 const STATE_TRADE_CURSOR: usize = 21;
 const STATE_TRADE_NEGOTIATION_ROUND: usize = 22;
-const STATE_BANK: usize = 23;
+const TRADE_STRIDE: usize = 15;
+const TRADE_PRESENT: usize = 0;
+const TRADE_CREATOR: usize = 1;
+const TRADE_RECIPIENTS: usize = 2;
+const TRADE_GIVE: usize = 3;
+const TRADE_RECEIVE: usize = 8;
+const TRADE_ACCEPTED: usize = 13;
+const TRADE_REJECTED: usize = 14;
+const STATE_TRADE: usize = 23;
+const STATE_LAST_REJECTED_TRADE: usize = STATE_TRADE + TRADE_STRIDE;
+const STATE_BANK: usize = STATE_LAST_REJECTED_TRADE + TRADE_STRIDE;
 const STATE_DEVELOPMENT_DECK: usize = STATE_BANK + 5;
 const STATE_PLAYED_DEVELOPMENT: usize = STATE_DEVELOPMENT_DECK + 5;
 const STATE_DISCARD_REMAINING: usize = STATE_PLAYED_DEVELOPMENT + 5;
@@ -56,7 +68,7 @@ const STATE_WORDS: usize = STATE_PLAYERS + MAX_PLAYERS * PLAYER_STRIDE;
 
 const ACTION_TAG: usize = 0;
 const ACTION_ARG0: usize = 1;
-const ACTION_WORDS: usize = 8;
+const ACTION_WORDS: usize = 12;
 const SUMMARY_WORDS: usize = 7;
 const ROOT_STATS_WORDS: usize = 7;
 const MATCHUP_PROFILE_WORDS: usize = 10;
@@ -90,6 +102,11 @@ const ACTION_PLAY_YEAR_OF_PLENTY: u32 = 14;
 const ACTION_PLAY_MONOPOLY: u32 = 15;
 const ACTION_MARITIME_TRADE: u32 = 16;
 const ACTION_END_TURN: u32 = 17;
+const ACTION_OFFER_TRADE: u32 = 18;
+const ACTION_RESPOND_TRADE: u32 = 19;
+const ACTION_COUNTER_TRADE: u32 = 20;
+const ACTION_CONFIRM_TRADE: u32 = 21;
+const ACTION_CANCEL_TRADE: u32 = 22;
 
 const CUDA_SOURCE: &str = include_str!("cuda/sim.cu");
 const BACKEND_NAME: &str = "cuda-resident-sim";
@@ -308,7 +325,7 @@ impl fmt::Display for CudaSimError {
                 "CUDA simulation arena campaign requires a nonzero resident chunk size",
             ),
             Self::UnsupportedAction => formatter.write_str(
-                "action is not implemented by the first GPU-resident transition kernel",
+                "action is not implemented by the GPU-resident transition kernel",
             ),
             Self::TransitionFailed { index, status } => {
                 write!(formatter, "CUDA transition {index} failed with {status:?}")
@@ -333,7 +350,7 @@ impl From<CompileError> for CudaSimError {
     }
 }
 
-/// Persistent GPU-resident batch of canonical no-player-trades game states.
+/// Persistent GPU-resident batch of standard 2-4 player game states.
 ///
 /// The state buffer is field-major (SoA): all lanes' `phase` words are
 /// contiguous, then all lanes' `current_player` words, and so on. This is the
@@ -1207,15 +1224,8 @@ impl CudaSimEngine {
     }
 }
 
-pub fn cuda_sim_action_supported(action: &Action) -> bool {
-    !matches!(
-        action,
-        Action::OfferTrade { .. }
-            | Action::RespondTrade { .. }
-            | Action::CounterTrade { .. }
-            | Action::ConfirmTrade { .. }
-            | Action::CancelTrade
-    )
+pub fn cuda_sim_action_supported(_action: &Action) -> bool {
+    true
 }
 
 fn resource_from_index(index: u32) -> Result<Resource, CudaSimError> {
@@ -1286,6 +1296,18 @@ fn unpack_action_words(words: &[u32; ACTION_WORDS]) -> Result<Action, CudaSimErr
             ratio: arg(2) as u8,
         }),
         ACTION_END_TURN => Ok(Action::EndTurn),
+        ACTION_OFFER_TRADE => Ok(Action::OfferTrade {
+            recipients: arg(0) as u8,
+            give: [arg(1) as u8, arg(2) as u8, arg(3) as u8, arg(4) as u8, arg(5) as u8],
+            receive: [arg(6) as u8, arg(7) as u8, arg(8) as u8, arg(9) as u8, arg(10) as u8],
+        }),
+        ACTION_RESPOND_TRADE => Ok(Action::RespondTrade { accept: arg(0) != 0 }),
+        ACTION_COUNTER_TRADE => Ok(Action::CounterTrade {
+            give: [arg(0) as u8, arg(1) as u8, arg(2) as u8, arg(3) as u8, arg(4) as u8],
+            receive: [arg(5) as u8, arg(6) as u8, arg(7) as u8, arg(8) as u8, arg(9) as u8],
+        }),
+        ACTION_CONFIRM_TRADE => Ok(Action::ConfirmTrade { partner: arg(0) as u8 }),
+        ACTION_CANCEL_TRADE => Ok(Action::CancelTrade),
         _ => Err(CudaSimError::UnsupportedAction),
     }
 }
@@ -1367,10 +1389,55 @@ fn pack_action_words(action: &Action, words: &mut [u32; ACTION_WORDS]) -> Result
             words[ACTION_ARG0 + 1] = receive.index() as u32;
             words[ACTION_ARG0 + 2] = *ratio as u32;
         }
+        Action::OfferTrade {
+            recipients,
+            give,
+            receive,
+        } => {
+            words[ACTION_TAG] = ACTION_OFFER_TRADE;
+            words[ACTION_ARG0] = *recipients as u32;
+            for resource in 0..5 {
+                words[ACTION_ARG0 + 1 + resource] = give[resource] as u32;
+                words[ACTION_ARG0 + 6 + resource] = receive[resource] as u32;
+            }
+        }
+        Action::RespondTrade { accept } => {
+            words[ACTION_TAG] = ACTION_RESPOND_TRADE;
+            words[ACTION_ARG0] = u32::from(*accept);
+        }
+        Action::CounterTrade { give, receive } => {
+            words[ACTION_TAG] = ACTION_COUNTER_TRADE;
+            for resource in 0..5 {
+                words[ACTION_ARG0 + resource] = give[resource] as u32;
+                words[ACTION_ARG0 + 5 + resource] = receive[resource] as u32;
+            }
+        }
+        Action::ConfirmTrade { partner } => {
+            words[ACTION_TAG] = ACTION_CONFIRM_TRADE;
+            words[ACTION_ARG0] = *partner as u32;
+        }
+        Action::CancelTrade => words[ACTION_TAG] = ACTION_CANCEL_TRADE,
         Action::EndTurn => words[ACTION_TAG] = ACTION_END_TURN,
-        _ => return Err(CudaSimError::UnsupportedAction),
     }
     Ok(())
+}
+
+fn pack_trade_words(trade: Option<TradeOffer>, words: &mut [u32; STATE_WORDS], base: usize) {
+    for field in 0..TRADE_STRIDE {
+        words[base + field] = 0;
+    }
+    let Some(trade) = trade else {
+        return;
+    };
+    words[base + TRADE_PRESENT] = 1;
+    words[base + TRADE_CREATOR] = trade.creator as u32;
+    words[base + TRADE_RECIPIENTS] = trade.recipients as u32;
+    for resource in 0..5 {
+        words[base + TRADE_GIVE + resource] = trade.give[resource] as u32;
+        words[base + TRADE_RECEIVE + resource] = trade.receive[resource] as u32;
+    }
+    words[base + TRADE_ACCEPTED] = trade.accepted as u32;
+    words[base + TRADE_REJECTED] = trade.rejected as u32;
 }
 
 fn pack_state_words(state: &GameState, words: &mut [u32; STATE_WORDS]) -> Result<(), CudaSimError> {
@@ -1387,17 +1454,6 @@ fn pack_state_words(state: &GameState, words: &mut [u32; STATE_WORDS]) -> Result
     {
         return Err(CudaSimError::TopologyMismatch);
     }
-    if state.player_trades_enabled
-        || state.trade.is_some()
-        || state.last_rejected_trade.is_some()
-        || matches!(state.phase, Phase::TradeResponses)
-        || matches!(state.robber_return_phase, Phase::TradeResponses)
-    {
-        return Err(CudaSimError::UnsupportedState(
-            "the first GPU-resident lane requires player trades to be disabled",
-        ));
-    }
-
     let (phase, phase_arg) = phase_words(state.phase);
     let (return_phase, return_arg) = phase_words(state.robber_return_phase);
     words[STATE_NUM_PLAYERS] = players as u32;
@@ -1423,6 +1479,8 @@ fn pack_state_words(state: &GameState, words: &mut [u32; STATE_WORDS]) -> Result
     words[STATE_PLAYER_TRADES_ENABLED] = u32::from(state.player_trades_enabled);
     words[STATE_TRADE_CURSOR] = state.trade_cursor as u32;
     words[STATE_TRADE_NEGOTIATION_ROUND] = state.trade_negotiation_round as u32;
+    pack_trade_words(state.trade, words, STATE_TRADE);
+    pack_trade_words(state.last_rejected_trade, words, STATE_LAST_REJECTED_TRADE);
 
     for resource in 0..5 {
         words[STATE_BANK + resource] = state.bank[resource] as u32;

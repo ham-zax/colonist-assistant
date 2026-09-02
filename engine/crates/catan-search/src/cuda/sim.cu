@@ -2,9 +2,9 @@
 //
 // States use a field-major (SoA) layout: field * stride + lane. The buffer is
 // mutated in place and remains resident across successive transition launches.
-// This first lane intentionally supports the canonical no-player-trades rules
-// subset needed to validate persistent GPU state before GPU legality/search are
-// layered on top.
+// The resident lane supports the standard 2-4 player rules, including optional
+// player-to-player trading, so legality, transitions, rollouts, and arena games
+// can remain on device after the initial state upload.
 typedef unsigned int uint32_t;
 typedef unsigned long long uint64_t;
 
@@ -37,18 +37,28 @@ typedef unsigned long long uint64_t;
 #define STATE_PLAYER_TRADES_ENABLED 20u
 #define STATE_TRADE_CURSOR 21u
 #define STATE_TRADE_NEGOTIATION_ROUND 22u
-#define STATE_BANK 23u
-#define STATE_DEVELOPMENT_DECK 28u
-#define STATE_PLAYED_DEVELOPMENT 33u
-#define STATE_DISCARD_REMAINING 38u
-#define STATE_HEX_RESOURCES 42u
-#define STATE_HEX_NUMBERS 61u
-#define STATE_PORTS 80u
-#define STATE_BUILDINGS 134u
-#define STATE_ROADS 188u
-#define STATE_PLAYERS 260u
+#define TRADE_STRIDE 15u
+#define TRADE_PRESENT 0u
+#define TRADE_CREATOR 1u
+#define TRADE_RECIPIENTS 2u
+#define TRADE_GIVE 3u
+#define TRADE_RECEIVE 8u
+#define TRADE_ACCEPTED 13u
+#define TRADE_REJECTED 14u
+#define STATE_TRADE 23u
+#define STATE_LAST_REJECTED_TRADE 38u
+#define STATE_BANK 53u
+#define STATE_DEVELOPMENT_DECK 58u
+#define STATE_PLAYED_DEVELOPMENT 63u
+#define STATE_DISCARD_REMAINING 68u
+#define STATE_HEX_RESOURCES 72u
+#define STATE_HEX_NUMBERS 91u
+#define STATE_PORTS 110u
+#define STATE_BUILDINGS 164u
+#define STATE_ROADS 218u
+#define STATE_PLAYERS 290u
 #define PLAYER_STRIDE 28u
-#define STATE_WORDS 372u
+#define STATE_WORDS 402u
 
 #define PLAYER_RESOURCES 0u
 #define PLAYER_DEVELOPMENT 5u
@@ -65,6 +75,7 @@ typedef unsigned long long uint64_t;
 
 #define ACTION_TAG 0u
 #define ACTION_ARG0 1u
+#define ACTION_WORDS 12u
 
 #define ACTION_PLACE_SETTLEMENT 0u
 #define ACTION_PLACE_ROAD 1u
@@ -84,6 +95,11 @@ typedef unsigned long long uint64_t;
 #define ACTION_PLAY_MONOPOLY 15u
 #define ACTION_MARITIME_TRADE 16u
 #define ACTION_END_TURN 17u
+#define ACTION_OFFER_TRADE 18u
+#define ACTION_RESPOND_TRADE 19u
+#define ACTION_COUNTER_TRADE 20u
+#define ACTION_CONFIRM_TRADE 21u
+#define ACTION_CANCEL_TRADE 22u
 
 #define PHASE_SETUP_SETTLEMENT 0u
 #define PHASE_SETUP_ROAD 1u
@@ -167,6 +183,147 @@ static inline __device__ void player_set(
     uint32_t value
 ) {
     state_set(states, stride, player_field(player, offset), lane, value);
+}
+
+static inline __device__ uint32_t trade_get(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t base,
+    uint32_t field
+) {
+    return state_get(states, stride, base + field, lane);
+}
+
+static inline __device__ void trade_set(
+    uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t base,
+    uint32_t field,
+    uint32_t value
+) {
+    state_set(states, stride, base + field, lane, value);
+}
+
+static inline __device__ void clear_trade(
+    uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t base
+) {
+    for (uint32_t field = 0u; field < TRADE_STRIDE; ++field) {
+        state_set(states, stride, base + field, lane, 0u);
+    }
+}
+
+static inline __device__ void copy_trade(
+    uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t destination,
+    uint32_t source
+) {
+    for (uint32_t field = 0u; field < TRADE_STRIDE; ++field) {
+        state_set(
+            states,
+            stride,
+            destination + field,
+            lane,
+            state_get(states, stride, source + field, lane)
+        );
+    }
+}
+
+static inline __device__ int trade_complete(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t base
+) {
+    if (trade_get(states, stride, lane, base, TRADE_PRESENT) == 0u) {
+        return 0;
+    }
+    const uint32_t recipients = trade_get(states, stride, lane, base, TRADE_RECIPIENTS);
+    const uint32_t responses = trade_get(states, stride, lane, base, TRADE_ACCEPTED)
+        | trade_get(states, stride, lane, base, TRADE_REJECTED);
+    return (responses & recipients) == recipients;
+}
+
+static inline __device__ uint32_t next_trade_recipient(
+    uint32_t recipients,
+    uint32_t start,
+    uint32_t players
+) {
+    for (uint32_t player = start; player < players; ++player) {
+        if ((recipients & (1u << player)) != 0u) {
+            return player;
+        }
+    }
+    return 0xffffffffu;
+}
+
+static inline __device__ uint32_t action_hand_total(
+    const uint32_t *actions,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t start
+) {
+    uint32_t total = 0u;
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        total += action_get(actions, stride, start + resource, lane);
+    }
+    return total;
+}
+
+static inline __device__ int action_hands_disjoint(
+    const uint32_t *actions,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t give_start,
+    uint32_t receive_start
+) {
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        if (action_get(actions, stride, give_start + resource, lane) > 0u
+            && action_get(actions, stride, receive_start + resource, lane) > 0u) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static inline __device__ int player_contains_action_hand(
+    const uint32_t *states,
+    const uint32_t *actions,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t player,
+    uint32_t action_start
+) {
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        if (player_get(states, stride, lane, player, PLAYER_RESOURCES + resource)
+            < action_get(actions, stride, action_start + resource, lane)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static inline __device__ int player_contains_trade_hand(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t player,
+    uint32_t trade_base,
+    uint32_t hand_offset
+) {
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        if (player_get(states, stride, lane, player, PLAYER_RESOURCES + resource)
+            < trade_get(states, stride, lane, trade_base, hand_offset + resource)) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static inline __device__ uint32_t building_player(uint32_t building) {
@@ -448,6 +605,13 @@ static inline __device__ uint32_t state_actor(
     if (phase == PHASE_DISCARD) {
         return state_get(states, stride, STATE_DISCARD_CURSOR, lane);
     }
+    if (phase == PHASE_TRADE_RESPONSES
+        && trade_get(states, stride, lane, STATE_TRADE, TRADE_PRESENT) != 0u) {
+        if (trade_complete(states, stride, lane, STATE_TRADE)) {
+            return trade_get(states, stride, lane, STATE_TRADE, TRADE_CREATOR);
+        }
+        return state_get(states, stride, STATE_TRADE_CURSOR, lane);
+    }
     return state_get(states, stride, STATE_CURRENT_PLAYER, lane);
 }
 
@@ -673,7 +837,7 @@ static inline __device__ void clear_action(
     uint32_t stride,
     uint32_t lane
 ) {
-    for (uint32_t field = 0u; field < 8u; ++field) {
+    for (uint32_t field = 0u; field < ACTION_WORDS; ++field) {
         actions[field * stride + lane] = 0u;
     }
 }
@@ -710,6 +874,20 @@ static inline __device__ void reservoir_action(
     }
 }
 
+static inline __device__ int weighted_reservoir_select(
+    uint64_t *rng,
+    uint32_t *total_weight,
+    uint32_t weight
+) {
+    if (weight == 0u) {
+        return 0;
+    }
+    const uint32_t next_total = *total_weight + weight;
+    const int selected = rng_range(rng, next_total) < weight;
+    *total_weight = next_total;
+    return selected;
+}
+
 static inline __device__ void weighted_reservoir_action(
     uint32_t *actions,
     uint32_t stride,
@@ -722,19 +900,455 @@ static inline __device__ void weighted_reservoir_action(
     uint32_t arg1,
     uint32_t arg2
 ) {
-    if (weight == 0u) {
-        return;
-    }
-    const uint32_t next_total = *total_weight + weight;
-    if (rng_range(rng, next_total) < weight) {
+    if (weighted_reservoir_select(rng, total_weight, weight)) {
         write_action(actions, stride, lane, tag, arg0, arg1, arg2);
     }
-    *total_weight = next_total;
+}
+
+static inline __device__ void write_offer_trade(
+    uint32_t *actions,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t recipients,
+    const uint32_t give[5],
+    const uint32_t receive[5]
+) {
+    actions[ACTION_TAG * stride + lane] = ACTION_OFFER_TRADE;
+    actions[ACTION_ARG0 * stride + lane] = recipients;
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        actions[(ACTION_ARG0 + 1u + resource) * stride + lane] = give[resource];
+        actions[(ACTION_ARG0 + 6u + resource) * stride + lane] = receive[resource];
+    }
+}
+
+static inline __device__ void write_one_for_one_offer(
+    uint32_t *actions,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t recipients,
+    uint32_t give,
+    uint32_t receive
+) {
+    uint32_t give_hand[5] = {0u, 0u, 0u, 0u, 0u};
+    uint32_t receive_hand[5] = {0u, 0u, 0u, 0u, 0u};
+    give_hand[give] = 1u;
+    receive_hand[receive] = 1u;
+    write_offer_trade(actions, stride, lane, recipients, give_hand, receive_hand);
+}
+
+static inline __device__ void write_counter_trade(
+    uint32_t *actions,
+    uint32_t stride,
+    uint32_t lane,
+    const uint32_t give[5],
+    const uint32_t receive[5]
+) {
+    actions[ACTION_TAG * stride + lane] = ACTION_COUNTER_TRADE;
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        actions[(ACTION_ARG0 + resource) * stride + lane] = give[resource];
+        actions[(ACTION_ARG0 + 5u + resource) * stride + lane] = receive[resource];
+    }
+    actions[(ACTION_ARG0 + 10u) * stride + lane] = 0u;
 }
 
 static inline __device__ uint32_t resource_policy_score(uint32_t resource) {
     const uint32_t weights[5] = {100u, 100u, 78u, 125u, 115u};
     return resource < 5u ? weights[resource] : 1u;
+}
+
+static inline __device__ int domestic_trade_receive_desired(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t player,
+    uint32_t resource
+) {
+    if (resource_total(states, stride, lane, player)
+        > state_get(states, stride, STATE_DISCARD_LIMIT, lane)) {
+        return 1;
+    }
+    const uint32_t held = player_get(states, stride, lane, player, PLAYER_RESOURCES + resource);
+    if (held < ROAD_COST[resource]
+        || held < SETTLEMENT_COST[resource]
+        || held < CITY_COST[resource]
+        || held < DEVELOPMENT_COST[resource]) {
+        return 1;
+    }
+    const uint32_t road_settlement[5] = {2u, 2u, 1u, 1u, 0u};
+    const uint32_t two_roads_settlement[5] = {3u, 3u, 1u, 1u, 0u};
+    return held < road_settlement[resource] || held < two_roads_settlement[resource];
+}
+
+static inline __device__ uint32_t domestic_trade_receive_score(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t player,
+    uint32_t resource
+) {
+    const uint32_t held = player_get(states, stride, lane, player, PLAYER_RESOURCES + resource);
+    uint32_t score = resource_policy_score(resource);
+    if (held < ROAD_COST[resource]) {
+        score += 180u;
+    }
+    if (held < SETTLEMENT_COST[resource]) {
+        score += 620u;
+    }
+    if (held < CITY_COST[resource]) {
+        score += 700u;
+    }
+    if (held < DEVELOPMENT_COST[resource]) {
+        score += 320u;
+    }
+    return score;
+}
+
+static inline __device__ int trade_is_one_for_one(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t base,
+    uint32_t give,
+    uint32_t receive
+) {
+    if (trade_get(states, stride, lane, base, TRADE_PRESENT) == 0u) {
+        return 0;
+    }
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        const uint32_t expected_give = resource == give ? 1u : 0u;
+        const uint32_t expected_receive = resource == receive ? 1u : 0u;
+        if (trade_get(states, stride, lane, base, TRADE_GIVE + resource) != expected_give
+            || trade_get(states, stride, lane, base, TRADE_RECEIVE + resource)
+                != expected_receive) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static inline __device__ int rejected_trade_is_one_for_one(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t give,
+    uint32_t receive
+) {
+    return trade_is_one_for_one(
+        states, stride, lane, STATE_LAST_REJECTED_TRADE, give, receive
+    );
+}
+
+static inline __device__ int choose_one_for_one_domestic_trade(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t player,
+    uint64_t *rng,
+    int avoid_last_rejected,
+    uint32_t *selected_give,
+    uint32_t *selected_receive
+) {
+    uint32_t total_weight = 0u;
+    int found = 0;
+    for (uint32_t receive = 0u; receive < 5u; ++receive) {
+        if (!domestic_trade_receive_desired(states, stride, lane, player, receive)) {
+            continue;
+        }
+        const uint32_t receive_score = domestic_trade_receive_score(
+            states, stride, lane, player, receive
+        );
+        for (uint32_t give = 0u; give < 5u; ++give) {
+            if (give == receive) {
+                continue;
+            }
+            const uint32_t held = player_get(
+                states, stride, lane, player, PLAYER_RESOURCES + give
+            );
+            if (held == 0u
+                || (avoid_last_rejected
+                    && rejected_trade_is_one_for_one(states, stride, lane, give, receive))) {
+                continue;
+            }
+            uint32_t weight = receive_score * (held + 1u) * 100u
+                / (resource_policy_score(give) + 50u);
+            weight = weight == 0u ? 1u : weight;
+            if (weighted_reservoir_select(rng, &total_weight, weight)) {
+                *selected_give = give;
+                *selected_receive = receive;
+            }
+            found = 1;
+        }
+    }
+    return found;
+}
+
+static inline __device__ uint32_t trade_bundle_policy_value(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t base,
+    uint32_t offset
+) {
+    uint32_t value = 0u;
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        value += trade_get(states, stride, lane, base, offset + resource)
+            * resource_policy_score(resource);
+    }
+    return value;
+}
+
+static inline __device__ uint32_t hand_total_fixed(const uint32_t hand[5]) {
+    return hand[0] + hand[1] + hand[2] + hand[3] + hand[4];
+}
+
+static inline __device__ void copy_fixed_hand(
+    uint32_t destination[5],
+    const uint32_t source[5]
+) {
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        destination[resource] = source[resource];
+    }
+}
+
+static inline __device__ int fixed_hand_contains(
+    const uint32_t hand[5],
+    const uint32_t required[5]
+) {
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        if (hand[resource] < required[resource]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static inline __device__ int fixed_hands_disjoint(
+    const uint32_t left[5],
+    const uint32_t right[5]
+) {
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        if (left[resource] > 0u && right[resource] > 0u) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static inline __device__ int fixed_hand_lex_less(
+    const uint32_t left[5],
+    const uint32_t right[5]
+) {
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        if (left[resource] < right[resource]) {
+            return 1;
+        }
+        if (left[resource] > right[resource]) {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+static inline __device__ float counter_hand_score(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    const uint32_t hand[5]
+) {
+    float ready = 0.0f;
+    if (fixed_hand_contains(hand, ROAD_COST)) {
+        ready = fmaxf(ready, 0.28f);
+    }
+    if (fixed_hand_contains(hand, SETTLEMENT_COST)) {
+        ready = fmaxf(ready, 1.42f);
+    }
+    if (fixed_hand_contains(hand, CITY_COST)) {
+        ready = fmaxf(ready, 1.26f);
+    }
+    if (fixed_hand_contains(hand, DEVELOPMENT_COST)) {
+        ready = fmaxf(ready, 0.72f);
+    }
+
+    float near = 0.0f;
+    uint32_t missing = 0u;
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        missing += ROAD_COST[resource] > hand[resource]
+            ? ROAD_COST[resource] - hand[resource]
+            : 0u;
+    }
+    near = fmaxf(near, 0.24f / (1.0f + (float)missing));
+    missing = 0u;
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        missing += SETTLEMENT_COST[resource] > hand[resource]
+            ? SETTLEMENT_COST[resource] - hand[resource]
+            : 0u;
+    }
+    near = fmaxf(near, 1.08f / (1.0f + (float)missing));
+    missing = 0u;
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        missing += CITY_COST[resource] > hand[resource]
+            ? CITY_COST[resource] - hand[resource]
+            : 0u;
+    }
+    near = fmaxf(near, 0.98f / (1.0f + (float)missing));
+    missing = 0u;
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        missing += DEVELOPMENT_COST[resource] > hand[resource]
+            ? DEVELOPMENT_COST[resource] - hand[resource]
+            : 0u;
+    }
+    near = fmaxf(near, 0.56f / (1.0f + (float)missing));
+
+    const float weights[5] = {0.98f, 0.98f, 0.73f, 1.22f, 1.10f};
+    float weighted = 0.0f;
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        weighted += (float)hand[resource] * weights[resource];
+    }
+    weighted *= 0.11f;
+    const uint32_t discard_limit = state_get(states, stride, STATE_DISCARD_LIMIT, lane);
+    const uint32_t total = hand_total_fixed(hand);
+    const float overflow = total > discard_limit ? (float)(total - discard_limit) : 0.0f;
+    return ready + near + weighted - overflow * overflow * 0.045f;
+}
+
+static inline __device__ float counter_action_score(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t actor,
+    uint32_t creator,
+    const uint32_t give[5],
+    const uint32_t receive[5],
+    float before
+) {
+    uint32_t after[5];
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        const uint32_t held = player_get(
+            states, stride, lane, actor, PLAYER_RESOURCES + resource
+        );
+        after[resource] = held - give[resource] + receive[resource];
+    }
+    const float creator_threat = (float)player_get(
+        states, stride, lane, creator, PLAYER_PUBLIC_VP
+    ) / (float)(state_get(states, stride, STATE_VICTORY_TARGET, lane) > 0u
+        ? state_get(states, stride, STATE_VICTORY_TARGET, lane)
+        : 1u);
+    const float feeds_creator = (float)give[3] * 1.25f
+        + (float)give[4] * 1.15f
+        + (float)(give[0] + give[1]) * 0.68f;
+    const float denies_creator = (float)receive[3] * 0.34f
+        + (float)receive[4] * 0.30f;
+    return counter_hand_score(states, stride, lane, after)
+        - before
+        - feeds_creator * creator_threat * 0.46f
+        + denies_creator * creator_threat;
+}
+
+static inline __device__ int choose_best_counter_trade(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t selected_give[5],
+    uint32_t selected_receive[5]
+) {
+    if (trade_get(states, stride, lane, STATE_TRADE, TRADE_PRESENT) == 0u
+        || trade_complete(states, stride, lane, STATE_TRADE)
+        || state_get(states, stride, STATE_TRADE_NEGOTIATION_ROUND, lane) >= 1u) {
+        return 0;
+    }
+    const uint32_t actor = state_get(states, stride, STATE_TRADE_CURSOR, lane);
+    const uint32_t creator = trade_get(states, stride, lane, STATE_TRADE, TRADE_CREATOR);
+    if (actor >= state_get(states, stride, STATE_NUM_PLAYERS, lane)
+        || creator >= state_get(states, stride, STATE_NUM_PLAYERS, lane)) {
+        return 0;
+    }
+
+    uint32_t hand[5];
+    uint32_t original_give[5];
+    uint32_t original_receive[5];
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        hand[resource] = player_get(states, stride, lane, actor, PLAYER_RESOURCES + resource);
+        original_give[resource] = trade_get(
+            states, stride, lane, STATE_TRADE, TRADE_GIVE + resource
+        );
+        original_receive[resource] = trade_get(
+            states, stride, lane, STATE_TRADE, TRADE_RECEIVE + resource
+        );
+    }
+
+    uint32_t give_options[11][5];
+    uint32_t receive_options[11][5];
+    uint32_t give_count = 0u;
+    uint32_t receive_count = 0u;
+    copy_fixed_hand(give_options[give_count++], original_receive);
+    copy_fixed_hand(receive_options[receive_count++], original_give);
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        if (hand[resource] > original_receive[resource]) {
+            uint32_t option[5];
+            copy_fixed_hand(option, original_receive);
+            option[resource] += 1u;
+            if (hand_total_fixed(option) <= 2u) {
+                copy_fixed_hand(give_options[give_count++], option);
+            }
+        }
+        uint32_t request[5];
+        copy_fixed_hand(request, original_give);
+        request[resource] += 1u;
+        if (hand_total_fixed(request) <= 2u) {
+            copy_fixed_hand(receive_options[receive_count++], request);
+        }
+        if (hand[resource] > 0u) {
+            uint32_t one[5] = {0u, 0u, 0u, 0u, 0u};
+            one[resource] = 1u;
+            copy_fixed_hand(give_options[give_count++], one);
+        }
+        uint32_t one_request[5] = {0u, 0u, 0u, 0u, 0u};
+        one_request[resource] = 1u;
+        copy_fixed_hand(receive_options[receive_count++], one_request);
+    }
+
+    const float before = counter_hand_score(states, stride, lane, hand);
+    float best_score = -3.402823466e+38F;
+    int found = 0;
+    for (uint32_t give_index = 0u; give_index < give_count; ++give_index) {
+        const uint32_t *give = give_options[give_index];
+        if (hand_total_fixed(give) == 0u || !fixed_hand_contains(hand, give)) {
+            continue;
+        }
+        for (uint32_t receive_index = 0u; receive_index < receive_count; ++receive_index) {
+            const uint32_t *receive = receive_options[receive_index];
+            if (hand_total_fixed(receive) == 0u || !fixed_hands_disjoint(give, receive)) {
+                continue;
+            }
+            int unchanged = 1;
+            for (uint32_t resource = 0u; resource < 5u; ++resource) {
+                if (give[resource] != original_receive[resource]
+                    || receive[resource] != original_give[resource]) {
+                    unchanged = 0;
+                    break;
+                }
+            }
+            if (unchanged) {
+                continue;
+            }
+            const float score = counter_action_score(
+                states, stride, lane, actor, creator, give, receive, before
+            );
+            int prefer = !found || score > best_score;
+            if (found && score == best_score) {
+                prefer = fixed_hand_lex_less(give, selected_give)
+                    || (!fixed_hand_lex_less(selected_give, give)
+                        && fixed_hand_lex_less(receive, selected_receive));
+            }
+            if (prefer) {
+                best_score = score;
+                copy_fixed_hand(selected_give, give);
+                copy_fixed_hand(selected_receive, receive);
+                found = 1;
+            }
+        }
+    }
+    return found;
 }
 
 static inline __device__ uint32_t pips_for_number(uint32_t number) {
@@ -1473,6 +2087,34 @@ static inline __device__ void generate_rollout_action_lane(
             );
         }
 
+        // CPU legal_actions() ranks/truncates domestic offers to 96 entries.
+        // With at most three cards in hand, the complete pre-cap offer set is
+        // bounded below that limit, so any transition-valid 1-for-1 offer is
+        // guaranteed to survive CPU admission. Outside that region this
+        // rollout policy simply chooses another legal family rather than
+        // approximating the CPU offer ranking.
+        if (state_get(states, stride, STATE_PLAYER_TRADES_ENABLED, lane) != 0u
+            && state_get(states, stride, STATE_DOMESTIC_TRADE_COUNT, lane) < 2u
+            && resource_total(states, stride, lane, current) <= 3u) {
+            uint32_t give = 0u;
+            uint32_t receive = 0u;
+            if (choose_one_for_one_domestic_trade(
+                states, stride, lane, current, &rng, 1, &give, &receive
+            )) {
+                const uint32_t recipients = ((1u << players) - 1u) & ~(1u << current);
+                const uint32_t base = 320u
+                    + domestic_trade_receive_score(states, stride, lane, current, receive) / 2u;
+                const uint32_t weight = profile_scaled_weight(
+                    states, stride, lane, current, 3u, base
+                );
+                if (weighted_reservoir_select(&rng, &family_weight, weight)) {
+                    write_one_for_one_offer(
+                        actions, stride, lane, recipients, give, receive
+                    );
+                }
+            }
+        }
+
         if (development_playable(states, stride, lane, current, 0u)) {
             uint32_t hex = 0u;
             uint32_t victim_code = 0u;
@@ -1615,6 +2257,137 @@ static inline __device__ void generate_rollout_action_lane(
             );
         }
         seen = family_weight > 0u ? 1u : 0u;
+    } else if (phase == PHASE_TRADE_RESPONSES) {
+        if (trade_get(states, stride, lane, STATE_TRADE, TRADE_PRESENT) != 0u) {
+            const uint32_t enabled = state_get(
+                states, stride, STATE_PLAYER_TRADES_ENABLED, lane
+            );
+            uint32_t total_weight = 0u;
+            if (trade_complete(states, stride, lane, STATE_TRADE)) {
+                const uint32_t creator = trade_get(
+                    states, stride, lane, STATE_TRADE, TRADE_CREATOR
+                );
+                weighted_reservoir_action(
+                    actions,
+                    stride,
+                    lane,
+                    &rng,
+                    &total_weight,
+                    profile_scaled_weight(states, stride, lane, creator, 0u, 120u),
+                    ACTION_CANCEL_TRADE,
+                    0u,
+                    0u,
+                    0u
+                );
+                if (enabled != 0u && creator < players) {
+                    const uint32_t accepted = trade_get(
+                        states, stride, lane, STATE_TRADE, TRADE_ACCEPTED
+                    );
+                    const uint32_t give_value = trade_bundle_policy_value(
+                        states, stride, lane, STATE_TRADE, TRADE_GIVE
+                    );
+                    const uint32_t receive_value = trade_bundle_policy_value(
+                        states, stride, lane, STATE_TRADE, TRADE_RECEIVE
+                    );
+                    const uint32_t benefit = receive_value > give_value
+                        ? receive_value - give_value
+                        : 0u;
+                    for (uint32_t partner = 0u; partner < players; ++partner) {
+                        if ((accepted & (1u << partner)) == 0u
+                            || !player_contains_trade_hand(
+                                states, stride, lane, creator, STATE_TRADE, TRADE_GIVE
+                            )
+                            || !player_contains_trade_hand(
+                                states, stride, lane, partner, STATE_TRADE, TRADE_RECEIVE
+                            )) {
+                            continue;
+                        }
+                        weighted_reservoir_action(
+                            actions,
+                            stride,
+                            lane,
+                            &rng,
+                            &total_weight,
+                            profile_scaled_weight(
+                                states, stride, lane, creator, 3u, 900u + benefit * 4u
+                            ),
+                            ACTION_CONFIRM_TRADE,
+                            partner,
+                            0u,
+                            0u
+                        );
+                    }
+                }
+            } else {
+                const uint32_t actor = state_get(
+                    states, stride, STATE_TRADE_CURSOR, lane
+                );
+                if (actor < players) {
+                    weighted_reservoir_action(
+                        actions,
+                        stride,
+                        lane,
+                        &rng,
+                        &total_weight,
+                        profile_scaled_weight(states, stride, lane, actor, 4u, 700u),
+                        ACTION_RESPOND_TRADE,
+                        0u,
+                        0u,
+                        0u
+                    );
+                    if (enabled != 0u
+                        && player_contains_trade_hand(
+                            states, stride, lane, actor, STATE_TRADE, TRADE_RECEIVE
+                        )) {
+                        const uint32_t incoming = trade_bundle_policy_value(
+                            states, stride, lane, STATE_TRADE, TRADE_GIVE
+                        );
+                        const uint32_t outgoing = trade_bundle_policy_value(
+                            states, stride, lane, STATE_TRADE, TRADE_RECEIVE
+                        );
+                        const uint32_t benefit = incoming > outgoing
+                            ? incoming - outgoing
+                            : 0u;
+                        weighted_reservoir_action(
+                            actions,
+                            stride,
+                            lane,
+                            &rng,
+                            &total_weight,
+                            profile_scaled_weight(
+                                states, stride, lane, actor, 3u, 520u + benefit * 5u
+                            ),
+                            ACTION_RESPOND_TRADE,
+                            1u,
+                            0u,
+                            0u
+                        );
+                    }
+                    if (enabled != 0u
+                        && state_get(
+                            states, stride, STATE_TRADE_NEGOTIATION_ROUND, lane
+                        ) < 1u) {
+                        uint32_t give[5];
+                        uint32_t receive[5];
+                        if (choose_best_counter_trade(
+                            states, stride, lane, give, receive
+                        )) {
+                            const uint32_t weight = profile_scaled_weight(
+                                states, stride, lane, actor, 3u, 260u
+                            );
+                            if (weighted_reservoir_select(
+                                &rng, &total_weight, weight
+                            )) {
+                                write_counter_trade(
+                                    actions, stride, lane, give, receive
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            seen = total_weight > 0u ? 1u : 0u;
+        }
     } else if (phase == PHASE_DEVELOPMENT_CHANCE) {
         uint32_t total = 0u;
         for (uint32_t card = 0u; card < 5u; ++card) {
@@ -1637,9 +2410,8 @@ static inline __device__ void generate_rollout_action_lane(
         seen = 1u;
     }
 
-    // A no-player-trades state should always have at least one action unless it
-    // is invalid. Leave tag 254 as a detectable sentinel instead of fabricating
-    // a legal transition.
+    // A valid standard-rules state should always expose a rollout action.
+    // Leave tag 254 as a detectable sentinel instead of fabricating a transition.
     if (seen == 0u) {
         write_action(actions, stride, lane, 254u, 0u, 0u, 0u);
     }
@@ -1657,11 +2429,6 @@ static inline __device__ void apply_transition_lane(
     if (status[lane] != STATUS_OK) {
         return;
     }
-    if (state_get(states, stride, STATE_PLAYER_TRADES_ENABLED, lane) != 0u) {
-        status[lane] = STATUS_INVALID_STATE;
-        return;
-    }
-
     const uint32_t tag = action_get(actions, stride, ACTION_TAG, lane);
     const uint32_t phase = state_get(states, stride, STATE_PHASE, lane);
     const uint32_t current = state_get(states, stride, STATE_CURRENT_PLAYER, lane);
@@ -2164,6 +2931,262 @@ static inline __device__ void apply_transition_lane(
         return;
     }
 
+    if (tag == ACTION_OFFER_TRADE) {
+        const uint32_t enabled = state_get(states, stride, STATE_PLAYER_TRADES_ENABLED, lane);
+        const uint32_t recipients = action_get(actions, stride, ACTION_ARG0, lane);
+        const uint32_t give_start = ACTION_ARG0 + 1u;
+        const uint32_t receive_start = ACTION_ARG0 + 6u;
+        if (enabled == 0u
+            || phase != PHASE_MAIN
+            || recipients == 0u
+            || (recipients & (1u << current)) != 0u
+            || (recipients >> players) != 0u
+            || action_hand_total(actions, stride, lane, give_start) == 0u
+            || action_hand_total(actions, stride, lane, receive_start) == 0u
+            || !player_contains_action_hand(
+                states, actions, stride, lane, current, give_start
+            )
+            || !action_hands_disjoint(
+                actions, stride, lane, give_start, receive_start
+            )) {
+            status[lane] = STATUS_INVALID_ACTION;
+            return;
+        }
+        const uint32_t first = next_trade_recipient(recipients, 0u, players);
+        if (first == 0xffffffffu) {
+            status[lane] = STATUS_INVALID_ACTION;
+            return;
+        }
+        clear_trade(states, stride, lane, STATE_TRADE);
+        trade_set(states, stride, lane, STATE_TRADE, TRADE_PRESENT, 1u);
+        trade_set(states, stride, lane, STATE_TRADE, TRADE_CREATOR, current);
+        trade_set(states, stride, lane, STATE_TRADE, TRADE_RECIPIENTS, recipients);
+        for (uint32_t resource = 0u; resource < 5u; ++resource) {
+            trade_set(
+                states,
+                stride,
+                lane,
+                STATE_TRADE,
+                TRADE_GIVE + resource,
+                action_get(actions, stride, give_start + resource, lane)
+            );
+            trade_set(
+                states,
+                stride,
+                lane,
+                STATE_TRADE,
+                TRADE_RECEIVE + resource,
+                action_get(actions, stride, receive_start + resource, lane)
+            );
+        }
+        state_set(states, stride, STATE_DOMESTIC_TRADE_USED, lane, 1u);
+        const uint32_t count = state_get(states, stride, STATE_DOMESTIC_TRADE_COUNT, lane);
+        state_set(
+            states,
+            stride,
+            STATE_DOMESTIC_TRADE_COUNT,
+            lane,
+            count < 255u ? count + 1u : 255u
+        );
+        state_set(states, stride, STATE_TRADE_CURSOR, lane, first);
+        state_set(states, stride, STATE_PHASE, lane, PHASE_TRADE_RESPONSES);
+        state_set(states, stride, STATE_PHASE_ARG, lane, 0u);
+        state_set(states, stride, STATE_TRADE_NEGOTIATION_ROUND, lane, 0u);
+        return;
+    }
+
+    if (tag == ACTION_RESPOND_TRADE) {
+        const uint32_t accept = action_get(actions, stride, ACTION_ARG0, lane);
+        if (phase != PHASE_TRADE_RESPONSES
+            || trade_get(states, stride, lane, STATE_TRADE, TRADE_PRESENT) == 0u
+            || trade_complete(states, stride, lane, STATE_TRADE)) {
+            status[lane] = STATUS_INVALID_PHASE;
+            return;
+        }
+        if (accept > 1u
+            || (accept != 0u
+                && state_get(states, stride, STATE_PLAYER_TRADES_ENABLED, lane) == 0u)) {
+            status[lane] = STATUS_INVALID_ACTION;
+            return;
+        }
+        const uint32_t cursor = state_get(states, stride, STATE_TRADE_CURSOR, lane);
+        const uint32_t recipients = trade_get(
+            states, stride, lane, STATE_TRADE, TRADE_RECIPIENTS
+        );
+        if (cursor >= players || (recipients & (1u << cursor)) == 0u) {
+            status[lane] = STATUS_INVALID_ACTION;
+            return;
+        }
+        if (accept != 0u
+            && !player_contains_trade_hand(
+                states, stride, lane, cursor, STATE_TRADE, TRADE_RECEIVE
+            )) {
+            status[lane] = STATUS_INVALID_ACTION;
+            return;
+        }
+        const uint32_t response_field = accept != 0u ? TRADE_ACCEPTED : TRADE_REJECTED;
+        trade_set(
+            states,
+            stride,
+            lane,
+            STATE_TRADE,
+            response_field,
+            trade_get(states, stride, lane, STATE_TRADE, response_field) | (1u << cursor)
+        );
+        if (!trade_complete(states, stride, lane, STATE_TRADE)) {
+            const uint32_t next = next_trade_recipient(recipients, cursor + 1u, players);
+            if (next == 0xffffffffu) {
+                status[lane] = STATUS_INVALID_ACTION;
+                return;
+            }
+            state_set(states, stride, STATE_TRADE_CURSOR, lane, next);
+        }
+        return;
+    }
+
+    if (tag == ACTION_COUNTER_TRADE) {
+        const uint32_t give_start = ACTION_ARG0;
+        const uint32_t receive_start = ACTION_ARG0 + 5u;
+        if (state_get(states, stride, STATE_PLAYER_TRADES_ENABLED, lane) == 0u
+            || phase != PHASE_TRADE_RESPONSES
+            || state_get(states, stride, STATE_TRADE_NEGOTIATION_ROUND, lane) >= 1u
+            || trade_get(states, stride, lane, STATE_TRADE, TRADE_PRESENT) == 0u
+            || trade_complete(states, stride, lane, STATE_TRADE)) {
+            status[lane] = STATUS_INVALID_PHASE;
+            return;
+        }
+        const uint32_t actor = state_get(states, stride, STATE_TRADE_CURSOR, lane);
+        if (actor >= players
+            || action_hand_total(actions, stride, lane, give_start) == 0u
+            || action_hand_total(actions, stride, lane, receive_start) == 0u
+            || !player_contains_action_hand(
+                states, actions, stride, lane, actor, give_start
+            )
+            || !action_hands_disjoint(
+                actions, stride, lane, give_start, receive_start
+            )) {
+            status[lane] = STATUS_INVALID_ACTION;
+            return;
+        }
+        const uint32_t previous_creator = trade_get(
+            states, stride, lane, STATE_TRADE, TRADE_CREATOR
+        );
+        clear_trade(states, stride, lane, STATE_TRADE);
+        trade_set(states, stride, lane, STATE_TRADE, TRADE_PRESENT, 1u);
+        trade_set(states, stride, lane, STATE_TRADE, TRADE_CREATOR, actor);
+        trade_set(
+            states,
+            stride,
+            lane,
+            STATE_TRADE,
+            TRADE_RECIPIENTS,
+            1u << previous_creator
+        );
+        for (uint32_t resource = 0u; resource < 5u; ++resource) {
+            trade_set(
+                states,
+                stride,
+                lane,
+                STATE_TRADE,
+                TRADE_GIVE + resource,
+                action_get(actions, stride, give_start + resource, lane)
+            );
+            trade_set(
+                states,
+                stride,
+                lane,
+                STATE_TRADE,
+                TRADE_RECEIVE + resource,
+                action_get(actions, stride, receive_start + resource, lane)
+            );
+        }
+        state_set(states, stride, STATE_TRADE_CURSOR, lane, previous_creator);
+        state_set(
+            states,
+            stride,
+            STATE_TRADE_NEGOTIATION_ROUND,
+            lane,
+            state_get(states, stride, STATE_TRADE_NEGOTIATION_ROUND, lane) + 1u
+        );
+        return;
+    }
+
+    if (tag == ACTION_CONFIRM_TRADE) {
+        const uint32_t partner = action_get(actions, stride, ACTION_ARG0, lane);
+        if (state_get(states, stride, STATE_PLAYER_TRADES_ENABLED, lane) == 0u
+            || phase != PHASE_TRADE_RESPONSES
+            || trade_get(states, stride, lane, STATE_TRADE, TRADE_PRESENT) == 0u
+            || !trade_complete(states, stride, lane, STATE_TRADE)) {
+            status[lane] = STATUS_INVALID_PHASE;
+            return;
+        }
+        const uint32_t creator = trade_get(states, stride, lane, STATE_TRADE, TRADE_CREATOR);
+        const uint32_t accepted = trade_get(states, stride, lane, STATE_TRADE, TRADE_ACCEPTED);
+        if (creator >= players
+            || partner >= players
+            || (accepted & (1u << partner)) == 0u
+            || !player_contains_trade_hand(
+                states, stride, lane, creator, STATE_TRADE, TRADE_GIVE
+            )
+            || !player_contains_trade_hand(
+                states, stride, lane, partner, STATE_TRADE, TRADE_RECEIVE
+            )) {
+            status[lane] = STATUS_INVALID_ACTION;
+            return;
+        }
+        for (uint32_t resource = 0u; resource < 5u; ++resource) {
+            const uint32_t give = trade_get(
+                states, stride, lane, STATE_TRADE, TRADE_GIVE + resource
+            );
+            const uint32_t receive = trade_get(
+                states, stride, lane, STATE_TRADE, TRADE_RECEIVE + resource
+            );
+            player_set(
+                states,
+                stride,
+                lane,
+                creator,
+                PLAYER_RESOURCES + resource,
+                player_get(states, stride, lane, creator, PLAYER_RESOURCES + resource)
+                    - give
+                    + receive
+            );
+            player_set(
+                states,
+                stride,
+                lane,
+                partner,
+                PLAYER_RESOURCES + resource,
+                player_get(states, stride, lane, partner, PLAYER_RESOURCES + resource)
+                    - receive
+                    + give
+            );
+        }
+        clear_trade(states, stride, lane, STATE_TRADE);
+        clear_trade(states, stride, lane, STATE_LAST_REJECTED_TRADE);
+        state_set(states, stride, STATE_TRADE_NEGOTIATION_ROUND, lane, 0u);
+        state_set(states, stride, STATE_PHASE, lane, PHASE_MAIN);
+        state_set(states, stride, STATE_PHASE_ARG, lane, 0u);
+        return;
+    }
+
+    if (tag == ACTION_CANCEL_TRADE) {
+        if (phase != PHASE_TRADE_RESPONSES
+            || trade_get(states, stride, lane, STATE_TRADE, TRADE_PRESENT) == 0u
+            || !trade_complete(states, stride, lane, STATE_TRADE)) {
+            status[lane] = STATUS_INVALID_PHASE;
+            return;
+        }
+        copy_trade(
+            states, stride, lane, STATE_LAST_REJECTED_TRADE, STATE_TRADE
+        );
+        clear_trade(states, stride, lane, STATE_TRADE);
+        state_set(states, stride, STATE_TRADE_NEGOTIATION_ROUND, lane, 0u);
+        state_set(states, stride, STATE_PHASE, lane, PHASE_MAIN);
+        state_set(states, stride, STATE_PHASE_ARG, lane, 0u);
+        return;
+    }
+
     if (tag == ACTION_END_TURN) {
         if (phase != PHASE_MAIN) {
             status[lane] = STATUS_INVALID_PHASE;
@@ -2175,6 +3198,7 @@ static inline __device__ void apply_transition_lane(
         player_set(states, stride, lane, current, PLAYER_PLAYED_DEVELOPMENT_THIS_TURN, 0u);
         state_set(states, stride, STATE_DOMESTIC_TRADE_USED, lane, 0u);
         state_set(states, stride, STATE_DOMESTIC_TRADE_COUNT, lane, 0u);
+        clear_trade(states, stride, lane, STATE_LAST_REJECTED_TRADE);
         state_set(states, stride, STATE_TRADE_NEGOTIATION_ROUND, lane, 0u);
         state_set(states, stride, STATE_CURRENT_PLAYER, lane, (current + 1u) % players);
         state_set(states, stride, STATE_TURN, lane, state_get(states, stride, STATE_TURN, lane) + 1u);
@@ -2360,7 +3384,7 @@ extern "C" __global__ void expand_root_rollouts_kernel(
     for (uint32_t field = 0u; field < STATE_WORDS; ++field) {
         states[field * stride + lane] = base_states[field * base_stride + base];
     }
-    for (uint32_t field = 0u; field < 8u; ++field) {
+    for (uint32_t field = 0u; field < ACTION_WORDS; ++field) {
         actions[field * stride + lane] = root_actions[field * root_count + root];
     }
     status[lane] = STATUS_OK;

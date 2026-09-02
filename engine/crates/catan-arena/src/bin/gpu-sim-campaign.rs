@@ -19,6 +19,7 @@ struct Config {
     max_actions: u32,
     chunk_games: usize,
     grid_step: Option<u8>,
+    player_trades_enabled: bool,
     baseline_profile: CudaSimPolicyProfile,
     candidate_profiles: Vec<CudaSimPolicyProfile>,
 }
@@ -34,6 +35,7 @@ impl Default for Config {
             max_actions: 4_096,
             chunk_games: 4_096,
             grid_step: None,
+            player_trades_enabled: false,
             baseline_profile: NEUTRAL_PROFILE,
             candidate_profiles: Vec::new(),
         }
@@ -180,22 +182,37 @@ fn append_grid_profiles(config: &mut Config) -> Result<(), String> {
         return Ok(());
     };
     let values = grid_values(step)?;
-    let grid_size = values.len().saturating_pow(3);
+    let dimensions = if config.player_trades_enabled { 5 } else { 3 };
+    let grid_size = values.len().saturating_pow(dimensions);
     if grid_size > 4_096 {
         return Err(format!(
-            "--grid-step {step} expands to {grid_size} profiles; choose a larger step (maximum 4096 profiles per invocation)"
+            "--grid-step {step} expands to {grid_size} profiles in {dimensions} dimensions; choose a larger step (maximum 4096 profiles per invocation)"
         ));
     }
     for balanced in values.iter().copied() {
         for expansion in values.iter().copied() {
             for city_development in values.iter().copied() {
-                config.candidate_profiles.push([
-                    balanced,
-                    expansion,
-                    city_development,
-                    config.baseline_profile[3],
-                    config.baseline_profile[4],
-                ]);
+                if config.player_trades_enabled {
+                    for trade_flexible in values.iter().copied() {
+                        for trade_resistant in values.iter().copied() {
+                            config.candidate_profiles.push([
+                                balanced,
+                                expansion,
+                                city_development,
+                                trade_flexible,
+                                trade_resistant,
+                            ]);
+                        }
+                    }
+                } else {
+                    config.candidate_profiles.push([
+                        balanced,
+                        expansion,
+                        city_development,
+                        config.baseline_profile[3],
+                        config.baseline_profile[4],
+                    ]);
+                }
             }
         }
     }
@@ -270,6 +287,9 @@ fn parse_args() -> Result<Option<Config>, String> {
             "--grid-step" => {
                 config.grid_step = Some(parse_value(flag, &next_value(&args, &mut index, flag)?)?);
             }
+            "--player-trades" => {
+                config.player_trades_enabled = true;
+            }
             "--baseline-profile" => {
                 config.baseline_profile = parse_profile(&next_value(&args, &mut index, flag)?)?;
             }
@@ -304,7 +324,7 @@ fn parse_args() -> Result<Option<Config>, String> {
 fn print_help() {
     println!(
         "gpu-sim-campaign\n\
-         \nRuns matched no-player-trades strength campaigns entirely on the GPU after initial state creation.\n\
+         \nRuns matched strength campaigns entirely on the GPU after initial state creation.\n\
          \nOptions:\n\
          \x20 --players 3,4                 Player counts to evaluate (default: 3,4)\n\
          \x20 --games N                     Games per player-count/profile trial (default: 256)\n\
@@ -313,21 +333,27 @@ fn print_help() {
          \x20 --max-turns N                 Per-game turn ceiling (default: 160)\n\
          \x20 --max-actions N               Per-game action ceiling (default: 4096)\n\
          \x20 --chunk-games N               Max resident games per GPU chunk (default: 4096)\n\
-         \x20 --grid-step N                  Add a 3D balanced/expansion/city grid over 0..102\n\
+         \x20 --grid-step N                  Grid 3 policy dimensions, or all 5 with --player-trades\n\
+         \x20 --player-trades                Enable player-to-player trade simulation\n\
          \x20 --baseline-profile a,b,c,d,e  Baseline policy profile (0..102 each)\n\
          \x20 --candidate-profile a,b,c,d,e Candidate profile; repeat for an in-process sweep\n\
          \nProfile fields: balanced, expansion, city/development, trade-flexible, trade-resistant."
     );
 }
 
-fn base_states(players: u8, games: usize, seed: u64) -> Vec<GameState> {
+fn base_states(
+    players: u8,
+    games: usize,
+    seed: u64,
+    player_trades_enabled: bool,
+) -> Vec<GameState> {
     (0..games)
         .map(|game| {
             let board_seed = seed.wrapping_add(
                 (game as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15),
             );
             let mut state = GameState::standard(board_seed, players);
-            state.player_trades_enabled = false;
+            state.player_trades_enabled = player_trades_enabled;
             state
         })
         .collect()
@@ -496,7 +522,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut trials = Vec::new();
 
     for players in config.players.iter().copied() {
-        let states = base_states(players, config.games, config.board_seed);
+        let states = base_states(
+            players,
+            config.games,
+            config.board_seed,
+            config.player_trades_enabled,
+        );
         for candidate_profile in config.candidate_profiles.iter().copied() {
             let started = Instant::now();
             let result = engine.run_rotating_profile_campaign(
@@ -535,7 +566,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             chunk_games: config.chunk_games,
             grid_step: config.grid_step,
             candidate_profile_count: config.candidate_profiles.len(),
-            player_trades_enabled: false,
+            player_trades_enabled: config.player_trades_enabled,
             candidate_seat_rotation: "global_game_index_mod_players",
             baseline_profile: config.baseline_profile.into(),
         },
