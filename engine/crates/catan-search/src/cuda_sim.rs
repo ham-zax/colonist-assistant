@@ -59,6 +59,9 @@ const ACTION_ARG0: usize = 1;
 const ACTION_WORDS: usize = 8;
 const SUMMARY_WORDS: usize = 7;
 const ROOT_STATS_WORDS: usize = 7;
+const MATCHUP_PROFILE_WORDS: usize = 10;
+
+pub type CudaSimPolicyProfile = [u8; 5];
 
 const TOPO_VERTEX_HEX_COUNTS: usize = 0;
 const TOPO_VERTEX_HEXES: usize = TOPO_VERTEX_HEX_COUNTS + VERTEX_COUNT;
@@ -345,6 +348,7 @@ pub struct CudaSimEngine {
     rollout_action_kernel: CudaFunction,
     rollout_steps_kernel: CudaFunction,
     arena_kernel: CudaFunction,
+    profile_kernel: CudaFunction,
     summary_kernel: CudaFunction,
     expand_roots_kernel: CudaFunction,
     reduce_roots_kernel: CudaFunction,
@@ -355,6 +359,7 @@ pub struct CudaSimEngine {
     rng_device: CudaSlice<u64>,
     summary_device: CudaSlice<u32>,
     arena_action_count_device: CudaSlice<u32>,
+    matchup_profile_device: CudaSlice<u32>,
     search_state_device: CudaSlice<u32>,
     search_action_device: CudaSlice<u32>,
     search_status_device: CudaSlice<u32>,
@@ -368,6 +373,7 @@ pub struct CudaSimEngine {
     rng_host: Vec<u64>,
     summary_host: Vec<u32>,
     arena_action_count_host: Vec<u32>,
+    matchup_profile_host: Vec<u32>,
     root_action_host: Vec<u32>,
     root_base_index_host: Vec<u32>,
     root_stats_host: Vec<u64>,
@@ -393,6 +399,7 @@ impl CudaSimEngine {
         let rollout_action_kernel = module.load_function("generate_rollout_actions_batch_kernel")?;
         let rollout_steps_kernel = module.load_function("run_rollout_steps_kernel")?;
         let arena_kernel = module.load_function("run_games_kernel")?;
+        let profile_kernel = module.load_function("assign_rotating_profiles_kernel")?;
         let summary_kernel = module.load_function("summarize_games_kernel")?;
         let expand_roots_kernel = module.load_function("expand_root_rollouts_kernel")?;
         let reduce_roots_kernel = module.load_function("reduce_root_rollouts_kernel")?;
@@ -404,6 +411,7 @@ impl CudaSimEngine {
         let rng_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY)?;
         let summary_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY * SUMMARY_WORDS)?;
         let arena_action_count_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY)?;
+        let matchup_profile_device = stream.alloc_zeros(MATCHUP_PROFILE_WORDS)?;
         let search_state_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY * STATE_WORDS)?;
         let search_action_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY * ACTION_WORDS)?;
         let search_status_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY)?;
@@ -425,6 +433,7 @@ impl CudaSimEngine {
             rollout_action_kernel,
             rollout_steps_kernel,
             arena_kernel,
+            profile_kernel,
             summary_kernel,
             expand_roots_kernel,
             reduce_roots_kernel,
@@ -435,6 +444,7 @@ impl CudaSimEngine {
             rng_device,
             summary_device,
             arena_action_count_device,
+            matchup_profile_device,
             search_state_device,
             search_action_device,
             search_status_device,
@@ -448,6 +458,7 @@ impl CudaSimEngine {
             rng_host: Vec::new(),
             summary_host: Vec::new(),
             arena_action_count_host: Vec::new(),
+            matchup_profile_host: Vec::new(),
             root_action_host: Vec::new(),
             root_base_index_host: Vec::new(),
             root_stats_host: Vec::new(),
@@ -491,6 +502,44 @@ impl CudaSimEngine {
 
     pub fn seed_rollout_rng(&mut self, base_seed: u64) -> Result<(), CudaSimError> {
         self.seed_rollout_rng_with_offset(base_seed, 0)
+    }
+
+    fn assign_rotating_profiles(
+        &mut self,
+        candidate: CudaSimPolicyProfile,
+        baseline: CudaSimPolicyProfile,
+        game_offset: usize,
+    ) -> Result<(), CudaSimError> {
+        let count = self.resident_states;
+        if count == 0 {
+            return Err(CudaSimError::NoResidentBatch);
+        }
+        let game_offset = u64::try_from(game_offset).map_err(|_| CudaSimError::BatchTooLarge)?;
+        self.matchup_profile_host.clear();
+        self.matchup_profile_host
+            .extend(candidate.into_iter().map(u32::from));
+        self.matchup_profile_host
+            .extend(baseline.into_iter().map(u32::from));
+        self.stream.memcpy_htod(
+            &self.matchup_profile_host,
+            &mut self.matchup_profile_device,
+        )?;
+
+        let count_u32 = u32::try_from(count).map_err(|_| CudaSimError::BatchTooLarge)?;
+        let stride = count_u32;
+        let launch = LaunchConfig {
+            grid_dim: (count.div_ceil(THREADS_PER_BLOCK) as u32, 1, 1),
+            block_dim: (THREADS_PER_BLOCK as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut arguments = self.stream.launch_builder(&self.profile_kernel);
+        arguments.arg(&mut self.state_device);
+        arguments.arg(&self.matchup_profile_device);
+        arguments.arg(&game_offset);
+        arguments.arg(&stride);
+        arguments.arg(&count_u32);
+        unsafe { arguments.launch(launch)? };
+        Ok(())
     }
 
     fn seed_rollout_rng_with_offset(
@@ -668,6 +717,38 @@ impl CudaSimEngine {
         seed: u64,
         chunk_games: usize,
     ) -> Result<CudaSimArenaResult, CudaSimError> {
+        self.run_arena_campaign_inner(states, config, seed, chunk_games, None)
+    }
+
+    /// Runs a matched candidate-vs-baseline campaign while rotating the
+    /// candidate seat by global game index. Profiles are assigned on device so
+    /// large parameter sweeps can reuse the same CPU base-state corpus.
+    pub fn run_rotating_profile_campaign(
+        &mut self,
+        states: &[GameState],
+        candidate: CudaSimPolicyProfile,
+        baseline: CudaSimPolicyProfile,
+        config: CudaSimArenaConfig,
+        seed: u64,
+        chunk_games: usize,
+    ) -> Result<CudaSimArenaResult, CudaSimError> {
+        self.run_arena_campaign_inner(
+            states,
+            config,
+            seed,
+            chunk_games,
+            Some((candidate, baseline)),
+        )
+    }
+
+    fn run_arena_campaign_inner(
+        &mut self,
+        states: &[GameState],
+        config: CudaSimArenaConfig,
+        seed: u64,
+        chunk_games: usize,
+        profiles: Option<(CudaSimPolicyProfile, CudaSimPolicyProfile)>,
+    ) -> Result<CudaSimArenaResult, CudaSimError> {
         if chunk_games == 0 {
             return Err(CudaSimError::InvalidArenaChunk);
         }
@@ -691,6 +772,9 @@ impl CudaSimEngine {
         let mut game_offset = 0usize;
         for chunk in states.chunks(chunk_games) {
             self.upload_states(chunk)?;
+            if let Some((candidate, baseline)) = profiles {
+                self.assign_rotating_profiles(candidate, baseline, game_offset)?;
+            }
             self.seed_rollout_rng_with_offset(seed, game_offset)?;
             let chunk_result = self.run_arena_games_seeded(config)?;
             for player in 0..4 {

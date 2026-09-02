@@ -19,8 +19,14 @@ name = "exact-gpu-search-parity"
 path = "src/bin/exact-gpu-search-parity.rs"
 required-features = ["cuda-exact"]
 
+[[bin]]
+name = "gpu-sim-campaign"
+path = "src/bin/gpu-sim-campaign.rs"
+required-features = ["cuda-sim"]
+
 [features]
 cuda-exact = ["colonist-catan-search/cuda-exact"]
+cuda-sim = ["colonist-catan-search/cuda-sim"]
 
 [dependencies]
 colonist-catan-core = { path = "../catan-core" }

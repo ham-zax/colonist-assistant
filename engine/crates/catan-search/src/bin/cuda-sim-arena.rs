@@ -44,10 +44,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if campaign != result {
         return Err("arena campaign changed when resident chunk size changed".into());
     }
+    let neutral = [51u8; 5];
+    let profiled = engine.run_rotating_profile_campaign(
+        &states,
+        neutral,
+        neutral,
+        config,
+        seed,
+        11,
+    )?;
+    if profiled != result {
+        return Err("neutral rotating profile assignment changed the campaign".into());
+    }
 
     let wins = result.wins;
     println!(
-        "{{\"kind\":\"cuda-resident-arena\",\"games\":{},\"terminalGames\":{},\"truncatedGames\":{},\"totalActions\":{},\"chunkParity\":true,\"wins\":[{},{},{},{}],\"gpu\":\"{}\"}}",
+        "{{\"kind\":\"cuda-resident-arena\",\"games\":{},\"terminalGames\":{},\"truncatedGames\":{},\"totalActions\":{},\"chunkParity\":true,\"profileParity\":true,\"wins\":[{},{},{},{}],\"gpu\":\"{}\"}}",
         result.games.len(),
         result.terminal_games,
         result.truncated_games,

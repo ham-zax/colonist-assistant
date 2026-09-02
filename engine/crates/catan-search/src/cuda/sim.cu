@@ -2240,6 +2240,37 @@ extern "C" __global__ void run_rollout_steps_kernel(
     }
 }
 
+extern "C" __global__ void assign_rotating_profiles_kernel(
+    uint32_t *states,
+    const uint32_t *profiles,
+    uint64_t game_offset,
+    uint32_t stride,
+    uint32_t count
+) {
+    const uint32_t lane = blockIdx.x * blockDim.x + threadIdx.x;
+    if (lane >= count) {
+        return;
+    }
+    const uint32_t players = state_get(states, stride, STATE_NUM_PLAYERS, lane);
+    if (players == 0u || players > MAX_PLAYERS) {
+        return;
+    }
+    const uint32_t candidate = (uint32_t)((game_offset + (uint64_t)lane) % (uint64_t)players);
+    for (uint32_t player = 0u; player < players; ++player) {
+        const uint32_t profile_base = player == candidate ? 0u : 5u;
+        for (uint32_t index = 0u; index < 5u; ++index) {
+            player_set(
+                states,
+                stride,
+                lane,
+                player,
+                PLAYER_POLICY_PROFILE + index,
+                profiles[profile_base + index]
+            );
+        }
+    }
+}
+
 extern "C" __global__ void run_games_kernel(
     uint32_t *states,
     const uint32_t *topology,
