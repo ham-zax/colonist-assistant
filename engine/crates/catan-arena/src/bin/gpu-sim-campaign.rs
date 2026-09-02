@@ -21,6 +21,8 @@ struct Config {
     chunk_games: usize,
     grid_step: Option<u8>,
     player_trades_enabled: bool,
+    paired_seat_blocks: bool,
+    max_truncation_rate: f64,
     baseline_profile: CudaSimPolicyProfile,
     candidate_profiles: Vec<CudaSimPolicyProfile>,
 }
@@ -32,11 +34,13 @@ impl Default for Config {
             games: 256,
             board_seed: 20_261_000,
             simulation_seed: 20_262_000,
-            max_turns: 160,
-            max_actions: 4_096,
+            max_turns: 600,
+            max_actions: 20_000,
             chunk_games: 4_096,
             grid_step: None,
             player_trades_enabled: false,
+            paired_seat_blocks: false,
+            max_truncation_rate: 0.01,
             baseline_profile: NEUTRAL_PROFILE,
             candidate_profiles: Vec::new(),
         }
@@ -87,7 +91,10 @@ struct CampaignConfigReport {
     grid_step: Option<u8>,
     candidate_profile_count: usize,
     player_trades_enabled: bool,
+    paired_seat_blocks: bool,
+    max_truncation_rate: f64,
     candidate_seat_rotation: &'static str,
+    seed_matching: &'static str,
     baseline_profile: ProfileReport,
 }
 
@@ -230,8 +237,7 @@ impl TrialAccumulator {
             total_actions: self.total_actions,
             elapsed_ms: self.elapsed_seconds * 1_000.0,
             games_per_second: self.games as f64 / self.elapsed_seconds.max(f64::EPSILON),
-            actions_per_second: self.total_actions as f64
-                / self.elapsed_seconds.max(f64::EPSILON),
+            actions_per_second: self.total_actions as f64 / self.elapsed_seconds.max(f64::EPSILON),
         }
     }
 }
@@ -369,8 +375,7 @@ fn parse_args() -> Result<Option<Config>, String> {
                 config.board_seed = parse_value(flag, &next_value(&args, &mut index, flag)?)?;
             }
             "--simulation-seed" => {
-                config.simulation_seed =
-                    parse_value(flag, &next_value(&args, &mut index, flag)?)?;
+                config.simulation_seed = parse_value(flag, &next_value(&args, &mut index, flag)?)?;
             }
             "--max-turns" => {
                 config.max_turns = parse_value(flag, &next_value(&args, &mut index, flag)?)?;
@@ -386,6 +391,13 @@ fn parse_args() -> Result<Option<Config>, String> {
             }
             "--player-trades" => {
                 config.player_trades_enabled = true;
+            }
+            "--paired-seat-blocks" => {
+                config.paired_seat_blocks = true;
+            }
+            "--max-truncation-rate" => {
+                config.max_truncation_rate =
+                    parse_value(flag, &next_value(&args, &mut index, flag)?)?;
             }
             "--baseline-profile" => {
                 config.baseline_profile = parse_profile(&next_value(&args, &mut index, flag)?)?;
@@ -403,6 +415,19 @@ fn parse_args() -> Result<Option<Config>, String> {
     }
     if config.chunk_games == 0 {
         return Err("--chunk-games must be greater than zero".into());
+    }
+    if !(0.0..=1.0).contains(&config.max_truncation_rate) {
+        return Err("--max-truncation-rate must be in 0..=1".into());
+    }
+    if config.paired_seat_blocks {
+        for players in config.players.iter().copied() {
+            if config.games % players as usize != 0 {
+                return Err(format!(
+                    "--paired-seat-blocks requires --games to be divisible by every player count; {} games is not divisible by {players}",
+                    config.games
+                ));
+            }
+        }
     }
     append_grid_profiles(&mut config)?;
     if config.candidate_profiles.is_empty() {
@@ -427,11 +452,13 @@ fn print_help() {
          \x20 --games N                     Games per player-count/profile trial (default: 256)\n\
          \x20 --board-seed N                Base board seed (default: 20261000)\n\
          \x20 --simulation-seed N           Base GPU RNG seed (default: 20262000)\n\
-         \x20 --max-turns N                 Per-game turn ceiling (default: 160)\n\
-         \x20 --max-actions N               Per-game action ceiling (default: 4096)\n\
+         \x20 --max-turns N                 Per-game turn ceiling (default: 600)\n\
+         \x20 --max-actions N               Per-game action ceiling (default: 20000)\n\
          \x20 --chunk-games N               Max resident games per GPU chunk (default: 4096)\n\
          \x20 --grid-step N                  Grid 3 policy dimensions, or all 5 with --player-trades\n\
          \x20 --player-trades                Enable player-to-player trade simulation\n\
+         \x20 --paired-seat-blocks           Reuse board/chance seed across each seat rotation block\n\
+         \x20 --max-truncation-rate R        Reject strength rankings above this rate (default: 0.01)\n\
          \x20 --baseline-profile a,b,c,d,e  Baseline policy profile (0..102 each)\n\
          \x20 --candidate-profile a,b,c,d,e Candidate profile; repeat for an in-process sweep\n\
          \nProfile fields: balanced, expansion, city/development, trade-flexible, trade-resistant."
@@ -444,11 +471,17 @@ fn base_state_chunk(
     games: usize,
     seed: u64,
     player_trades_enabled: bool,
+    paired_seat_blocks: bool,
 ) -> Vec<GameState> {
     (0..games)
         .map(|local_game| {
             let global_game = global_game_offset + local_game;
-            let board_seed = cuda_sim_board_seed(seed, global_game as u64);
+            let board_index = if paired_seat_blocks {
+                global_game / players as usize
+            } else {
+                global_game
+            };
+            let board_seed = cuda_sim_board_seed(seed, board_index as u64);
             let mut state = GameState::standard(board_seed, players);
             state.player_trades_enabled = player_trades_enabled;
             state
@@ -466,10 +499,32 @@ fn wilson_interval(wins: u64, samples: u64) -> Option<[f64; 2]> {
     let z2 = z * z;
     let denominator = 1.0 + z2 / n;
     let center = (p + z2 / (2.0 * n)) / denominator;
-    let radius = z
-        * ((p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt())
-        / denominator;
+    let radius = z * ((p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt()) / denominator;
     Some([(center - radius).max(0.0), (center + radius).min(1.0)])
+}
+
+fn ensure_strength_truncation_bound(
+    trials: &[TrialReport],
+    max_truncation_rate: f64,
+) -> Result<(), String> {
+    for trial in trials {
+        if trial.games == 0 {
+            continue;
+        }
+        let rate = trial.truncated_games as f64 / trial.games as f64;
+        if rate > max_truncation_rate {
+            return Err(format!(
+                "strength ranking refused: {}-player profile {:?} truncated {}/{} games ({:.2}%), above --max-truncation-rate {:.2}%; raise --max-turns/--max-actions or explicitly relax the threshold",
+                trial.players,
+                trial.candidate_profile,
+                trial.truncated_games,
+                trial.games,
+                rate * 100.0,
+                max_truncation_rate * 100.0,
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn build_ranking(
@@ -544,7 +599,8 @@ fn build_ranking(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(config) = parse_args().map_err(|error| format!("{error}\nUse --help for usage."))? else {
+    let Some(config) = parse_args().map_err(|error| format!("{error}\nUse --help for usage."))?
+    else {
         print_help();
         return Ok(());
     };
@@ -568,18 +624,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 chunk_games,
                 config.board_seed,
                 config.player_trades_enabled,
+                config.paired_seat_blocks,
             );
             for (profile_index, candidate_profile) in
                 config.candidate_profiles.iter().copied().enumerate()
             {
                 let started = Instant::now();
-                let result = engine.run_rotating_profile_chunk(
+                let seed_block_games = if config.paired_seat_blocks {
+                    players as usize
+                } else {
+                    1
+                };
+                let result = engine.run_rotating_profile_chunk_with_seed_blocks(
                     &states,
                     candidate_profile,
                     config.baseline_profile,
                     arena_config,
                     config.simulation_seed,
                     game_offset,
+                    seed_block_games,
                 )?;
                 accumulators[profile_index].absorb(
                     players,
@@ -598,6 +661,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    ensure_strength_truncation_bound(&trials, config.max_truncation_rate)?;
     let ranking = build_ranking(&trials, &config.candidate_profiles, &config.players);
     let output = Output {
         kind: "cuda-resident-strength-campaign",
@@ -618,7 +682,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             grid_step: config.grid_step,
             candidate_profile_count: config.candidate_profiles.len(),
             player_trades_enabled: config.player_trades_enabled,
+            paired_seat_blocks: config.paired_seat_blocks,
+            max_truncation_rate: config.max_truncation_rate,
             candidate_seat_rotation: "global_game_index_mod_players",
+            seed_matching: if config.paired_seat_blocks {
+                "board_and_chance_rng_by_seat_rotation_block;policy_rng_by_global_game"
+            } else {
+                "board_policy_and_chance_rng_by_global_game"
+            },
             baseline_profile: config.baseline_profile.into(),
         },
         trials,

@@ -5,6 +5,7 @@
 // The resident lane supports the standard 2-4 player rules, including optional
 // player-to-player trading, so legality, transitions, rollouts, and arena games
 // can remain on device after the initial state upload.
+typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
 typedef unsigned long long uint64_t;
 
@@ -15,6 +16,9 @@ typedef unsigned long long uint64_t;
 #define MAX_VERTEX_ADJACENCY 3u
 #define SEED_INDEX_MIX 0xd1342543de82ef95ull
 #define ROOT_RNG_DOMAIN 0xa4093822299f31d0ull
+#define ROOT_CHANCE_RNG_DOMAIN 0x082efa98ec4e6c89ull
+#define CANDIDATE_PROPOSAL_RNG_DOMAIN 0x9216d5d98979fb1bull
+#define CANDIDATE_PROPOSAL_CHANCE_RNG_DOMAIN 0xd1310ba698dfb5acull
 
 #define STATE_NUM_PLAYERS 0u
 #define STATE_PHASE 1u
@@ -60,7 +64,8 @@ typedef unsigned long long uint64_t;
 #define STATE_ROADS 218u
 #define STATE_PLAYERS 290u
 #define PLAYER_STRIDE 28u
-#define STATE_WORDS 402u
+#define STATE_DOMESTIC_TRADE_DISABLED 402u
+#define STATE_WORDS 403u
 
 #define PLAYER_RESOURCES 0u
 #define PLAYER_DEVELOPMENT 5u
@@ -133,6 +138,14 @@ static const uint32_t ROAD_COST[5] = {1u, 1u, 0u, 0u, 0u};
 static const uint32_t SETTLEMENT_COST[5] = {1u, 1u, 1u, 1u, 0u};
 static const uint32_t CITY_COST[5] = {0u, 0u, 0u, 2u, 3u};
 static const uint32_t DEVELOPMENT_COST[5] = {0u, 0u, 1u, 1u, 1u};
+static const uint32_t DOMESTIC_PLAN_COSTS[6][5] = {
+    {1u, 1u, 0u, 0u, 0u},
+    {1u, 1u, 1u, 1u, 0u},
+    {0u, 0u, 0u, 2u, 3u},
+    {0u, 0u, 1u, 1u, 1u},
+    {2u, 2u, 1u, 1u, 0u},
+    {3u, 3u, 1u, 1u, 0u}
+};
 
 static inline __device__ uint32_t state_get(
     const uint32_t *states,
@@ -598,6 +611,23 @@ static inline __device__ void finish_if_won(
     }
 }
 
+static inline __device__ int domestic_trade_allowed_for(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t player
+) {
+    return state_get(states, stride, STATE_PLAYER_TRADES_ENABLED, lane) != 0u
+        && (state_get(states, stride, STATE_DOMESTIC_TRADE_DISABLED, lane)
+            & (1u << player)) == 0u;
+}
+
+static inline __device__ int phase_is_chance(uint32_t phase) {
+    return phase == PHASE_ROLL_CHANCE
+        || phase == PHASE_DEVELOPMENT_CHANCE
+        || phase == PHASE_RESOLVE_STEAL;
+}
+
 static inline __device__ uint32_t state_actor(
     const uint32_t *states,
     uint32_t stride,
@@ -934,21 +964,6 @@ static inline __device__ void write_offer_trade(
     }
 }
 
-static inline __device__ void write_one_for_one_offer(
-    uint32_t *actions,
-    uint32_t stride,
-    uint32_t lane,
-    uint32_t recipients,
-    uint32_t give,
-    uint32_t receive
-) {
-    uint32_t give_hand[5] = {0u, 0u, 0u, 0u, 0u};
-    uint32_t receive_hand[5] = {0u, 0u, 0u, 0u, 0u};
-    give_hand[give] = 1u;
-    receive_hand[receive] = 1u;
-    write_offer_trade(actions, stride, lane, recipients, give_hand, receive_hand);
-}
-
 static inline __device__ void write_counter_trade(
     uint32_t *actions,
     uint32_t stride,
@@ -967,132 +982,6 @@ static inline __device__ void write_counter_trade(
 static inline __device__ uint32_t resource_policy_score(uint32_t resource) {
     const uint32_t weights[5] = {100u, 100u, 78u, 125u, 115u};
     return resource < 5u ? weights[resource] : 1u;
-}
-
-static inline __device__ int domestic_trade_receive_desired(
-    const uint32_t *states,
-    uint32_t stride,
-    uint32_t lane,
-    uint32_t player,
-    uint32_t resource
-) {
-    if (resource_total(states, stride, lane, player)
-        > state_get(states, stride, STATE_DISCARD_LIMIT, lane)) {
-        return 1;
-    }
-    const uint32_t held = player_get(states, stride, lane, player, PLAYER_RESOURCES + resource);
-    if (held < ROAD_COST[resource]
-        || held < SETTLEMENT_COST[resource]
-        || held < CITY_COST[resource]
-        || held < DEVELOPMENT_COST[resource]) {
-        return 1;
-    }
-    const uint32_t road_settlement[5] = {2u, 2u, 1u, 1u, 0u};
-    const uint32_t two_roads_settlement[5] = {3u, 3u, 1u, 1u, 0u};
-    return held < road_settlement[resource] || held < two_roads_settlement[resource];
-}
-
-static inline __device__ uint32_t domestic_trade_receive_score(
-    const uint32_t *states,
-    uint32_t stride,
-    uint32_t lane,
-    uint32_t player,
-    uint32_t resource
-) {
-    const uint32_t held = player_get(states, stride, lane, player, PLAYER_RESOURCES + resource);
-    uint32_t score = resource_policy_score(resource);
-    if (held < ROAD_COST[resource]) {
-        score += 180u;
-    }
-    if (held < SETTLEMENT_COST[resource]) {
-        score += 620u;
-    }
-    if (held < CITY_COST[resource]) {
-        score += 700u;
-    }
-    if (held < DEVELOPMENT_COST[resource]) {
-        score += 320u;
-    }
-    return score;
-}
-
-static inline __device__ int trade_is_one_for_one(
-    const uint32_t *states,
-    uint32_t stride,
-    uint32_t lane,
-    uint32_t base,
-    uint32_t give,
-    uint32_t receive
-) {
-    if (trade_get(states, stride, lane, base, TRADE_PRESENT) == 0u) {
-        return 0;
-    }
-    for (uint32_t resource = 0u; resource < 5u; ++resource) {
-        const uint32_t expected_give = resource == give ? 1u : 0u;
-        const uint32_t expected_receive = resource == receive ? 1u : 0u;
-        if (trade_get(states, stride, lane, base, TRADE_GIVE + resource) != expected_give
-            || trade_get(states, stride, lane, base, TRADE_RECEIVE + resource)
-                != expected_receive) {
-            return 0;
-        }
-    }
-    return 1;
-}
-
-static inline __device__ int rejected_trade_is_one_for_one(
-    const uint32_t *states,
-    uint32_t stride,
-    uint32_t lane,
-    uint32_t give,
-    uint32_t receive
-) {
-    return trade_is_one_for_one(
-        states, stride, lane, STATE_LAST_REJECTED_TRADE, give, receive
-    );
-}
-
-static inline __device__ int choose_one_for_one_domestic_trade(
-    const uint32_t *states,
-    uint32_t stride,
-    uint32_t lane,
-    uint32_t player,
-    uint64_t *rng,
-    int avoid_last_rejected,
-    uint32_t *selected_give,
-    uint32_t *selected_receive
-) {
-    uint32_t total_weight = 0u;
-    int found = 0;
-    for (uint32_t receive = 0u; receive < 5u; ++receive) {
-        if (!domestic_trade_receive_desired(states, stride, lane, player, receive)) {
-            continue;
-        }
-        const uint32_t receive_score = domestic_trade_receive_score(
-            states, stride, lane, player, receive
-        );
-        for (uint32_t give = 0u; give < 5u; ++give) {
-            if (give == receive) {
-                continue;
-            }
-            const uint32_t held = player_get(
-                states, stride, lane, player, PLAYER_RESOURCES + give
-            );
-            if (held == 0u
-                || (avoid_last_rejected
-                    && rejected_trade_is_one_for_one(states, stride, lane, give, receive))) {
-                continue;
-            }
-            uint32_t weight = receive_score * (held + 1u) * 100u
-                / (resource_policy_score(give) + 50u);
-            weight = weight == 0u ? 1u : weight;
-            if (weighted_reservoir_select(rng, &total_weight, weight)) {
-                *selected_give = give;
-                *selected_receive = receive;
-            }
-            found = 1;
-        }
-    }
-    return found;
 }
 
 static inline __device__ uint32_t trade_bundle_policy_value(
@@ -1160,6 +1049,517 @@ static inline __device__ int fixed_hand_lex_less(
         }
     }
     return 0;
+}
+
+static inline __device__ uint32_t encode_base4_hand(const uint32_t hand[5]) {
+    uint32_t code = 0u;
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        code = code * 4u + hand[resource];
+    }
+    return code;
+}
+
+static inline __device__ void decode_base4_hand(uint32_t code, uint32_t hand[5]) {
+    for (int resource = 4; resource >= 0; --resource) {
+        hand[resource] = code % 4u;
+        code /= 4u;
+    }
+}
+
+static inline __device__ uint32_t encode_base5_hand(const uint32_t hand[5]) {
+    uint32_t code = 0u;
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        code = code * 5u + hand[resource];
+    }
+    return code;
+}
+
+static inline __device__ void decode_base5_hand(uint32_t code, uint32_t hand[5]) {
+    for (int resource = 4; resource >= 0; --resource) {
+        hand[resource] = code % 5u;
+        code /= 5u;
+    }
+}
+
+static inline __device__ void append_domestic_request(
+    uint16_t requests[32],
+    uint32_t *count,
+    const uint32_t request[5]
+) {
+    const uint32_t code = encode_base4_hand(request);
+    for (uint32_t index = 0u; index < *count; ++index) {
+        if (requests[index] == code) {
+            return;
+        }
+    }
+    if (*count < 32u) {
+        requests[*count] = (uint16_t)code;
+        *count += 1u;
+    }
+}
+
+static inline __device__ uint32_t build_domestic_requests(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t player,
+    uint16_t requests[32]
+) {
+    uint32_t count = 0u;
+    for (uint32_t plan = 0u; plan < 6u; ++plan) {
+        uint32_t missing[5];
+        uint32_t missing_total = 0u;
+        for (uint32_t resource = 0u; resource < 5u; ++resource) {
+            const uint32_t held = player_get(
+                states, stride, lane, player, PLAYER_RESOURCES + resource
+            );
+            const uint32_t required = DOMESTIC_PLAN_COSTS[plan][resource];
+            missing[resource] = required > held ? required - held : 0u;
+            missing_total += missing[resource];
+            for (uint32_t amount = 1u; amount <= missing[resource]; ++amount) {
+                uint32_t request[5] = {0u, 0u, 0u, 0u, 0u};
+                request[resource] = amount;
+                append_domestic_request(requests, &count, request);
+            }
+        }
+        for (uint32_t first = 0u; first < 5u; ++first) {
+            if (missing[first] == 0u) {
+                continue;
+            }
+            for (uint32_t second = first + 1u; second < 5u; ++second) {
+                if (missing[second] == 0u) {
+                    continue;
+                }
+                uint32_t request[5] = {0u, 0u, 0u, 0u, 0u};
+                request[first] = 1u;
+                request[second] = 1u;
+                append_domestic_request(requests, &count, request);
+            }
+        }
+        if (missing_total > 1u) {
+            append_domestic_request(requests, &count, missing);
+        }
+    }
+    if (resource_total(states, stride, lane, player)
+        > state_get(states, stride, STATE_DISCARD_LIMIT, lane)) {
+        for (uint32_t resource = 0u; resource < 5u; ++resource) {
+            uint32_t request[5] = {0u, 0u, 0u, 0u, 0u};
+            request[resource] = 1u;
+            append_domestic_request(requests, &count, request);
+        }
+    }
+    return count;
+}
+
+static inline __device__ void nearest_domestic_plan(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t player,
+    uint32_t nearest[5]
+) {
+    uint32_t best_missing = 0xffffffffu;
+    for (uint32_t plan = 0u; plan < 6u; ++plan) {
+        uint32_t missing = 0u;
+        for (uint32_t resource = 0u; resource < 5u; ++resource) {
+            const uint32_t held = player_get(
+                states, stride, lane, player, PLAYER_RESOURCES + resource
+            );
+            const uint32_t required = DOMESTIC_PLAN_COSTS[plan][resource];
+            missing += required > held ? required - held : 0u;
+        }
+        if (missing < best_missing) {
+            best_missing = missing;
+            for (uint32_t resource = 0u; resource < 5u; ++resource) {
+                nearest[resource] = DOMESTIC_PLAN_COSTS[plan][resource];
+            }
+        }
+    }
+}
+
+static inline __device__ float domestic_give_opportunity_cost(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t player,
+    const uint32_t nearest[5],
+    const uint32_t give[5]
+) {
+    float score = 0.0f;
+    uint32_t total = 0u;
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        const uint32_t held = player_get(
+            states, stride, lane, player, PLAYER_RESOURCES + resource
+        );
+        const uint32_t surplus = held > nearest[resource] ? held - nearest[resource] : 0u;
+        const uint32_t cheap = give[resource] < surplus ? give[resource] : surplus;
+        const uint32_t protected_count = give[resource] - cheap;
+        score += (float)cheap * 0.08f + (float)protected_count;
+        total += give[resource];
+    }
+    return score + (float)total * 0.01f;
+}
+
+static inline __device__ uint32_t build_mixed_domestic_bundles(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t player,
+    uint16_t mixed_codes[48]
+) {
+    uint32_t nearest[5];
+    nearest_domestic_plan(states, stride, lane, player, nearest);
+    uint16_t frontier[126];
+    uint32_t frontier_count = 1u;
+    frontier[0] = 0u;
+    uint32_t mixed_count = 0u;
+    uint32_t expansions = 0u;
+
+    while (frontier_count > 0u && expansions < 96u && mixed_count < 48u) {
+        uint32_t best_index = 0u;
+        uint32_t best_hand[5];
+        decode_base5_hand((uint32_t)frontier[0], best_hand);
+        float best_score = domestic_give_opportunity_cost(
+            states, stride, lane, player, nearest, best_hand
+        );
+        for (uint32_t index = 1u; index < frontier_count; ++index) {
+            uint32_t hand[5];
+            decode_base5_hand((uint32_t)frontier[index], hand);
+            const float score = domestic_give_opportunity_cost(
+                states, stride, lane, player, nearest, hand
+            );
+            if (score < best_score
+                || (score == best_score && frontier[index] < frontier[best_index])) {
+                best_index = index;
+                best_score = score;
+                copy_fixed_hand(best_hand, hand);
+            }
+        }
+
+        const uint16_t code = frontier[best_index];
+        for (uint32_t index = best_index + 1u; index < frontier_count; ++index) {
+            frontier[index - 1u] = frontier[index];
+        }
+        frontier_count -= 1u;
+        expansions += 1u;
+
+        uint32_t current[5];
+        decode_base5_hand((uint32_t)code, current);
+        const uint32_t total = hand_total_fixed(current);
+        uint32_t kinds = 0u;
+        for (uint32_t resource = 0u; resource < 5u; ++resource) {
+            kinds += current[resource] > 0u ? 1u : 0u;
+        }
+        if (total >= 2u && kinds >= 2u) {
+            mixed_codes[mixed_count++] = code;
+        }
+        if (total >= 4u) {
+            continue;
+        }
+
+        for (uint32_t resource = 0u; resource < 5u; ++resource) {
+            const uint32_t held = player_get(
+                states, stride, lane, player, PLAYER_RESOURCES + resource
+            );
+            if (current[resource] >= held) {
+                continue;
+            }
+            uint32_t next[5];
+            copy_fixed_hand(next, current);
+            next[resource] += 1u;
+            const uint16_t next_code = (uint16_t)encode_base5_hand(next);
+            int duplicate = 0;
+            for (uint32_t index = 0u; index < frontier_count; ++index) {
+                if (frontier[index] == next_code) {
+                    duplicate = 1;
+                    break;
+                }
+            }
+            if (!duplicate) {
+                for (uint32_t index = 0u; index < mixed_count; ++index) {
+                    if (mixed_codes[index] == next_code) {
+                        duplicate = 1;
+                        break;
+                    }
+                }
+            }
+            if (!duplicate && frontier_count < 126u) {
+                frontier[frontier_count++] = next_code;
+            }
+        }
+    }
+    return mixed_count;
+}
+
+static inline __device__ int decimal_debug_lex_less(
+    uint32_t left,
+    uint32_t right,
+    uint32_t end_character
+) {
+    if (left == right) {
+        return 0;
+    }
+    uint32_t left_power = 1u;
+    uint32_t right_power = 1u;
+    while (left / left_power >= 10u) {
+        left_power *= 10u;
+    }
+    while (right / right_power >= 10u) {
+        right_power *= 10u;
+    }
+    uint32_t left_rest = left;
+    uint32_t right_rest = right;
+    for (;;) {
+        const uint32_t left_digit = left_rest / left_power;
+        const uint32_t right_digit = right_rest / right_power;
+        if (left_digit != right_digit) {
+            return left_digit < right_digit;
+        }
+        left_rest %= left_power;
+        right_rest %= right_power;
+        const int left_done = left_power == 1u;
+        const int right_done = right_power == 1u;
+        if (left_done || right_done) {
+            if (left_done && !right_done) {
+                const uint32_t next_power = right_power / 10u;
+                const uint32_t next_digit = right_rest / next_power;
+                return end_character < (uint32_t)('0' + next_digit);
+            }
+            if (!left_done && right_done) {
+                const uint32_t next_power = left_power / 10u;
+                const uint32_t next_digit = left_rest / next_power;
+                return (uint32_t)('0' + next_digit) < end_character;
+            }
+            return 0;
+        }
+        left_power /= 10u;
+        right_power /= 10u;
+    }
+}
+
+static inline __device__ int offer_debug_lex_less(
+    const uint32_t give[5],
+    const uint32_t receive[5],
+    const uint32_t best_give[5],
+    const uint32_t best_receive[5]
+) {
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        if (give[resource] != best_give[resource]) {
+            const uint32_t end_character = resource < 4u ? (uint32_t)',' : (uint32_t)']';
+            return decimal_debug_lex_less(
+                give[resource], best_give[resource], end_character
+            );
+        }
+    }
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        if (receive[resource] != best_receive[resource]) {
+            const uint32_t end_character = resource < 4u ? (uint32_t)',' : (uint32_t)']';
+            return decimal_debug_lex_less(
+                receive[resource], best_receive[resource], end_character
+            );
+        }
+    }
+    return 0;
+}
+
+static inline __device__ int rejected_trade_matches(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    const uint32_t give[5],
+    const uint32_t receive[5]
+) {
+    if (trade_get(states, stride, lane, STATE_LAST_REJECTED_TRADE, TRADE_PRESENT) == 0u) {
+        return 0;
+    }
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        if (trade_get(
+                states, stride, lane, STATE_LAST_REJECTED_TRADE, TRADE_GIVE + resource
+            ) != give[resource]
+            || trade_get(
+                states, stride, lane, STATE_LAST_REJECTED_TRADE, TRADE_RECEIVE + resource
+            ) != receive[resource]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static inline __device__ float domestic_offer_rules_score(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t player,
+    const uint32_t give[5],
+    const uint32_t receive[5]
+) {
+    uint32_t after[5];
+    uint32_t give_total = 0u;
+    uint32_t receive_total = 0u;
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        const uint32_t held = player_get(
+            states, stride, lane, player, PLAYER_RESOURCES + resource
+        );
+        after[resource] = held - give[resource] + receive[resource];
+        give_total += give[resource];
+        receive_total += receive[resource];
+    }
+    float completed = 0.0f;
+    if (fixed_hand_contains(after, ROAD_COST)) {
+        completed = fmaxf(completed, 1.2f);
+    }
+    if (fixed_hand_contains(after, SETTLEMENT_COST)) {
+        completed = fmaxf(completed, 7.5f);
+    }
+    if (fixed_hand_contains(after, CITY_COST)) {
+        completed = fmaxf(completed, 7.0f);
+    }
+    if (fixed_hand_contains(after, DEVELOPMENT_COST)) {
+        completed = fmaxf(completed, 3.4f);
+    }
+    if (fixed_hand_contains(after, DOMESTIC_PLAN_COSTS[4])) {
+        completed = fmaxf(completed, 8.8f);
+    }
+    if (fixed_hand_contains(after, DOMESTIC_PLAN_COSTS[5])) {
+        completed = fmaxf(completed, 9.4f);
+    }
+
+    float nearest = 3.402823466e+38F;
+    for (uint32_t plan = 0u; plan < 4u; ++plan) {
+        uint32_t missing = 0u;
+        for (uint32_t resource = 0u; resource < 5u; ++resource) {
+            const uint32_t required = DOMESTIC_PLAN_COSTS[plan][resource];
+            missing += required > after[resource] ? required - after[resource] : 0u;
+        }
+        nearest = fminf(nearest, (float)missing);
+    }
+    float safety = 0.0f;
+    if (resource_total(states, stride, lane, player)
+        > state_get(states, stride, STATE_DISCARD_LIMIT, lane)
+        && give_total > receive_total) {
+        safety = (float)(give_total - receive_total) * 0.8f;
+    }
+    return completed
+        + 1.5f / (1.0f + nearest)
+        + (float)receive_total * 0.32f
+        - (float)give_total * 0.18f
+        + safety;
+}
+
+static inline __device__ void consider_best_domestic_offer(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t player,
+    const uint32_t give[5],
+    const uint32_t receive[5],
+    int *found,
+    float *best_score,
+    uint32_t best_give[5],
+    uint32_t best_receive[5]
+) {
+    if (!fixed_hands_disjoint(give, receive)
+        || rejected_trade_matches(states, stride, lane, give, receive)) {
+        return;
+    }
+    const uint32_t receive_total = hand_total_fixed(receive);
+    uint32_t requested_resource = 0xffffffffu;
+    if (receive_total == 1u) {
+        for (uint32_t resource = 0u; resource < 5u; ++resource) {
+            if (receive[resource] == 1u) {
+                requested_resource = resource;
+                break;
+            }
+        }
+    }
+    if (requested_resource != 0xffffffffu
+        && state_get(states, stride, STATE_BANK + requested_resource, lane) > 0u) {
+        for (uint32_t resource = 0u; resource < 5u; ++resource) {
+            if (give[resource] >= trade_ratio(states, stride, lane, player, resource)) {
+                return;
+            }
+        }
+    }
+
+    const float score = domestic_offer_rules_score(
+        states, stride, lane, player, give, receive
+    );
+    if (!*found
+        || score > *best_score
+        || (score == *best_score
+            && offer_debug_lex_less(give, receive, best_give, best_receive))) {
+        *best_score = score;
+        copy_fixed_hand(best_give, give);
+        copy_fixed_hand(best_receive, receive);
+        *found = 1;
+    }
+}
+
+static inline __device__ int choose_best_domestic_trade_offer(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t player,
+    uint32_t selected_give[5],
+    uint32_t selected_receive[5]
+) {
+    uint16_t requests[32];
+    const uint32_t request_count = build_domestic_requests(
+        states, stride, lane, player, requests
+    );
+    if (request_count == 0u) {
+        return 0;
+    }
+
+    uint16_t mixed_codes[48];
+    const uint32_t mixed_count = build_mixed_domestic_bundles(
+        states, stride, lane, player, mixed_codes
+    );
+
+    int found = 0;
+    float best_score = -3.402823466e+38F;
+    for (uint32_t request_index = 0u; request_index < request_count; ++request_index) {
+        uint32_t receive[5];
+        decode_base4_hand((uint32_t)requests[request_index], receive);
+        for (uint32_t resource = 0u; resource < 5u; ++resource) {
+            const uint32_t held = player_get(
+                states, stride, lane, player, PLAYER_RESOURCES + resource
+            );
+            for (uint32_t amount = 1u; amount <= held; ++amount) {
+                uint32_t give[5] = {0u, 0u, 0u, 0u, 0u};
+                give[resource] = amount;
+                consider_best_domestic_offer(
+                    states,
+                    stride,
+                    lane,
+                    player,
+                    give,
+                    receive,
+                    &found,
+                    &best_score,
+                    selected_give,
+                    selected_receive
+                );
+            }
+        }
+        for (uint32_t mixed = 0u; mixed < mixed_count; ++mixed) {
+            uint32_t give[5];
+            decode_base5_hand((uint32_t)mixed_codes[mixed], give);
+            consider_best_domestic_offer(
+                states,
+                stride,
+                lane,
+                player,
+                give,
+                receive,
+                &found,
+                &best_score,
+                selected_give,
+                selected_receive
+            );
+        }
+    }
+    return found;
 }
 
 static inline __device__ float counter_hand_score(
@@ -1783,12 +2183,16 @@ static inline __device__ void generate_rollout_action_lane(
     const uint32_t *topology,
     uint32_t *actions,
     uint64_t *rng_states,
+    uint64_t *chance_rng_states,
     uint32_t stride,
     uint32_t lane
 ) {
     clear_action(actions, stride, lane);
-    uint64_t rng = rng_states[lane];
     const uint32_t phase = state_get(states, stride, STATE_PHASE, lane);
+    const int chance_phase = phase == PHASE_ROLL_CHANCE
+        || phase == PHASE_DEVELOPMENT_CHANCE
+        || phase == PHASE_RESOLVE_STEAL;
+    uint64_t rng = chance_phase ? chance_rng_states[lane] : rng_states[lane];
     const uint32_t current = state_get(states, stride, STATE_CURRENT_PLAYER, lane);
     const uint32_t players = state_get(states, stride, STATE_NUM_PLAYERS, lane);
     uint32_t seen = 0u;
@@ -2100,33 +2504,6 @@ static inline __device__ void generate_rollout_action_lane(
             );
         }
 
-        // CPU legal_actions() ranks/truncates domestic offers to 96 entries.
-        // With at most three cards in hand, the complete pre-cap offer set is
-        // bounded below that limit, so any transition-valid 1-for-1 offer is
-        // guaranteed to survive CPU admission. Outside that region this
-        // rollout policy simply chooses another legal family rather than
-        // approximating the CPU offer ranking.
-        if (state_get(states, stride, STATE_PLAYER_TRADES_ENABLED, lane) != 0u
-            && state_get(states, stride, STATE_DOMESTIC_TRADE_COUNT, lane) < 2u
-            && resource_total(states, stride, lane, current) <= 3u) {
-            uint32_t give = 0u;
-            uint32_t receive = 0u;
-            if (choose_one_for_one_domestic_trade(
-                states, stride, lane, current, &rng, 1, &give, &receive
-            )) {
-                const uint32_t recipients = ((1u << players) - 1u) & ~(1u << current);
-                const uint32_t base = 320u
-                    + domestic_trade_receive_score(states, stride, lane, current, receive) / 2u;
-                const uint32_t weight = profile_scaled_weight(
-                    states, stride, lane, current, 3u, base
-                );
-                if (weighted_reservoir_select(&rng, &family_weight, weight)) {
-                    write_one_for_one_offer(
-                        actions, stride, lane, recipients, give, receive
-                    );
-                }
-            }
-        }
 
         if (development_playable(states, stride, lane, current, 0u)) {
             uint32_t hex = 0u;
@@ -2269,12 +2646,52 @@ static inline __device__ void generate_rollout_action_lane(
                 0u
             );
         }
+
+        // Domestic offers are expensive to rank because the CPU rules contract
+        // includes mixed and multi-card bundles. Keep the complete fidelity
+        // search lazy: first let the domestic family compete using a cheap
+        // build-readiness weight, and only materialize/rank the top CPU-admitted
+        // offer when that family actually wins the weighted draw.
+        if (domestic_trade_allowed_for(states, stride, lane, current)
+            && state_get(states, stride, STATE_DOMESTIC_TRADE_COUNT, lane) < 2u
+            && resource_total(states, stride, lane, current) > 0u) {
+            uint32_t nearest_missing = 0xffffffffu;
+            for (uint32_t plan = 0u; plan < 6u; ++plan) {
+                uint32_t missing = 0u;
+                for (uint32_t resource = 0u; resource < 5u; ++resource) {
+                    const uint32_t held = player_get(
+                        states, stride, lane, current, PLAYER_RESOURCES + resource
+                    );
+                    const uint32_t required = DOMESTIC_PLAN_COSTS[plan][resource];
+                    missing += required > held ? required - held : 0u;
+                }
+                nearest_missing = missing < nearest_missing ? missing : nearest_missing;
+            }
+            const uint32_t hand_total = resource_total(states, stride, lane, current);
+            const uint32_t overflow = hand_total
+                > state_get(states, stride, STATE_DISCARD_LIMIT, lane)
+                ? hand_total - state_get(states, stride, STATE_DISCARD_LIMIT, lane)
+                : 0u;
+            const uint32_t base = 320u
+                + 720u / (1u + nearest_missing)
+                + (overflow < 8u ? overflow : 8u) * 70u;
+            const uint32_t weight = profile_scaled_weight(
+                states, stride, lane, current, 3u, base
+            );
+            if (weighted_reservoir_select(&rng, &family_weight, weight)) {
+                uint32_t give[5];
+                uint32_t receive[5];
+                if (choose_best_domestic_trade_offer(
+                    states, stride, lane, current, give, receive
+                )) {
+                    const uint32_t recipients = ((1u << players) - 1u) & ~(1u << current);
+                    write_offer_trade(actions, stride, lane, recipients, give, receive);
+                }
+            }
+        }
         seen = family_weight > 0u ? 1u : 0u;
     } else if (phase == PHASE_TRADE_RESPONSES) {
         if (trade_get(states, stride, lane, STATE_TRADE, TRADE_PRESENT) != 0u) {
-            const uint32_t enabled = state_get(
-                states, stride, STATE_PLAYER_TRADES_ENABLED, lane
-            );
             uint32_t total_weight = 0u;
             if (trade_complete(states, stride, lane, STATE_TRADE)) {
                 const uint32_t creator = trade_get(
@@ -2292,7 +2709,8 @@ static inline __device__ void generate_rollout_action_lane(
                     0u,
                     0u
                 );
-                if (enabled != 0u && creator < players) {
+                if (creator < players
+                    && domestic_trade_allowed_for(states, stride, lane, creator)) {
                     const uint32_t accepted = trade_get(
                         states, stride, lane, STATE_TRADE, TRADE_ACCEPTED
                     );
@@ -2348,7 +2766,7 @@ static inline __device__ void generate_rollout_action_lane(
                         0u,
                         0u
                     );
-                    if (enabled != 0u
+                    if (domestic_trade_allowed_for(states, stride, lane, actor)
                         && player_contains_trade_hand(
                             states, stride, lane, actor, STATE_TRADE, TRADE_RECEIVE
                         )) {
@@ -2376,7 +2794,7 @@ static inline __device__ void generate_rollout_action_lane(
                             0u
                         );
                     }
-                    if (enabled != 0u
+                    if (domestic_trade_allowed_for(states, stride, lane, actor)
                         && state_get(
                             states, stride, STATE_TRADE_NEGOTIATION_ROUND, lane
                         ) < 1u) {
@@ -2428,7 +2846,11 @@ static inline __device__ void generate_rollout_action_lane(
     if (seen == 0u) {
         write_action(actions, stride, lane, 254u, 0u, 0u, 0u);
     }
-    rng_states[lane] = rng;
+    if (chance_phase) {
+        chance_rng_states[lane] = rng;
+    } else {
+        rng_states[lane] = rng;
+    }
 }
 
 static inline __device__ void apply_transition_lane(
@@ -2945,11 +3367,10 @@ static inline __device__ void apply_transition_lane(
     }
 
     if (tag == ACTION_OFFER_TRADE) {
-        const uint32_t enabled = state_get(states, stride, STATE_PLAYER_TRADES_ENABLED, lane);
         const uint32_t recipients = action_get(actions, stride, ACTION_ARG0, lane);
         const uint32_t give_start = ACTION_ARG0 + 1u;
         const uint32_t receive_start = ACTION_ARG0 + 6u;
-        if (enabled == 0u
+        if (!domestic_trade_allowed_for(states, stride, lane, current)
             || phase != PHASE_MAIN
             || recipients == 0u
             || (recipients & (1u << current)) != 0u
@@ -3010,6 +3431,7 @@ static inline __device__ void apply_transition_lane(
 
     if (tag == ACTION_RESPOND_TRADE) {
         const uint32_t accept = action_get(actions, stride, ACTION_ARG0, lane);
+        const uint32_t cursor = state_get(states, stride, STATE_TRADE_CURSOR, lane);
         if (phase != PHASE_TRADE_RESPONSES
             || trade_get(states, stride, lane, STATE_TRADE, TRADE_PRESENT) == 0u
             || trade_complete(states, stride, lane, STATE_TRADE)) {
@@ -3018,11 +3440,10 @@ static inline __device__ void apply_transition_lane(
         }
         if (accept > 1u
             || (accept != 0u
-                && state_get(states, stride, STATE_PLAYER_TRADES_ENABLED, lane) == 0u)) {
+                && !domestic_trade_allowed_for(states, stride, lane, cursor))) {
             status[lane] = STATUS_INVALID_ACTION;
             return;
         }
-        const uint32_t cursor = state_get(states, stride, STATE_TRADE_CURSOR, lane);
         const uint32_t recipients = trade_get(
             states, stride, lane, STATE_TRADE, TRADE_RECIPIENTS
         );
@@ -3060,7 +3481,8 @@ static inline __device__ void apply_transition_lane(
     if (tag == ACTION_COUNTER_TRADE) {
         const uint32_t give_start = ACTION_ARG0;
         const uint32_t receive_start = ACTION_ARG0 + 5u;
-        if (state_get(states, stride, STATE_PLAYER_TRADES_ENABLED, lane) == 0u
+        const uint32_t actor = state_get(states, stride, STATE_TRADE_CURSOR, lane);
+        if (!domestic_trade_allowed_for(states, stride, lane, actor)
             || phase != PHASE_TRADE_RESPONSES
             || state_get(states, stride, STATE_TRADE_NEGOTIATION_ROUND, lane) >= 1u
             || trade_get(states, stride, lane, STATE_TRADE, TRADE_PRESENT) == 0u
@@ -3068,7 +3490,6 @@ static inline __device__ void apply_transition_lane(
             status[lane] = STATUS_INVALID_PHASE;
             return;
         }
-        const uint32_t actor = state_get(states, stride, STATE_TRADE_CURSOR, lane);
         if (actor >= players
             || action_hand_total(actions, stride, lane, give_start) == 0u
             || action_hand_total(actions, stride, lane, receive_start) == 0u
@@ -3126,14 +3547,14 @@ static inline __device__ void apply_transition_lane(
 
     if (tag == ACTION_CONFIRM_TRADE) {
         const uint32_t partner = action_get(actions, stride, ACTION_ARG0, lane);
-        if (state_get(states, stride, STATE_PLAYER_TRADES_ENABLED, lane) == 0u
+        const uint32_t creator = trade_get(states, stride, lane, STATE_TRADE, TRADE_CREATOR);
+        if (!domestic_trade_allowed_for(states, stride, lane, creator)
             || phase != PHASE_TRADE_RESPONSES
             || trade_get(states, stride, lane, STATE_TRADE, TRADE_PRESENT) == 0u
             || !trade_complete(states, stride, lane, STATE_TRADE)) {
             status[lane] = STATUS_INVALID_PHASE;
             return;
         }
-        const uint32_t creator = trade_get(states, stride, lane, STATE_TRADE, TRADE_CREATOR);
         const uint32_t accepted = trade_get(states, stride, lane, STATE_TRADE, TRADE_ACCEPTED);
         if (creator >= players
             || partner >= players
@@ -3230,6 +3651,7 @@ extern "C" __global__ void generate_rollout_actions_batch_kernel(
     const uint32_t *topology,
     uint32_t *actions,
     uint64_t *rng_states,
+    uint64_t *chance_rng_states,
     uint32_t stride,
     uint32_t count
 ) {
@@ -3237,7 +3659,9 @@ extern "C" __global__ void generate_rollout_actions_batch_kernel(
     if (lane >= count) {
         return;
     }
-    generate_rollout_action_lane(states, topology, actions, rng_states, stride, lane);
+    generate_rollout_action_lane(
+        states, topology, actions, rng_states, chance_rng_states, stride, lane
+    );
 }
 
 extern "C" __global__ void apply_transition_batch_kernel(
@@ -3261,6 +3685,7 @@ extern "C" __global__ void run_rollout_steps_kernel(
     uint32_t *actions,
     uint32_t *status,
     uint64_t *rng_states,
+    uint64_t *chance_rng_states,
     uint32_t stride,
     uint32_t count,
     uint32_t steps
@@ -3270,7 +3695,9 @@ extern "C" __global__ void run_rollout_steps_kernel(
         return;
     }
     for (uint32_t step = 0u; step < steps && status[lane] == STATUS_OK; ++step) {
-        generate_rollout_action_lane(states, topology, actions, rng_states, stride, lane);
+        generate_rollout_action_lane(
+            states, topology, actions, rng_states, chance_rng_states, stride, lane
+        );
         apply_transition_lane(states, topology, actions, status, stride, lane);
         if (state_get(states, stride, STATE_PHASE, lane) == PHASE_FINISHED) {
             break;
@@ -3309,12 +3736,264 @@ extern "C" __global__ void assign_rotating_profiles_kernel(
     }
 }
 
+extern "C" __global__ void run_until_candidate_kernel(
+    uint32_t *states,
+    const uint32_t *topology,
+    uint32_t *actions,
+    uint32_t *status,
+    uint64_t *rng_states,
+    uint64_t *chance_rng_states,
+    uint32_t *action_counts,
+    uint32_t *candidate_ready,
+    uint64_t game_offset,
+    uint32_t stride,
+    uint32_t count,
+    uint32_t max_actions,
+    uint32_t max_turns
+) {
+    const uint32_t lane = blockIdx.x * blockDim.x + threadIdx.x;
+    if (lane >= count) {
+        return;
+    }
+    candidate_ready[lane] = 0u;
+    uint32_t executed = action_counts[lane];
+    while (executed < max_actions && status[lane] == STATUS_OK) {
+        const uint32_t phase = state_get(states, stride, STATE_PHASE, lane);
+        if (phase == PHASE_FINISHED
+            || state_get(states, stride, STATE_TURN, lane) >= max_turns) {
+            break;
+        }
+        const uint32_t players = state_get(states, stride, STATE_NUM_PLAYERS, lane);
+        if (players == 0u || players > MAX_PLAYERS) {
+            status[lane] = STATUS_INVALID_STATE;
+            break;
+        }
+        const uint32_t candidate = (uint32_t)(
+            (game_offset + (uint64_t)lane) % (uint64_t)players
+        );
+        if (!phase_is_chance(phase) && state_actor(states, stride, lane) == candidate) {
+            candidate_ready[lane] = 1u;
+            break;
+        }
+        generate_rollout_action_lane(
+            states, topology, actions, rng_states, chance_rng_states, stride, lane
+        );
+        apply_transition_lane(states, topology, actions, status, stride, lane);
+        if (status[lane] == STATUS_OK) {
+            executed += 1u;
+        }
+    }
+    action_counts[lane] = executed;
+}
+
+extern "C" __global__ void apply_candidate_actions_kernel(
+    uint32_t *states,
+    const uint32_t *topology,
+    const uint32_t *actions,
+    uint32_t *status,
+    uint32_t *action_counts,
+    const uint32_t *candidate_ready,
+    uint32_t stride,
+    uint32_t count
+) {
+    const uint32_t lane = blockIdx.x * blockDim.x + threadIdx.x;
+    if (lane >= count || candidate_ready[lane] == 0u || status[lane] != STATUS_OK) {
+        return;
+    }
+    apply_transition_lane(states, topology, actions, status, stride, lane);
+    if (status[lane] == STATUS_OK) {
+        action_counts[lane] += 1u;
+    }
+}
+
+extern "C" __global__ void sample_candidate_root_actions_kernel(
+    const uint32_t *base_states,
+    uint32_t base_stride,
+    const uint32_t *topology,
+    const uint32_t *candidate_ready,
+    uint32_t *root_states,
+    uint32_t *root_actions,
+    uint64_t *root_rng_states,
+    uint64_t *root_chance_rng_states,
+    uint32_t *root_base_indices,
+    uint64_t *root_seed_keys,
+    uint64_t game_offset,
+    uint64_t seed,
+    uint32_t game_count,
+    uint32_t roots_per_game,
+    uint32_t root_count
+) {
+    const uint32_t root = blockIdx.x * blockDim.x + threadIdx.x;
+    if (root >= root_count || roots_per_game == 0u) {
+        return;
+    }
+    const uint32_t game = root / roots_per_game;
+    if (game >= game_count) {
+        return;
+    }
+    root_base_indices[root] = game;
+    const uint32_t slot = root % roots_per_game;
+    const uint64_t global_game = game_offset + (uint64_t)game;
+    const uint64_t proposal_index = global_game * (uint64_t)roots_per_game + (uint64_t)slot;
+    root_seed_keys[root] = proposal_index;
+    if (candidate_ready[game] == 0u) {
+        for (uint32_t field = 0u; field < ACTION_WORDS; ++field) {
+            root_actions[field * root_count + root] = 0u;
+        }
+        root_actions[ACTION_TAG * root_count + root] = 254u;
+        return;
+    }
+    for (uint32_t field = 0u; field < STATE_WORDS; ++field) {
+        root_states[field * root_count + root] = base_states[field * base_stride + game];
+    }
+    root_rng_states[root] = mix_stream_seed(
+        seed, proposal_index, CANDIDATE_PROPOSAL_RNG_DOMAIN
+    );
+    root_chance_rng_states[root] = mix_stream_seed(
+        seed, proposal_index, CANDIDATE_PROPOSAL_CHANCE_RNG_DOMAIN
+    );
+    generate_rollout_action_lane(
+        root_states,
+        topology,
+        root_actions,
+        root_rng_states,
+        root_chance_rng_states,
+        root_count,
+        root
+    );
+}
+
+static inline __device__ int root_actions_equal(
+    const uint32_t *root_actions,
+    uint32_t root_count,
+    uint32_t left,
+    uint32_t right
+) {
+    for (uint32_t field = 0u; field < ACTION_WORDS; ++field) {
+        if (root_actions[field * root_count + left]
+            != root_actions[field * root_count + right]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+extern "C" __global__ void select_candidate_root_actions_kernel(
+    const uint32_t *root_actions,
+    const uint64_t *root_stats,
+    const uint32_t *candidate_ready,
+    uint32_t *actions,
+    uint32_t *status,
+    uint32_t game_stride,
+    uint32_t game_count,
+    uint32_t roots_per_game,
+    uint32_t root_count
+) {
+    const uint32_t game = blockIdx.x * blockDim.x + threadIdx.x;
+    if (game >= game_count || candidate_ready[game] == 0u || roots_per_game == 0u) {
+        return;
+    }
+    const uint32_t start = game * roots_per_game;
+    const uint32_t end = start + roots_per_game < root_count
+        ? start + roots_per_game
+        : root_count;
+    uint32_t best_root = 0xffffffffu;
+    long long best_net = 0ll;
+    uint64_t best_samples = 1ull;
+    long long best_margin = 0ll;
+    uint64_t best_valid = 1ull;
+    uint64_t best_turns = 0ull;
+
+    for (uint32_t root = start; root < end; ++root) {
+        if (root_actions[ACTION_TAG * root_count + root] >= 254u) {
+            continue;
+        }
+        int duplicate = 0;
+        for (uint32_t previous = start; previous < root; ++previous) {
+            if (root_actions[ACTION_TAG * root_count + previous] < 254u
+                && root_actions_equal(root_actions, root_count, previous, root)) {
+                duplicate = 1;
+                break;
+            }
+        }
+        if (duplicate) {
+            continue;
+        }
+
+        uint64_t samples = 0ull;
+        uint64_t errors = 0ull;
+        uint64_t terminals = 0ull;
+        uint64_t wins = 0ull;
+        uint64_t turns = 0ull;
+        uint64_t actor_vp = 0ull;
+        uint64_t opponent_vp = 0ull;
+        for (uint32_t peer = root; peer < end; ++peer) {
+            if (root_actions[ACTION_TAG * root_count + peer] >= 254u
+                || !root_actions_equal(root_actions, root_count, root, peer)) {
+                continue;
+            }
+            samples += root_stats[0u * root_count + peer];
+            errors += root_stats[1u * root_count + peer];
+            terminals += root_stats[2u * root_count + peer];
+            wins += root_stats[3u * root_count + peer];
+            turns += root_stats[4u * root_count + peer];
+            actor_vp += root_stats[5u * root_count + peer];
+            opponent_vp += root_stats[6u * root_count + peer];
+        }
+        if (samples == 0ull || errors >= samples) {
+            continue;
+        }
+        const uint64_t valid = samples - errors;
+        const long long net = (long long)(2ull * wins) - (long long)terminals;
+        const long long margin = (long long)actor_vp - (long long)opponent_vp;
+
+        int better = best_root == 0xffffffffu;
+        if (!better) {
+            const long long net_left = net * (long long)best_samples;
+            const long long net_right = best_net * (long long)samples;
+            if (net_left != net_right) {
+                better = net_left > net_right;
+            } else {
+                const long long margin_left = margin * (long long)best_valid;
+                const long long margin_right = best_margin * (long long)valid;
+                if (margin_left != margin_right) {
+                    better = margin_left > margin_right;
+                } else {
+                    const uint64_t turns_left = turns * best_valid;
+                    const uint64_t turns_right = best_turns * valid;
+                    if (turns_left != turns_right) {
+                        better = turns_left < turns_right;
+                    }
+                }
+            }
+        }
+        if (better) {
+            best_root = root;
+            best_net = net;
+            best_samples = samples;
+            best_margin = margin;
+            best_valid = valid;
+            best_turns = turns;
+        }
+    }
+
+    if (best_root == 0xffffffffu) {
+        status[game] = STATUS_INVALID_ACTION;
+        return;
+    }
+    for (uint32_t field = 0u; field < ACTION_WORDS; ++field) {
+        actions[field * game_stride + game]
+            = root_actions[field * root_count + best_root];
+    }
+}
+
 extern "C" __global__ void run_games_kernel(
     uint32_t *states,
     const uint32_t *topology,
     uint32_t *actions,
     uint32_t *status,
     uint64_t *rng_states,
+    uint64_t *chance_rng_states,
     uint32_t *action_counts,
     uint32_t stride,
     uint32_t count,
@@ -3331,7 +4010,9 @@ extern "C" __global__ void run_games_kernel(
             || state_get(states, stride, STATE_TURN, lane) >= max_turns) {
             break;
         }
-        generate_rollout_action_lane(states, topology, actions, rng_states, stride, lane);
+        generate_rollout_action_lane(
+            states, topology, actions, rng_states, chance_rng_states, stride, lane
+        );
         apply_transition_lane(states, topology, actions, status, stride, lane);
     }
     action_counts[lane] = executed;
@@ -3374,6 +4055,7 @@ extern "C" __global__ void expand_root_rollouts_kernel(
     const uint32_t *topology,
     const uint32_t *root_actions,
     const uint32_t *root_base_indices,
+    const uint64_t *root_seed_keys,
     uint32_t root_count,
     uint32_t chunk_rollouts_per_action,
     uint32_t total_rollouts_per_action,
@@ -3382,6 +4064,7 @@ extern "C" __global__ void expand_root_rollouts_kernel(
     uint32_t *actions,
     uint32_t *status,
     uint64_t *rng_states,
+    uint64_t *chance_rng_states,
     uint32_t stride,
     uint64_t seed,
     uint32_t count
@@ -3403,10 +4086,12 @@ extern "C" __global__ void expand_root_rollouts_kernel(
     }
     status[lane] = STATUS_OK;
     const uint32_t local_rollout = lane % chunk_rollouts_per_action;
-    const uint64_t global_rollout = (uint64_t)root * (uint64_t)total_rollouts_per_action
-        + (uint64_t)rollout_offset
-        + (uint64_t)local_rollout;
-    rng_states[lane] = mix_stream_seed(seed, global_rollout, ROOT_RNG_DOMAIN);
+    const uint64_t rollout = (uint64_t)rollout_offset + (uint64_t)local_rollout;
+    const uint64_t root_seed = root_seed_keys[root];
+    rng_states[lane] = mix_stream_seed(seed ^ root_seed, rollout, ROOT_RNG_DOMAIN);
+    chance_rng_states[lane] = mix_stream_seed(
+        seed ^ root_seed, rollout, ROOT_CHANCE_RNG_DOMAIN
+    );
     apply_transition_lane(states, topology, actions, status, stride, lane);
 }
 

@@ -21,7 +21,9 @@ const THREADS_PER_BLOCK: usize = 128;
 const SEARCH_CHUNK_LANES: usize = 65_536;
 const SEED_INDEX_MIX: u64 = 0xd134_2543_de82_ef95;
 const GAME_RNG_DOMAIN: u64 = 0x243f_6a88_85a3_08d3;
+const GAME_CHANCE_RNG_DOMAIN: u64 = 0x4528_21e6_38d0_1377;
 const BOARD_RNG_DOMAIN: u64 = 0x1319_8a2e_0370_7344;
+const CANDIDATE_DECISION_DOMAIN: u64 = 0xbe54_66cf_34e9_0c6c;
 
 const STATE_NUM_PLAYERS: usize = 0;
 const STATE_PHASE: usize = 1;
@@ -67,7 +69,8 @@ const STATE_BUILDINGS: usize = STATE_PORTS + VERTEX_COUNT;
 const STATE_ROADS: usize = STATE_BUILDINGS + VERTEX_COUNT;
 const STATE_PLAYERS: usize = STATE_ROADS + EDGE_COUNT;
 const PLAYER_STRIDE: usize = 28;
-const STATE_WORDS: usize = STATE_PLAYERS + MAX_PLAYERS * PLAYER_STRIDE;
+const STATE_DOMESTIC_TRADE_DISABLED: usize = STATE_PLAYERS + MAX_PLAYERS * PLAYER_STRIDE;
+const STATE_WORDS: usize = STATE_DOMESTIC_TRADE_DISABLED + 1;
 
 const ACTION_TAG: usize = 0;
 const ACTION_ARG0: usize = 1;
@@ -93,6 +96,11 @@ pub fn cuda_sim_board_seed(base_seed: u64, global_game_index: u64) -> u64 {
 #[inline]
 fn cuda_sim_game_rng_seed(base_seed: u64, global_game_index: u64) -> u64 {
     mix_stream_seed(base_seed, global_game_index, GAME_RNG_DOMAIN)
+}
+
+#[inline]
+fn cuda_sim_game_chance_rng_seed(base_seed: u64, global_game_index: u64) -> u64 {
+    mix_stream_seed(base_seed, global_game_index, GAME_CHANCE_RNG_DOMAIN)
 }
 
 const TOPO_VERTEX_HEX_COUNTS: usize = 0;
@@ -156,10 +164,38 @@ pub struct CudaSimArenaConfig {
 impl Default for CudaSimArenaConfig {
     fn default() -> Self {
         Self {
-            max_actions: 4_096,
-            max_turns: 160,
+            max_actions: 20_000,
+            max_turns: 600,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CudaSimAgentSearchConfig {
+    pub root_samples: usize,
+    pub rollouts_per_action: usize,
+    pub rollout_steps: usize,
+}
+
+impl Default for CudaSimAgentSearchConfig {
+    fn default() -> Self {
+        Self {
+            // Campaign-strength default: enough independent root evidence to
+            // materially outperform the weighted policy while keeping the
+            // searched arena in the high-throughput regime. Deeper 8/32/64
+            // settings remain available explicitly for oracle/calibration runs.
+            root_samples: 4,
+            rollouts_per_action: 16,
+            rollout_steps: 32,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CudaSimSearchedArenaResult {
+    pub arena: CudaSimArenaResult,
+    pub candidate_decisions: u64,
+    pub root_actions_evaluated: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -339,7 +375,7 @@ impl fmt::Display for CudaSimError {
                 "CUDA simulation root batch has {rows} action rows for {states} resident states"
             ),
             Self::InvalidRolloutCount => formatter.write_str(
-                "CUDA simulation root search requires at least one rollout per root action",
+                "CUDA simulation root search requires nonzero root samples and rollouts",
             ),
             Self::InvalidArenaChunk => formatter.write_str(
                 "CUDA simulation arena campaign requires a nonzero resident chunk size",
@@ -385,6 +421,10 @@ pub struct CudaSimEngine {
     rollout_action_kernel: CudaFunction,
     rollout_steps_kernel: CudaFunction,
     arena_kernel: CudaFunction,
+    run_until_candidate_kernel: CudaFunction,
+    sample_candidate_roots_kernel: CudaFunction,
+    select_candidate_roots_kernel: CudaFunction,
+    apply_candidate_kernel: CudaFunction,
     profile_kernel: CudaFunction,
     summary_kernel: CudaFunction,
     expand_roots_kernel: CudaFunction,
@@ -394,25 +434,32 @@ pub struct CudaSimEngine {
     action_device: CudaSlice<u32>,
     status_device: CudaSlice<u32>,
     rng_device: CudaSlice<u64>,
+    chance_rng_device: CudaSlice<u64>,
     summary_device: CudaSlice<u32>,
     arena_action_count_device: CudaSlice<u32>,
+    candidate_ready_device: CudaSlice<u32>,
     matchup_profile_device: CudaSlice<u32>,
     search_state_device: CudaSlice<u32>,
     search_action_device: CudaSlice<u32>,
     search_status_device: CudaSlice<u32>,
     search_rng_device: CudaSlice<u64>,
+    search_chance_rng_device: CudaSlice<u64>,
     root_action_device: CudaSlice<u32>,
     root_base_index_device: CudaSlice<u32>,
+    root_seed_key_device: CudaSlice<u64>,
     root_stats_device: CudaSlice<u64>,
     state_host: Vec<u32>,
     action_host: Vec<u32>,
     status_host: Vec<u32>,
     rng_host: Vec<u64>,
+    chance_rng_host: Vec<u64>,
     summary_host: Vec<u32>,
     arena_action_count_host: Vec<u32>,
+    candidate_ready_host: Vec<u32>,
     matchup_profile_host: Vec<u32>,
     root_action_host: Vec<u32>,
     root_base_index_host: Vec<u32>,
+    root_seed_key_host: Vec<u64>,
     root_stats_host: Vec<u64>,
     capacity: usize,
     search_capacity: usize,
@@ -436,6 +483,12 @@ impl CudaSimEngine {
         let rollout_action_kernel = module.load_function("generate_rollout_actions_batch_kernel")?;
         let rollout_steps_kernel = module.load_function("run_rollout_steps_kernel")?;
         let arena_kernel = module.load_function("run_games_kernel")?;
+        let run_until_candidate_kernel = module.load_function("run_until_candidate_kernel")?;
+        let sample_candidate_roots_kernel =
+            module.load_function("sample_candidate_root_actions_kernel")?;
+        let select_candidate_roots_kernel =
+            module.load_function("select_candidate_root_actions_kernel")?;
+        let apply_candidate_kernel = module.load_function("apply_candidate_actions_kernel")?;
         let profile_kernel = module.load_function("assign_rotating_profiles_kernel")?;
         let summary_kernel = module.load_function("summarize_games_kernel")?;
         let expand_roots_kernel = module.load_function("expand_root_rollouts_kernel")?;
@@ -446,15 +499,19 @@ impl CudaSimEngine {
         let action_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY * ACTION_WORDS)?;
         let status_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY)?;
         let rng_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY)?;
+        let chance_rng_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY)?;
         let summary_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY * SUMMARY_WORDS)?;
         let arena_action_count_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY)?;
+        let candidate_ready_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY)?;
         let matchup_profile_device = stream.alloc_zeros(MATCHUP_PROFILE_WORDS)?;
         let search_state_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY * STATE_WORDS)?;
         let search_action_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY * ACTION_WORDS)?;
         let search_status_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY)?;
         let search_rng_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY)?;
+        let search_chance_rng_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY)?;
         let root_action_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY * ACTION_WORDS)?;
         let root_base_index_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY)?;
+        let root_seed_key_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY)?;
         let root_stats_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY * ROOT_STATS_WORDS)?;
         let identity = CudaSimDeviceIdentity {
             backend: BACKEND_NAME,
@@ -470,6 +527,10 @@ impl CudaSimEngine {
             rollout_action_kernel,
             rollout_steps_kernel,
             arena_kernel,
+            run_until_candidate_kernel,
+            sample_candidate_roots_kernel,
+            select_candidate_roots_kernel,
+            apply_candidate_kernel,
             profile_kernel,
             summary_kernel,
             expand_roots_kernel,
@@ -479,25 +540,32 @@ impl CudaSimEngine {
             action_device,
             status_device,
             rng_device,
+            chance_rng_device,
             summary_device,
             arena_action_count_device,
+            candidate_ready_device,
             matchup_profile_device,
             search_state_device,
             search_action_device,
             search_status_device,
             search_rng_device,
+            search_chance_rng_device,
             root_action_device,
             root_base_index_device,
+            root_seed_key_device,
             root_stats_device,
             state_host: Vec::new(),
             action_host: Vec::new(),
             status_host: Vec::new(),
             rng_host: Vec::new(),
+            chance_rng_host: Vec::new(),
             summary_host: Vec::new(),
             arena_action_count_host: Vec::new(),
+            candidate_ready_host: Vec::new(),
             matchup_profile_host: Vec::new(),
             root_action_host: Vec::new(),
             root_base_index_host: Vec::new(),
+            root_seed_key_host: Vec::new(),
             root_stats_host: Vec::new(),
             capacity: INITIAL_BATCH_CAPACITY,
             search_capacity: INITIAL_BATCH_CAPACITY,
@@ -584,21 +652,40 @@ impl CudaSimEngine {
         base_seed: u64,
         game_offset: usize,
     ) -> Result<(), CudaSimError> {
+        self.seed_rollout_rng_with_blocks(base_seed, game_offset, 1)
+    }
+
+    fn seed_rollout_rng_with_blocks(
+        &mut self,
+        base_seed: u64,
+        game_offset: usize,
+        games_per_seed_block: usize,
+    ) -> Result<(), CudaSimError> {
         let count = self.resident_states;
         if count == 0 {
             return Err(CudaSimError::NoResidentBatch);
         }
+        if games_per_seed_block == 0 {
+            return Err(CudaSimError::InvalidArenaChunk);
+        }
         self.rng_host.clear();
         self.rng_host.reserve(count);
+        self.chance_rng_host.clear();
+        self.chance_rng_host.reserve(count);
         for lane in 0..count {
             let global_lane = game_offset
                 .checked_add(lane)
                 .ok_or(CudaSimError::BatchTooLarge)?;
+            let seed_block = global_lane / games_per_seed_block;
             self.rng_host
                 .push(cuda_sim_game_rng_seed(base_seed, global_lane as u64));
+            self.chance_rng_host
+                .push(cuda_sim_game_chance_rng_seed(base_seed, seed_block as u64));
         }
         self.stream
             .memcpy_htod(&self.rng_host, &mut self.rng_device)?;
+        self.stream
+            .memcpy_htod(&self.chance_rng_host, &mut self.chance_rng_device)?;
         self.stream.synchronize()?;
         Ok(())
     }
@@ -638,6 +725,7 @@ impl CudaSimEngine {
         arguments.arg(&mut self.action_device);
         arguments.arg(&mut self.status_device);
         arguments.arg(&mut self.rng_device);
+        arguments.arg(&mut self.chance_rng_device);
         arguments.arg(&stride);
         arguments.arg(&count_u32);
         arguments.arg(&steps_u32);
@@ -687,6 +775,7 @@ impl CudaSimEngine {
         arguments.arg(&mut self.action_device);
         arguments.arg(&mut self.status_device);
         arguments.arg(&mut self.rng_device);
+        arguments.arg(&mut self.chance_rng_device);
         arguments.arg(&mut self.arena_action_count_device);
         arguments.arg(&stride);
         arguments.arg(&count_u32);
@@ -788,6 +877,31 @@ impl CudaSimEngine {
         seed: u64,
         game_offset: usize,
     ) -> Result<CudaSimArenaResult, CudaSimError> {
+        self.run_rotating_profile_chunk_with_seed_blocks(
+            states,
+            candidate,
+            baseline,
+            config,
+            seed,
+            game_offset,
+            1,
+        )
+    }
+
+    /// Runs one host-generated campaign chunk while reusing the same chance
+    /// seed for each consecutive `games_per_seed_block` games. Strength
+    /// campaigns use one block per seat rotation so board/chance luck is paired
+    /// across candidate seats without changing chunk-independent game identity.
+    pub fn run_rotating_profile_chunk_with_seed_blocks(
+        &mut self,
+        states: &[GameState],
+        candidate: CudaSimPolicyProfile,
+        baseline: CudaSimPolicyProfile,
+        config: CudaSimArenaConfig,
+        seed: u64,
+        game_offset: usize,
+        games_per_seed_block: usize,
+    ) -> Result<CudaSimArenaResult, CudaSimError> {
         if states.is_empty() {
             return Ok(CudaSimArenaResult {
                 games: Vec::new(),
@@ -799,8 +913,335 @@ impl CudaSimEngine {
         }
         self.upload_states(states)?;
         self.assign_rotating_profiles(candidate, baseline, game_offset)?;
-        self.seed_rollout_rng_with_offset(seed, game_offset)?;
+        self.seed_rollout_rng_with_blocks(seed, game_offset, games_per_seed_block)?;
         self.run_arena_games_seeded(config)
+    }
+
+    /// Runs one matched chunk with the rotating candidate using GPU root-rollout
+    /// search at every candidate decision while all opponent decisions and
+    /// chance transitions use the resident GPU weighted policy. Root proposals,
+    /// rollouts, reduction, selection, and application remain on device.
+    pub fn run_searched_candidate_chunk_with_seed_blocks(
+        &mut self,
+        states: &[GameState],
+        candidate: CudaSimPolicyProfile,
+        baseline: CudaSimPolicyProfile,
+        arena_config: CudaSimArenaConfig,
+        search_config: CudaSimAgentSearchConfig,
+        game_seed: u64,
+        search_seed: u64,
+        game_offset: usize,
+        games_per_seed_block: usize,
+    ) -> Result<CudaSimSearchedArenaResult, CudaSimError> {
+        if states.is_empty() {
+            return Ok(CudaSimSearchedArenaResult {
+                arena: CudaSimArenaResult {
+                    games: Vec::new(),
+                    wins: [0; 4],
+                    terminal_games: 0,
+                    truncated_games: 0,
+                    total_actions: 0,
+                },
+                candidate_decisions: 0,
+                root_actions_evaluated: 0,
+            });
+        }
+        if search_config.root_samples == 0
+            || search_config.rollouts_per_action == 0
+            || search_config.rollout_steps == 0
+        {
+            return Err(CudaSimError::InvalidRolloutCount);
+        }
+        if games_per_seed_block == 0 {
+            return Err(CudaSimError::InvalidArenaChunk);
+        }
+
+        self.upload_states(states)?;
+        self.assign_rotating_profiles(candidate, baseline, game_offset)?;
+        self.seed_rollout_rng_with_blocks(game_seed, game_offset, games_per_seed_block)?;
+
+        let count = self.resident_states;
+        let count_u32 = u32::try_from(count).map_err(|_| CudaSimError::BatchTooLarge)?;
+        let stride = count_u32;
+        let game_offset_u64 =
+            u64::try_from(game_offset).map_err(|_| CudaSimError::BatchTooLarge)?;
+        let game_launch = LaunchConfig {
+            grid_dim: (count.div_ceil(THREADS_PER_BLOCK) as u32, 1, 1),
+            block_dim: (THREADS_PER_BLOCK as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        self.clear_transition_status(count)?;
+        self.arena_action_count_host.clear();
+        self.arena_action_count_host.resize(count, 0);
+        self.stream.memcpy_htod(
+            &self.arena_action_count_host,
+            &mut self.arena_action_count_device,
+        )?;
+        self.candidate_ready_host.clear();
+        self.candidate_ready_host.resize(count, 0);
+        self.stream.memcpy_htod(
+            &self.candidate_ready_host,
+            &mut self.candidate_ready_device,
+        )?;
+
+        let roots_per_game = search_config.root_samples;
+        let roots_per_game_u32 =
+            u32::try_from(roots_per_game).map_err(|_| CudaSimError::BatchTooLarge)?;
+        let root_count = count
+            .checked_mul(roots_per_game)
+            .ok_or(CudaSimError::BatchTooLarge)?;
+        let root_count_u32 =
+            u32::try_from(root_count).map_err(|_| CudaSimError::BatchTooLarge)?;
+        let rollouts_per_action = search_config.rollouts_per_action;
+        let rollouts_u32 =
+            u32::try_from(rollouts_per_action).map_err(|_| CudaSimError::BatchTooLarge)?;
+        let rollout_steps_u32 =
+            u32::try_from(search_config.rollout_steps).map_err(|_| CudaSimError::BatchTooLarge)?;
+        let chunk_rollouts_cap = (SEARCH_CHUNK_LANES / root_count).max(1);
+        let max_chunk_lanes = root_count
+            .checked_mul(chunk_rollouts_cap.min(rollouts_per_action))
+            .ok_or(CudaSimError::BatchTooLarge)?;
+        self.ensure_root_capacity(root_count)?;
+        self.ensure_search_capacity(root_count.max(max_chunk_lanes))?;
+
+        let mut decision_round = 0u64;
+        let mut candidate_decisions = 0u64;
+        let mut root_actions_evaluated = 0u64;
+        loop {
+            {
+                let mut arguments = self.stream.launch_builder(&self.run_until_candidate_kernel);
+                arguments.arg(&mut self.state_device);
+                arguments.arg(&self.topology_device);
+                arguments.arg(&mut self.action_device);
+                arguments.arg(&mut self.status_device);
+                arguments.arg(&mut self.rng_device);
+                arguments.arg(&mut self.chance_rng_device);
+                arguments.arg(&mut self.arena_action_count_device);
+                arguments.arg(&mut self.candidate_ready_device);
+                arguments.arg(&game_offset_u64);
+                arguments.arg(&stride);
+                arguments.arg(&count_u32);
+                arguments.arg(&arena_config.max_actions);
+                arguments.arg(&arena_config.max_turns);
+                unsafe { arguments.launch(game_launch)? };
+            }
+            self.stream.synchronize()?;
+            self.check_transition_status(count)?;
+
+            let ready = self.candidate_ready_device.slice(0..count);
+            self.stream
+                .memcpy_dtoh(&ready, &mut self.candidate_ready_host)?;
+            self.stream.synchronize()?;
+            let ready_count = self
+                .candidate_ready_host
+                .iter()
+                .filter(|value| **value != 0)
+                .count();
+            if ready_count == 0 {
+                break;
+            }
+            candidate_decisions = candidate_decisions.saturating_add(ready_count as u64);
+            root_actions_evaluated = root_actions_evaluated.saturating_add(
+                (ready_count as u64).saturating_mul(roots_per_game as u64),
+            );
+
+            let decision_seed = mix_stream_seed(
+                search_seed,
+                decision_round,
+                CANDIDATE_DECISION_DOMAIN,
+            );
+            let root_launch = LaunchConfig {
+                grid_dim: (root_count.div_ceil(THREADS_PER_BLOCK) as u32, 1, 1),
+                block_dim: (THREADS_PER_BLOCK as u32, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            {
+                let mut arguments = self
+                    .stream
+                    .launch_builder(&self.sample_candidate_roots_kernel);
+                arguments.arg(&self.state_device);
+                arguments.arg(&stride);
+                arguments.arg(&self.topology_device);
+                arguments.arg(&self.candidate_ready_device);
+                arguments.arg(&mut self.search_state_device);
+                arguments.arg(&mut self.root_action_device);
+                arguments.arg(&mut self.search_rng_device);
+                arguments.arg(&mut self.search_chance_rng_device);
+                arguments.arg(&mut self.root_base_index_device);
+                arguments.arg(&mut self.root_seed_key_device);
+                arguments.arg(&game_offset_u64);
+                arguments.arg(&decision_seed);
+                arguments.arg(&count_u32);
+                arguments.arg(&roots_per_game_u32);
+                arguments.arg(&root_count_u32);
+                unsafe { arguments.launch(root_launch)? };
+            }
+
+            self.root_stats_host.clear();
+            self.root_stats_host.resize(ROOT_STATS_WORDS * root_count, 0);
+            self.stream
+                .memcpy_htod(&self.root_stats_host, &mut self.root_stats_device)?;
+
+            let mut rollout_offset = 0usize;
+            while rollout_offset < rollouts_per_action {
+                let chunk_rollouts =
+                    (rollouts_per_action - rollout_offset).min(chunk_rollouts_cap);
+                let lane_count = root_count
+                    .checked_mul(chunk_rollouts)
+                    .ok_or(CudaSimError::BatchTooLarge)?;
+                let lane_count_u32 =
+                    u32::try_from(lane_count).map_err(|_| CudaSimError::BatchTooLarge)?;
+                let chunk_rollouts_u32 =
+                    u32::try_from(chunk_rollouts).map_err(|_| CudaSimError::BatchTooLarge)?;
+                let rollout_offset_u32 =
+                    u32::try_from(rollout_offset).map_err(|_| CudaSimError::BatchTooLarge)?;
+                let rollout_stride = lane_count_u32;
+                let rollout_launch = LaunchConfig {
+                    grid_dim: (lane_count.div_ceil(THREADS_PER_BLOCK) as u32, 1, 1),
+                    block_dim: (THREADS_PER_BLOCK as u32, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                {
+                    let mut arguments = self.stream.launch_builder(&self.expand_roots_kernel);
+                    arguments.arg(&self.state_device);
+                    arguments.arg(&stride);
+                    arguments.arg(&self.topology_device);
+                    arguments.arg(&self.root_action_device);
+                    arguments.arg(&self.root_base_index_device);
+                    arguments.arg(&self.root_seed_key_device);
+                    arguments.arg(&root_count_u32);
+                    arguments.arg(&chunk_rollouts_u32);
+                    arguments.arg(&rollouts_u32);
+                    arguments.arg(&rollout_offset_u32);
+                    arguments.arg(&mut self.search_state_device);
+                    arguments.arg(&mut self.search_action_device);
+                    arguments.arg(&mut self.search_status_device);
+                    arguments.arg(&mut self.search_rng_device);
+                    arguments.arg(&mut self.search_chance_rng_device);
+                    arguments.arg(&rollout_stride);
+                    arguments.arg(&decision_seed);
+                    arguments.arg(&lane_count_u32);
+                    unsafe { arguments.launch(rollout_launch)? };
+                }
+                {
+                    let mut arguments = self.stream.launch_builder(&self.rollout_steps_kernel);
+                    arguments.arg(&mut self.search_state_device);
+                    arguments.arg(&self.topology_device);
+                    arguments.arg(&mut self.search_action_device);
+                    arguments.arg(&mut self.search_status_device);
+                    arguments.arg(&mut self.search_rng_device);
+                    arguments.arg(&mut self.search_chance_rng_device);
+                    arguments.arg(&rollout_stride);
+                    arguments.arg(&lane_count_u32);
+                    arguments.arg(&rollout_steps_u32);
+                    unsafe { arguments.launch(rollout_launch)? };
+                }
+                {
+                    let mut arguments = self.stream.launch_builder(&self.reduce_roots_kernel);
+                    arguments.arg(&self.search_state_device);
+                    arguments.arg(&self.search_status_device);
+                    arguments.arg(&self.state_device);
+                    arguments.arg(&self.root_base_index_device);
+                    arguments.arg(&mut self.root_stats_device);
+                    arguments.arg(&rollout_stride);
+                    arguments.arg(&stride);
+                    arguments.arg(&root_count_u32);
+                    arguments.arg(&chunk_rollouts_u32);
+                    arguments.arg(&lane_count_u32);
+                    unsafe { arguments.launch(rollout_launch)? };
+                }
+                rollout_offset += chunk_rollouts;
+            }
+
+            {
+                let mut arguments = self
+                    .stream
+                    .launch_builder(&self.select_candidate_roots_kernel);
+                arguments.arg(&self.root_action_device);
+                arguments.arg(&self.root_stats_device);
+                arguments.arg(&self.candidate_ready_device);
+                arguments.arg(&mut self.action_device);
+                arguments.arg(&mut self.status_device);
+                arguments.arg(&stride);
+                arguments.arg(&count_u32);
+                arguments.arg(&roots_per_game_u32);
+                arguments.arg(&root_count_u32);
+                unsafe { arguments.launch(game_launch)? };
+            }
+            {
+                let mut arguments = self.stream.launch_builder(&self.apply_candidate_kernel);
+                arguments.arg(&mut self.state_device);
+                arguments.arg(&self.topology_device);
+                arguments.arg(&self.action_device);
+                arguments.arg(&mut self.status_device);
+                arguments.arg(&mut self.arena_action_count_device);
+                arguments.arg(&self.candidate_ready_device);
+                arguments.arg(&stride);
+                arguments.arg(&count_u32);
+                unsafe { arguments.launch(game_launch)? };
+            }
+            self.stream.synchronize()?;
+            self.check_transition_status(count)?;
+            decision_round = decision_round.wrapping_add(1);
+        }
+
+        let arena = self.collect_current_arena_result(arena_config)?;
+        Ok(CudaSimSearchedArenaResult {
+            arena,
+            candidate_decisions,
+            root_actions_evaluated,
+        })
+    }
+
+    fn collect_current_arena_result(
+        &mut self,
+        config: CudaSimArenaConfig,
+    ) -> Result<CudaSimArenaResult, CudaSimError> {
+        let count = self.resident_states;
+        let summaries = self.download_game_summaries()?;
+        self.arena_action_count_host.resize(count, 0);
+        let action_counts = self.arena_action_count_device.slice(0..count);
+        self.stream
+            .memcpy_dtoh(&action_counts, &mut self.arena_action_count_host)?;
+        self.stream.synchronize()?;
+
+        let mut wins = [0u64; 4];
+        let mut terminal_games = 0u64;
+        let mut truncated_games = 0u64;
+        let mut total_actions = 0u64;
+        let mut games = Vec::with_capacity(count);
+        for (game, actions) in summaries
+            .into_iter()
+            .zip(self.arena_action_count_host.iter().copied())
+        {
+            if let Some(winner) = game.winner
+                && let Some(count) = wins.get_mut(winner as usize)
+            {
+                *count = count.saturating_add(1);
+            }
+            if game.terminal {
+                terminal_games = terminal_games.saturating_add(1);
+            }
+            let truncated = !game.terminal
+                && (game.turn >= config.max_turns || actions >= config.max_actions);
+            if truncated {
+                truncated_games = truncated_games.saturating_add(1);
+            }
+            total_actions = total_actions.saturating_add(actions as u64);
+            games.push(CudaSimArenaGameSummary {
+                game,
+                actions,
+                truncated,
+            });
+        }
+        Ok(CudaSimArenaResult {
+            games,
+            wins,
+            terminal_games,
+            truncated_games,
+            total_actions,
+        })
     }
 
     fn run_arena_campaign_inner(
@@ -872,6 +1313,7 @@ impl CudaSimEngine {
         arguments.arg(&self.topology_device);
         arguments.arg(&mut self.action_device);
         arguments.arg(&mut self.rng_device);
+        arguments.arg(&mut self.chance_rng_device);
         arguments.arg(&stride);
         arguments.arg(&count_u32);
         unsafe { arguments.launch(config)? };
@@ -1052,6 +1494,12 @@ impl CudaSimEngine {
             &self.root_base_index_host,
             &mut self.root_base_index_device,
         )?;
+        self.root_seed_key_host.clear();
+        self.root_seed_key_host.extend((0..root_count).map(|root| root as u64));
+        self.stream.memcpy_htod(
+            &self.root_seed_key_host,
+            &mut self.root_seed_key_device,
+        )?;
         self.root_stats_host.clear();
         self.root_stats_host.resize(ROOT_STATS_WORDS * root_count, 0);
         self.stream
@@ -1082,6 +1530,7 @@ impl CudaSimEngine {
                 arguments.arg(&self.topology_device);
                 arguments.arg(&self.root_action_device);
                 arguments.arg(&self.root_base_index_device);
+                arguments.arg(&self.root_seed_key_device);
                 arguments.arg(&root_count_u32);
                 arguments.arg(&chunk_rollouts_u32);
                 arguments.arg(&rollouts_u32);
@@ -1090,6 +1539,7 @@ impl CudaSimEngine {
                 arguments.arg(&mut self.search_action_device);
                 arguments.arg(&mut self.search_status_device);
                 arguments.arg(&mut self.search_rng_device);
+                arguments.arg(&mut self.search_chance_rng_device);
                 arguments.arg(&stride);
                 arguments.arg(&seed);
                 arguments.arg(&lane_count_u32);
@@ -1102,6 +1552,7 @@ impl CudaSimEngine {
                 arguments.arg(&mut self.search_action_device);
                 arguments.arg(&mut self.search_status_device);
                 arguments.arg(&mut self.search_rng_device);
+                arguments.arg(&mut self.search_chance_rng_device);
                 arguments.arg(&stride);
                 arguments.arg(&lane_count_u32);
                 arguments.arg(&rollout_steps_u32);
@@ -1227,8 +1678,10 @@ impl CudaSimEngine {
         self.action_device = self.stream.alloc_zeros(capacity * ACTION_WORDS)?;
         self.status_device = self.stream.alloc_zeros(capacity)?;
         self.rng_device = self.stream.alloc_zeros(capacity)?;
+        self.chance_rng_device = self.stream.alloc_zeros(capacity)?;
         self.summary_device = self.stream.alloc_zeros(capacity * SUMMARY_WORDS)?;
         self.arena_action_count_device = self.stream.alloc_zeros(capacity)?;
+        self.candidate_ready_device = self.stream.alloc_zeros(capacity)?;
         self.capacity = capacity;
         Ok(())
     }
@@ -1247,6 +1700,7 @@ impl CudaSimEngine {
         self.search_action_device = self.stream.alloc_zeros(capacity * ACTION_WORDS)?;
         self.search_status_device = self.stream.alloc_zeros(capacity)?;
         self.search_rng_device = self.stream.alloc_zeros(capacity)?;
+        self.search_chance_rng_device = self.stream.alloc_zeros(capacity)?;
         self.search_capacity = capacity;
         Ok(())
     }
@@ -1263,6 +1717,7 @@ impl CudaSimEngine {
         }
         self.root_action_device = self.stream.alloc_zeros(capacity * ACTION_WORDS)?;
         self.root_base_index_device = self.stream.alloc_zeros(capacity)?;
+        self.root_seed_key_device = self.stream.alloc_zeros(capacity)?;
         self.root_stats_device = self.stream.alloc_zeros(capacity * ROOT_STATS_WORDS)?;
         self.root_capacity = capacity;
         Ok(())
@@ -1522,6 +1977,7 @@ fn pack_state_words(state: &GameState, words: &mut [u32; STATE_WORDS]) -> Result
     words[STATE_DOMESTIC_TRADE_USED] = u32::from(state.domestic_trade_used);
     words[STATE_DOMESTIC_TRADE_COUNT] = state.domestic_trade_count as u32;
     words[STATE_PLAYER_TRADES_ENABLED] = u32::from(state.player_trades_enabled);
+    words[STATE_DOMESTIC_TRADE_DISABLED] = state.domestic_trade_disabled as u32;
     words[STATE_TRADE_CURSOR] = state.trade_cursor as u32;
     words[STATE_TRADE_NEGOTIATION_ROUND] = state.trade_negotiation_round as u32;
     pack_trade_words(state.trade, words, STATE_TRADE);

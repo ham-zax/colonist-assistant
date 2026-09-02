@@ -2,6 +2,7 @@ use colonist_catan_core::{Action, GameState, Phase};
 use colonist_catan_search::{CudaSimEngine, CudaSimPackedState};
 
 const MAIN_LANES: usize = 32;
+const RICH_MAIN_LANES: usize = 16;
 const INCOMPLETE_LANES: usize = 32;
 const COMPLETE_LANES: usize = 16;
 const DISABLED_LANES: usize = 16;
@@ -48,6 +49,17 @@ fn make_main(seed: u64, players: u8) -> GameState {
     state
 }
 
+fn make_rich_main(seed: u64, players: u8) -> GameState {
+    let mut state = base_state(seed, players);
+    state.players[state.current_player as usize].resources = [0, 0, 0, 0, 4];
+    for player in 0..players as usize {
+        if player != state.current_player as usize {
+            state.players[player].resources = [4; 5];
+        }
+    }
+    state
+}
+
 fn make_incomplete(seed: u64, players: u8, disabled: bool) -> GameState {
     let mut state = base_state(seed, players);
     for player in &mut state.players {
@@ -89,6 +101,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for lane in 0..MAIN_LANES {
         states.push(make_main(40_000 + lane as u64, if lane % 2 == 0 { 3 } else { 4 }));
     }
+    for lane in 0..RICH_MAIN_LANES {
+        states.push(make_rich_main(
+            40_500 + lane as u64,
+            if lane % 2 == 0 { 3 } else { 4 },
+        ));
+    }
     for lane in 0..INCOMPLETE_LANES {
         states.push(make_incomplete(
             41_000 + lane as u64,
@@ -115,6 +133,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     engine.seed_rollout_rng(0x77aa_1100_4455_99cc)?;
 
     let mut offers = 0usize;
+    let mut high_hand_offers = 0usize;
+    let mut bundled_offers = 0usize;
     let mut accepts = 0usize;
     let mut rejects = 0usize;
     let mut counters = 0usize;
@@ -144,7 +164,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .into());
             }
             match action {
-                Action::OfferTrade { .. } => offers += 1,
+                Action::OfferTrade { give, receive, .. } => {
+                    offers += 1;
+                    if state.players[state.actor() as usize].resource_total() > 3 {
+                        high_hand_offers += 1;
+                    }
+                    let give_total = give.iter().map(|value| *value as usize).sum::<usize>();
+                    let receive_total = receive
+                        .iter()
+                        .map(|value| *value as usize)
+                        .sum::<usize>();
+                    if give_total > 1 || receive_total > 1 {
+                        bundled_offers += 1;
+                    }
+                }
                 Action::RespondTrade { accept: true } => accepts += 1,
                 Action::RespondTrade { accept: false } => rejects += 1,
                 Action::CounterTrade { .. } => counters += 1,
@@ -179,17 +212,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         transitions += states.len();
     }
 
-    if offers == 0 || rejects == 0 || confirms + cancels == 0 {
+    if offers == 0
+        || high_hand_offers == 0
+        || bundled_offers == 0
+        || rejects == 0
+        || confirms + cancels == 0
+    {
         return Err(format!(
-            "trade generator did not exercise required families: offers={offers} accepts={accepts} rejects={rejects} counters={counters} confirms={confirms} cancels={cancels}"
+            "trade generator did not exercise required families: offers={offers} high_hand_offers={high_hand_offers} bundled_offers={bundled_offers} accepts={accepts} rejects={rejects} counters={counters} confirms={confirms} cancels={cancels}"
         )
         .into());
     }
 
     println!(
-        "{{\"kind\":\"cuda-resident-trade-generated-parity\",\"parity\":true,\"transitions\":{},\"offers\":{},\"accepts\":{},\"rejects\":{},\"counters\":{},\"confirms\":{},\"cancels\":{},\"gpu\":\"{}\"}}",
+        "{{\"kind\":\"cuda-resident-trade-generated-parity\",\"parity\":true,\"transitions\":{},\"offers\":{},\"highHandOffers\":{},\"bundledOffers\":{},\"accepts\":{},\"rejects\":{},\"counters\":{},\"confirms\":{},\"cancels\":{},\"gpu\":\"{}\"}}",
         transitions,
         offers,
+        high_hand_offers,
+        bundled_offers,
         accepts,
         rejects,
         counters,

@@ -321,18 +321,164 @@ fn generated_trade_policy_parity(
     ))
 }
 
+
+fn per_seat_disabled_policy_parity(
+    engine: &mut CudaSimEngine,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut state = trade_ready_state(31_501, 3);
+    engine.upload_states(std::slice::from_ref(&state))?;
+    let action = offer(&state)?;
+    apply_and_compare(engine, &mut state, action, "per-seat-disable-offer")?;
+
+    let responder = state.trade_cursor;
+    state.domestic_trade_disabled |= 1 << responder;
+    engine.upload_states(std::slice::from_ref(&state))?;
+    engine.seed_rollout_rng(0x51a5_0001)?;
+    engine.generate_rollout_actions()?;
+    let generated = engine.download_generated_actions()?.remove(0);
+    if generated != (Action::RespondTrade { accept: false }) {
+        return Err(format!(
+            "disabled responder generated {generated:?} instead of mandatory rejection"
+        )
+        .into());
+    }
+    state.apply(&generated)?;
+    engine.apply_generated_actions()?;
+    let expected = CudaSimPackedState::new(&state)?;
+    let actual = engine.download_packed_states()?.remove(0);
+    if expected != actual {
+        return Err("per-seat disabled responder diverged after rejection".into());
+    }
+
+    while !state
+        .legal_actions()
+        .iter()
+        .any(|candidate| matches!(candidate, Action::CancelTrade))
+    {
+        let reject = first_matching(
+            &state,
+            |candidate| matches!(candidate, Action::RespondTrade { accept: false }),
+            "per-seat remaining reject",
+        )?;
+        engine.upload_states(std::slice::from_ref(&state))?;
+        apply_and_compare(engine, &mut state, reject, "per-seat remaining reject")?;
+    }
+    let creator = state
+        .trade
+        .ok_or("completed trade disappeared before creator-disable check")?
+        .creator;
+    state.domestic_trade_disabled |= 1 << creator;
+    engine.upload_states(std::slice::from_ref(&state))?;
+    engine.seed_rollout_rng(0x51a5_0002)?;
+    engine.generate_rollout_actions()?;
+    let generated = engine.download_generated_actions()?.remove(0);
+    if generated != Action::CancelTrade {
+        return Err(format!(
+            "disabled trade creator generated {generated:?} instead of mandatory cancellation"
+        )
+        .into());
+    }
+    state.apply(&generated)?;
+    engine.apply_generated_actions()?;
+    let expected = CudaSimPackedState::new(&state)?;
+    let actual = engine.download_packed_states()?.remove(0);
+    if expected != actual {
+        return Err("per-seat disabled creator diverged after cancellation".into());
+    }
+    Ok(2)
+}
+
+fn high_hand_offer_policy_parity(
+    engine: &mut CudaSimEngine,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    const LANES: usize = 32;
+    const ATTEMPTS: usize = 96;
+    let states = (0..LANES)
+        .map(|lane| {
+            let mut state = trade_ready_state(33_000 + lane as u64 * 19, if lane % 2 == 0 { 3 } else { 4 });
+            for player in &mut state.players {
+                player.resources = [0; 5];
+                player.policy_profile = [0, 0, 0, 102, 0];
+            }
+            state.bank = [19; 5];
+            let actor = state.current_player as usize;
+            state.players[actor].resources = [4; 5];
+            state.bank = [15; 5];
+            state.validate().expect("high-hand trade oracle state must validate");
+            state
+        })
+        .collect::<Vec<_>>();
+    let admitted = states
+        .iter()
+        .map(|state| {
+            let offers = state
+                .legal_actions()
+                .into_iter()
+                .filter(|action| matches!(action, Action::OfferTrade { .. }))
+                .collect::<Vec<_>>();
+            if offers.is_empty() {
+                Err("high-hand oracle state has no domestic offer".to_string())
+            } else {
+                Ok(offers)
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    engine.upload_states(&states)?;
+    engine.seed_rollout_rng(0xfeed_3300_1234_5678)?;
+    let mut observed = 0usize;
+    let mut rich = 0usize;
+    for _ in 0..ATTEMPTS {
+        engine.generate_rollout_actions()?;
+        let actions = engine.download_generated_actions()?;
+        for (lane, action) in actions.iter().enumerate() {
+            let Action::OfferTrade { give, receive, .. } = action else {
+                continue;
+            };
+            observed += 1;
+            if !admitted[lane].contains(action) {
+                return Err(format!(
+                    "GPU high-hand offer is outside the CPU admitted top-96 set lane={lane}: gpu={action:?} admitted_count={}",
+                    admitted[lane].len()
+                )
+                .into());
+            }
+            let give_total = give.iter().copied().sum::<u8>();
+            let receive_total = receive.iter().copied().sum::<u8>();
+            let give_kinds = give.iter().filter(|amount| **amount > 0).count();
+            let receive_kinds = receive.iter().filter(|amount| **amount > 0).count();
+            if give_total > 1 || receive_total > 1 || give_kinds > 1 || receive_kinds > 1 {
+                rich += 1;
+            }
+        }
+        if observed >= LANES && rich > 0 {
+            break;
+        }
+    }
+    if observed == 0 || rich == 0 {
+        return Err(format!(
+            "high-hand GPU offer oracle lacked coverage: observed={observed} rich={rich}"
+        )
+        .into());
+    }
+    Ok(observed)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut engine = CudaSimEngine::new()?;
     let scenarios = rejection_and_cancel(&mut engine)?
         + accept_and_confirm(&mut engine)?
         + counter_and_confirm(&mut engine)?
         + disabled_cleanup(&mut engine)?
-        + root_actor_parity(&mut engine)?;
+        + root_actor_parity(&mut engine)?
+        + per_seat_disabled_policy_parity(&mut engine)?;
+    let high_hand_offers = high_hand_offer_policy_parity(&mut engine)?;
     let (generated, offers, responses, counters, confirmations, cancellations) =
         generated_trade_policy_parity(&mut engine)?;
     println!(
-        "{{\"kind\":\"cuda-resident-trade-parity\",\"parity\":true,\"scenarios\":{},\"generatedTransitions\":{},\"offers\":{},\"responses\":{},\"counters\":{},\"confirmations\":{},\"cancellations\":{},\"gpu\":\"{}\"}}",
+        "{{\"kind\":\"cuda-resident-trade-parity\",\"parity\":true,\"scenarios\":{},\"highHandOffers\":{},\"generatedTransitions\":{},\"offers\":{},\"responses\":{},\"counters\":{},\"confirmations\":{},\"cancellations\":{},\"gpu\":\"{}\"}}",
         scenarios,
+        high_hand_offers,
         generated,
         offers,
         responses,
