@@ -39,6 +39,10 @@ export type NextClick =
       kind: "trade";
       offerIndex: number;
       tradeId: string;
+      tradeCreator?: string;
+      tradeExecutor?: string;
+      tradeCreatorGive?: ResourceVector;
+      tradeCreatorReceive?: ResourceVector;
       verdict: "accept" | "counter" | "decline";
       label: string;
       signature: string;
@@ -62,6 +66,10 @@ export type NextClick =
       kind: "trade-partner";
       offerIndex: number;
       tradeId: string;
+      tradeCreator?: string;
+      tradeExecutor?: string;
+      tradeCreatorGive?: ResourceVector;
+      tradeCreatorReceive?: ResourceVector;
       acceptedIndex: number;
       player: string;
       label: string;
@@ -72,6 +80,11 @@ export type NextClick =
       kind: "trade-cancel";
       offerIndex: number;
       tradeId: string;
+      tradeCreator?: string;
+      tradeExecutor?: string;
+      tradeCreatorGive?: ResourceVector;
+      tradeCreatorReceive?: ResourceVector;
+      exhaustDomesticOffers?: boolean;
       label: string;
       signature: string;
       confidence: number;
@@ -111,6 +124,7 @@ export interface ActionExecutionDiagnostic {
   offerIndex?: number;
   visibleTradeCount?: number;
   visibleTradeFingerprints?: string[];
+  domesticTradeExhausted?: boolean;
 }
 
 export interface ActionGuideOptions {
@@ -431,23 +445,144 @@ const tradeExecutionDiagnostic = (
   };
 };
 
-const findTradeControl = (
-  offerIndex: number,
-  verdict: "accept" | "counter" | "decline",
-): HTMLElement | undefined => {
+const visibleTradeContainers = (): HTMLElement[] => {
   const nestedOffers = [
     ...document.querySelectorAll<HTMLElement>(
       "[class*='gameTradeOffersWrapper-'] [class*='tradeContainer-']",
     ),
   ].filter(visible);
-  const offers = nestedOffers.length
+  return nestedOffers.length
     ? nestedOffers
     : [
         ...document.querySelectorAll<HTMLElement>(
           "[class*='tradeContainer-']",
         ),
       ].filter(visible);
-  const offer = offers[offerIndex];
+};
+
+const tradeResourceCount = (
+  root: ParentNode,
+  resource: Resource,
+): number => {
+  const counts = [...root.querySelectorAll<HTMLImageElement>("img[src]")]
+    .filter((image) => normalized(image.src).includes(resourceAsset[resource]))
+    .map((image) => {
+      const stack =
+        image.closest<HTMLElement>(
+          "[class*='cardStackContainer-'], [class*='cardContainer-'], [data-card-enum], button, [role='button']",
+        ) ?? image;
+      const badge = stack.querySelector<HTMLElement>(
+        "[class*='countBadge-'], [class*='cardCount-'], [class*='amount-']",
+      );
+      const value = Number.parseInt(
+        normalized(badge?.textContent ?? "").match(/\d+/u)?.[0] ?? "1",
+        10,
+      );
+      return Number.isFinite(value) ? Math.max(1, value) : 1;
+    });
+  return counts.length ? Math.max(...counts) : 0;
+};
+
+const tradeResourceCounts = (root: ParentNode): Record<Resource, number> =>
+  Object.fromEntries(
+    (Object.keys(resourceAsset) as Resource[]).map((resource) => [
+      resource,
+      tradeResourceCount(root, resource),
+    ]),
+  ) as Record<Resource, number>;
+
+const sameResourceCounts = (
+  actual: Record<Resource, number>,
+  expected: ResourceVector,
+): boolean =>
+  (Object.keys(resourceAsset) as Resource[]).every(
+    (resource) => actual[resource] === expected[resource],
+  );
+
+const tradeContainerResourceMatch = (
+  offer: HTMLElement,
+  give?: ResourceVector,
+  receive?: ResourceVector,
+): boolean | undefined => {
+  if (!give || !receive) return undefined;
+  const offered = offer.querySelector<HTMLElement>(
+    "[class*='proposalOfferedHalfContainer-']",
+  );
+  const wanted = offer.querySelector<HTMLElement>(
+    "[class*='proposalWantedHalfContainer-']",
+  );
+  if (offered && wanted) {
+    const offeredCounts = tradeResourceCounts(offered);
+    const wantedCounts = tradeResourceCounts(wanted);
+    const observed =
+      Object.values(offeredCounts).some((count) => count > 0) ||
+      Object.values(wantedCounts).some((count) => count > 0);
+    if (!observed) return undefined;
+    return sameResourceCounts(offeredCounts, give) &&
+      sameResourceCounts(wantedCounts, receive);
+  }
+  const actual = tradeResourceCounts(offer);
+  if (Object.values(actual).every((count) => count === 0)) return undefined;
+  return (Object.keys(resourceAsset) as Resource[]).every(
+    (resource) => actual[resource] === give[resource] + receive[resource],
+  );
+};
+
+// `offerIndex` remains on NextClick for board/record diagnostics only. Colonist
+// does not promise that its store order matches visible DOM container order.
+const findTradeContainer = (
+  _offerIndex: number,
+  tradeCreator?: string,
+  tradeExecutor?: string,
+  tradeCreatorGive?: ResourceVector,
+  tradeCreatorReceive?: ResourceVector,
+): HTMLElement | undefined => {
+  const offers = visibleTradeContainers();
+  let candidates = offers;
+  for (const player of [tradeCreator, tradeExecutor]) {
+    if (!player) continue;
+    const wanted = normalized(player);
+    const named = candidates.filter((offer) =>
+      normalized(offer.textContent ?? "").includes(wanted),
+    );
+    if (named.length) candidates = named;
+  }
+  if (tradeCreatorGive && tradeCreatorReceive) {
+    const resourceEvidence = candidates.map((offer) => ({
+      offer,
+      match: tradeContainerResourceMatch(
+        offer,
+        tradeCreatorGive,
+        tradeCreatorReceive,
+      ),
+    }));
+    const resourceMatches = resourceEvidence
+      .filter((candidate) => candidate.match === true)
+      .map((candidate) => candidate.offer);
+    if (resourceMatches.length) {
+      candidates = resourceMatches;
+    } else if (resourceEvidence.some((candidate) => candidate.match === false)) {
+      candidates = [];
+    }
+  }
+  return candidates.length === 1 ? candidates[0] : undefined;
+};
+
+const findTradeControl = (
+  offerIndex: number,
+  verdict: "accept" | "counter" | "decline",
+  tradeCreator?: string,
+  tradeExecutor?: string,
+  tradeCreatorGive?: ResourceVector,
+  tradeCreatorReceive?: ResourceVector,
+): HTMLElement | undefined => {
+  const offer = findTradeContainer(
+    offerIndex,
+    tradeCreator,
+    tradeExecutor,
+    tradeCreatorGive,
+    tradeCreatorReceive,
+  );
   if (!offer) return undefined;
   if (verdict === "accept") {
     // Open-ended Colonist offers can have no genuine accept control. Never
@@ -464,20 +599,20 @@ const findTradeControl = (
   );
 };
 
-const findTradeCancelControl = (offerIndex: number): HTMLElement | undefined => {
-  const nestedOffers = [
-    ...document.querySelectorAll<HTMLElement>(
-      "[class*='gameTradeOffersWrapper-'] [class*='tradeContainer-']",
-    ),
-  ].filter(visible);
-  const offers = nestedOffers.length
-    ? nestedOffers
-    : [
-        ...document.querySelectorAll<HTMLElement>(
-          "[class*='tradeContainer-']",
-        ),
-      ].filter(visible);
-  const offer = offers[offerIndex];
+const findTradeCancelControl = (
+  offerIndex: number,
+  tradeCreator?: string,
+  tradeExecutor?: string,
+  tradeCreatorGive?: ResourceVector,
+  tradeCreatorReceive?: ResourceVector,
+): HTMLElement | undefined => {
+  const offer = findTradeContainer(
+    offerIndex,
+    tradeCreator,
+    tradeExecutor,
+    tradeCreatorGive,
+    tradeCreatorReceive,
+  );
   if (!offer) return undefined;
 
   const explicit = findControl(
@@ -603,14 +738,20 @@ const findTradeSubmit = (
 
 const findTradePartnerControl = (
   offerIndex: number,
-  acceptedIndex: number,
+  _acceptedIndex: number,
+  player: string,
+  tradeCreator?: string,
+  tradeExecutor?: string,
+  tradeCreatorGive?: ResourceVector,
+  tradeCreatorReceive?: ResourceVector,
 ): HTMLElement | undefined => {
-  const offers = [
-    ...document.querySelectorAll<HTMLElement>(
-      "[class*='gameTradeOffersWrapper-'] [class*='tradeContainer-']",
-    ),
-  ].filter(visible);
-  const offer = offers[offerIndex];
+  const offer = findTradeContainer(
+    offerIndex,
+    tradeCreator,
+    tradeExecutor,
+    tradeCreatorGive,
+    tradeCreatorReceive,
+  );
   if (!offer) return undefined;
   // Colonist's player-response controls are divs, so disabled responses do
   // not carry a native `disabled` attribute. The accepted responses are the
@@ -629,7 +770,16 @@ const findTradePartnerControl = (
           !/disabled/iu.test(element.outerHTML),
       ),
     );
-  return accepted[acceptedIndex] ?? accepted[0];
+  const wanted = normalized(player);
+  const named = accepted.filter((element) => {
+    const participant =
+      element.closest<HTMLElement>("[class*='player-'], [class*='response-']") ??
+      element.parentElement;
+    return normalized(participant?.textContent ?? element.textContent ?? "").includes(wanted);
+  });
+  if (named.length === 1) return named[0];
+  if (accepted.length === 1) return accepted[0];
+  return undefined;
 };
 
 const modalRoots = (): HTMLElement[] =>
@@ -753,7 +903,14 @@ const resolveElement = (action: NextClick): HTMLElement | undefined => {
     return findDevelopmentCard(action.card);
   }
   if (action.kind === "trade") {
-    return findTradeControl(action.offerIndex, action.verdict);
+    return findTradeControl(
+      action.offerIndex,
+      action.verdict,
+      action.tradeCreator,
+      action.tradeExecutor,
+      action.tradeCreatorGive,
+      action.tradeCreatorReceive,
+    );
   }
   if (action.kind === "trade-builder") {
     return findTradePanelControl();
@@ -762,10 +919,21 @@ const resolveElement = (action: NextClick): HTMLElement | undefined => {
     return findTradePartnerControl(
       action.offerIndex,
       action.acceptedIndex,
+      action.player,
+      action.tradeCreator,
+      action.tradeExecutor,
+      action.tradeCreatorGive,
+      action.tradeCreatorReceive,
     );
   }
   if (action.kind === "trade-cancel") {
-    return findTradeCancelControl(action.offerIndex);
+    return findTradeCancelControl(
+      action.offerIndex,
+      action.tradeCreator,
+      action.tradeExecutor,
+      action.tradeCreatorGive,
+      action.tradeCreatorReceive,
+    );
   }
   if (action.kind === "discard") {
     const resource = (Object.keys(action.cards) as Resource[]).find(
@@ -1379,6 +1547,9 @@ const tradeResourceSteps = (
 const TRADE_FAILURE_PATTERN =
   /no one has (?:the )?wanted resource|no player has (?:the )?wanted resource|(?:nobody|none of the players?) (?:has|have) (?:the )?(?:wanted|requested|required) resource|(?:players?|opponents?) (?:do not|don't|does not|doesn't) have enough (?:cards|resources)|insufficient (?:cards|resources)(?: for (?:this )?trade)?|identical trade|trade (?:offer )?limit|too many (?:identical )?trades|cannot (?:make|send|offer) (?:this )?trade|invalid trade|not enough (?:cards|resources)/iu;
 
+const DOMESTIC_TRADE_EXHAUSTION_PATTERN =
+  /no one has (?:the )?wanted resource|no player has (?:the )?wanted resource|(?:nobody|none of the players?) (?:has|have) (?:the )?(?:wanted|requested|required) resource|identical trade|trade (?:offer )?limit|too many (?:identical )?trades/iu;
+
 const tradeFailureLogKeys = (): Set<string> => {
   const root = findLogRoot();
   if (!root) return new Set();
@@ -1483,7 +1654,14 @@ const counterWorkflow = (
     {
       label: "Open counteroffer",
       resolve: () =>
-        findTradeControl(action.offerIndex, "counter"),
+        findTradeControl(
+          action.offerIndex,
+          "counter",
+          action.tradeCreator,
+          action.tradeExecutor,
+          action.tradeCreatorGive,
+          action.tradeCreatorReceive,
+        ),
       ready: tradePanelIsOpen,
       complete: tradePanelIsOpen,
       retryOnIncomplete: true,
@@ -1654,13 +1832,18 @@ const startWorkflow = (
     ? tradeFailureLogKeys()
     : new Set<string>();
 
-  const fail = (reason: string): void => {
+  const fail = (reason: string, tradeFailure?: string): void => {
     const activeOptions = workflowOptions ?? options;
     activeOptions.onExecution?.({
       succeeded: false,
       signature: action.signature,
       reason,
-      diagnostic: tradeExecutionDiagnostic(action),
+      diagnostic: {
+        ...tradeExecutionDiagnostic(action),
+        ...(tradeFailure && DOMESTIC_TRADE_EXHAUSTION_PATTERN.test(tradeFailure)
+          ? { domesticTradeExhausted: true }
+          : {}),
+      },
     });
     if (tradeTransaction) {
       const closeTradePanel = (attempt = 0): void => {
@@ -1694,7 +1877,7 @@ const startWorkflow = (
       ? visibleTradeFailure(ignoredTradeFailureLogKeys)
       : undefined;
     if (tradeFailure) {
-      fail(`Colonist rejected the trade workflow: ${tradeFailure}`);
+      fail(`Colonist rejected the trade workflow: ${tradeFailure}`, tradeFailure);
       return;
     }
     const step = steps[index];

@@ -1359,60 +1359,39 @@ fn belief_search(
     // when the wall clock expires during a deeper wave.
     aggregate.clear();
     let mut particles_searched = 0;
-    let mut floor_complete = !deadline_reached && !deadline.has_elapsed();
-    if floor_complete {
-        'floor: for particle in particles {
-            if deadline.has_elapsed() {
-                deadline_reached = true;
-                floor_complete = false;
-                break;
-            }
-            let weight = particle.weight.max(0.0) / total_weight;
-            if weight <= 0.0 {
-                continue;
-            }
-            particles_searched += 1;
-            for action in &root_actions {
-                if deadline.has_elapsed() {
-                    deadline_reached = true;
-                    floor_complete = false;
-                    break 'floor;
-                }
-                let mut next = particle.state.clone();
-                let entry = if next.apply(action).is_ok() {
-                    let mut value = evaluate_after_forced_chance(&next, 0);
-                    apply_action_friction(&mut value, &particle.state, action, observer);
-                    RowEntry {
-                        action: action.clone(),
-                        value,
-                        legal: true,
-                    }
-                } else {
-                    RowEntry {
-                        action: action.clone(),
-                        value: evaluate(&particle.state),
-                        legal: false,
-                    }
-                };
-                accumulate(&mut aggregate, entry, weight);
-            }
+    // The retained root/world table is deliberately small and is the minimum
+    // action-specific evidence this search may return. Finish it even if
+    // preparation consumed the nominal deadline; otherwise every root receives
+    // the same fallback value and root ordering becomes the recommendation.
+    for particle in particles {
+        let weight = particle.weight.max(0.0) / total_weight;
+        if weight <= 0.0 {
+            continue;
         }
-    }
-    if !floor_complete {
-        aggregate.clear();
-        particles_searched = 0;
-        let fallback = evaluate(&first.observed_state(observer));
+        particles_searched += 1;
         for action in &root_actions {
-            accumulate(
-                &mut aggregate,
+            let mut next = particle.state.clone();
+            let entry = if next.apply(action).is_ok() {
+                let mut value = evaluate_after_forced_chance(&next, 0);
+                apply_action_friction(&mut value, &particle.state, action, observer);
                 RowEntry {
                     action: action.clone(),
-                    value: fallback,
+                    value,
                     legal: true,
-                },
-                1.0,
-            );
+                }
+            } else {
+                RowEntry {
+                    action: action.clone(),
+                    value: evaluate(&particle.state),
+                    legal: false,
+                }
+            };
+            accumulate(&mut aggregate, entry, weight);
         }
+    }
+    let floor_complete = true;
+    if deadline.has_elapsed() {
+        deadline_reached = true;
     }
     let one_ply_floor_ms = elapsed_stage_ms(&deadline, one_ply_floor_started);
     let deep_waves_started = deadline.elapsed_ms();
@@ -1441,6 +1420,8 @@ fn belief_search(
         let mut wave_particles = 0usize;
         let mut wave_depth = 0u8;
         let mut wave_complete = true;
+        let total_wave_cells = positive_particle_count as usize * root_actions.len().max(1);
+        let mut completed_wave_cells = 0usize;
 
         'particles: for particle in particles {
             let weight = particle.weight.max(0.0) / total_weight;
@@ -1465,6 +1446,7 @@ fn belief_search(
                         },
                         weight,
                     );
+                    completed_wave_cells += 1;
                     continue;
                 }
                 let completed_turn = next.turn != particle.state.turn
@@ -1474,6 +1456,19 @@ fn belief_search(
                     .copied()
                     .unwrap_or(1)
                     .max(1);
+                let remaining_cells = total_wave_cells
+                    .saturating_sub(completed_wave_cells)
+                    .max(1) as u32;
+                let remaining_ms = deadline.remaining_ms();
+                if remaining_ms != u32::MAX && remaining_ms < remaining_cells {
+                    wave_complete = false;
+                    break 'particles;
+                }
+                let child_deadline = if remaining_ms == u32::MAX {
+                    deadline.clone()
+                } else {
+                    CooperativeDeadline::start((remaining_ms / remaining_cells).max(1))
+                };
                 let mut searcher = Searcher {
                     algorithm: if paranoid {
                         Algorithm::Paranoid { root: observer }
@@ -1487,7 +1482,7 @@ fn belief_search(
                     nodes: 0,
                     cutoffs: 0,
                     deepest_depth: 0,
-                    deadline: deadline.clone(),
+                    deadline: child_deadline,
                     deadline_reached: false,
                     observation_safe_recursive: true,
                     evaluation_cache: Rc::clone(&evaluation_cache),
@@ -1504,7 +1499,7 @@ fn belief_search(
                 nodes += searcher.nodes;
                 cutoffs += searcher.cutoffs;
                 wave_depth = wave_depth.max(searcher.deepest_depth);
-                if searcher.deadline_reached || deadline.has_elapsed() {
+                if deadline.has_elapsed() {
                     deadline_reached = true;
                     wave_complete = false;
                     break 'particles;
@@ -1518,6 +1513,7 @@ fn belief_search(
                     },
                     weight,
                 );
+                completed_wave_cells += 1;
             }
         }
 

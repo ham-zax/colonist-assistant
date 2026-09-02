@@ -83,12 +83,14 @@ import type { TradeVerdict } from "../core/trades";
 import type {
   DecisionAnalysis,
   DecisionAuthority,
+  DecisionRationale,
   DecisionRuntime,
   DecisionSearchConstraints,
   DomesticTradeState,
   RootTradeActionExclusion,
 } from "../core/engine";
 import {
+  explainDeepSearchDecision,
   isSearchDecisionRuntime,
   isWasmDecisionEngine,
 } from "../core/engine";
@@ -354,6 +356,7 @@ export class AssistantOverlay {
   private lastRejectedDomesticTrade?: DomesticTradeState;
   private readonly rootTradeActionExclusions: RootTradeActionExclusion[] = [];
   private readonly failedTradeActions = new Set<string>();
+  private rootDomesticTradeExhausted = false;
   private readonly completedIncomingTradeIds = new Set<string>();
   private readonly outgoingTradeSeenAt = new Map<string, number>();
   private readonly outgoingTradeWatchdogs = new Map<string, number>();
@@ -363,6 +366,12 @@ export class AssistantOverlay {
     gameKey?: string;
     turn?: number;
     player: string;
+  };
+  private localSevenProtocol?: {
+    gameKey?: string;
+    turn?: number;
+    robberHexBefore?: string;
+    robberObserved: boolean;
   };
   private actionGuideSignature = "";
 
@@ -423,7 +432,9 @@ export class AssistantOverlay {
   }
 
   updateBoard(board?: BoardSnapshot): void {
+    const previousBoard = this.board;
     let nextBoard = board;
+    this.updateLocalSevenProtocol(previousBoard, nextBoard);
     if (nextBoard) {
       const traceScope = nextBoard.gameKey ?? null;
       if (
@@ -447,6 +458,7 @@ export class AssistantOverlay {
       this.lastRejectedDomesticTrade = undefined;
       this.rootTradeActionExclusions.length = 0;
       this.failedTradeActions.clear();
+      this.rootDomesticTradeExhausted = false;
       this.completedIncomingTradeIds.clear();
       this.outgoingTradeSeenAt.clear();
       this.tradeOfferSnapshots.clear();
@@ -587,6 +599,7 @@ export class AssistantOverlay {
       this.lastRejectedDomesticTrade = undefined;
       this.rootTradeActionExclusions.length = 0;
       this.failedTradeActions.clear();
+      this.rootDomesticTradeExhausted = false;
       this.completedIncomingTradeIds.clear();
       this.outgoingTradeSeenAt.clear();
       this.clearOutgoingTradeWatchdogs();
@@ -651,6 +664,102 @@ export class AssistantOverlay {
     this.render();
   }
 
+  private updateLocalSevenProtocol(
+    previous: BoardSnapshot | undefined,
+    next: BoardSnapshot | undefined,
+  ): void {
+    if (
+      !next ||
+      next.gameOver ||
+      !next.isMyTurn ||
+      next.hasRolled !== true ||
+      next.lastRoll !== 7
+    ) {
+      this.localSevenProtocol = undefined;
+      return;
+    }
+    const sameScope = (candidate: typeof this.localSevenProtocol): boolean =>
+      Boolean(
+        candidate &&
+          candidate.gameKey === next.gameKey &&
+          candidate.turn === next.turn,
+      );
+    const rollStarted = Boolean(
+      previous &&
+        previous.gameKey === next.gameKey &&
+        previous.turn === next.turn &&
+        previous.isMyTurn &&
+        previous.hasRolled === false,
+    );
+    const protocolVisible =
+      next.action === "discard" ||
+      next.action === "robber" ||
+      Boolean(next.robberVictimSelection);
+    if (!sameScope(this.localSevenProtocol) && (rollStarted || protocolVisible)) {
+      this.localSevenProtocol = {
+        gameKey: next.gameKey,
+        turn: next.turn,
+        robberHexBefore: previous?.hexes.find((hex) => hex.blocked)?.id ??
+          next.hexes.find((hex) => hex.blocked)?.id,
+        robberObserved: false,
+      };
+    }
+    if (!sameScope(this.localSevenProtocol)) return;
+    if (next.action === "robber" || next.robberVictimSelection) {
+      this.localSevenProtocol!.robberObserved = true;
+    }
+    const previousVictimSelection = Boolean(previous?.robberVictimSelection);
+    const robberMoveJustCompleted = previous?.action === "robber";
+    const blockedHex = next.hexes.find((hex) => hex.blocked)?.id;
+    const robberMoved = Boolean(
+      blockedHex && blockedHex !== this.localSevenProtocol!.robberHexBefore,
+    );
+    const victimChoiceRequired = this.robberVictimCandidates(next).length > 1;
+    if (
+      this.localSevenProtocol!.robberObserved &&
+      next.action === "none" &&
+      !next.robberVictimSelection &&
+      (
+        previousVictimSelection ||
+        (robberMoveJustCompleted && robberMoved && !victimChoiceRequired)
+      )
+    ) {
+      this.localSevenProtocol = undefined;
+    }
+  }
+
+  private robberVictimCandidates(board: BoardSnapshot): string[] {
+    const blocked = board.hexes.find((hex) => hex.blocked);
+    if (!blocked) return [];
+    const victims = new Set<string>();
+    for (const vertex of board.vertices) {
+      const player = vertex.building?.player;
+      if (
+        !player ||
+        player === board.myPlayer ||
+        !vertex.adjacentHexes.includes(blocked.id) ||
+        (board.players?.[player]?.handSize ?? 0) <= 0
+      ) {
+        continue;
+      }
+      victims.add(player);
+    }
+    return [...victims];
+  }
+
+  private awaitingLocalSevenProtocol(): boolean {
+    const board = this.board;
+    const pending = this.localSevenProtocol;
+    return Boolean(
+      board &&
+        pending &&
+        pending.gameKey === board.gameKey &&
+        pending.turn === board.turn &&
+        (board.action ?? "none") === "none" &&
+        !board.robberVictimSelection,
+    );
+  }
+
   setSettings(settings: AssistantSettings): void {
     const wasRecording = this.settings.recordGame;
     const engineChanged = settings.engine !== this.settings.engine;
@@ -696,11 +805,13 @@ export class AssistantOverlay {
     this.freeRoadPlan = undefined;
     this.queuedPlacement = undefined;
     this.robberVictimPlan = undefined;
+    this.localSevenProtocol = undefined;
     this.confirmedPlacement = undefined;
     this.confirmedPlacementSpend = undefined;
     this.lastRejectedDomesticTrade = undefined;
     this.rootTradeActionExclusions.length = 0;
     this.failedTradeActions.clear();
+    this.rootDomesticTradeExhausted = false;
     this.completedIncomingTradeIds.clear();
     this.outgoingTradeSeenAt.clear();
     this.clearOutgoingTradeWatchdogs();
@@ -1359,6 +1470,16 @@ export class AssistantOverlay {
         }
         if (succeeded && next?.kind === "board") {
           this.registerPendingPlacement(next);
+        }
+        if (diagnostic?.domesticTradeExhausted) {
+          this.rootDomesticTradeExhausted = true;
+        }
+        if (
+          succeeded &&
+          next?.kind === "trade-cancel" &&
+          next.exhaustDomesticOffers
+        ) {
+          this.rootDomesticTradeExhausted = true;
         }
         if (traceKey) {
           const offerIndex =
@@ -2169,7 +2290,7 @@ export class AssistantOverlay {
       this.decisionWaitingForPreviousSearch = false;
       return;
     }
-    const decisionBoard = board.activeTrades
+    const decisionBoardBase = board.activeTrades
       ? {
           ...board,
           activeTrades: board.activeTrades.filter(
@@ -2179,6 +2300,20 @@ export class AssistantOverlay {
           ),
         }
       : board;
+    const decisionBoard =
+      this.rootDomesticTradeExhausted && decisionBoardBase.isMyTurn
+        ? { ...decisionBoardBase, domesticTradeUsed: true }
+        : decisionBoardBase;
+    if (this.awaitingLocalSevenProtocol()) {
+      this.decisionAnalysis = undefined;
+      this.decisionKey = "";
+      this.decisionPendingKey = "";
+      this.decisionSlowKey = "";
+      this.decisionWaitingForPreviousSearch = false;
+      this.decisionRuntimeError = "";
+      this.decisionWorker.reset();
+      return;
+    }
     if (this.decisionContextInvalidated) {
       this.decisionPendingKey = "";
       this.decisionSlowKey = "";
@@ -2816,19 +2951,24 @@ export class AssistantOverlay {
       this.decisionAnalysis?.deepSearch
     ) {
       const search = this.decisionAnalysis.deepSearch;
-      const statistic = search.actions.find(
-        (candidate) => candidate.action.targetId === recommendation?.id,
-      );
+      const rationale = explainDeepSearchDecision(search);
       recommendation = {
         ...recommendation,
         ...(deepAction.player ? { targetPlayer: deepAction.player } : {}),
-        reasons: [
-          `Strategist selected this after ${search.nodes.toLocaleString()} search nodes at decision depth ${search.deepestDecisionDepth}`,
-          statistic
-            ? `Its relative strategic value is ${Math.round((statistic.value[search.rootIndex] ?? 0) * 100)} across the current belief set`
-            : `It remained best across ${search.particles} legal hidden-card particles`,
-          ...recommendation.reasons,
-        ],
+        reasons: rationale
+          ? [
+              rationale.summary,
+              ...(rationale.reasons.length
+                ? rationale.reasons
+                : ["The final search authority kept this target as the strongest legal continuation"]),
+              ...rationale.evidence.slice(0, 3),
+              ...recommendation.reasons,
+            ]
+          : [
+              `Strategist selected this after ${search.nodes.toLocaleString()} search nodes at decision depth ${search.deepestDecisionDepth}`,
+              `It remained best across ${search.particles} legal hidden-card particles`,
+              ...recommendation.reasons,
+            ],
       };
     }
     return {
@@ -2940,6 +3080,10 @@ export class AssistantOverlay {
       };
     }
 
+    if (this.awaitingLocalSevenProtocol()) {
+      return undefined;
+    }
+
     if (state && board.activeTrades?.length) {
       for (let index = 0; index < board.activeTrades.length; index += 1) {
         const trade = board.activeTrades[index]!;
@@ -2958,6 +3102,10 @@ export class AssistantOverlay {
             kind: "trade",
             offerIndex: index,
             tradeId: trade.id,
+            tradeCreator: trade.creator,
+            tradeExecutor: trade.tradeExecutor,
+            tradeCreatorGive: { ...trade.creatorGive },
+            tradeCreatorReceive: { ...trade.creatorReceive },
             verdict: "decline",
             label: "Decline this trade",
             signature: `${signatureBase}|trade|${trade.id}|decline|player-trades-disabled`,
@@ -3021,6 +3169,10 @@ export class AssistantOverlay {
           kind: "trade",
           offerIndex: index,
           tradeId: trade.id,
+          tradeCreator: trade.creator,
+          tradeExecutor: trade.tradeExecutor,
+          tradeCreatorGive: { ...trade.creatorGive },
+          tradeCreatorReceive: { ...trade.creatorReceive },
           verdict,
           label:
             verdict === "accept"
@@ -3064,6 +3216,10 @@ export class AssistantOverlay {
           kind: "trade-cancel",
           offerIndex: board.activeTrades!.indexOf(trade),
           tradeId: trade.id,
+          tradeCreator: trade.creator,
+          tradeExecutor: trade.tradeExecutor,
+          tradeCreatorGive: { ...trade.creatorGive },
+          tradeCreatorReceive: { ...trade.creatorReceive },
           label: "Cancel player trade",
           signature: `${signatureBase}|cancel-trade|${trade.id}|player-trades-disabled`,
           confidence: 1,
@@ -3078,6 +3234,10 @@ export class AssistantOverlay {
             kind: "trade-cancel",
             offerIndex: board.activeTrades!.indexOf(trade),
             tradeId: trade.id,
+            tradeCreator: trade.creator,
+            tradeExecutor: trade.tradeExecutor,
+            tradeCreatorGive: { ...trade.creatorGive },
+            tradeCreatorReceive: { ...trade.creatorReceive },
             label: "Cancel this accepted trade",
             signature: `${signatureBase}|cancel-trade|${trade.id}|rust`,
             confidence: 1,
@@ -3095,6 +3255,10 @@ export class AssistantOverlay {
           kind: "trade-partner",
           offerIndex: board.activeTrades!.indexOf(trade),
           tradeId: trade.id,
+          tradeCreator: trade.creator,
+          tradeExecutor: trade.tradeExecutor,
+          tradeCreatorGive: { ...trade.creatorGive },
+          tradeCreatorReceive: { ...trade.creatorReceive },
           acceptedIndex: trade.acceptedPlayers.indexOf(selected),
           player: selected,
           label: `Trade with ${selected}`,
@@ -3118,6 +3282,11 @@ export class AssistantOverlay {
           kind: "trade-cancel",
           offerIndex: board.activeTrades!.indexOf(trade),
           tradeId: trade.id,
+          tradeCreator: trade.creator,
+          tradeExecutor: trade.tradeExecutor,
+          tradeCreatorGive: { ...trade.creatorGive },
+          tradeCreatorReceive: { ...trade.creatorReceive },
+          exhaustDomesticOffers: true,
           label: "Cancel unanswered trade",
           signature: `${signatureBase}|cancel-trade|${trade.id}|timeout`,
           confidence: 1,
@@ -3130,6 +3299,11 @@ export class AssistantOverlay {
         kind: "trade-cancel",
         offerIndex: board.activeTrades!.indexOf(trade),
         tradeId: trade.id,
+        tradeCreator: trade.creator,
+        tradeExecutor: trade.tradeExecutor,
+        tradeCreatorGive: { ...trade.creatorGive },
+        tradeCreatorReceive: { ...trade.creatorReceive },
+        exhaustDomesticOffers: true,
         label: "Close rejected trade",
         signature: `${signatureBase}|cancel-trade|${trade.id}|complete`,
         confidence: 1,
@@ -3654,10 +3828,83 @@ export class AssistantOverlay {
     );
   }
 
+  private currentDecisionRationale(): DecisionRationale | undefined {
+    const search = this.decisionAnalysis?.deepSearch;
+    return search ? explainDeepSearchDecision(search) : undefined;
+  }
+
+  private rationaleEvidenceHtml(rationale: DecisionRationale | undefined): string {
+    if (!rationale) return "";
+    return [...rationale.reasons, ...rationale.evidence]
+      .map((line) => `<p>${escapeHtml(line)}.</p>`)
+      .join("");
+  }
+
+  private deepRationaleForBuild(kind: BuildKind): DecisionRationale | undefined {
+    const chosen = this.decisionAnalysis?.deepSearch?.chosen;
+    const matches =
+      kind === "road"
+        ? chosen?.kind === "build-road" || chosen?.kind === "place-road"
+        : kind === "settlement"
+          ? chosen?.kind === "build-settlement" || chosen?.kind === "place-settlement"
+          : kind === "city"
+            ? chosen?.kind === "build-city"
+            : chosen?.kind === "buy-development";
+    return matches ? this.currentDecisionRationale() : undefined;
+  }
+
+  private decisionRationaleForNext(next: NextClick): DecisionRationale | undefined {
+    const chosen = this.decisionAnalysis?.deepSearch?.chosen;
+    if (!chosen) return undefined;
+    const matches = (() => {
+      switch (next.kind) {
+        case "board":
+          return chosen.targetId === next.targetId;
+        case "build":
+          return Boolean(this.deepRationaleForBuild(next.build));
+        case "development":
+          return chosen.kind === `play-${next.card}`;
+        case "trade":
+          return next.verdict === "counter"
+            ? chosen.kind === "counter-trade" && chosen.tradeId === next.tradeId
+            : chosen.kind === "respond-trade" &&
+                chosen.tradeId === next.tradeId &&
+                Boolean(chosen.accept) === (next.verdict === "accept");
+        case "trade-builder":
+          return next.mode === "bank"
+            ? chosen.kind === "maritime-trade"
+            : chosen.kind === "offer-trade";
+        case "trade-partner":
+          return chosen.kind === "confirm-trade" && chosen.player === next.player;
+        case "trade-cancel":
+          return chosen.kind === "cancel-trade" && chosen.tradeId === next.tradeId;
+        case "discard":
+          return chosen.kind === "discard";
+        case "turn-control":
+          return (
+            (next.control === "roll" && chosen.kind === "roll") ||
+            (next.control === "end" && chosen.kind === "end-turn")
+          );
+        case "resource":
+          return chosen.resource === next.resource;
+        case "player":
+          return chosen.player === next.player;
+      }
+    })();
+    return matches ? this.currentDecisionRationale() : undefined;
+  }
+
   private renderTurnControlAdvice(
     next: Extract<NextClick, { kind: "turn-control" }>,
   ): string {
     const roll = next.control === "roll";
+    const rationale = this.decisionRationaleForNext(next);
+    const fallbackWhy = roll
+      ? "Roll before the engine evaluates spend, trade, and development-card lines from the resulting hand"
+      : "No remaining legal conversion beats passing; the highlighted control ends this turn";
+    const why = rationale
+      ? `${rationale.summary}. ${rationale.reasons[0] ?? "The final authority selected this action from the legal choices"}`
+      : fallbackWhy;
     const icon = roll
       ? '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="2" fill="currentColor"/><circle cx="8" cy="8" r="1.35" fill="#0d1821"/><circle cx="16" cy="8" r="1.35" fill="#0d1821"/><circle cx="12" cy="12" r="1.35" fill="#0d1821"/><circle cx="8" cy="16" r="1.35" fill="#0d1821"/><circle cx="16" cy="16" r="1.35" fill="#0d1821"/></svg>'
       : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h3v16H5zM10 5l9 7-9 7z" fill="currentColor"/></svg>';
@@ -3667,8 +3914,9 @@ export class AssistantOverlay {
         <span class="command-art">${icon}</span>
         <h1>${roll ? "Roll the dice" : "End your turn"}</h1>
       </div>
-      <p class="why">${roll ? "Roll before the engine evaluates spend, trade, and development-card lines from the resulting hand" : "No remaining legal conversion beats passing; the highlighted control ends this turn"}.</p>
+      <p class="why">${escapeHtml(why)}.</p>
       <div class="board-confirm"><i></i><span>${roll ? "The active dice face is highlighted" : "The pass-turn button is highlighted"}</span></div>
+      ${rationale ? `<details class="more"><summary>Why this action</summary>${this.rationaleEvidenceHtml(rationale)}</details>` : ""}
     </section>`;
   }
 
@@ -3679,18 +3927,22 @@ export class AssistantOverlay {
       (candidate) => candidate.id === next.tradeId,
     );
     const creator = trade?.creator ?? "this player";
+    const rationale = this.decisionRationaleForNext(next);
     const title =
       next.verdict === "accept"
         ? "Accept this offer"
         : next.verdict === "counter"
           ? "Send a counteroffer"
           : "Decline this offer";
-    const detail =
+    const fallbackDetail =
       next.verdict === "accept"
-        ? "The received value and tempo beat the opponent benefit in the current race."
+        ? "The received value and tempo beat the opponent benefit in the current race"
         : next.verdict === "counter"
-          ? "The original offer is close, but the highlighted counter sequence improves your conversion."
-          : "The offer helps the opponent more than it advances your best reachable build.";
+          ? "The original offer is close, but the highlighted counter sequence improves your conversion"
+          : "The offer helps the opponent more than it advances your best reachable build";
+    const detail = rationale
+      ? `${rationale.summary}. ${rationale.reasons[0] ?? fallbackDetail}`
+      : fallbackDetail;
     return `<section class="decision trade-decision" aria-live="polite">
       <div class="decision-meta"><span>INCOMING TRADE</span><span>${next.verdict.toUpperCase()}</span></div>
       <div class="decision-command">
@@ -3698,22 +3950,28 @@ export class AssistantOverlay {
         <h1>${title}</h1>
       </div>
       <div class="single-tactic"><span>FROM</span><strong>${escapeHtml(creator)}</strong></div>
-      <p class="why">${detail}</p>
+      <p class="why">${escapeHtml(detail)}.</p>
       <div class="board-confirm"><i></i><span>The exact ${next.verdict} control is highlighted on the offer</span></div>
+      ${rationale ? `<details class="more"><summary>Why this verdict</summary>${this.rationaleEvidenceHtml(rationale)}</details>` : ""}
     </section>`;
   }
 
   private renderTradeCancelAdvice(
     next: Extract<NextClick, { kind: "trade-cancel" }>,
   ): string {
+    const rationale = this.decisionRationaleForNext(next);
+    const why = rationale
+      ? `${rationale.summary}. ${rationale.reasons[0] ?? "The final authority preferred closing this trade state"}`
+      : "This offer has no useful live response. Closing it releases Colonist's trade state; the same bundle stays blocked for this turn";
     return `<section class="decision trade-decision" aria-live="polite">
       <div class="decision-meta"><span>OUTGOING TRADE</span><span>RECOVERY</span></div>
       <div class="decision-command">
         <span class="command-art">${this.pieceArt("development")}</span>
         <h1>${escapeHtml(next.label)}</h1>
       </div>
-      <p class="why">This offer has no useful live response. Closing it releases Colonist's trade state; the same bundle stays blocked for this turn.</p>
+      <p class="why">${escapeHtml(why)}.</p>
       <div class="board-confirm"><i></i><span>The offer's cancel control is highlighted</span></div>
+      ${rationale ? `<details class="more"><summary>Why this action</summary>${this.rationaleEvidenceHtml(rationale)}</details>` : ""}
     </section>`;
   }
 
@@ -3735,14 +3993,19 @@ export class AssistantOverlay {
   private renderRobberVictimAdvice(
     next: Extract<NextClick, { kind: "player" }>,
   ): string {
+    const rationale = this.decisionRationaleForNext(next);
+    const why = rationale
+      ? `${rationale.summary}. ${rationale.reasons[0] ?? "This victim remained the strongest legal steal target"}`
+      : "This victim best combines current win threat, steal value, and disruption of the strongest reachable build line";
     return `<section class="decision control-decision" aria-live="polite">
       <div class="decision-meta"><span>ROBBER TARGET</span><span>EXACT NEXT CLICK</span></div>
       <div class="decision-command">
         <span class="command-art">${this.pieceArt("robber")}</span>
         <h1>Steal from ${escapeHtml(next.player)}</h1>
       </div>
-      <p class="why">This victim best combines current win threat, steal value, and disruption of the strongest reachable build line.</p>
+      <p class="why">${escapeHtml(why)}.</p>
       <div class="board-confirm"><i></i><span>Select the highlighted player, then confirm the victim</span></div>
+      ${rationale ? `<details class="more"><summary>Why this victim</summary>${this.rationaleEvidenceHtml(rationale)}</details>` : ""}
     </section>`;
   }
 
@@ -3803,6 +4066,10 @@ export class AssistantOverlay {
         ? `Send to ${action.recipients.join(", ")}`
         : "Send to the table";
     const firstGive = RESOURCE_ORDER.find((resource) => give[resource] > 0);
+    const rationale = this.currentDecisionRationale();
+    const why = rationale
+      ? `${rationale.summary}. ${rationale.reasons[0] ?? "This conversion had the strongest continuation"}`
+      : "The modeled conversion beats building, another trade, or ending the turn";
     return `<section class="decision trade-decision" aria-live="polite">
       <div class="decision-meta"><span>DEEP SEARCH · ${maritime ? "BANK TRADE" : "PLAYER TRADE"}</span><span>NEXT SEQUENCE</span></div>
       <div class="decision-command">
@@ -3815,9 +4082,10 @@ export class AssistantOverlay {
         <div><em>YOU GET</em><span>${row(receive)}</span></div>
       </div>
       <div class="trade-next"><span>${maritime ? "BANK / PORT" : "RECIPIENTS"}</span><strong>${escapeHtml(recipients)}</strong></div>
-      <p class="why">Every click in this sequence is highlighted. The search chose it only because the modeled conversion beats building, another trade, or ending the turn.</p>
+      <p class="why">${escapeHtml(why)}.</p>
       <details class="more">
-        <summary>Search evidence</summary>
+        <summary>Why this trade</summary>
+        ${this.rationaleEvidenceHtml(rationale)}
         <p>${escapeHtml(this.decisionAnalysis?.model ?? "")}.</p>
       </details>
     </section>`;
@@ -3860,6 +4128,10 @@ export class AssistantOverlay {
     const card = cards[action.kind as keyof typeof cards];
     if (!card) return "";
     const search = this.decisionAnalysis?.deepSearch;
+    const rationale = this.currentDecisionRationale();
+    const why = rationale
+      ? `${rationale.summary}. ${rationale.reasons[0] ?? "This line had the strongest modeled continuation"}`
+      : "This line has the best modeled continuation from your exact hand and the current opponent-card belief set";
     return `<section class="decision development-decision" aria-live="polite">
       <div class="decision-meta"><span>DEEP SEARCH · PLAY NOW</span><span>${escapeHtml(search?.algorithm.toUpperCase() ?? "SEARCH")}</span></div>
       <div class="decision-command">
@@ -3867,9 +4139,10 @@ export class AssistantOverlay {
         <h1>Play ${card.label} now</h1>
       </div>
       <div class="single-tactic"><span>NEXT</span><strong>${escapeHtml(card.instruction)}</strong></div>
-      <p class="why">This line has the best modeled continuation from your exact hand and the current opponent-card belief set.</p>
+      <p class="why">${escapeHtml(why)}.</p>
       <details class="more">
-        <summary>Search evidence</summary>
+        <summary>Why this card now</summary>
+        ${this.rationaleEvidenceHtml(rationale)}
         <p>${escapeHtml(this.decisionAnalysis?.model ?? "")}.</p>
         ${search?.tacticalProven ? "<p>The current-turn solver proved this tactical line.</p>" : ""}
       </details>
@@ -4024,17 +4297,20 @@ export class AssistantOverlay {
             Math.max(0, board.ownHand![resource] - discard[resource]),
           ]),
         ) as ResourceVector;
+        const rationale = explainDeepSearchDecision(deepSearch);
         return {
           count: board.discardCount,
           discard,
           keep,
           score: deepSearch.tacticalWinProbability,
-          reasons: [
-            deepSearch.exactDecision
-              ? `The exact solver compared every legal discard across ${deepSearch.particles.toLocaleString()} weighted belief ${deepSearch.particles === 1 ? "world" : "worlds"}`
-              : `Deep Search compared this discard inside ${deepSearch.rollouts.toLocaleString()} continuation rollouts`,
-            "It preserves the strongest legal conversion and win-race branches",
-          ],
+          reasons: rationale
+            ? [rationale.summary, ...rationale.reasons, ...rationale.evidence]
+            : [
+                deepSearch.exactDecision
+                  ? `The exact solver compared every legal discard across ${deepSearch.particles.toLocaleString()} weighted belief ${deepSearch.particles === 1 ? "world" : "worlds"}`
+                  : `Deep Search compared this discard inside ${deepSearch.rollouts.toLocaleString()} continuation rollouts`,
+                "It preserves the strongest legal conversion and win-race branches",
+              ],
         };
       }
     }
@@ -4075,8 +4351,10 @@ export class AssistantOverlay {
       <p class="why">${escapeHtml(recommendation.reasons[0] ?? "")}. ${escapeHtml(recommendation.reasons[1] ?? "")}.</p>
       <details class="more">
         <summary>How this was chosen</summary>
-        <p>Compared every legal discard from your current hand.</p>
-        <p>Scored build completion, replacement speed, port-ready sets, and remaining options.</p>
+        ${recommendation.reasons
+          .slice(2)
+          .map((reason) => `<p>${escapeHtml(reason)}.</p>`)
+          .join("") || "<p>Compared the legal discards against build completion, replacement speed, and remaining options.</p>"}
       </details>
     </section>`;
   }
@@ -4102,6 +4380,9 @@ export class AssistantOverlay {
         ),
       ]),
     ) as ResourceVector;
+    const buildRationale = forcedKind
+      ? this.deepRationaleForBuild(forcedKind)
+      : undefined;
     const primary =
       matching ??
       (forcedKind
@@ -4115,11 +4396,17 @@ export class AssistantOverlay {
             deficit: fallbackDeficit,
             affordableProbability:
               resourceTotal(fallbackDeficit) === 0 ? 1 : 0,
-            reasons: [
-              `${this.decisionEngineLabel()} selected this action from the current legal position`,
-              this.decisionAnalysis?.model ??
-                "It is the highest-value legal continuation now",
-            ],
+            reasons: buildRationale
+              ? [
+                  buildRationale.summary,
+                  ...buildRationale.reasons,
+                  ...buildRationale.evidence.slice(0, 3),
+                ]
+              : [
+                  `${this.decisionEngineLabel()} selected this action from the current legal position`,
+                  this.decisionAnalysis?.model ??
+                    "It is the highest-value legal continuation now",
+                ],
           }
         : report.primary);
     const affordable = primary.affordableProbability === 1;
@@ -4167,12 +4454,13 @@ export class AssistantOverlay {
         <span class="command-art">${this.pieceArt(primary.kind === "development" ? "development" : primary.kind)}</span>
         <h1>${escapeHtml(title)}</h1>
       </div>
-      <p class="why">${escapeHtml(primary.reasons[1] ?? "")}.</p>
+      <p class="why">${escapeHtml(buildRationale ? `${buildRationale.summary}. ${buildRationale.reasons[0] ?? "The final search authority selected this build"}` : primary.reasons[1] ?? "")}.</p>
       <div class="resource-plan" aria-label="Resources for this goal">${resourcePlan}</div>
       ${tactic}
       <details class="more">
         <summary>Why this recommendation</summary>
         ${this.decisionAnalysis?.deepSearch ? `<p>${escapeHtml(this.decisionAnalysis.model)}.</p>` : ""}
+        ${buildRationale ? this.rationaleEvidenceHtml(buildRationale) : ""}
         <p>${primary.confidence}% hand certainty across ${state.worlds.length} legal tracked state${state.worlds.length === 1 ? "" : "s"}.</p>
         ${primary.reasons.map((reason) => `<p>${escapeHtml(reason)}.</p>`).join("")}
         ${report.trade ? `<p>Trade model: ${escapeHtml(report.trade.reason)}.</p>` : ""}
