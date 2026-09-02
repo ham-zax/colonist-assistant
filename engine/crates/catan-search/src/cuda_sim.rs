@@ -107,6 +107,37 @@ pub struct CudaSimGameSummary {
     pub victory_points: [u8; 4],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CudaSimArenaConfig {
+    pub max_actions: u32,
+    pub max_turns: u32,
+}
+
+impl Default for CudaSimArenaConfig {
+    fn default() -> Self {
+        Self {
+            max_actions: 4_096,
+            max_turns: 160,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CudaSimArenaGameSummary {
+    pub game: CudaSimGameSummary,
+    pub actions: u32,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CudaSimArenaResult {
+    pub games: Vec<CudaSimArenaGameSummary>,
+    pub wins: [u32; 4],
+    pub terminal_games: u32,
+    pub truncated_games: u32,
+    pub total_actions: u64,
+}
+
 #[derive(Clone, Debug)]
 pub struct CudaSimRootActionStats {
     pub action: Action,
@@ -184,6 +215,28 @@ impl CudaSimPackedState {
     pub fn words(&self) -> &[u32; STATE_WORDS] {
         &self.words
     }
+
+    pub fn summary(&self) -> CudaSimGameSummary {
+        let players = self.words[STATE_NUM_PLAYERS] as usize;
+        let terminal = self.words[STATE_PHASE] == 10;
+        let target = self.words[STATE_VICTORY_TARGET];
+        let mut victory_points = [0u8; 4];
+        let mut winner = None;
+        for (player, value) in victory_points.iter_mut().enumerate().take(players) {
+            let base = STATE_PLAYERS + player * PLAYER_STRIDE;
+            let vp = self.words[base + 15] + self.words[base + 5 + 1];
+            *value = vp.min(u8::MAX as u32) as u8;
+            if terminal && winner.is_none() && vp >= target {
+                winner = Some(player as u8);
+            }
+        }
+        CudaSimGameSummary {
+            terminal,
+            winner,
+            turn: self.words[STATE_TURN],
+            victory_points,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -218,6 +271,7 @@ pub enum CudaSimError {
     ActionCountMismatch { states: usize, actions: usize },
     RootBatchMismatch { states: usize, rows: usize },
     InvalidRolloutCount,
+    InvalidArenaChunk,
     UnsupportedAction,
     TransitionFailed {
         index: usize,
@@ -246,6 +300,9 @@ impl fmt::Display for CudaSimError {
             ),
             Self::InvalidRolloutCount => formatter.write_str(
                 "CUDA simulation root search requires at least one rollout per root action",
+            ),
+            Self::InvalidArenaChunk => formatter.write_str(
+                "CUDA simulation arena campaign requires a nonzero resident chunk size",
             ),
             Self::UnsupportedAction => formatter.write_str(
                 "action is not implemented by the first GPU-resident transition kernel",
@@ -287,6 +344,7 @@ pub struct CudaSimEngine {
     transition_kernel: CudaFunction,
     rollout_action_kernel: CudaFunction,
     rollout_steps_kernel: CudaFunction,
+    arena_kernel: CudaFunction,
     summary_kernel: CudaFunction,
     expand_roots_kernel: CudaFunction,
     reduce_roots_kernel: CudaFunction,
@@ -296,6 +354,7 @@ pub struct CudaSimEngine {
     status_device: CudaSlice<u32>,
     rng_device: CudaSlice<u64>,
     summary_device: CudaSlice<u32>,
+    arena_action_count_device: CudaSlice<u32>,
     search_state_device: CudaSlice<u32>,
     search_action_device: CudaSlice<u32>,
     search_status_device: CudaSlice<u32>,
@@ -308,6 +367,7 @@ pub struct CudaSimEngine {
     status_host: Vec<u32>,
     rng_host: Vec<u64>,
     summary_host: Vec<u32>,
+    arena_action_count_host: Vec<u32>,
     root_action_host: Vec<u32>,
     root_base_index_host: Vec<u32>,
     root_stats_host: Vec<u64>,
@@ -332,6 +392,7 @@ impl CudaSimEngine {
         let transition_kernel = module.load_function("apply_transition_batch_kernel")?;
         let rollout_action_kernel = module.load_function("generate_rollout_actions_batch_kernel")?;
         let rollout_steps_kernel = module.load_function("run_rollout_steps_kernel")?;
+        let arena_kernel = module.load_function("run_games_kernel")?;
         let summary_kernel = module.load_function("summarize_games_kernel")?;
         let expand_roots_kernel = module.load_function("expand_root_rollouts_kernel")?;
         let reduce_roots_kernel = module.load_function("reduce_root_rollouts_kernel")?;
@@ -342,6 +403,7 @@ impl CudaSimEngine {
         let status_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY)?;
         let rng_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY)?;
         let summary_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY * SUMMARY_WORDS)?;
+        let arena_action_count_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY)?;
         let search_state_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY * STATE_WORDS)?;
         let search_action_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY * ACTION_WORDS)?;
         let search_status_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY)?;
@@ -362,6 +424,7 @@ impl CudaSimEngine {
             transition_kernel,
             rollout_action_kernel,
             rollout_steps_kernel,
+            arena_kernel,
             summary_kernel,
             expand_roots_kernel,
             reduce_roots_kernel,
@@ -371,6 +434,7 @@ impl CudaSimEngine {
             status_device,
             rng_device,
             summary_device,
+            arena_action_count_device,
             search_state_device,
             search_action_device,
             search_status_device,
@@ -383,6 +447,7 @@ impl CudaSimEngine {
             status_host: Vec::new(),
             rng_host: Vec::new(),
             summary_host: Vec::new(),
+            arena_action_count_host: Vec::new(),
             root_action_host: Vec::new(),
             root_base_index_host: Vec::new(),
             root_stats_host: Vec::new(),
@@ -425,6 +490,14 @@ impl CudaSimEngine {
     }
 
     pub fn seed_rollout_rng(&mut self, base_seed: u64) -> Result<(), CudaSimError> {
+        self.seed_rollout_rng_with_offset(base_seed, 0)
+    }
+
+    fn seed_rollout_rng_with_offset(
+        &mut self,
+        base_seed: u64,
+        game_offset: usize,
+    ) -> Result<(), CudaSimError> {
         let count = self.resident_states;
         if count == 0 {
             return Err(CudaSimError::NoResidentBatch);
@@ -432,8 +505,13 @@ impl CudaSimEngine {
         self.rng_host.clear();
         self.rng_host.reserve(count);
         for lane in 0..count {
+            let global_lane = game_offset
+                .checked_add(lane)
+                .ok_or(CudaSimError::BatchTooLarge)?;
             self.rng_host.push(
-                base_seed.wrapping_add((lane as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)),
+                base_seed.wrapping_add(
+                    (global_lane as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15),
+                ),
             );
         }
         self.stream
@@ -483,6 +561,156 @@ impl CudaSimEngine {
         unsafe { arguments.launch(config)? };
         self.stream.synchronize()?;
         self.check_transition_status(count)
+    }
+
+    /// Runs the currently resident states as a whole-game GPU arena. All action
+    /// selection, chance resolution, and transitions stay on device until the
+    /// terminal/turn/action bound is reached; only compact summaries return.
+    pub fn run_arena_games(
+        &mut self,
+        config: CudaSimArenaConfig,
+        seed: u64,
+    ) -> Result<CudaSimArenaResult, CudaSimError> {
+        self.seed_rollout_rng_with_offset(seed, 0)?;
+        self.run_arena_games_seeded(config)
+    }
+
+    fn run_arena_games_seeded(
+        &mut self,
+        config: CudaSimArenaConfig,
+    ) -> Result<CudaSimArenaResult, CudaSimError> {
+        let count = self.resident_states;
+        if count == 0 {
+            return Err(CudaSimError::NoResidentBatch);
+        }
+        self.clear_transition_status(count)?;
+        self.arena_action_count_host.clear();
+        self.arena_action_count_host.resize(count, 0);
+        self.stream.memcpy_htod(
+            &self.arena_action_count_host,
+            &mut self.arena_action_count_device,
+        )?;
+
+        let count_u32 = u32::try_from(count).map_err(|_| CudaSimError::BatchTooLarge)?;
+        let stride = count_u32;
+        let launch = LaunchConfig {
+            grid_dim: (count.div_ceil(THREADS_PER_BLOCK) as u32, 1, 1),
+            block_dim: (THREADS_PER_BLOCK as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut arguments = self.stream.launch_builder(&self.arena_kernel);
+        arguments.arg(&mut self.state_device);
+        arguments.arg(&self.topology_device);
+        arguments.arg(&mut self.action_device);
+        arguments.arg(&mut self.status_device);
+        arguments.arg(&mut self.rng_device);
+        arguments.arg(&mut self.arena_action_count_device);
+        arguments.arg(&stride);
+        arguments.arg(&count_u32);
+        arguments.arg(&config.max_actions);
+        arguments.arg(&config.max_turns);
+        unsafe { arguments.launch(launch)? };
+        self.stream.synchronize()?;
+        self.check_transition_status(count)?;
+
+        let summaries = self.download_game_summaries()?;
+        self.arena_action_count_host.resize(count, 0);
+        let action_counts = self.arena_action_count_device.slice(0..count);
+        self.stream
+            .memcpy_dtoh(&action_counts, &mut self.arena_action_count_host)?;
+        self.stream.synchronize()?;
+
+        let mut wins = [0u32; 4];
+        let mut terminal_games = 0u32;
+        let mut truncated_games = 0u32;
+        let mut total_actions = 0u64;
+        let mut games = Vec::with_capacity(count);
+        for (game, actions) in summaries
+            .into_iter()
+            .zip(self.arena_action_count_host.iter().copied())
+        {
+            if let Some(winner) = game.winner
+                && let Some(count) = wins.get_mut(winner as usize)
+            {
+                *count = count.saturating_add(1);
+            }
+            if game.terminal {
+                terminal_games = terminal_games.saturating_add(1);
+            }
+            let truncated = !game.terminal
+                && (game.turn >= config.max_turns || actions >= config.max_actions);
+            if truncated {
+                truncated_games = truncated_games.saturating_add(1);
+            }
+            total_actions = total_actions.saturating_add(actions as u64);
+            games.push(CudaSimArenaGameSummary {
+                game,
+                actions,
+                truncated,
+            });
+        }
+        Ok(CudaSimArenaResult {
+            games,
+            wins,
+            terminal_games,
+            truncated_games,
+            total_actions,
+        })
+    }
+
+    /// Runs an arbitrarily large campaign through a bounded resident working
+    /// set. RNG identity uses the global game index, so changing `chunk_games`
+    /// does not change the simulated trajectories.
+    pub fn run_arena_campaign(
+        &mut self,
+        states: &[GameState],
+        config: CudaSimArenaConfig,
+        seed: u64,
+        chunk_games: usize,
+    ) -> Result<CudaSimArenaResult, CudaSimError> {
+        if chunk_games == 0 {
+            return Err(CudaSimError::InvalidArenaChunk);
+        }
+        if states.is_empty() {
+            return Ok(CudaSimArenaResult {
+                games: Vec::new(),
+                wins: [0; 4],
+                terminal_games: 0,
+                truncated_games: 0,
+                total_actions: 0,
+            });
+        }
+
+        let mut result = CudaSimArenaResult {
+            games: Vec::with_capacity(states.len()),
+            wins: [0; 4],
+            terminal_games: 0,
+            truncated_games: 0,
+            total_actions: 0,
+        };
+        let mut game_offset = 0usize;
+        for chunk in states.chunks(chunk_games) {
+            self.upload_states(chunk)?;
+            self.seed_rollout_rng_with_offset(seed, game_offset)?;
+            let chunk_result = self.run_arena_games_seeded(config)?;
+            for player in 0..4 {
+                result.wins[player] = result.wins[player].saturating_add(chunk_result.wins[player]);
+            }
+            result.terminal_games = result
+                .terminal_games
+                .saturating_add(chunk_result.terminal_games);
+            result.truncated_games = result
+                .truncated_games
+                .saturating_add(chunk_result.truncated_games);
+            result.total_actions = result
+                .total_actions
+                .saturating_add(chunk_result.total_actions);
+            result.games.extend(chunk_result.games);
+            game_offset = game_offset
+                .checked_add(chunk.len())
+                .ok_or(CudaSimError::BatchTooLarge)?;
+        }
+        Ok(result)
     }
 
     fn enqueue_rollout_actions(&mut self, count: usize) -> Result<(), CudaSimError> {
@@ -854,6 +1082,7 @@ impl CudaSimEngine {
         self.status_device = self.stream.alloc_zeros(capacity)?;
         self.rng_device = self.stream.alloc_zeros(capacity)?;
         self.summary_device = self.stream.alloc_zeros(capacity * SUMMARY_WORDS)?;
+        self.arena_action_count_device = self.stream.alloc_zeros(capacity)?;
         self.capacity = capacity;
         Ok(())
     }

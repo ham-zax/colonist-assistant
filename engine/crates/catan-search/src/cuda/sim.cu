@@ -2240,6 +2240,34 @@ extern "C" __global__ void run_rollout_steps_kernel(
     }
 }
 
+extern "C" __global__ void run_games_kernel(
+    uint32_t *states,
+    const uint32_t *topology,
+    uint32_t *actions,
+    uint32_t *status,
+    uint64_t *rng_states,
+    uint32_t *action_counts,
+    uint32_t stride,
+    uint32_t count,
+    uint32_t max_actions,
+    uint32_t max_turns
+) {
+    const uint32_t lane = blockIdx.x * blockDim.x + threadIdx.x;
+    if (lane >= count) {
+        return;
+    }
+    uint32_t executed = 0u;
+    for (; executed < max_actions && status[lane] == STATUS_OK; ++executed) {
+        if (state_get(states, stride, STATE_PHASE, lane) == PHASE_FINISHED
+            || state_get(states, stride, STATE_TURN, lane) >= max_turns) {
+            break;
+        }
+        generate_rollout_action_lane(states, topology, actions, rng_states, stride, lane);
+        apply_transition_lane(states, topology, actions, status, stride, lane);
+    }
+    action_counts[lane] = executed;
+}
+
 extern "C" __global__ void summarize_games_kernel(
     const uint32_t *states,
     uint32_t *summaries,
