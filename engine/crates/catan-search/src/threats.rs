@@ -340,6 +340,16 @@ pub fn posterior_immediate_threat_weight<'a>(
         .clamp(0.0, 1.0)
 }
 
+/// Benchmark-facing expected tactical threat mass. Before Wave 2 this is
+/// intentionally identical to the strict detector; Wave 2 can widen the
+/// expectation without changing strict forced-loss semantics.
+pub fn posterior_expected_tactical_threat_weight<'a>(
+    worlds: impl IntoIterator<Item = (&'a GameState, f32)>,
+    protected: u8,
+) -> f32 {
+    posterior_immediate_threat_weight(worlds, protected)
+}
+
 /// Posterior mass in which this root action still leaves a verified immediate
 /// opponent win. The action is verified after transition in every world where
 /// it is legal. If it is unavailable in one world, it cannot count as an escape

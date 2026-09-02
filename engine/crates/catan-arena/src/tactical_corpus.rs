@@ -1,12 +1,14 @@
-//! Road-only tactical scenario corpus definition, loader, and mechanical verifier.
+//! Tactical scenario corpus definition, loader, and mechanical verifier.
 //!
 //! The authoritative corpus is defined in `tests/fixtures/latent-threat-tactical-corpus.json`.
 //! This module loads the fixture, constructs valid game states, and strictly verifies
-//! G0 mechanical consequences.
+//! G0 mechanical consequences without duplicating production legality rules.
 
 use std::path::{Path, PathBuf};
 
-use colonist_catan_core::{Action, Building, GameState, Phase, ResourceHand};
+use colonist_catan_core::{
+    Action, Building, DevCard, GameState, Phase, Resource, ResourceHand, SETTLEMENT_COST,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,16 +19,60 @@ pub struct TacticalActionSpec {
     pub vertex: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edge: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub second_edge: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub second_resource: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hex: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub victim: Option<u8>,
+}
+
+fn resource(index: u8) -> Resource {
+    *Resource::ALL
+        .get(index as usize)
+        .unwrap_or_else(|| panic!("resource index must be 0..4, found {index}"))
 }
 
 impl TacticalActionSpec {
     pub fn to_action(&self) -> Action {
         match self.kind.as_str() {
-            "build-settlement" | "place-settlement" => Action::BuildSettlement {
+            "build-settlement" => Action::BuildSettlement {
                 vertex: self.vertex.expect("vertex required for build-settlement"),
             },
-            "build-road" | "place-road" => Action::BuildRoad {
+            "place-settlement" => Action::PlaceSettlement {
+                vertex: self.vertex.expect("vertex required for place-settlement"),
+            },
+            "build-road" => Action::BuildRoad {
                 edge: self.edge.expect("edge required for build-road"),
+            },
+            "place-road" => Action::PlaceRoad {
+                edge: self.edge.expect("edge required for place-road"),
+            },
+            "build-city" => Action::BuildCity {
+                vertex: self.vertex.expect("vertex required for build-city"),
+            },
+            "buy-development" => Action::BuyDevelopment,
+            "play-road-building" => Action::PlayRoadBuilding {
+                first: self.edge.expect("edge required for play-road-building"),
+                second: self.second_edge,
+            },
+            "play-year-of-plenty" => Action::PlayYearOfPlenty {
+                first: resource(self.resource.expect("resource required for play-year-of-plenty")),
+                second: resource(
+                    self.second_resource
+                        .expect("secondResource required for play-year-of-plenty"),
+                ),
+            },
+            "play-monopoly" => Action::PlayMonopoly {
+                resource: resource(self.resource.expect("resource required for play-monopoly")),
+            },
+            "play-knight" => Action::PlayKnight {
+                hex: self.hex.expect("hex required for play-knight"),
+                victim: self.victim,
             },
             "end-turn" => Action::EndTurn,
             "roll" => Action::Roll,
@@ -35,29 +81,62 @@ impl TacticalActionSpec {
     }
 
     pub fn from_action(action: &Action) -> Self {
+        let mut spec = Self {
+            kind: String::new(),
+            vertex: None,
+            edge: None,
+            second_edge: None,
+            resource: None,
+            second_resource: None,
+            hex: None,
+            victim: None,
+        };
         match action {
-            Action::BuildSettlement { vertex } | Action::PlaceSettlement { vertex } => Self {
-                kind: "build-settlement".into(),
-                vertex: Some(*vertex),
-                edge: None,
-            },
-            Action::BuildRoad { edge } | Action::PlaceRoad { edge } => Self {
-                kind: "build-road".into(),
-                vertex: None,
-                edge: Some(*edge),
-            },
-            Action::EndTurn => Self {
-                kind: "end-turn".into(),
-                vertex: None,
-                edge: None,
-            },
-            Action::Roll => Self {
-                kind: "roll".into(),
-                vertex: None,
-                edge: None,
-            },
+            Action::BuildSettlement { vertex } => {
+                spec.kind = "build-settlement".into();
+                spec.vertex = Some(*vertex);
+            }
+            Action::PlaceSettlement { vertex } => {
+                spec.kind = "place-settlement".into();
+                spec.vertex = Some(*vertex);
+            }
+            Action::BuildRoad { edge } => {
+                spec.kind = "build-road".into();
+                spec.edge = Some(*edge);
+            }
+            Action::PlaceRoad { edge } => {
+                spec.kind = "place-road".into();
+                spec.edge = Some(*edge);
+            }
+            Action::BuildCity { vertex } => {
+                spec.kind = "build-city".into();
+                spec.vertex = Some(*vertex);
+            }
+            Action::BuyDevelopment => spec.kind = "buy-development".into(),
+            Action::PlayRoadBuilding { first, second } => {
+                spec.kind = "play-road-building".into();
+                spec.edge = Some(*first);
+                spec.second_edge = *second;
+            }
+            Action::PlayYearOfPlenty { first, second } => {
+                spec.kind = "play-year-of-plenty".into();
+                spec.resource = Some(*first as u8);
+                spec.second_resource = Some(*second as u8);
+            }
+            Action::PlayMonopoly { resource } => {
+                spec.kind = "play-monopoly".into();
+                spec.resource = Some(*resource as u8);
+            }
+            Action::PlayKnight { hex, victim } => {
+                spec.kind = "play-knight".into();
+                spec.hex = Some(*hex);
+                spec.victim = *victim;
+            }
+            Action::EndTurn => spec.kind = "end-turn".into(),
+            Action::Roll => spec.kind = "roll".into(),
             other => panic!("unsupported action for tactical action spec: {other:?}"),
         }
+        spec
     }
 }
 
@@ -82,9 +161,93 @@ pub struct TacticalStateSpec {
     pub board_seed: u64,
     pub players: u8,
     pub active_player: u8,
+    #[serde(default)]
+    pub phase: Option<String>,
+    #[serde(default = "default_victory_target")]
+    pub victory_target: u8,
     pub roads: Vec<RoadEdgeSpec>,
     pub buildings: Vec<RoadBuildingSpec>,
     pub resources: Vec<ResourceHand>,
+    #[serde(default)]
+    pub development: Vec<[u8; 5]>,
+    #[serde(default)]
+    pub bought_development: Vec<[u8; 5]>,
+    #[serde(default)]
+    pub played_knights: Vec<u8>,
+    #[serde(default)]
+    pub played_development_this_turn: Vec<bool>,
+    #[serde(default)]
+    pub development_deck: Option<[u8; 5]>,
+    #[serde(default = "default_true")]
+    pub bank_is_public: bool,
+    #[serde(default)]
+    pub robber_hex: Option<u8>,
+    #[serde(default)]
+    pub largest_army_holder: Option<u8>,
+}
+
+const fn default_victory_target() -> u8 {
+    10
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TacticalHiddenVariant {
+    pub id: String,
+    pub weight: f32,
+    #[serde(default)]
+    pub resources: Option<Vec<ResourceHand>>,
+    #[serde(default)]
+    pub development: Option<Vec<[u8; 5]>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TacticalThreatProbe {
+    pub protected_player: u8,
+    #[serde(default)]
+    pub variants: Vec<TacticalHiddenVariant>,
+    pub expected_weight: f32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TacticalObservationSafetyProbe {
+    pub actor: u8,
+    pub variant: TacticalHiddenVariant,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TacticalMechanicalExpectations {
+    #[serde(default)]
+    pub action: Option<TacticalActionSpec>,
+    #[serde(default)]
+    pub follow_up: Option<TacticalActionSpec>,
+    #[serde(default)]
+    pub forbidden_action: Option<TacticalActionSpec>,
+    #[serde(default)]
+    pub winner_after_sequence: Option<u8>,
+    #[serde(default)]
+    pub longest_road_holder_after_action: Option<u8>,
+    #[serde(default)]
+    pub largest_army_holder_after_action: Option<u8>,
+    #[serde(default)]
+    pub largest_army_must_not_be_actor: bool,
+    #[serde(default)]
+    pub robber_moved_from: Option<u8>,
+    #[serde(default)]
+    pub bypass_cut_vertex: Option<u8>,
+    #[serde(default)]
+    pub bypass_cut_player: Option<u8>,
+    #[serde(default)]
+    pub bypass_holder: Option<u8>,
+    #[serde(default)]
+    pub development_vp_chance: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -93,6 +256,12 @@ pub struct TacticalProposalProbe {
     pub player: u8,
     pub resources: ResourceHand,
     pub action: TacticalActionSpec,
+    #[serde(default)]
+    pub match_kind: bool,
+    #[serde(default)]
+    pub min_proposal_rate: Option<f32>,
+    #[serde(default)]
+    pub max_proposal_rate: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -105,6 +274,14 @@ pub struct TacticalScenario {
     pub candidate_roots: Vec<TacticalActionSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proposal_probe: Option<TacticalProposalProbe>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub threat_probe: Option<TacticalThreatProbe>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observation_safety_probe: Option<TacticalObservationSafetyProbe>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mechanical: Option<TacticalMechanicalExpectations>,
+    #[serde(default = "default_true")]
+    pub enforce_explicit_root_ordering: bool,
     pub expected_best_root: TacticalActionSpec,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub negative_control_root: Option<TacticalActionSpec>,
@@ -155,35 +332,122 @@ fn rebalance_bank_from_hands(state: &mut GameState) -> Result<(), String> {
     Ok(())
 }
 
+const DEVELOPMENT_TOTALS: [u8; 5] = [14, 5, 2, 2, 2];
+
+fn phase_from_spec(spec: &TacticalStateSpec) -> Result<Phase, String> {
+    match spec.phase.as_deref().unwrap_or("main") {
+        "main" => Ok(Phase::Main),
+        "pre-roll" => Ok(Phase::PreRoll),
+        other => Err(format!("unsupported tactical phase: {other}")),
+    }
+}
+
+fn configure_development(state: &mut GameState, spec: &TacticalStateSpec) -> Result<(), String> {
+    for player in &mut state.players {
+        player.development = [0; 5];
+        player.bought_development = [0; 5];
+        player.played_knights = 0;
+        player.played_development_this_turn = false;
+    }
+    for (player, hand) in spec.development.iter().copied().enumerate() {
+        if player < state.players.len() {
+            state.players[player].development = hand;
+        }
+    }
+    for (player, hand) in spec.bought_development.iter().copied().enumerate() {
+        if player < state.players.len() {
+            state.players[player].bought_development = hand;
+        }
+    }
+    for (player, count) in spec.played_knights.iter().copied().enumerate() {
+        if player < state.players.len() {
+            state.players[player].played_knights = count;
+        }
+    }
+    for (player, played) in spec
+        .played_development_this_turn
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        if player < state.players.len() {
+            state.players[player].played_development_this_turn = played;
+        }
+    }
+
+    let held = |card: usize| {
+        state
+            .players
+            .iter()
+            .map(|player| player.development[card] as u16)
+            .sum::<u16>()
+    };
+    let played_knights = state
+        .players
+        .iter()
+        .map(|player| player.played_knights as u16)
+        .sum::<u16>();
+    state.played_development = [0; 5];
+    state.played_development[DevCard::Knight.index()] = played_knights
+        .try_into()
+        .map_err(|_| "played Knight count overflow".to_string())?;
+
+    if let Some(deck) = spec.development_deck {
+        state.development_deck = deck;
+        for card in 0..5 {
+            let accounted = deck[card] as u16 + held(card);
+            state.played_development[card] = (DEVELOPMENT_TOTALS[card] as u16)
+                .checked_sub(accounted)
+                .ok_or_else(|| format!("development card {card} exceeds supply"))?
+                as u8;
+        }
+        if (state.played_development[DevCard::Knight.index()] as u16) < played_knights {
+            return Err("played Knights exceed consumed Knight cards".into());
+        }
+    } else {
+        for card in 0..5 {
+            let accounted = held(card) + state.played_development[card] as u16;
+            state.development_deck[card] = (DEVELOPMENT_TOTALS[card] as u16)
+                .checked_sub(accounted)
+                .ok_or_else(|| format!("development card {card} exceeds supply"))?
+                as u8;
+        }
+    }
+    Ok(())
+}
+
 /// Constructs and validates a resource-conserving GameState from a TacticalStateSpec.
 pub fn build_state(spec: &TacticalStateSpec) -> Result<GameState, String> {
     let mut state = GameState::standard(spec.board_seed, spec.players);
     state.current_player = spec.active_player;
-    state.phase = Phase::Main;
+    state.phase = phase_from_spec(spec)?;
+    state.victory_target = spec.victory_target;
+    state.bank_is_public = spec.bank_is_public;
     state.domestic_trade_used = false;
     state.domestic_trade_count = 0;
     state.trade = None;
     state.last_rejected_trade = None;
     state.trade_negotiation_round = 0;
+    if let Some(robber_hex) = spec.robber_hex {
+        state.robber_hex = robber_hex;
+    }
 
-    // Reset initial resources and set specified hands
     for p in 0..spec.players as usize {
         state.players[p].resources = [0; 5];
     }
-    for (p, &hand) in spec.resources.iter().enumerate() {
+    for (p, hand) in spec.resources.iter().copied().enumerate() {
         if p < state.players.len() {
             state.players[p].resources = hand;
         }
     }
+    configure_development(&mut state, spec)?;
 
-    // Place roads
     for road in &spec.roads {
         state.roads[road.edge as usize] = Some(road.player);
         state.players[road.player as usize].roads_left =
             state.players[road.player as usize].roads_left.saturating_sub(1);
     }
 
-    // Place buildings
     for bld in &spec.buildings {
         let building = match bld.kind.as_str() {
             "settlement" => {
@@ -204,6 +468,16 @@ pub fn build_state(spec: &TacticalStateSpec) -> Result<GameState, String> {
     }
 
     state.update_longest_road();
+    if let Some(holder) = spec.largest_army_holder {
+        if holder >= spec.players || state.players[holder as usize].played_knights < 3 {
+            return Err("Largest Army holder must have at least three played Knights".into());
+        }
+        state.largest_army_holder = Some(holder);
+        state.players[holder as usize].has_largest_army = true;
+        state.players[holder as usize].public_victory_points = state.players[holder as usize]
+            .public_victory_points
+            .saturating_add(2);
+    }
     rebalance_bank_from_hands(&mut state)?;
     state
         .validate()
@@ -214,6 +488,45 @@ pub fn build_state(spec: &TacticalStateSpec) -> Result<GameState, String> {
 /// Rebalances the public bank after a benchmark-only hand override.
 pub fn rebalance_tactical_bank(state: &mut GameState) -> Result<(), String> {
     rebalance_bank_from_hands(state)
+}
+
+/// Applies one hidden-state benchmark variant while preserving resource and development supply.
+pub fn apply_hidden_variant(
+    base: &GameState,
+    variant: &TacticalHiddenVariant,
+) -> Result<GameState, String> {
+    let mut state = base.clone();
+    if let Some(resources) = &variant.resources {
+        for (player, hand) in resources.iter().copied().enumerate() {
+            if player < state.players.len() {
+                state.players[player].resources = hand;
+            }
+        }
+        rebalance_bank_from_hands(&mut state)?;
+    }
+    if let Some(development) = &variant.development {
+        for (player, hand) in development.iter().copied().enumerate() {
+            if player < state.players.len() {
+                state.players[player].development = hand;
+                state.players[player].bought_development = [0; 5];
+            }
+        }
+        for card in 0..5 {
+            let held = state
+                .players
+                .iter()
+                .map(|player| player.development[card] as u16)
+                .sum::<u16>();
+            state.development_deck[card] = (DEVELOPMENT_TOTALS[card] as u16)
+                .checked_sub(held + state.played_development[card] as u16)
+                .ok_or_else(|| format!("variant development card {card} exceeds supply"))?
+                as u8;
+        }
+    }
+    state
+        .validate()
+        .map_err(|error| format!("invalid hidden variant {}: {error}", variant.id))?;
+    Ok(state)
 }
 
 /// Checks if a vertex can legally receive a settlement under public occupancy and distance rules.
@@ -280,6 +593,123 @@ fn shortest_route_distance(state: &GameState, player: u8, start: u8, goal: u8) -
 pub fn verify_mechanical_consequence(scenario: &TacticalScenario) -> Result<(), String> {
     let base = build_state(&scenario.state)?;
     let best_action = scenario.expected_best_root.to_action();
+
+    if let Some(expect) = &scenario.mechanical {
+        if let Some(forbidden) = &expect.forbidden_action {
+            let forbidden = forbidden.to_action();
+            if base.legal_actions().contains(&forbidden) {
+                return Err(format!("forbidden action is unexpectedly legal: {forbidden:?}"));
+            }
+        }
+
+        let action = expect
+            .action
+            .as_ref()
+            .map(TacticalActionSpec::to_action)
+            .unwrap_or_else(|| best_action.clone());
+        if !base.legal_actions().contains(&action) {
+            return Err(format!("expected action is not legal: {action:?}"));
+        }
+        let mut next = base.clone();
+        next.apply(&action)
+            .map_err(|error| format!("expected action {action:?} failed: {error:?}"))?;
+
+        if let Some(holder) = expect.longest_road_holder_after_action
+            && next.longest_road_holder != Some(holder)
+        {
+            return Err(format!(
+                "Longest Road holder after action was {:?}, expected {holder}",
+                next.longest_road_holder
+            ));
+        }
+        if let Some(holder) = expect.largest_army_holder_after_action
+            && next.largest_army_holder != Some(holder)
+        {
+            return Err(format!(
+                "Largest Army holder after action was {:?}, expected {holder}",
+                next.largest_army_holder
+            ));
+        }
+        if expect.largest_army_must_not_be_actor
+            && next.largest_army_holder == Some(scenario.state.active_player)
+        {
+            return Err("actor unexpectedly acquired Largest Army".into());
+        }
+        if let Some(previous_robber) = expect.robber_moved_from
+            && next.robber_hex == previous_robber
+        {
+            return Err(format!("robber did not move from hex {previous_robber}"));
+        }
+        if let Some(expected) = expect.development_vp_chance {
+            if next.phase != Phase::DevelopmentChance {
+                return Err("development VP chance requires BuyDevelopment to enter chance phase".into());
+            }
+            let actions = next.legal_actions();
+            let total = actions
+                .iter()
+                .map(|action| next.chance_weight(action) as u32)
+                .sum::<u32>();
+            let vp = actions
+                .iter()
+                .filter(|action| {
+                    matches!(action, Action::ResolveDevelopment { card: DevCard::VictoryPoint })
+                })
+                .map(|action| next.chance_weight(action) as u32)
+                .sum::<u32>();
+            let actual = if total == 0 {
+                0.0
+            } else {
+                vp as f32 / total as f32
+            };
+            if (actual - expected).abs() > 1e-6 {
+                return Err(format!(
+                    "development VP chance was {actual:.6}, expected {expected:.6}"
+                ));
+            }
+        }
+
+        if let Some(follow_up) = &expect.follow_up {
+            let follow_up = follow_up.to_action();
+            if !next.legal_actions().contains(&follow_up) {
+                return Err(format!("follow-up is not legal after action: {follow_up:?}"));
+            }
+            next.apply(&follow_up)
+                .map_err(|error| format!("follow-up {follow_up:?} failed: {error:?}"))?;
+        }
+        if let Some(winner) = expect.winner_after_sequence
+            && next.winner() != Some(winner)
+        {
+            return Err(format!(
+                "winner after declared sequence was {:?}, expected {winner}",
+                next.winner()
+            ));
+        }
+
+        if let (Some(vertex), Some(cut_player), Some(holder)) = (
+            expect.bypass_cut_vertex,
+            expect.bypass_cut_player,
+            expect.bypass_holder,
+        ) {
+            let mut cut = next.clone();
+            cut.current_player = cut_player;
+            cut.phase = Phase::Main;
+            cut.players[cut_player as usize].resources = SETTLEMENT_COST;
+            rebalance_bank_from_hands(&mut cut)?;
+            let cut_action = Action::BuildSettlement { vertex };
+            if !cut.legal_actions().contains(&cut_action) {
+                return Err(format!("declared bypass cut is not legal: {cut_action:?}"));
+            }
+            cut.apply(&cut_action)
+                .map_err(|error| format!("declared bypass cut failed: {error:?}"))?;
+            if cut.longest_road_holder != Some(holder) {
+                return Err(format!(
+                    "bypass cut changed holder to {:?}, expected {holder}",
+                    cut.longest_road_holder
+                ));
+            }
+        }
+        return Ok(());
+    }
 
     let mut next = base.clone();
     if let Err(e) = next.apply(&best_action) {
@@ -413,7 +843,7 @@ mod tests {
     fn test_checked_in_corpus_passes_mechanical_g0() {
         let path = default_corpus_path();
         let corpus = load_tactical_corpus(&path).expect("failed to load checked-in tactical corpus");
-        assert_eq!(corpus.scenarios.len(), 6);
+        assert_eq!(corpus.scenarios.len(), 19);
         for scenario in &corpus.scenarios {
             let res = verify_mechanical_consequence(scenario);
             assert!(res.is_ok(), "scenario {} failed G0: {:?}", scenario.id, res.err());

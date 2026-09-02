@@ -1,6 +1,6 @@
 {
-  "description": "Authoritative road tactical corpus with positive and negative controls",
-  "schemaVersion": 1,
+  "description": "Authoritative latent-threat tactical corpus with road and hidden progress-card positive/negative controls",
+  "schemaVersion": 2,
   "scenarios": [
     {
       "id": "road-fragile-chain-cut",
@@ -564,6 +564,320 @@
       },
       "declaredConsequence": "negative_control_vanity_branch",
       "isNegativeControl": true
+    },
+    {
+      "id": "road-building-two-road-settlement-win",
+      "description": "Ready Road Building must take the low-production two-edge line that reaches a winning settlement rather than an attractive inert branch.",
+      "family": "RoadBuilding",
+      "state": {
+        "boardSeed": 910300003,
+        "players": 3,
+        "activePlayer": 1,
+        "roads": [{"player":1,"edge":0}],
+        "buildings": [
+          {"player":1,"vertex":10,"kind":"city"},{"player":1,"vertex":29,"kind":"city"},{"player":1,"vertex":43,"kind":"city"},
+          {"player":1,"vertex":0,"kind":"settlement"},{"player":1,"vertex":52,"kind":"settlement"},{"player":1,"vertex":27,"kind":"settlement"}
+        ],
+        "resources": [[0,0,0,0,0],[1,1,1,1,0],[0,0,0,0,0]],
+        "development": [[0,0,0,0,0],[0,0,1,0,0],[0,0,0,0,0]]
+      },
+      "candidateRoots": [
+        {"kind":"play-road-building","edge":1,"secondEdge":19},
+        {"kind":"play-road-building","edge":5,"secondEdge":7},
+        {"kind":"end-turn"}
+      ],
+      "proposalProbe": {"player":1,"resources":[1,1,1,1,0],"action":{"kind":"play-road-building","edge":1,"secondEdge":19},"minProposalRate":0.20},
+      "threatProbe": {"protectedPlayer":0,"expectedWeight":1.0},
+      "mechanical": {"action":{"kind":"play-road-building","edge":1,"secondEdge":19},"followUp":{"kind":"build-settlement","vertex":17},"winnerAfterSequence":1},
+      "expectedBestRoot": {"kind":"play-road-building","edge":1,"secondEdge":19},
+      "negativeControlRoot": {"kind":"play-road-building","edge":5,"secondEdge":7},
+      "declaredConsequence": "road_building_settlement_win",
+      "isNegativeControl": false
+    },
+    {
+      "id": "road-building-longest-road-win",
+      "description": "Two free roads move the actor from a four-road chain past the incumbent five-road holder and win by Longest Road transfer.",
+      "family": "RoadBuilding",
+      "state": {
+        "boardSeed": 910300003,"players":3,"activePlayer":1,
+        "roads": [
+          {"player":1,"edge":0},{"player":1,"edge":1},{"player":1,"edge":2},{"player":1,"edge":3},
+          {"player":0,"edge":35},{"player":0,"edge":31},{"player":0,"edge":32},{"player":0,"edge":33},{"player":0,"edge":34}
+        ],
+        "buildings": [
+          {"player":1,"vertex":10,"kind":"city"},{"player":1,"vertex":29,"kind":"city"},{"player":1,"vertex":43,"kind":"city"},
+          {"player":1,"vertex":0,"kind":"settlement"},{"player":1,"vertex":52,"kind":"settlement"},{"player":0,"vertex":15,"kind":"settlement"}
+        ],
+        "resources": [[0,0,0,0,0],[0,0,0,0,0],[0,0,0,0,0]],
+        "development": [[0,0,0,0,0],[0,0,1,0,0],[0,0,0,0,0]]
+      },
+      "candidateRoots": [
+        {"kind":"play-road-building","edge":4,"secondEdge":8},
+        {"kind":"play-road-building","edge":5,"secondEdge":7},
+        {"kind":"end-turn"}
+      ],
+      "proposalProbe": {"player":1,"resources":[0,0,0,0,0],"action":{"kind":"play-road-building","edge":4,"secondEdge":8},"minProposalRate":0.20},
+      "threatProbe": {"protectedPlayer":0,"expectedWeight":1.0},
+      "mechanical": {"action":{"kind":"play-road-building","edge":4,"secondEdge":8},"longestRoadHolderAfterAction":1,"winnerAfterSequence":1},
+      "expectedBestRoot": {"kind":"play-road-building","edge":4,"secondEdge":8},
+      "negativeControlRoot": {"kind":"play-road-building","edge":5,"secondEdge":7},
+      "declaredConsequence": "road_building_longest_road_win",
+      "isNegativeControl": false
+    },
+    {
+      "id": "road-building-two-road-bypass",
+      "description": "Road Building closes the public six-edge cycle and adds a tail so a legal settlement cut at the old choke no longer strips Longest Road.",
+      "family": "RoadBuilding",
+      "state": {
+        "boardSeed":910300003,"players":3,"activePlayer":1,
+        "roads":[{"player":1,"edge":0},{"player":1,"edge":1},{"player":1,"edge":2},{"player":1,"edge":3},{"player":1,"edge":4},{"player":0,"edge":19}],
+        "buildings":[{"player":1,"vertex":0,"kind":"settlement"}],
+        "resources":[[0,0,0,0,0],[0,0,0,0,0],[0,0,0,0,0]],
+        "development":[[0,0,0,0,0],[0,0,1,0,0],[0,0,0,0,0]]
+      },
+      "candidateRoots":[{"kind":"play-road-building","edge":5,"secondEdge":8},{"kind":"play-road-building","edge":7,"secondEdge":23},{"kind":"end-turn"}],
+      "proposalProbe":{"player":1,"resources":[0,0,0,0,0],"action":{"kind":"play-road-building","edge":5,"secondEdge":8},"minProposalRate":0.15},
+      "threatProbe":{"protectedPlayer":0,"expectedWeight":0.0},
+      "mechanical":{"action":{"kind":"play-road-building","edge":5,"secondEdge":8},"longestRoadHolderAfterAction":1,"bypassCutVertex":2,"bypassCutPlayer":0,"bypassHolder":1},
+      "enforceExplicitRootOrdering":false,
+      "expectedBestRoot":{"kind":"play-road-building","edge":5,"secondEdge":8},
+      "declaredConsequence":"road_building_bypass",
+      "isNegativeControl":false
+    },
+    {
+      "id": "road-building-one-piece-negative",
+      "description": "Only one road piece remains; the legal one-road Road Building use cannot create an immediate build, award transfer, or winning conversion.",
+      "family": "RoadBuilding",
+      "state": {
+        "boardSeed":910300003,"players":3,"activePlayer":1,
+        "roads":[
+          {"player":1,"edge":0},{"player":1,"edge":3},{"player":1,"edge":6},{"player":1,"edge":9},{"player":1,"edge":11},{"player":1,"edge":14},{"player":1,"edge":16},
+          {"player":1,"edge":18},{"player":1,"edge":21},{"player":1,"edge":24},{"player":1,"edge":27},{"player":1,"edge":31},{"player":1,"edge":36},{"player":1,"edge":42}
+        ],
+        "buildings":[{"player":1,"vertex":0,"kind":"settlement"}],
+        "resources":[[0,0,0,0,0],[0,0,0,0,0],[0,0,0,0,0]],
+        "development":[[0,0,0,0,0],[0,0,1,0,0],[0,0,0,0,0]]
+      },
+      "candidateRoots":[{"kind":"play-road-building","edge":1},{"kind":"end-turn"}],
+      "proposalProbe":{"player":1,"resources":[0,0,0,0,0],"action":{"kind":"play-road-building","edge":1},"matchKind":true,"maxProposalRate":0.25},
+      "threatProbe":{"protectedPlayer":0,"expectedWeight":0.0},
+      "mechanical":{"action":{"kind":"play-road-building","edge":1},"forbiddenAction":{"kind":"play-road-building","edge":1,"secondEdge":2}},
+      "enforceExplicitRootOrdering":false,
+      "expectedBestRoot":{"kind":"end-turn"},
+      "negativeControlRoot":{"kind":"play-road-building","edge":1},
+      "declaredConsequence":"road_building_one_piece_negative",
+      "isNegativeControl":true
+    },
+    {
+      "id": "year-of-plenty-settlement-win",
+      "description": "The low-generic-value Brick+Wool pair exactly completes a connected winning settlement.",
+      "family": "YearOfPlenty",
+      "state": {
+        "boardSeed":910300003,"players":3,"activePlayer":1,
+        "roads":[{"player":1,"edge":0},{"player":1,"edge":1},{"player":1,"edge":2}],
+        "buildings":[
+          {"player":1,"vertex":10,"kind":"city"},{"player":1,"vertex":29,"kind":"city"},{"player":1,"vertex":43,"kind":"city"},
+          {"player":1,"vertex":0,"kind":"settlement"},{"player":1,"vertex":52,"kind":"settlement"},{"player":1,"vertex":27,"kind":"settlement"}
+        ],
+        "resources":[[0,0,0,0,0],[1,0,0,1,0],[0,0,0,0,0]],
+        "development":[[0,0,0,0,0],[0,0,0,1,0],[0,0,0,0,0]]
+      },
+      "candidateRoots":[{"kind":"play-year-of-plenty","resource":1,"secondResource":2},{"kind":"play-year-of-plenty","resource":3,"secondResource":4},{"kind":"end-turn"}],
+      "proposalProbe":{"player":1,"resources":[1,0,0,1,0],"action":{"kind":"play-year-of-plenty","resource":1,"secondResource":2},"minProposalRate":0.25},
+      "threatProbe":{"protectedPlayer":0,"expectedWeight":1.0},
+      "mechanical":{"action":{"kind":"play-year-of-plenty","resource":1,"secondResource":2},"followUp":{"kind":"build-settlement","vertex":3},"winnerAfterSequence":1},
+      "expectedBestRoot":{"kind":"play-year-of-plenty","resource":1,"secondResource":2},
+      "negativeControlRoot":{"kind":"play-year-of-plenty","resource":3,"secondResource":4},
+      "declaredConsequence":"year_of_plenty_settlement_win",
+      "isNegativeControl":false
+    },
+    {
+      "id": "year-of-plenty-bank-shortage-negative",
+      "description": "The winning Brick+Wool pair is mechanically unavailable because every Brick is already held outside the bank.",
+      "family": "YearOfPlenty",
+      "state": {
+        "boardSeed":910300003,"players":3,"activePlayer":1,
+        "roads":[{"player":1,"edge":0},{"player":1,"edge":1},{"player":1,"edge":2}],
+        "buildings":[
+          {"player":1,"vertex":10,"kind":"city"},{"player":1,"vertex":29,"kind":"city"},{"player":1,"vertex":43,"kind":"city"},
+          {"player":1,"vertex":0,"kind":"settlement"},{"player":1,"vertex":52,"kind":"settlement"},{"player":1,"vertex":27,"kind":"settlement"}
+        ],
+        "resources":[[0,10,0,0,0],[1,0,0,1,0],[0,9,0,0,0]],
+        "development":[[0,0,0,0,0],[0,0,0,1,0],[0,0,0,0,0]]
+      },
+      "candidateRoots":[{"kind":"play-year-of-plenty","resource":3,"secondResource":4},{"kind":"end-turn"}],
+      "threatProbe":{"protectedPlayer":0,"expectedWeight":0.0},
+      "mechanical":{"forbiddenAction":{"kind":"play-year-of-plenty","resource":1,"secondResource":2},"action":{"kind":"end-turn"}},
+      "enforceExplicitRootOrdering":false,
+      "expectedBestRoot":{"kind":"end-turn"},
+      "declaredConsequence":"year_of_plenty_bank_shortage_negative",
+      "isNegativeControl":true
+    },
+    {
+      "id": "monopoly-smaller-conversion-win",
+      "description": "One stolen Ore completes a city and wins while a larger four-Lumber haul is strategically inert; public production makes Lumber look more abundant.",
+      "family": "Monopoly",
+      "state": {
+        "boardSeed":910300003,"players":3,"activePlayer":1,"bankIsPublic":false,
+        "roads":[],
+        "buildings":[
+          {"player":1,"vertex":10,"kind":"city"},{"player":1,"vertex":29,"kind":"city"},{"player":1,"vertex":43,"kind":"city"},
+          {"player":1,"vertex":0,"kind":"settlement"},{"player":1,"vertex":52,"kind":"settlement"},{"player":1,"vertex":27,"kind":"settlement"},
+          {"player":0,"vertex":14,"kind":"settlement"},{"player":2,"vertex":25,"kind":"settlement"}
+        ],
+        "resources":[[4,0,0,0,0],[0,0,0,2,2],[0,0,0,0,1]],
+        "development":[[0,0,0,0,0],[0,0,0,0,1],[0,0,0,0,0]]
+      },
+      "candidateRoots":[{"kind":"play-monopoly","resource":4},{"kind":"play-monopoly","resource":0},{"kind":"end-turn"}],
+      "proposalProbe":{"player":1,"resources":[0,0,0,2,2],"action":{"kind":"play-monopoly","resource":4},"minProposalRate":0.25},
+      "threatProbe":{"protectedPlayer":0,"expectedWeight":1.0},
+      "observationSafetyProbe":{"actor":1,"variant":{"id":"hidden-hands-swapped","weight":1.0,"resources":[[0,0,0,0,4],[0,0,0,2,2],[1,0,0,0,0]]}},
+      "mechanical":{"action":{"kind":"play-monopoly","resource":4},"followUp":{"kind":"build-city","vertex":52},"winnerAfterSequence":1},
+      "expectedBestRoot":{"kind":"play-monopoly","resource":4},
+      "negativeControlRoot":{"kind":"play-monopoly","resource":0},
+      "declaredConsequence":"monopoly_smaller_conversion_win",
+      "isNegativeControl":false
+    },
+    {
+      "id": "monopoly-negligible-conversion-negative",
+      "description": "A publicly plausible Lumber target holds only one transferable card and the actor has no immediate build conversion.",
+      "family": "Monopoly",
+      "state": {
+        "boardSeed":910300003,"players":3,"activePlayer":1,"bankIsPublic":false,
+        "roads":[],
+        "buildings":[
+          {"player":1,"vertex":10,"kind":"city"},{"player":1,"vertex":29,"kind":"city"},{"player":1,"vertex":43,"kind":"city"},
+          {"player":1,"vertex":0,"kind":"settlement"},{"player":1,"vertex":52,"kind":"settlement"},{"player":1,"vertex":27,"kind":"settlement"},
+          {"player":0,"vertex":14,"kind":"settlement"}
+        ],
+        "resources":[[1,0,0,0,0],[0,0,0,0,0],[0,0,0,0,0]],
+        "development":[[0,0,0,0,0],[0,0,0,0,1],[0,0,0,0,0]]
+      },
+      "candidateRoots":[{"kind":"play-monopoly","resource":0},{"kind":"end-turn"}],
+      "threatProbe":{"protectedPlayer":0,"expectedWeight":0.0},
+      "mechanical":{"action":{"kind":"play-monopoly","resource":0}},
+      "enforceExplicitRootOrdering":false,
+      "expectedBestRoot":{"kind":"end-turn"},
+      "negativeControlRoot":{"kind":"play-monopoly","resource":0},
+      "declaredConsequence":"monopoly_negligible_conversion_negative",
+      "isNegativeControl":true
+    },
+    {
+      "id": "knight-largest-army-transfer-win",
+      "description": "The ready fourth Knight takes Largest Army from a three-Knight incumbent and wins independently of the steal result.",
+      "family": "Knight",
+      "state": {
+        "boardSeed":910300003,"players":3,"activePlayer":1,"robberHex":3,"largestArmyHolder":0,
+        "roads":[],
+        "buildings":[
+          {"player":1,"vertex":10,"kind":"city"},{"player":1,"vertex":29,"kind":"city"},{"player":1,"vertex":43,"kind":"city"},
+          {"player":1,"vertex":52,"kind":"settlement"},{"player":1,"vertex":27,"kind":"settlement"},{"player":0,"vertex":14,"kind":"settlement"}
+        ],
+        "resources":[[0,0,0,0,0],[0,0,0,0,0],[0,0,0,0,0]],
+        "development":[[0,0,0,0,0],[1,0,0,0,0],[0,0,0,0,0]],
+        "playedKnights":[3,3,0]
+      },
+      "candidateRoots":[{"kind":"play-knight","hex":0},{"kind":"end-turn"}],
+      "proposalProbe":{"player":1,"resources":[0,0,0,0,0],"action":{"kind":"play-knight","hex":0},"matchKind":true,"minProposalRate":0.50},
+      "threatProbe":{"protectedPlayer":0,"expectedWeight":1.0},
+      "mechanical":{"action":{"kind":"play-knight","hex":0},"largestArmyHolderAfterAction":1,"winnerAfterSequence":1},
+      "expectedBestRoot":{"kind":"play-knight","hex":0},
+      "negativeControlRoot":{"kind":"end-turn"},
+      "declaredConsequence":"knight_largest_army_win",
+      "isNegativeControl":false
+    },
+    {
+      "id": "knight-self-unblock-critical-producer",
+      "description": "Pre-roll Knight moves the robber off the actor's high-value city before rolling.",
+      "family": "Knight",
+      "state": {
+        "boardSeed":910300003,"players":3,"activePlayer":1,"phase":"pre-roll","robberHex":13,
+        "roads":[],"buildings":[{"player":1,"vertex":29,"kind":"city"}],
+        "resources":[[0,0,0,0,0],[0,0,0,0,0],[0,0,0,0,0]],
+        "development":[[0,0,0,0,0],[1,0,0,0,0],[0,0,0,0,0]]
+      },
+      "candidateRoots":[{"kind":"play-knight","hex":0},{"kind":"roll"}],
+      "proposalProbe":{"player":1,"resources":[0,0,0,0,0],"action":{"kind":"play-knight","hex":0},"matchKind":true,"minProposalRate":0.30},
+      "threatProbe":{"protectedPlayer":0,"expectedWeight":0.0},
+      "mechanical":{"action":{"kind":"play-knight","hex":0},"followUp":{"kind":"roll"},"robberMovedFrom":13},
+      "enforceExplicitRootOrdering":false,
+      "expectedBestRoot":{"kind":"play-knight","hex":0},
+      "declaredConsequence":"knight_self_unblock",
+      "isNegativeControl":false
+    },
+    {
+      "id": "knight-largest-army-lead-negative",
+      "description": "A ready third Knight cannot take Largest Army from an incumbent already on five played Knights.",
+      "family": "Knight",
+      "state": {
+        "boardSeed":910300003,"players":3,"activePlayer":1,"robberHex":3,"largestArmyHolder":0,
+        "roads":[],
+        "buildings":[{"player":1,"vertex":29,"kind":"city"},{"player":0,"vertex":14,"kind":"settlement"}],
+        "resources":[[0,0,0,0,0],[0,0,0,0,0],[0,0,0,0,0]],
+        "development":[[0,0,0,0,0],[1,0,0,0,0],[0,0,0,0,0]],
+        "playedKnights":[5,2,0]
+      },
+      "candidateRoots":[{"kind":"play-knight","hex":0},{"kind":"end-turn"}],
+      "threatProbe":{"protectedPlayer":0,"expectedWeight":0.0},
+      "mechanical":{"action":{"kind":"play-knight","hex":0},"largestArmyMustNotBeActor":true},
+      "enforceExplicitRootOrdering":false,
+      "expectedBestRoot":{"kind":"end-turn"},
+      "negativeControlRoot":{"kind":"play-knight","hex":0},
+      "declaredConsequence":"knight_largest_army_negative",
+      "isNegativeControl":true
+    },
+    {
+      "id": "buy-development-vp-posterior",
+      "description": "At nine public VP, buying from a 20-card deck has a five-percent exact VP win chance in one hidden world and zero in an observation-matched world.",
+      "family": "BuyDevelopment",
+      "state": {
+        "boardSeed":910300003,"players":3,"activePlayer":1,
+        "roads":[],
+        "buildings":[
+          {"player":1,"vertex":10,"kind":"city"},{"player":1,"vertex":29,"kind":"city"},{"player":1,"vertex":43,"kind":"city"},
+          {"player":1,"vertex":0,"kind":"settlement"},{"player":1,"vertex":52,"kind":"settlement"},{"player":1,"vertex":27,"kind":"settlement"}
+        ],
+        "resources":[[0,0,0,0,0],[0,0,1,1,1],[0,0,0,0,0]],
+        "development":[[1,2,0,0,0],[0,0,0,0,0],[0,2,0,0,0]],
+        "developmentDeck":[13,1,2,2,2]
+      },
+      "candidateRoots":[{"kind":"buy-development"},{"kind":"end-turn"}],
+      "threatProbe":{
+        "protectedPlayer":0,"expectedWeight":0.025,
+        "variants":[
+          {"id":"vp-in-deck","weight":0.5,"development":[[1,2,0,0,0],[0,0,0,0,0],[0,2,0,0,0]]},
+          {"id":"vp-out-of-deck","weight":0.5,"development":[[0,3,0,0,0],[0,0,0,0,0],[0,2,0,0,0]]}
+        ]
+      },
+      "observationSafetyProbe":{"actor":1,"variant":{"id":"vp-identity-hidden","weight":1.0,"development":[[0,3,0,0,0],[0,0,0,0,0],[0,2,0,0,0]]}},
+      "mechanical":{"action":{"kind":"buy-development"},"developmentVpChance":0.05},
+      "enforceExplicitRootOrdering":false,
+      "expectedBestRoot":{"kind":"buy-development"},
+      "declaredConsequence":"development_vp_draw_probability",
+      "isNegativeControl":false
+    },
+    {
+      "id": "buy-development-no-vp-control",
+      "description": "Observation-matched nine-VP control with the same 20-card deck size but no Victory Point card remaining.",
+      "family": "BuyDevelopment",
+      "state": {
+        "boardSeed":910300003,"players":3,"activePlayer":1,
+        "roads":[],
+        "buildings":[
+          {"player":1,"vertex":10,"kind":"city"},{"player":1,"vertex":29,"kind":"city"},{"player":1,"vertex":43,"kind":"city"},
+          {"player":1,"vertex":0,"kind":"settlement"},{"player":1,"vertex":52,"kind":"settlement"},{"player":1,"vertex":27,"kind":"settlement"}
+        ],
+        "resources":[[0,0,0,0,0],[0,0,1,1,1],[0,0,0,0,0]],
+        "development":[[0,3,0,0,0],[0,0,0,0,0],[0,2,0,0,0]],
+        "developmentDeck":[14,0,2,2,2]
+      },
+      "candidateRoots":[{"kind":"buy-development"},{"kind":"end-turn"}],
+      "threatProbe":{"protectedPlayer":0,"expectedWeight":0.0},
+      "mechanical":{"action":{"kind":"buy-development"},"developmentVpChance":0.0},
+      "enforceExplicitRootOrdering":false,
+      "expectedBestRoot":{"kind":"buy-development"},
+      "declaredConsequence":"development_vp_draw_negative",
+      "isNegativeControl":true
     }
   ]
 }
