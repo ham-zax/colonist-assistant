@@ -7,7 +7,8 @@
 use std::path::{Path, PathBuf};
 
 use colonist_catan_core::{
-    Action, Building, DevCard, GameState, Phase, Resource, ResourceHand, SETTLEMENT_COST,
+    Action, Building, DevCard, GameState, Phase, Resource, ResourceHand, ROAD_COST,
+    SETTLEMENT_COST,
 };
 use serde::{Deserialize, Serialize};
 
@@ -418,6 +419,74 @@ fn configure_development(state: &mut GameState, spec: &TacticalStateSpec) -> Res
     Ok(())
 }
 
+fn refresh_longest_road_via_public_transition(
+    state: &mut GameState,
+    roads: &[RoadEdgeSpec],
+) -> Result<(), String> {
+    if roads.is_empty()
+        || (0..state.board.num_players)
+            .map(|player| state.longest_road_length(player))
+            .max()
+            .unwrap_or(0)
+            < 5
+    {
+        state.longest_road_holder = None;
+        for player in &mut state.players {
+            player.has_longest_road = false;
+        }
+        return Ok(());
+    }
+
+    for road in roads.iter().rev() {
+        if state.roads[road.edge as usize] != Some(road.player) {
+            continue;
+        }
+        let mut probe = state.clone();
+        probe.roads[road.edge as usize] = None;
+        probe.players[road.player as usize].roads_left = probe.players[road.player as usize]
+            .roads_left
+            .saturating_add(1);
+        probe.current_player = road.player;
+        probe.phase = Phase::Main;
+        probe.players[road.player as usize].resources = ROAD_COST;
+        rebalance_bank_from_hands(&mut probe)?;
+        let action = Action::BuildRoad { edge: road.edge };
+        if !probe.legal_actions().contains(&action) || probe.apply(&action).is_err() {
+            continue;
+        }
+
+        state.longest_road_holder = probe.longest_road_holder;
+        for (target, source) in state.players.iter_mut().zip(&probe.players) {
+            target.has_longest_road = source.has_longest_road;
+            target.public_victory_points = source.public_victory_points;
+        }
+        return Ok(());
+    }
+
+    Err("unable to refresh Longest Road through a legal public road transition".into())
+}
+
+fn initialize_longest_road_award(state: &mut GameState) {
+    let lengths = (0..state.board.num_players)
+        .map(|player| state.longest_road_length(player))
+        .collect::<Vec<_>>();
+    let best = lengths.iter().copied().max().unwrap_or(0);
+    let leaders = lengths
+        .iter()
+        .enumerate()
+        .filter(|(_, length)| **length == best && best >= 5)
+        .map(|(player, _)| player as u8)
+        .collect::<Vec<_>>();
+    if leaders.len() == 1 {
+        let holder = leaders[0];
+        state.longest_road_holder = Some(holder);
+        state.players[holder as usize].has_longest_road = true;
+        state.players[holder as usize].public_victory_points = state.players[holder as usize]
+            .public_victory_points
+            .saturating_add(2);
+    }
+}
+
 /// Constructs and validates a resource-conserving GameState from a TacticalStateSpec.
 pub fn build_state(spec: &TacticalStateSpec) -> Result<GameState, String> {
     let mut state = GameState::standard(spec.board_seed, spec.players);
@@ -469,7 +538,7 @@ pub fn build_state(spec: &TacticalStateSpec) -> Result<GameState, String> {
         state.buildings[bld.vertex as usize] = Some(building);
     }
 
-    state.update_longest_road();
+    refresh_longest_road_via_public_transition(&mut state, &spec.roads)?;
     if let Some(holder) = spec.largest_army_holder {
         if holder >= spec.players || state.players[holder as usize].played_knights < 3 {
             return Err("Largest Army holder must have at least three played Knights".into());
