@@ -498,6 +498,7 @@ pub fn solve_opening(state: &GameState, root: u8, config: OpeningConfig) -> Open
         if next.apply(&action).is_err() {
             continue;
         }
+        let mut candidate_has_completed_leaf = false;
         let value = if index >= deep_count || solver.deadline.has_elapsed() {
             if solver.deadline.has_elapsed() {
                 solver.aborted = true;
@@ -513,31 +514,34 @@ pub fn solve_opening(state: &GameState, root: u8, config: OpeningConfig) -> Open
             if solver.nodes < solver.config.maximum_nodes {
                 let completed_before = solver.completed_setups;
                 let deep = solver.visit(&next);
-                if solver.deadline_reached {
-                    // Preserve a deep value only when THIS candidate completed
-                    // at least one draft leaf. A global completed_setups counter
-                    // would incorrectly keep partial values after earlier
-                    // candidates finished.
-                    let candidate_completed = solver.completed_setups > completed_before;
-                    if deep.is_finite() && candidate_completed {
-                        deep
-                    } else {
-                        static_value
-                    }
-                } else {
+                candidate_has_completed_leaf = solver.completed_setups > completed_before;
+                if deep.is_finite() && candidate_has_completed_leaf {
                     deep
+                } else {
+                    static_value
                 }
             } else {
                 solver.aborted = true;
                 static_value
             }
         };
-        actions.push(OpeningActionValue { action, value });
+        actions.push((OpeningActionValue { action, value }, candidate_has_completed_leaf));
     }
     if solver.deadline.has_elapsed() {
         solver.aborted = true;
         solver.deadline_reached = true;
     }
+    // Partial setup scores are ordering priors, not comparable endpoint values.
+    // Once any root reaches a completed snake-draft leaf, only roots with a
+    // completed leaf may become authoritative. Preserve the all-static fallback
+    // only when the budget was too small to complete any root at all.
+    let has_completed_root = actions.iter().any(|(_, completed)| *completed);
+    let mut actions = actions
+        .into_iter()
+        .filter_map(|(candidate, completed)| {
+            (!has_completed_root || completed).then_some(candidate)
+        })
+        .collect::<Vec<_>>();
     actions.sort_by(|left, right| right.value.total_cmp(&left.value));
     OpeningReport {
         chosen: actions.first().map(|candidate| candidate.action.clone()),

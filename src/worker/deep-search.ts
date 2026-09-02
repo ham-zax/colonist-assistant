@@ -1475,6 +1475,26 @@ export const analyzeDeepSearch = async (
       ? "rust-chosen-action-does-not-match-live-prompt"
       : undefined;
   const selected = mappingFailureReason ? undefined : response.chosen;
+  const effectiveSearchEffort: DeepSearchResult["effectiveSearchEffort"] =
+    response.algorithm === "gpu-root-rollout"
+      ? {
+          backend: "gpu",
+          timeBudgetMs: response.effectiveEffort.decisionTimeMs,
+          tacticalMaxDepth: response.effectiveEffort.tactical.maxDepth,
+          tacticalNodeBudget: response.effectiveEffort.tactical.nodeBudget,
+          rootCap: response.effectiveEffort.gpu.rootCap,
+          rolloutBudget: response.effectiveEffort.gpu.rolloutBudget,
+          rolloutSteps: response.effectiveEffort.gpu.rolloutSteps,
+        }
+      : {
+          backend: "cpu",
+          timeBudgetMs: response.effectiveEffort.decisionTimeMs,
+          tacticalMaxDepth: response.effectiveEffort.tactical.maxDepth,
+          tacticalNodeBudget: response.effectiveEffort.tactical.nodeBudget,
+          maxDepth: response.effectiveEffort.cpu.maxDepth,
+          rootCap: response.effectiveEffort.cpu.rootCap,
+          nodesPerDepthWave: response.effectiveEffort.cpu.nodesPerDepthWave,
+        };
   const search: DeepSearchResult = {
     engineRevision: response.engineRevision,
     rootIndex: root,
@@ -1482,10 +1502,7 @@ export const analyzeDeepSearch = async (
     tradeModelVersion: response.tradeModelVersion,
     algorithm: response.algorithm,
     authority: response.authority,
-    requestedTimeBudgetMs: request.effort.decisionTimeMs,
-    requestedMaxDepth: request.effort.cpu.maxDepth,
-    requestedRootCap: request.effort.cpu.rootCap,
-    requestedNodesPerDepthWave: request.effort.cpu.nodesPerDepthWave,
+    effectiveSearchEffort,
     ...(selected ? { chosen: mapAction(selected, players, board) } : {}),
     rootValue: response.rootValue.slice(0, players.length),
     tacticalWinProbability: response.tacticalWinProbability,

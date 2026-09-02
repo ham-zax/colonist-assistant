@@ -5,6 +5,7 @@ import type { ResourceVector } from "./resources";
 import type {
   DeepSearchAction,
   DeepSearchAuthorityTrace,
+  DeepSearchEffectiveEffort,
   DeepSearchRootProvenance,
   DecisionAnalysis,
   DecisionAuthority,
@@ -128,10 +129,7 @@ export interface DecisionTrace {
   runtimeReason?: string;
   engineRevision?: string;
   algorithm?: string;
-  requestedTimeBudgetMs?: number;
-  requestedMaxDepth?: number;
-  requestedRootCap?: number;
-  requestedNodesPerDepthWave?: number;
+  effectiveSearchEffort?: DeepSearchEffectiveEffort;
   searchElapsedMs?: number;
   searchStages?: DecisionTraceSearchStages;
   iterations?: number;
@@ -387,10 +385,9 @@ export class DecisionTraceRecorder {
     trace.runtime = analysis.runtime;
     trace.engineRevision = analysis.deepSearch?.engineRevision;
     trace.algorithm = analysis.deepSearch?.algorithm;
-    trace.requestedTimeBudgetMs = analysis.deepSearch?.requestedTimeBudgetMs;
-    trace.requestedMaxDepth = analysis.deepSearch?.requestedMaxDepth;
-    trace.requestedRootCap = analysis.deepSearch?.requestedRootCap;
-    trace.requestedNodesPerDepthWave = analysis.deepSearch?.requestedNodesPerDepthWave;
+    trace.effectiveSearchEffort = analysis.deepSearch?.effectiveSearchEffort
+      ? structuredClone(analysis.deepSearch.effectiveSearchEffort)
+      : undefined;
     trace.searchElapsedMs = analysis.deepSearch?.elapsedMs;
     trace.searchStages = analysis.deepSearch?.searchStages;
     trace.iterations = analysis.deepSearch?.iterations;

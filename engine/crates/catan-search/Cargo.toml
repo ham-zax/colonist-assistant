@@ -19,3 +19,4 @@ cudarc = { version = "0.19.9", optional = true, default-features = false, featur
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Performance", "Window"] }

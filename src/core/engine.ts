@@ -72,6 +72,26 @@ export interface DeepSearchStageTimings {
   attemptedDepth: number;
 }
 
+export type DeepSearchEffectiveEffort =
+  | {
+      backend: "cpu";
+      timeBudgetMs: number;
+      tacticalMaxDepth: number;
+      tacticalNodeBudget: number;
+      maxDepth: number;
+      rootCap: number;
+      nodesPerDepthWave: number;
+    }
+  | {
+      backend: "gpu";
+      timeBudgetMs: number;
+      tacticalMaxDepth: number;
+      tacticalNodeBudget: number;
+      rootCap: number;
+      rolloutBudget: number;
+      rolloutSteps: number;
+    };
+
 export interface DeepSearchActionStatistics {
   action: DeepSearchAction;
   visits: number;
@@ -163,10 +183,7 @@ export interface DeepSearchResult {
   tradeModelVersion?: string;
   algorithm: string;
   authority: DecisionAuthority;
-  requestedTimeBudgetMs?: number;
-  requestedMaxDepth?: number;
-  requestedRootCap?: number;
-  requestedNodesPerDepthWave?: number;
+  effectiveSearchEffort?: DeepSearchEffectiveEffort;
   chosen?: DeepSearchAction;
   rootValue: number[];
   tacticalWinProbability: number;

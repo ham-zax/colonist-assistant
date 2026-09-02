@@ -159,14 +159,14 @@ struct RootExclusionInput {
 }
 
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TacticalEffortInput {
     max_depth: u8,
     node_budget: u32,
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CpuEffortInput {
     max_depth: u8,
@@ -174,7 +174,7 @@ struct CpuEffortInput {
     nodes_per_depth_wave: u32,
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GpuEffortInput {
     root_cap: usize,
@@ -182,7 +182,7 @@ struct GpuEffortInput {
     rollout_steps: u16,
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SearchEffortInput {
     decision_time_ms: u32,
@@ -434,6 +434,7 @@ struct AuthorityTraceOutput {
 struct ResponseDiagnostics {
     rust_posterior_particles: usize,
     rust_search_particles: usize,
+    effective_effort: SearchEffortInput,
     search_stages: Option<SearchStagesOutput>,
     root_provenance: RootProvenanceOutput,
     authority_trace: AuthorityTraceOutput,
@@ -465,6 +466,7 @@ struct Response {
     wasm_particles: usize,
     rust_posterior_particles: usize,
     rust_search_particles: usize,
+    effective_effort: SearchEffortInput,
     search_stages: Option<SearchStagesOutput>,
     root_provenance: RootProvenanceOutput,
     authority_trace: AuthorityTraceOutput,
@@ -1020,10 +1022,12 @@ where
 fn basic_response_diagnostics(
     particles: usize,
     authority: DecisionAuthority,
+    effective_effort: SearchEffortInput,
 ) -> ResponseDiagnostics {
     ResponseDiagnostics {
         rust_posterior_particles: particles,
         rust_search_particles: particles,
+        effective_effort,
         search_stages: None,
         root_provenance: RootProvenanceOutput::default(),
         authority_trace: AuthorityTraceOutput {
@@ -1100,6 +1104,7 @@ fn response(
         wasm_particles: particles,
         rust_posterior_particles: diagnostics.rust_posterior_particles,
         rust_search_particles: diagnostics.rust_search_particles,
+        effective_effort: diagnostics.effective_effort,
         search_stages: diagnostics.search_stages,
         root_provenance: diagnostics.root_provenance,
         authority_trace: diagnostics.authority_trace,
@@ -1333,7 +1338,11 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
                 particles.len(),
                 algorithm,
                 DecisionAuthority::ExactMandatory,
-                basic_response_diagnostics(particles.len(), DecisionAuthority::ExactMandatory),
+                basic_response_diagnostics(
+                    particles.len(),
+                    DecisionAuthority::ExactMandatory,
+                    effort,
+                ),
             ))
             .map_err(|error| JsValue::from_str(&error.to_string()));
         }
@@ -1402,6 +1411,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
                     basic_response_diagnostics(
                         particles.len(),
                         DecisionAuthority::TacticalProven,
+                        effort,
                     ),
                 ))
                 .map_err(|error| JsValue::from_str(&error.to_string()));
@@ -1432,7 +1442,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
             .map_err(|error| JsValue::from_str(&format!("{error:?}")))?;
             let rust_posterior_particles = depth_report.posterior_particles;
             let rust_search_particles = depth_report.particles;
-            let search_stages = Some(SearchStagesOutput::from(depth_report.stage_timings));
+            let search_stages = depth_report.stage_timings.map(SearchStagesOutput::from);
             let depth_safety_replacement = depth_report.provenance.safety_replacement.clone();
             let depth_exact_family_replacement =
                 depth_report.provenance.exact_family_replacement.clone();
@@ -1510,6 +1520,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
             let diagnostics = ResponseDiagnostics {
                 rust_posterior_particles,
                 rust_search_particles,
+                effective_effort: effort,
                 search_stages,
                 root_provenance,
                 authority_trace: AuthorityTraceOutput {
@@ -1614,6 +1625,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
             let diagnostics = ResponseDiagnostics {
                 rust_posterior_particles: particles.len(),
                 rust_search_particles: particles.len(),
+                effective_effort: effort,
                 search_stages: None,
                 root_provenance: RootProvenanceOutput::default(),
                 authority_trace: AuthorityTraceOutput {
@@ -1690,7 +1702,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
                     .ok_or_else(|| JsValue::from_str("pondering produced no search group"))
             })?;
             let authority = DecisionAuthority::DeepMaxn;
-            let diagnostics = basic_response_diagnostics(particles.len(), authority);
+            let diagnostics = basic_response_diagnostics(particles.len(), authority, effort);
             (report, authority, diagnostics)
         };
     serde_wasm_bindgen::to_value(&response(

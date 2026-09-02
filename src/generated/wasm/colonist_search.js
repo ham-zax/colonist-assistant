@@ -159,6 +159,16 @@ function __wbg_get_imports() {
             const ret = result;
             return ret;
         },
+        __wbg_instanceof_Window_05ba1ee4f6781663: function(arg0) {
+            let result;
+            try {
+                result = getObject(arg0) instanceof Window;
+            } catch (_) {
+                result = false;
+            }
+            const ret = result;
+            return ret;
+        },
         __wbg_isArray_0677c962b281d01a: function(arg0) {
             const ret = Array.isArray(getObject(arg0));
             return ret;
@@ -199,9 +209,17 @@ function __wbg_get_imports() {
             const ret = getObject(arg0).next();
             return addHeapObject(ret);
         }, arguments); },
+        __wbg_now_390768da5ee9e776: function(arg0) {
+            const ret = getObject(arg0).now();
+            return ret;
+        },
         __wbg_now_86c0d4ba3fa605b8: function() {
             const ret = Date.now();
             return ret;
+        },
+        __wbg_performance_3ef602e13d6c3b56: function(arg0) {
+            const ret = getObject(arg0).performance;
+            return isLikeNone(ret) ? 0 : addHeapObject(ret);
         },
         __wbg_prototypesetcall_4770620bbe4688a0: function(arg0, arg1, arg2) {
             Uint8Array.prototype.set.call(getArrayU8FromWasm0(arg0, arg1), getObject(arg2));
@@ -211,6 +229,22 @@ function __wbg_get_imports() {
         },
         __wbg_set_8a16b38e4805b298: function(arg0, arg1, arg2) {
             getObject(arg0)[arg1 >>> 0] = takeObject(arg2);
+        },
+        __wbg_static_accessor_GLOBAL_4ef717fb391d88b7: function() {
+            const ret = typeof global === 'undefined' ? null : global;
+            return isLikeNone(ret) ? 0 : addHeapObject(ret);
+        },
+        __wbg_static_accessor_GLOBAL_THIS_8d1badc68b5a74f4: function() {
+            const ret = typeof globalThis === 'undefined' ? null : globalThis;
+            return isLikeNone(ret) ? 0 : addHeapObject(ret);
+        },
+        __wbg_static_accessor_SELF_146583524fe1469b: function() {
+            const ret = typeof self === 'undefined' ? null : self;
+            return isLikeNone(ret) ? 0 : addHeapObject(ret);
+        },
+        __wbg_static_accessor_WINDOW_f2829a2234d7819e: function() {
+            const ret = typeof window === 'undefined' ? null : window;
+            return isLikeNone(ret) ? 0 : addHeapObject(ret);
         },
         __wbg_value_a5d5488a9589444a: function(arg0) {
             const ret = getObject(arg0).value;

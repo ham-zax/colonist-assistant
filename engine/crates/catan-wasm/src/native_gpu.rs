@@ -19,7 +19,7 @@ use super::{
 };
 
 const GPU_ALGORITHM: &str = "gpu-root-rollout";
-pub const NATIVE_GPU_PROTOCOL_VERSION: u32 = 4;
+pub const NATIVE_GPU_PROTOCOL_VERSION: u32 = 5;
 pub const NATIVE_GPU_STATE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize)]
@@ -449,7 +449,11 @@ impl NativeGpuSearchEngine {
                     particles.len(),
                     GPU_ALGORITHM,
                     DecisionAuthority::ExactMandatory,
-                    basic_response_diagnostics(particles.len(), DecisionAuthority::ExactMandatory),
+                    basic_response_diagnostics(
+                        particles.len(),
+                        DecisionAuthority::ExactMandatory,
+                        effort,
+                    ),
                 ))
                 .map_err(|error| error.to_string());
             }
@@ -506,7 +510,11 @@ impl NativeGpuSearchEngine {
                 particles.len(),
                 GPU_ALGORITHM,
                 DecisionAuthority::TacticalProven,
-                basic_response_diagnostics(particles.len(), DecisionAuthority::TacticalProven),
+                basic_response_diagnostics(
+                    particles.len(),
+                    DecisionAuthority::TacticalProven,
+                    effort,
+                ),
             ))
             .map_err(|error| error.to_string());
         }
@@ -1090,6 +1098,7 @@ impl NativeGpuSearchEngine {
         let diagnostics = ResponseDiagnostics {
             rust_posterior_particles: particles.len(),
             rust_search_particles: particles.len(),
+            effective_effort: effort,
             search_stages: None,
             root_provenance,
             authority_trace: AuthorityTraceOutput {

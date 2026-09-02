@@ -31,6 +31,13 @@ export interface WasmSearchStages {
   attemptedDepth: number;
 }
 
+export interface WasmSearchEffort {
+  decisionTimeMs: number;
+  tactical: { maxDepth: number; nodeBudget: number };
+  cpu: { maxDepth: number; rootCap: number; nodesPerDepthWave: number };
+  gpu: { rootCap: number; rolloutBudget: number; rolloutSteps: number };
+}
+
 export interface WasmActionStatistics {
   action: WasmAction;
   visits: number;
@@ -125,6 +132,7 @@ export interface WasmSearchResponse {
   wasmParticles: number;
   rustPosteriorParticles: number;
   rustSearchParticles: number;
+  effectiveEffort: WasmSearchEffort;
   searchStages?: WasmSearchStages;
   rootProvenance: WasmRootProvenance;
   authorityTrace: WasmAuthorityTrace;

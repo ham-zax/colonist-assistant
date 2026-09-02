@@ -121,7 +121,7 @@ pub struct BeliefDepthResult {
     /// Weighted particles supplied to this Rust belief search before coalescing.
     pub posterior_particles: usize,
     pub deadline_reached: bool,
-    pub stage_timings: BeliefSearchStageTimings,
+    pub stage_timings: Option<BeliefSearchStageTimings>,
     pub provenance: BeliefSearchProvenance,
 }
 
@@ -843,13 +843,42 @@ enum BeliefNodeBudgetMode {
     PerDepthWave,
 }
 
-fn elapsed_stage_ms(deadline: &CooperativeDeadline, started_remaining_ms: u32) -> u32 {
-    let remaining_ms = deadline.remaining_ms();
-    if started_remaining_ms == u32::MAX || remaining_ms == u32::MAX {
-        0
-    } else {
-        started_remaining_ms.saturating_sub(remaining_ms)
+fn evaluate_after_forced_chance(state: &GameState, depth: u8) -> [f32; 4] {
+    if depth >= 5 || state.node_kind() != NodeKind::Chance {
+        return evaluate(state);
     }
+    let actions = state.legal_actions();
+    if actions.is_empty() {
+        return evaluate(state);
+    }
+    let total = actions
+        .iter()
+        .map(|action| state.chance_weight(action) as f32)
+        .sum::<f32>()
+        .max(f32::EPSILON);
+    let mut result = [0.0; 4];
+    let mut mass = 0.0_f32;
+    for action in actions {
+        let probability = state.chance_weight(&action) as f32 / total;
+        let mut next = state.clone();
+        if next.apply(&action).is_err() {
+            continue;
+        }
+        let child = evaluate_after_forced_chance(&next, depth + 1);
+        for player in 0..4 {
+            result[player] += child[player] * probability;
+        }
+        mass += probability;
+    }
+    if mass > 0.0 {
+        result.map(|value| value / mass)
+    } else {
+        evaluate(state)
+    }
+}
+
+fn elapsed_stage_ms(deadline: &CooperativeDeadline, started_elapsed_ms: u32) -> u32 {
+    deadline.elapsed_ms().saturating_sub(started_elapsed_ms)
 }
 
 fn belief_search(
@@ -864,7 +893,7 @@ fn belief_search(
     let branch_cap = config.branch_cap;
     let maximum_nodes = config.maximum_nodes;
     let deadline = CooperativeDeadline::start(config.time_budget_ms);
-    let particle_preparation_started = deadline.remaining_ms();
+    let particle_preparation_started = deadline.elapsed_ms();
     let Some(first_particle) = particles.first() else {
         return Err(DepthBeliefError::Empty);
     };
@@ -965,7 +994,7 @@ fn belief_search(
             particles: particles.len(),
             posterior_particles: particles.len(),
             deadline_reached: report.deadline_reached,
-            stage_timings: BeliefSearchStageTimings::default(),
+            stage_timings: None,
             provenance: BeliefSearchProvenance::default(),
         });
     }
@@ -996,7 +1025,7 @@ fn belief_search(
         coalesced
     };
     let particle_preparation_ms = elapsed_stage_ms(&deadline, particle_preparation_started);
-    let root_scoring_started = deadline.remaining_ms();
+    let root_scoring_started = deadline.elapsed_ms();
     struct Aggregate {
         action: Action,
         value: [f32; 4],
@@ -1049,7 +1078,7 @@ fn belief_search(
     let mut ranked_diagnostics =
         normalize_belief_root_priors_with_diagnostics(particles, observer, planner_nodes);
     let root_scoring_ms = elapsed_stage_ms(&deadline, root_scoring_started);
-    let exact_families_started = deadline.remaining_ms();
+    let exact_families_started = deadline.elapsed_ms();
     if deadline.has_elapsed() {
         deadline_reached = true;
     }
@@ -1147,7 +1176,7 @@ fn belief_search(
         });
     }
     let exact_families_ms = elapsed_stage_ms(&deadline, exact_families_started);
-    let threat_safety_started = deadline.remaining_ms();
+    let threat_safety_started = deadline.elapsed_ms();
     ranked_diagnostics.sort_by(|left, right| {
         right
             .quota_score
@@ -1321,7 +1350,7 @@ fn belief_search(
         .map(|(action, _)| action)
         .collect::<Vec<_>>();
     let threat_safety_ms = elapsed_stage_ms(&deadline, threat_safety_started);
-    let one_ply_floor_started = deadline.remaining_ms();
+    let one_ply_floor_started = deadline.elapsed_ms();
 
     // Always retain one complete posterior-wide one-ply table. Deeper search
     // may replace it only after an entire depth wave completes across every
@@ -1351,7 +1380,7 @@ fn belief_search(
                 }
                 let mut next = particle.state.clone();
                 let entry = if next.apply(action).is_ok() {
-                    let mut value = evaluate(&next);
+                    let mut value = evaluate_after_forced_chance(&next, 0);
                     apply_action_friction(&mut value, &particle.state, action, observer);
                     RowEntry {
                         action: action.clone(),
@@ -1386,7 +1415,7 @@ fn belief_search(
         }
     }
     let one_ply_floor_ms = elapsed_stage_ms(&deadline, one_ply_floor_started);
-    let deep_waves_started = deadline.remaining_ms();
+    let deep_waves_started = deadline.elapsed_ms();
     let mut attempted_depth = 0u8;
 
     for target_depth in 1..=maximum_depth {
@@ -1566,7 +1595,7 @@ fn belief_search(
         particles: particles_searched,
         posterior_particles,
         deadline_reached,
-        stage_timings: BeliefSearchStageTimings {
+        stage_timings: Some(BeliefSearchStageTimings {
             particle_preparation_ms,
             root_scoring_ms,
             exact_families_ms,
@@ -1575,7 +1604,7 @@ fn belief_search(
             deep_waves_ms,
             floor_complete,
             attempted_depth,
-        },
+        }),
         provenance,
     })
 }
@@ -3198,7 +3227,7 @@ fn cuda_belief_search_with_batch(
             particles: particles_searched,
             posterior_particles,
             deadline_reached: false,
-            stage_timings: BeliefSearchStageTimings::default(),
+            stage_timings: None,
             provenance,
         });
     }
@@ -3386,7 +3415,7 @@ fn cuda_belief_search_with_batch(
         particles: particles_searched,
         posterior_particles,
         deadline_reached: false,
-        stage_timings: BeliefSearchStageTimings::default(),
+        stage_timings: None,
         provenance,
     })
 }
