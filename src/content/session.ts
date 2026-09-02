@@ -17,6 +17,15 @@ import {
 } from "./dom";
 import { isExtensionContextInvalidatedError } from "./extension-context";
 
+export type UnmatchedLogReason =
+  | "known-ignored-system-message"
+  | "known-redundant-trade-offer"
+  | "known-redundant-robber-move"
+  | "known-ignored-production-blocked"
+  | "known-ignored-empty-robbery"
+  | "known-ignored-bot-status"
+  | "unrecognized-log-format";
+
 export interface UnmatchedLogSample {
   signature: string;
   count: number;
@@ -24,7 +33,8 @@ export interface UnmatchedLogSample {
   lastSeenAt: number;
   firstLogIndex?: number;
   lastLogIndex?: number;
-  reason: "unrecognized-log-format";
+  reason: UnmatchedLogReason;
+  affectsIntegrity: boolean;
   sample: string;
 }
 
@@ -39,6 +49,7 @@ interface StoredSession {
   seenIds: string[];
   partialHistory: boolean;
   unmatchedCount: number;
+  unmatchedIntegrityCount?: number;
   unmatchedSamples?: UnmatchedLogSample[];
 }
 
@@ -53,6 +64,33 @@ export interface SessionSummary {
 }
 
 const MAX_STORED_EVENTS = 1600;
+
+const classifyUnmatchedLog = (
+  serialText: string,
+): { reason: UnmatchedLogReason; affectsIntegrity: boolean } => {
+  const normalized = serialText.replace(/\s+/gu, " ").trim();
+  if (/^happy settling!|\blist of commands:\s*\/help\b/iu.test(normalized)) {
+    return { reason: "known-ignored-system-message", affectsIntegrity: false };
+  }
+  if (/^bot is selecting cards to discard for\b/iu.test(normalized)) {
+    return { reason: "known-ignored-bot-status", affectsIntegrity: false };
+  }
+  if (/^player has no cards\.?$/iu.test(normalized)) {
+    return { reason: "known-ignored-empty-robbery", affectsIntegrity: false };
+  }
+  if (/is blocked by the robber.*no resources produced/iu.test(normalized)) {
+    return { reason: "known-ignored-production-blocked", affectsIntegrity: false };
+  }
+  if (/\bmoved robber to\b/iu.test(normalized)) {
+    return { reason: "known-redundant-robber-move", affectsIntegrity: false };
+  }
+  if (/\bwants to give\b.+\bfor\b/iu.test(normalized)) {
+    // Active-trade snapshots are ingested separately with stable trade
+    // identity, so the rendered chat offer is duplicate evidence.
+    return { reason: "known-redundant-trade-offer", affectsIntegrity: false };
+  }
+  return { reason: "unrecognized-log-format", affectsIntegrity: true };
+};
 const MAX_SEEN_IDS = 2600;
 const MAX_UNMATCHED_SAMPLES = 24;
 const MAX_UNMATCHED_SAMPLE_CHARS = 220;
@@ -151,6 +189,7 @@ export class GameSession {
   events: StoredEvent[] = [];
   partialHistory = false;
   unmatchedCount = 0;
+  unmatchedIntegrityCount = 0;
   unmatchedSamples: UnmatchedLogSample[] = [];
   startedAt = Date.now();
   gameKey?: string;
@@ -249,6 +288,7 @@ export class GameSession {
     this.events = [];
     this.partialHistory = false;
     this.unmatchedCount = 0;
+    this.unmatchedIntegrityCount = 0;
     this.unmatchedSamples = [];
     this.seenIds.clear();
     this.syntheticSequence = 0;
@@ -275,6 +315,7 @@ export class GameSession {
     this.events = [];
     this.partialHistory = false;
     this.unmatchedCount = 0;
+    this.unmatchedIntegrityCount = 0;
     this.unmatchedSamples = [];
     try {
       await enqueueStorage(clearCurrentGameStorage);
@@ -358,6 +399,7 @@ export class GameSession {
       this.events = [];
       this.partialHistory = false;
       this.unmatchedCount = 0;
+      this.unmatchedIntegrityCount = 0;
       this.unmatchedSamples = [];
       this.startedAt = Date.now();
       this.seenIds.clear();
@@ -380,8 +422,10 @@ export class GameSession {
       if (!snapshot) continue;
       const parsed = parseLogSnapshot(snapshot);
       if (!parsed) {
+        const classification = classifyUnmatchedLog(snapshot.serialText);
         this.unmatchedCount += 1;
-        this.recordUnmatched(snapshot.serialText, snapshot.index);
+        if (classification.affectsIntegrity) this.unmatchedIntegrityCount += 1;
+        this.recordUnmatched(snapshot.serialText, snapshot.index, classification);
         changed = true;
         continue;
       }
@@ -412,7 +456,11 @@ export class GameSession {
     }
   }
 
-  private recordUnmatched(serialText: string, logIndex?: number): void {
+  private recordUnmatched(
+    serialText: string,
+    logIndex: number | undefined,
+    classification: { reason: UnmatchedLogReason; affectsIntegrity: boolean },
+  ): void {
     const normalized = serialText.replace(/\s+/gu, " ").trim();
     const signature = hashString(normalized);
     const now = Date.now();
@@ -447,7 +495,8 @@ export class GameSession {
       ...(logIndex !== undefined
         ? { firstLogIndex: logIndex, lastLogIndex: logIndex }
         : {}),
-      reason: "unrecognized-log-format",
+      reason: classification.reason,
+      affectsIntegrity: classification.affectsIntegrity,
       sample: normalized.slice(0, MAX_UNMATCHED_SAMPLE_CHARS),
     });
   }
@@ -469,9 +518,18 @@ export class GameSession {
     this.events = stored.events;
     this.partialHistory = stored.partialHistory;
     this.unmatchedCount = stored.unmatchedCount;
+    this.unmatchedIntegrityCount =
+      stored.unmatchedIntegrityCount ??
+      (stored.unmatchedSamples ?? []).reduce(
+        (count, sample) => count + ((sample.affectsIntegrity ?? true) ? sample.count : 0),
+        0,
+      );
     this.unmatchedSamples = (stored.unmatchedSamples ?? [])
       .slice(-MAX_UNMATCHED_SAMPLES)
-      .map((sample) => ({ ...sample }));
+      .map((sample) => ({
+        ...sample,
+        affectsIntegrity: sample.affectsIntegrity ?? sample.reason === "unrecognized-log-format",
+      }));
     this.state = replayEvents(stored.events);
     for (const id of stored.seenIds) this.seenIds.add(id);
   }
@@ -498,6 +556,7 @@ export class GameSession {
       seenIds: [...this.seenIds].slice(-MAX_SEEN_IDS),
       partialHistory: this.partialHistory,
       unmatchedCount: this.unmatchedCount,
+      unmatchedIntegrityCount: this.unmatchedIntegrityCount,
       unmatchedSamples: this.unmatchedSamples.map((sample) => ({ ...sample })),
     };
     const summary: SessionSummary = {

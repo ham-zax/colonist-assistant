@@ -123,6 +123,7 @@ export interface ActionExecutionDiagnostic {
   offerIndex?: number;
   visibleTradeCount?: number;
   visibleTradeFingerprints?: string[];
+  visibleTradeControlFingerprints?: string[];
 }
 
 export interface ActionGuideOptions {
@@ -414,6 +415,54 @@ const findDevelopmentCard = (
   return undefined;
 };
 
+const diagnosticText = (root: HTMLElement): string => {
+  const clone = root.cloneNode(true) as HTMLElement;
+  clone
+    .querySelectorAll("#colonist-assistant-root, .ca-trade-verdict")
+    .forEach((element) => element.remove());
+  return normalized(clone.textContent ?? "").slice(0, 120);
+};
+
+const diagnosticControlFingerprint = (
+  control: HTMLElement,
+  index: number,
+): string => {
+  const className =
+    typeof control.className === "string"
+      ? normalized(control.className).slice(0, 80)
+      : "";
+  const text = diagnosticText(control).slice(0, 60);
+  const aria = normalized(
+    control.getAttribute("aria-label") ?? control.getAttribute("title") ?? "",
+  ).slice(0, 60);
+  const icon = [...control.querySelectorAll<HTMLImageElement>("img[src]")]
+    .map((image) => image.src.split("/").at(-1)?.split("?")[0] ?? "")
+    .filter(Boolean)
+    .slice(0, 3)
+    .join("+");
+  const disabled = [
+    control.matches("[disabled]") ? "disabled" : "",
+    control.getAttribute("aria-disabled") === "true" ? "aria-disabled" : "",
+    normalized(className).includes("disabled") ? "class-disabled" : "",
+    control.querySelector("[class*='foregroundDisabled-']")
+      ? "foreground-disabled"
+      : "",
+  ]
+    .filter(Boolean)
+    .join("+");
+  return [
+    `${index}:${control.tagName.toLowerCase()}`,
+    `active=${activeColonistControl(control) ? 1 : 0}`,
+    className ? `class=${className}` : "",
+    text ? `text=${text}` : "",
+    aria ? `aria=${aria}` : "",
+    icon ? `icon=${icon}` : "",
+    disabled ? `disabled=${disabled}` : "disabled=none",
+  ]
+    .filter(Boolean)
+    .join("|");
+};
+
 const tradeExecutionDiagnostic = (
   action: NextClick,
 ): ActionExecutionDiagnostic => {
@@ -435,15 +484,32 @@ const tradeExecutionDiagnostic = (
     : [
         ...document.querySelectorAll<HTMLElement>("[class*='tradeContainer-']"),
       ].filter(visible);
+  const controls = offers
+    .slice(0, 8)
+    .flatMap((offer, offerIndex) =>
+      [
+        ...offer.querySelectorAll<HTMLElement>(
+          "[class*='tradeButton-'], button, [role='button']",
+        ),
+      ]
+        .filter((control, index, all) => all.indexOf(control) === index)
+        .slice(0, 12)
+        .map(
+          (control, controlIndex) =>
+            `offer${offerIndex}/${diagnosticControlFingerprint(control, controlIndex)}`,
+        ),
+    )
+    .slice(0, 24);
   return {
     actionKind: action.kind,
     tradeId: action.tradeId,
     offerIndex: action.offerIndex,
     visibleTradeCount: offers.length,
     visibleTradeFingerprints: offers.slice(0, 8).map((offer, index) => {
-      const text = normalized(offer.textContent ?? "").slice(0, 120);
+      const text = diagnosticText(offer);
       return `${index}:${text || "<no-text>"}`;
     }),
+    ...(controls.length ? { visibleTradeControlFingerprints: controls } : {}),
   };
 };
 

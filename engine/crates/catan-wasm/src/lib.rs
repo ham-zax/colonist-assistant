@@ -372,6 +372,22 @@ struct RetainedRootOutput {
     allocated_nodes: u32,
     planner_value: Option<f32>,
     planner_completion_mass: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    final_rank: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal_outcome: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal_lower_bound: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal_upper_bound: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    victory_margin: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    victory_margin_lower_bound: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    victory_margin_upper_bound: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mean_turn: Option<f32>,
 }
 
 #[derive(Serialize)]
@@ -872,6 +888,14 @@ fn root_provenance_output(provenance: BeliefSearchProvenance) -> RootProvenanceO
                 allocated_nodes: candidate.allocated_nodes,
                 planner_value: candidate.planner_value,
                 planner_completion_mass: candidate.planner_completion_mass,
+                final_rank: None,
+                terminal_outcome: None,
+                terminal_lower_bound: None,
+                terminal_upper_bound: None,
+                victory_margin: None,
+                victory_margin_lower_bound: None,
+                victory_margin_upper_bound: None,
+                mean_turn: None,
             })
             .collect(),
         pruned_root_count: provenance.pruned_root_count,

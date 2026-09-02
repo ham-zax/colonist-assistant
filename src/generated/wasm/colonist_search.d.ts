@@ -79,6 +79,14 @@ export interface WasmRetainedRoot {
   allocatedNodes: number;
   plannerValue?: number;
   plannerCompletionMass?: number;
+  finalRank?: number;
+  terminalOutcome?: number;
+  terminalLowerBound?: number;
+  terminalUpperBound?: number;
+  victoryMargin?: number;
+  victoryMarginLowerBound?: number;
+  victoryMarginUpperBound?: number;
+  meanTurn?: number;
 }
 
 export interface WasmPrunedRoot {

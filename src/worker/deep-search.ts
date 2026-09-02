@@ -648,6 +648,30 @@ const mapRootProvenance = (
       ...(candidate.plannerCompletionMass !== undefined
         ? { plannerCompletionMass: candidate.plannerCompletionMass }
         : {}),
+      ...(typeof candidate.finalRank === "number"
+        ? { finalRank: candidate.finalRank }
+        : {}),
+      ...(typeof candidate.terminalOutcome === "number"
+        ? { terminalOutcome: candidate.terminalOutcome }
+        : {}),
+      ...(typeof candidate.terminalLowerBound === "number"
+        ? { terminalLowerBound: candidate.terminalLowerBound }
+        : {}),
+      ...(typeof candidate.terminalUpperBound === "number"
+        ? { terminalUpperBound: candidate.terminalUpperBound }
+        : {}),
+      ...(typeof candidate.victoryMargin === "number"
+        ? { victoryMargin: candidate.victoryMargin }
+        : {}),
+      ...(typeof candidate.victoryMarginLowerBound === "number"
+        ? { victoryMarginLowerBound: candidate.victoryMarginLowerBound }
+        : {}),
+      ...(typeof candidate.victoryMarginUpperBound === "number"
+        ? { victoryMarginUpperBound: candidate.victoryMarginUpperBound }
+        : {}),
+      ...(typeof candidate.meanTurn === "number"
+        ? { meanTurn: candidate.meanTurn }
+        : {}),
     })),
     prunedRootCount: provenance.prunedRootCount,
     prunedRoots: provenance.prunedRoots.map((candidate) => ({

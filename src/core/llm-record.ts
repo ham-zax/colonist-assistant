@@ -16,6 +16,14 @@ export const RECORD_DEVELOPMENT_ORDER = [
 type Scalar = string | number | boolean | null;
 type CompactCell = Scalar | number[] | string[];
 type CompactRow = CompactCell[];
+type UnmatchedLogReason =
+  | "known-ignored-system-message"
+  | "known-redundant-trade-offer"
+  | "known-redundant-robber-move"
+  | "known-ignored-production-blocked"
+  | "known-ignored-empty-robbery"
+  | "known-ignored-bot-status"
+  | "unrecognized-log-format";
 
 export interface CompactRecordContracts {
   resources: readonly string[];
@@ -54,6 +62,7 @@ export interface CompactGameRecord {
   completedAt?: number;
   partialHistory: boolean;
   unmatchedCount: number;
+  unmatchedIntegrityCount: number;
   assistant: {
     engine: string;
     disablePlayerTrades: boolean;
@@ -76,7 +85,8 @@ export interface CompactGameRecord {
       lastSeenAt: number;
       firstLogIndex?: number;
       lastLogIndex?: number;
-      reason: "unrecognized-log-format";
+      reason: UnmatchedLogReason;
+      affectsIntegrity: boolean;
       sample: string;
     }>;
     integrityIssues?: string[];
@@ -111,6 +121,7 @@ export interface CompactGameCapture {
   startedAt: number;
   partialHistory: boolean;
   unmatchedCount: number;
+  unmatchedIntegrityCount?: number;
   unmatchedSamples?: Array<{
     signature: string;
     count: number;
@@ -118,7 +129,8 @@ export interface CompactGameCapture {
     lastSeenAt: number;
     firstLogIndex?: number;
     lastLogIndex?: number;
-    reason: "unrecognized-log-format";
+    reason: UnmatchedLogReason;
+    affectsIntegrity?: boolean;
     sample: string;
   }>;
   playerOrder?: string[];
@@ -218,6 +230,7 @@ const compactExecutionDiagnostic = (trace: DecisionTrace): string[] | undefined 
       ? [`domCount=${diagnostic.visibleTradeCount}`]
       : []),
     ...(diagnostic.visibleTradeFingerprints?.map((entry) => `dom=${entry}`) ?? []),
+    ...(diagnostic.visibleTradeControlFingerprints?.map((entry) => `ctl=${entry}`) ?? []),
   ];
 };
 
@@ -552,7 +565,9 @@ const updateRecordIntegrity = (record: CompactGameRecord): void => {
     }
   }
   if (record.partialHistory) issues.push("partial-history");
-  if (record.unmatchedCount > 0) issues.push(`unmatched-events:${record.unmatchedCount}`);
+  if (record.unmatchedIntegrityCount > 0) {
+    issues.push(`unmatched-state-events:${record.unmatchedIntegrityCount}`);
+  }
   if (record.meta.unresolvedPlayers?.length) issues.push("unresolved-player-evidence");
   record.meta.integrityIssues = [...new Set(issues)];
   const lastWinner = [...record.frames]
@@ -570,6 +585,9 @@ export const normalizeCompactRecordIntegrity = (
   input: CompactGameRecord,
 ): CompactGameRecord => {
   const record = structuredClone(input);
+  if (!Number.isFinite(record.unmatchedIntegrityCount)) {
+    record.unmatchedIntegrityCount = record.unmatchedCount;
+  }
   const unresolved = new Set(record.meta.unresolvedPlayers ?? []);
   let count = record.meta.playerCount;
   if (!Number.isInteger(count) || count === undefined || count < 2 || count > 4) {
@@ -660,6 +678,9 @@ const contracts = (): CompactRecordContracts => ({
     "chosen",
     "display",
     "status",
+    "lifecycle",
+    "searchResult",
+    "reusedFrom",
     "engine",
     "runtime",
     "model",
@@ -770,6 +791,14 @@ const contracts = (): CompactRecordContracts => ({
     "completionMass",
     "allocatedNodes",
     "reason",
+    "finalRank",
+    "terminalOutcome",
+    "terminalLcb",
+    "terminalUcb",
+    "victoryMargin",
+    "marginLcb",
+    "marginUcb",
+    "meanTurn",
   ],
   replacementColumns: ["decision", "kind", "from", "to"],
   beliefColumns: [
@@ -980,6 +1009,8 @@ export class CompactGameBuilder {
         ...(isCompleted ? { completedAt: now } : {}),
         partialHistory: input.partialHistory,
         unmatchedCount: input.unmatchedCount,
+        unmatchedIntegrityCount:
+          input.unmatchedIntegrityCount ?? input.unmatchedCount,
         assistant: { ...input.assistant },
         aliases: aliasing.aliases,
         contracts: contracts(),
@@ -1011,6 +1042,8 @@ export class CompactGameBuilder {
       if (isCompleted) existing.completedAt ??= now;
       existing.partialHistory = input.partialHistory;
       existing.unmatchedCount = input.unmatchedCount;
+      existing.unmatchedIntegrityCount =
+        input.unmatchedIntegrityCount ?? input.unmatchedCount;
       existing.assistant = { ...input.assistant };
       if (input.gameKey) existing.gameKey = input.gameKey;
     }
@@ -1018,7 +1051,11 @@ export class CompactGameBuilder {
     const record = this.record!;
     record.aliases = aliasing.aliases;
     record.meta.unmatchedSamples = input.unmatchedSamples?.length
-      ? input.unmatchedSamples.slice(-MAX_UNMATCHED_SAMPLES).map((sample) => ({ ...sample }))
+      ? input.unmatchedSamples.slice(-MAX_UNMATCHED_SAMPLES).map((sample) => ({
+          ...sample,
+          affectsIntegrity:
+            sample.affectsIntegrity ?? sample.reason === "unrecognized-log-format",
+        }))
       : undefined;
 
     for (const event of input.events) {
@@ -1390,6 +1427,19 @@ export class CompactGameBuilder {
         ? null
         : Math.max(0, Math.round(timestamp - record.startedAt));
     const effort = trace.effectiveSearchEffort;
+    const searchOriginState = trace.searchResultOriginStateHash
+      ? compactStateId(trace.searchResultOriginStateHash)
+      : undefined;
+    const searchOriginIndex = searchOriginState
+      ? this.decisionIndexByState.get(searchOriginState)
+      : undefined;
+    const searchOriginRow =
+      searchOriginIndex === undefined ? undefined : record.decisions[searchOriginIndex];
+    const reusedFrom = trace.searchResultReused
+      ? typeof searchOriginRow?.[0] === "string"
+        ? searchOriginRow[0]
+        : searchOriginState ?? NA
+      : NA;
     const row: CompactRow = [
       id,
       Math.max(0, trace.recordedAt - record.startedAt),
@@ -1406,6 +1456,16 @@ export class CompactGameBuilder {
       trace.deepChosenAction ? actionLabel(trace.deepChosenAction, alias) : NA,
       trace.finalAction ? actionLabel(trace.finalAction, alias) : NA,
       trace.deepStatus,
+      trace.lifecycleStatus ??
+        (trace.deepStatus === "complete"
+          ? "search-complete"
+          : trace.deepStatus === "failed"
+            ? "search-failed"
+            : trace.deepStatus === "superseded"
+              ? "superseded"
+              : "search-pending"),
+      trace.searchResultId ?? NA,
+      reusedFrom,
       trace.engine ?? NA,
       trace.runtime ?? NA,
       trace.decisionModel ?? NA,
@@ -1543,6 +1603,14 @@ export class CompactGameBuilder {
           compactNumber(root.plannerCompletionMass),
           null,
           NA,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
         ]);
       });
     provenance?.retainedRoots
@@ -1558,6 +1626,14 @@ export class CompactGameBuilder {
           compactNumber(root.plannerCompletionMass),
           root.allocatedNodes,
           NA,
+          root.finalRank ?? null,
+          compactNumber(root.terminalOutcome),
+          compactNumber(root.terminalLowerBound),
+          compactNumber(root.terminalUpperBound),
+          compactNumber(root.victoryMargin),
+          compactNumber(root.victoryMarginLowerBound),
+          compactNumber(root.victoryMarginUpperBound),
+          compactNumber(root.meanTurn),
         ]);
       });
     provenance?.prunedRoots
@@ -1573,6 +1649,14 @@ export class CompactGameBuilder {
           null,
           null,
           root.reason,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
         ]);
       });
 
@@ -1617,6 +1701,7 @@ export const formatCompactGameRecord = (record: CompactGameRecord): string => {
     `@updated=${record.updatedAt}`,
     `@partial=${record.partialHistory ? 1 : 0}`,
     `@unmatched=${record.unmatchedCount}`,
+    `@unmatchedRelevant=${record.unmatchedIntegrityCount}`,
     `@resources=[${record.contracts.resources.join(",")}]`,
     `@development=[${record.contracts.development.join(",")}]`,
     `@symbols=${JSON.stringify({ ".": "unchanged", "~": "unavailable" })}`,
@@ -1624,7 +1709,7 @@ export const formatCompactGameRecord = (record: CompactGameRecord): string => {
     `@time=${JSON.stringify({ frames: "dtMs since previous frame; first since start", decisions: "dtMs since start", events: "dtMs since start" })}`,
     `@actionKeys=${JSON.stringify({ t: "targetId", t2: "secondTargetId", r: "resource", r2: "otherResource", q: "ratio", b: "build", ctl: "control", card: "development card", v: "verdict", accept: "boolean", mode: "trade mode", ba: "board action", oi: "offer index", tid: "trade id", ai: "accepted-player index", c: "confidence", p: "player alias", fp: "follow-up player alias", pt: "screen point x,y", cards: "resource vector", recv: "receive resource vector", give: "give resource vector", get: "receive resource vector", cg: "counter give resource vector", cr: "counter receive resource vector", eg: "existing give resource vector", er: "existing receive resource vector", to: "recipient aliases", fr: "follow-up resource sequence" })}`,
     `@eventArgs=${JSON.stringify({ discover: "[P]", gain: "[P,R,reason]", spend: "[P,R,reason]", transfer: "[from,to,R,reason]", trade: "[P,acceptor,giveR,getR,bank]", "trade-offered": "[P,recipients,giveR,getR]", "trade-accepted": "[P,creator,giveR,getR]", "trade-rejected": "[P,creator,giveR,getR]", "trade-countered": "[P,creator,giveR,getR,counterGiveR,counterGetR]", "trade-embargoed": "[P,creator]", "trade-embargo-cleared": "[P,creator]", "trade-expired": "[P,recipients,giveR,getR]", "unknown-transfer": "[from,to,count]", "unknown-discard": "[P,count]", monopoly: "[P,resource,amount]", "buy-dev": "[P]", "play-dev": "[P,card]", roll: "[P,dice]" })}`,
-    `@diagnostics=${JSON.stringify({ searchStages: "particlePrep/rootScoring/exactFamilies/threatSafety/onePly/deepWaves are actual elapsed ms inside the bounded CPU belief search; omitted for opening/GPU paths where these stages do not apply", effectiveEffort: "backend-resolved search effort after native profiling and engine-side clamping", decisionRationale: "plain-language summary, causal reasons, and auditable evidence derived from the final authority, chosen root, runner-up data, exact comparator, provenance, and deadline state", exactCandidates: "source=exact exposes decisionScore, lowerScore, and the authoritative comparatorScore", executionDiagnostic: "failure-only trade identity/DOM evidence; offerIndex is diagnostic, not stable identity", unmatchedSamples: "bounded deduplicated raw log forms that the parser could not recognize" })}`,
+    `@diagnostics=${JSON.stringify({ searchStages: "particlePrep/rootScoring/exactFamilies/threatSafety/onePly/deepWaves are actual elapsed ms inside the bounded CPU belief search; omitted for opening/GPU paths where these stages do not apply", effectiveEffort: "backend-resolved search effort after native profiling and engine-side clamping", decisionRationale: "plain-language summary, causal reasons, and auditable evidence derived from the final authority, chosen root, runner-up data, exact comparator, provenance, and deadline state", searchResult: "stable per-analysis identity inside this recording; reusedFrom points at the first decision row that owns reused search work", exactCandidates: "source=exact exposes decisionScore, lowerScore, and the authoritative comparatorScore", gpuRoots: "retained GPU roots expose final comparator rank, terminal-outcome and victory-margin confidence bands, and mean completion turn", executionDiagnostic: "failure-only trade identity/DOM evidence with assistant-owned badge text removed; ctl entries expose candidate controls and disabled/active evidence", unmatchedSamples: "bounded deduplicated unparsed log forms classified as harmless/redundant or integrity-relevant; @unmatchedRelevant alone gates benchmark integrity" })}`,
     `@beliefWorlds=${JSON.stringify("handRefs follow the player order declared by each @beliefs row")}`,
     `@aliases=${JSON.stringify(record.aliases)}`,
     `@assistant=${JSON.stringify(record.assistant)}`,

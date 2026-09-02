@@ -134,6 +134,14 @@ export interface DeepSearchRetainedRoot {
   allocatedNodes: number;
   plannerValue?: number;
   plannerCompletionMass?: number;
+  finalRank?: number;
+  terminalOutcome?: number;
+  terminalLowerBound?: number;
+  terminalUpperBound?: number;
+  victoryMargin?: number;
+  victoryMarginLowerBound?: number;
+  victoryMarginUpperBound?: number;
+  meanTurn?: number;
 }
 
 export interface DeepSearchPrunedRoot {
@@ -429,6 +437,24 @@ export const explainDeepSearchDecision = (
   const retained = search.rootProvenance.retainedRoots.find((candidate) =>
     sameDeepSearchAction(candidate.action, chosen),
   );
+  if (retained?.finalRank !== undefined) {
+    const gpuRunnerUp = search.rootProvenance.retainedRoots
+      .filter(
+        (candidate) =>
+          candidate.finalRank !== undefined &&
+          !sameDeepSearchAction(candidate.action, chosen),
+      )
+      .sort((left, right) => (left.finalRank ?? Infinity) - (right.finalRank ?? Infinity))[0];
+    const runnerComparison = gpuRunnerUp
+      ? `; runner-up ${describeDeepSearchAction(gpuRunnerUp.action)} had terminal score ${fixedScore(gpuRunnerUp.terminalOutcome)} and victory margin ${fixedScore(gpuRunnerUp.victoryMargin)}`
+      : "";
+    reasons.push(
+      `Its final GPU comparator rank was #${retained.finalRank}, with terminal score ${fixedScore(retained.terminalOutcome)} and victory margin ${fixedScore(retained.victoryMargin)}${runnerComparison}`,
+    );
+    evidence.push(
+      `GPU confidence bands: terminal ${fixedScore(retained.terminalLowerBound)}..${fixedScore(retained.terminalUpperBound)}, victory margin ${fixedScore(retained.victoryMarginLowerBound)}..${fixedScore(retained.victoryMarginUpperBound)}, mean completion turn ${fixedScore(retained.meanTurn)}`,
+    );
+  }
   if (ranked?.rank) {
     evidence.push(
       `Planner pre-rank #${ranked.rank}${retained ? `; ${retained.allocatedNodes.toLocaleString()} search nodes allocated across belief worlds` : ""}`,

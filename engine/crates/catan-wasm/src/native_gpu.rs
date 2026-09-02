@@ -19,7 +19,7 @@ use super::{
 };
 
 const GPU_ALGORITHM: &str = "gpu-root-rollout";
-pub const NATIVE_GPU_PROTOCOL_VERSION: u32 = 5;
+pub const NATIVE_GPU_PROTOCOL_VERSION: u32 = 6;
 pub const NATIVE_GPU_STATE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize)]
@@ -924,6 +924,17 @@ impl NativeGpuSearchEngine {
             .max_by(|left, right| compare_roots(left, right))
             .cloned()
             .ok_or_else(|| "GPU native search had no error-free surviving root candidate".to_string())?;
+        let mut final_root_order = active
+            .iter()
+            .copied()
+            .filter(|index| {
+                let candidate = &aggregated[*index];
+                candidate.errors == 0 && candidate.samples > 0
+            })
+            .collect::<Vec<_>>();
+        final_root_order.sort_by(|left, right| {
+            compare_roots(&aggregated[*left], &aggregated[*right]).reverse()
+        });
 
         let player_count = particles[0].state.board.num_players as usize;
         let root_values = |candidate: &AggregatedRoot| {
@@ -1068,7 +1079,7 @@ impl NativeGpuSearchEngine {
                 .enumerate()
                 .map(|(rank, candidate)| RankedRootOutput {
                     action: action(candidate.action.clone()),
-                    rank,
+                    rank: rank + 1,
                     prior: candidate.prior,
                     planner_value: None,
                     planner_completion_mass: None,
@@ -1076,16 +1087,36 @@ impl NativeGpuSearchEngine {
                 .collect(),
             retained_roots: retained
                 .iter()
-                .map(|candidate| RetainedRootOutput {
-                    action: action(candidate.action.clone()),
-                    pre_truncation_rank: ranked
-                        .iter()
-                        .position(|ranked_candidate| ranked_candidate.action == candidate.action),
-                    prior: candidate.prior,
-                    node_budget_per_particle: 0,
-                    allocated_nodes: 0,
-                    planner_value: None,
-                    planner_completion_mass: None,
+                .enumerate()
+                .map(|(index, candidate)| {
+                    let aggregate = &aggregated[index];
+                    let terminal_width =
+                        confidence_width(aggregate.terminal_variance, aggregate.samples);
+                    let margin_width =
+                        confidence_width(aggregate.victory_margin_variance, aggregate.samples);
+                    RetainedRootOutput {
+                        action: action(candidate.action.clone()),
+                        pre_truncation_rank: ranked
+                            .iter()
+                            .position(|ranked_candidate| ranked_candidate.action == candidate.action)
+                            .map(|rank| rank + 1),
+                        prior: candidate.prior,
+                        node_budget_per_particle: 0,
+                        allocated_nodes: 0,
+                        planner_value: None,
+                        planner_completion_mass: None,
+                        final_rank: final_root_order
+                            .iter()
+                            .position(|candidate_index| *candidate_index == index)
+                            .map(|rank| rank + 1),
+                        terminal_outcome: Some(aggregate.terminal_outcome),
+                        terminal_lower_bound: Some(aggregate.terminal_outcome - terminal_width),
+                        terminal_upper_bound: Some(aggregate.terminal_outcome + terminal_width),
+                        victory_margin: Some(aggregate.victory_margin),
+                        victory_margin_lower_bound: Some(aggregate.victory_margin - margin_width),
+                        victory_margin_upper_bound: Some(aggregate.victory_margin + margin_width),
+                        mean_turn: Some(aggregate.mean_turn),
+                    }
                 })
                 .collect(),
             pruned_root_count: pruned_roots.len(),

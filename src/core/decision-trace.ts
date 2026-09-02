@@ -75,14 +75,31 @@ export interface DecisionExecutionDiagnostic {
   boardTradeAtIndex?: string;
   visibleTradeCount?: number;
   visibleTradeFingerprints?: string[];
+  visibleTradeControlFingerprints?: string[];
 }
+
+export type DecisionSearchStatus =
+  | "pending"
+  | "complete"
+  | "failed"
+  | "superseded";
+
+export type DecisionLifecycleStatus =
+  | "search-pending"
+  | "search-complete"
+  | "search-failed"
+  | "superseded"
+  | "action-selected"
+  | "execution-pending"
+  | "execution-complete"
+  | "execution-failed";
 
 export interface DecisionSearchAttempt {
   startedAt: number;
   finishedAt?: number;
   latencyMs?: number;
   slowWarningAtMs?: number;
-  status: "pending" | "complete" | "failed";
+  status: DecisionSearchStatus;
   failureReason?: string;
   timedOut: boolean;
 }
@@ -123,7 +140,8 @@ export interface DecisionTrace {
   deepRequestFinishedAt?: number;
   deepLatencyMs?: number;
   deepSlowWarningAtMs?: number;
-  deepStatus: "pending" | "complete" | "failed";
+  deepStatus: DecisionSearchStatus;
+  lifecycleStatus?: DecisionLifecycleStatus;
   deepFailureReason?: string;
   deepTimedOut: boolean;
   deepAttempts?: DecisionSearchAttempt[];
@@ -133,6 +151,9 @@ export interface DecisionTrace {
   algorithm?: string;
   effectiveSearchEffort?: DeepSearchEffectiveEffort;
   decisionRationale?: DecisionRationale;
+  searchResultId?: string;
+  searchResultOriginStateHash?: string;
+  searchResultReused?: boolean;
   searchElapsedMs?: number;
   searchStages?: DecisionTraceSearchStages;
   iterations?: number;
@@ -239,6 +260,26 @@ const summarizeBeliefs = (
   };
 };
 
+const refreshLifecycleStatus = (trace: DecisionTrace): void => {
+  if (trace.executionFinishedAt !== undefined) {
+    trace.lifecycleStatus = trace.executionSucceeded
+      ? "execution-complete"
+      : "execution-failed";
+  } else if (trace.deepStatus === "superseded") {
+    trace.lifecycleStatus = "superseded";
+  } else if (trace.executionStartedAt !== undefined) {
+    trace.lifecycleStatus = "execution-pending";
+  } else if (trace.finalAction !== undefined) {
+    trace.lifecycleStatus = "action-selected";
+  } else if (trace.deepStatus === "complete") {
+    trace.lifecycleStatus = "search-complete";
+  } else if (trace.deepStatus === "failed") {
+    trace.lifecycleStatus = "search-failed";
+  } else {
+    trace.lifecycleStatus = "search-pending";
+  }
+};
+
 export class DecisionTraceRecorder {
   private readonly traces = new Map<string, DecisionTrace>();
   private persistTimer?: ReturnType<typeof globalThis.setTimeout>;
@@ -246,6 +287,8 @@ export class DecisionTraceRecorder {
   private legacyStorageEnabled = true;
   private readonly recordSignatures = new Map<string, string>();
   private readonly recordBeliefCaptured = new Set<string>();
+  private analysisSearchResults = new WeakMap<DecisionAnalysis, { id: string; originStateHash: string }>();
+  private nextSearchResultId = 1;
 
   constructor(private readonly onChange?: () => void) {}
 
@@ -275,6 +318,7 @@ export class DecisionTraceRecorder {
       searchConstraints?: DecisionSearchConstraints;
     },
   ): void {
+    this.supersedePending(stateHash, startedAt);
     const existing = this.traces.get(stateHash);
     if (existing) {
       if (existing.deepStatus === "pending") return;
@@ -283,6 +327,7 @@ export class DecisionTraceRecorder {
       existing.deepLatencyMs = undefined;
       existing.deepSlowWarningAtMs = undefined;
       existing.deepStatus = "pending";
+      existing.lifecycleStatus = "search-pending";
       existing.deepFailureReason = undefined;
       existing.deepTimedOut = false;
       existing.settings = context?.settings
@@ -340,6 +385,7 @@ export class DecisionTraceRecorder {
       beliefSummary: summarizeBeliefs(state, board.myPlayer),
       deepRequestStartedAt: startedAt,
       deepStatus: "pending",
+      lifecycleStatus: "search-pending",
       deepTimedOut: false,
       deepAttempts: [{ startedAt, status: "pending", timedOut: false }],
       executedBeforeDeepResult: false,
@@ -394,6 +440,17 @@ export class DecisionTraceRecorder {
     trace.decisionRationale = analysis.deepSearch
       ? explainDeepSearchDecision(analysis.deepSearch)
       : undefined;
+    let searchResult = this.analysisSearchResults.get(analysis);
+    if (!searchResult) {
+      searchResult = {
+        id: `S${this.nextSearchResultId++}`,
+        originStateHash: stateHash,
+      };
+      this.analysisSearchResults.set(analysis, searchResult);
+    }
+    trace.searchResultId = searchResult.id;
+    trace.searchResultOriginStateHash = searchResult.originStateHash;
+    trace.searchResultReused = searchResult.originStateHash !== stateHash;
     trace.searchElapsedMs = analysis.deepSearch?.elapsedMs;
     trace.searchStages = analysis.deepSearch?.searchStages;
     trace.iterations = analysis.deepSearch?.iterations;
@@ -449,6 +506,7 @@ export class DecisionTraceRecorder {
       comparatorScore: candidate.comparatorScore,
     })) ?? [];
     trace.deepCandidates = [...strategicCandidates, ...exactCandidates];
+    refreshLifecycleStatus(trace);
     this.schedulePersist();
   }
 
@@ -485,6 +543,7 @@ export class DecisionTraceRecorder {
       attempt.failureReason = reason;
       attempt.timedOut = false;
     }
+    refreshLifecycleStatus(trace);
     this.schedulePersist();
   }
 
@@ -511,6 +570,7 @@ export class DecisionTraceRecorder {
     trace.finalAction = action;
     trace.finalActionSource = source;
     trace.finalActionSelectedAt ??= Date.now();
+    refreshLifecycleStatus(trace);
     this.schedulePersist();
   }
 
@@ -519,6 +579,7 @@ export class DecisionTraceRecorder {
     if (!trace || trace.executionStartedAt !== undefined) return;
     trace.executionStartedAt = Date.now();
     trace.executedBeforeDeepResult = trace.deepRequestFinishedAt === undefined;
+    refreshLifecycleStatus(trace);
     this.schedulePersist();
   }
 
@@ -536,6 +597,7 @@ export class DecisionTraceRecorder {
     trace.executionDiagnostic = diagnostic
       ? structuredClone(diagnostic)
       : undefined;
+    refreshLifecycleStatus(trace);
     this.schedulePersist();
   }
 
@@ -592,9 +654,37 @@ export class DecisionTraceRecorder {
     this.traces.clear();
     this.recordSignatures.clear();
     this.recordBeliefCaptured.clear();
+    this.analysisSearchResults = new WeakMap();
+    this.nextSearchResultId = 1;
     await this.enqueueStorage(() =>
       chrome.storage.local.remove(DECISION_TRACE_STORAGE_KEY),
     );
+  }
+
+  supersedePending(
+    activeStateHash?: string,
+    finishedAt = performance.now(),
+  ): void {
+    let changed = false;
+    for (const [stateHash, trace] of this.traces) {
+      if (stateHash === activeStateHash || trace.deepStatus !== "pending") continue;
+      trace.deepRequestFinishedAt = finishedAt;
+      trace.deepLatencyMs =
+        trace.deepRequestStartedAt === undefined
+          ? undefined
+          : Math.max(0, finishedAt - trace.deepRequestStartedAt);
+      trace.deepStatus = "superseded";
+      const attempt = trace.deepAttempts?.at(-1);
+      if (attempt?.status === "pending") {
+        attempt.finishedAt = finishedAt;
+        attempt.latencyMs = trace.deepLatencyMs;
+        attempt.status = "superseded";
+        attempt.timedOut = false;
+      }
+      refreshLifecycleStatus(trace);
+      changed = true;
+    }
+    if (changed) this.schedulePersist();
   }
 
   private schedulePersist(): void {

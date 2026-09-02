@@ -1213,6 +1213,7 @@ export class AssistantOverlay {
       partialHistory:
         this.session.partialHistory || Boolean(this.session.state.warnings.length),
       unmatchedCount: this.session.unmatchedCount,
+      unmatchedIntegrityCount: this.session.unmatchedIntegrityCount,
       unmatchedSamples: this.session.unmatchedSamples.map((sample) => ({ ...sample })),
       playerOrder: [...this.session.state.playerOrder],
       assistant: {
@@ -2360,6 +2361,7 @@ export class AssistantOverlay {
       !board ||
       board.gameOver
     ) {
+      this.decisionTraces.supersedePending();
       this.decisionPendingKey = "";
       this.decisionSlowKey = "";
       this.decisionWaitingForPreviousSearch = false;
@@ -2383,6 +2385,7 @@ export class AssistantOverlay {
       this.decisionSlowKey = "";
       this.decisionWaitingForPreviousSearch = false;
       this.decisionRuntimeError = "";
+      this.decisionTraces.supersedePending();
       this.decisionWorker.reset();
       return;
     }
@@ -2417,6 +2420,7 @@ export class AssistantOverlay {
         this.decisionPendingKey = "";
         this.decisionSlowKey = "";
         this.decisionRuntimeError = "";
+        this.decisionTraces.supersedePending();
         this.decisionWorker.reset();
       }
       return;
@@ -2438,6 +2442,7 @@ export class AssistantOverlay {
         this.decisionPendingKey = "";
         this.decisionSlowKey = "";
         this.decisionRuntimeError = "";
+        this.decisionTraces.supersedePending();
         this.decisionWorker.reset();
       }
       return;
@@ -2499,6 +2504,7 @@ export class AssistantOverlay {
       this.decisionKey = "";
       this.decisionPendingKey = "";
       this.decisionSlowKey = "";
+      this.decisionTraces.supersedePending();
       this.decisionWorker.reset();
       return;
     }
