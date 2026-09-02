@@ -129,6 +129,7 @@ chrome.runtime.onMessage.addListener(
               id: status.id,
               runtime: "background-gpu",
               engineRevision: gpu.engineRevision,
+              ...(gpu.build ? { nativeGpuBuild: gpu.build } : {}),
               deviceName: gpu.device.name,
               initializationMs: performance.now() - startedAt,
             };
@@ -169,6 +170,7 @@ chrome.runtime.onMessage.addListener(
             ...analysis,
             runtime: "background-gpu" as const,
             runtimeReason: `CUDA resident search on ${gpu.device.name}`,
+            ...(gpu.build ? { nativeGpuBuild: gpu.build } : {}),
           };
         }
       }

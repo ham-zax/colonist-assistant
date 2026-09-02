@@ -12,6 +12,7 @@ import type {
   DecisionAnalysis,
   DecisionAuthority,
   DecisionSearchConstraints,
+  NativeGpuBuildIdentity,
 } from "./engine";
 import type { TrackerState } from "./types";
 
@@ -148,6 +149,7 @@ export interface DecisionTrace {
   decisionModel?: string;
   runtimeReason?: string;
   engineRevision?: string;
+  nativeGpuBuild?: NativeGpuBuildIdentity;
   algorithm?: string;
   effectiveSearchEffort?: DeepSearchEffectiveEffort;
   decisionRationale?: DecisionRationale;
@@ -439,6 +441,9 @@ export class DecisionTraceRecorder {
     trace.engine = analysis.engine;
     trace.runtime = analysis.runtime;
     trace.engineRevision = analysis.deepSearch?.engineRevision;
+    trace.nativeGpuBuild = analysis.nativeGpuBuild
+      ? structuredClone(analysis.nativeGpuBuild)
+      : undefined;
     trace.algorithm = analysis.deepSearch?.algorithm;
     trace.effectiveSearchEffort = analysis.deepSearch?.effectiveSearchEffort
       ? structuredClone(analysis.deepSearch.effectiveSearchEffort)

@@ -1,3 +1,4 @@
+import type { NativeGpuBuildIdentity } from "../core/engine";
 import type { WasmSearchResponse } from "../generated/wasm/colonist_search.js";
 
 export const NATIVE_GPU_HOST = "io.colonist_assistant.gpu";
@@ -8,6 +9,7 @@ const EXPECTED_ENGINE_REVISION = "deep-maxn-v10";
 export interface NativeGpuStatus {
   runtime: "gpu-native";
   engineRevision: string;
+  build?: NativeGpuBuildIdentity;
   device: {
     backend: string;
     ordinal: number;
@@ -22,6 +24,7 @@ interface NativeGpuResponse {
   protocolVersion?: number;
   stateSchemaVersion?: number;
   engineRevision?: string;
+  build?: NativeGpuBuildIdentity;
   device?: NativeGpuStatus["device"];
   response?: WasmSearchResponse;
   error?: string;
@@ -33,6 +36,18 @@ interface PendingNativeRequest {
 }
 
 class NativeGpuCompatibilityError extends Error {}
+
+const isNativeGpuBuildIdentity = (
+  value: NativeGpuBuildIdentity | undefined,
+): value is NativeGpuBuildIdentity =>
+  Boolean(
+    value &&
+      typeof value.gitSha === "string" &&
+      typeof value.dirty === "boolean" &&
+      Number.isSafeInteger(value.builtAtUnixMs) &&
+      value.builtAtUnixMs > 0 &&
+      /^[0-9a-f]{64}$/u.test(value.ptxSha256),
+  );
 
 export class NativeGpuClient {
   private port?: chrome.runtime.Port;
@@ -148,9 +163,13 @@ export class NativeGpuClient {
           `GPU companion is incompatible with this extension (expected protocol/state/engine ${NATIVE_GPU_PROTOCOL_VERSION}/${NATIVE_GPU_STATE_SCHEMA_VERSION}/${EXPECTED_ENGINE_REVISION})`,
         );
       }
+      if (hello.build !== undefined && !isNativeGpuBuildIdentity(hello.build)) {
+        throw new NativeGpuCompatibilityError("Native GPU build identity is invalid");
+      }
       const status: NativeGpuStatus = {
         runtime: hello.runtime,
         engineRevision: hello.engineRevision,
+        ...(hello.build ? { build: hello.build } : {}),
         device: hello.device,
       };
       this.statusValue = status;

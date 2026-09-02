@@ -13,6 +13,17 @@ use serde_json::{Value, json};
 const MAX_INBOUND_BYTES: usize = 64 * 1024 * 1024;
 const MAX_OUTBOUND_BYTES: usize = 1024 * 1024;
 
+fn native_build_identity() -> Value {
+    json!({
+        "gitSha": env!("COLONIST_NATIVE_HOST_GIT_SHA"),
+        "dirty": env!("COLONIST_NATIVE_HOST_DIRTY") == "1",
+        "builtAtUnixMs": env!("COLONIST_NATIVE_HOST_BUILT_AT_UNIX_MS")
+            .parse::<u64>()
+            .expect("build timestamp must be a u64"),
+        "ptxSha256": env!("COLONIST_NATIVE_HOST_PTX_SHA256"),
+    })
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 enum HostRequest {
@@ -145,6 +156,7 @@ fn main() -> io::Result<()> {
                             "protocolVersion": NATIVE_GPU_PROTOCOL_VERSION,
                             "stateSchemaVersion": NATIVE_GPU_STATE_SCHEMA_VERSION,
                             "engineRevision": engine_version(),
+                            "build": native_build_identity(),
                             "device": engine.device_identity(),
                         }),
                         Err(error) => json!({ "id": id, "error": error }),

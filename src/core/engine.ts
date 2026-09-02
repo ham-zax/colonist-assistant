@@ -33,6 +33,13 @@ export type DecisionRuntime =
   | "background-wasm"
   | "background-rollout";
 
+export interface NativeGpuBuildIdentity {
+  gitSha: string;
+  dirty: boolean;
+  builtAtUnixMs: number;
+  ptxSha256: string;
+}
+
 export const isSearchDecisionRuntime = (
   runtime: DecisionRuntime | undefined,
 ): boolean => runtime === "background-gpu" || runtime === "background-wasm";
@@ -547,6 +554,7 @@ export interface DecisionAnalysis {
   model: string;
   runtime?: DecisionRuntime;
   runtimeReason?: string;
+  nativeGpuBuild?: NativeGpuBuildIdentity;
   deepSearch?: DeepSearchResult;
 }
 

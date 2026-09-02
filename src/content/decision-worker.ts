@@ -2,6 +2,7 @@ import type {
   DecisionAnalysis,
   DecisionEngine,
   DecisionSearchConstraints,
+  NativeGpuBuildIdentity,
 } from "../core/engine";
 import type { BoardSnapshot } from "../core/placement";
 import type { TrackerState } from "../core/types";
@@ -42,6 +43,7 @@ const slowDecisionThresholdMs = (
 export interface DecisionServiceStatus {
   runtime: "background-gpu" | "background-wasm" | "engine-error";
   detail: string;
+  nativeGpuBuild?: NativeGpuBuildIdentity;
   initializationMs?: number;
 }
 
@@ -111,6 +113,9 @@ export class DecisionWorkerClient {
             response.runtime === "background-gpu"
               ? `${response.engineRevision} · ${response.deviceName ?? "CUDA GPU"} ready`
               : `${response.engineRevision} ready`,
+          ...(response.nativeGpuBuild
+            ? { nativeGpuBuild: response.nativeGpuBuild }
+            : {}),
           ...(response.initializationMs !== undefined
             ? { initializationMs: response.initializationMs }
             : {}),
