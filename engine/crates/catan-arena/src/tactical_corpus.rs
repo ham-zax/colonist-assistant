@@ -466,27 +466,6 @@ fn refresh_longest_road_via_public_transition(
     Err("unable to refresh Longest Road through a legal public road transition".into())
 }
 
-fn initialize_longest_road_award(state: &mut GameState) {
-    let lengths = (0..state.board.num_players)
-        .map(|player| state.longest_road_length(player))
-        .collect::<Vec<_>>();
-    let best = lengths.iter().copied().max().unwrap_or(0);
-    let leaders = lengths
-        .iter()
-        .enumerate()
-        .filter(|(_, length)| **length == best && best >= 5)
-        .map(|(player, _)| player as u8)
-        .collect::<Vec<_>>();
-    if leaders.len() == 1 {
-        let holder = leaders[0];
-        state.longest_road_holder = Some(holder);
-        state.players[holder as usize].has_longest_road = true;
-        state.players[holder as usize].public_victory_points = state.players[holder as usize]
-            .public_victory_points
-            .saturating_add(2);
-    }
-}
-
 /// Constructs and validates a resource-conserving GameState from a TacticalStateSpec.
 pub fn build_state(spec: &TacticalStateSpec) -> Result<GameState, String> {
     let mut state = GameState::standard(spec.board_seed, spec.players);
