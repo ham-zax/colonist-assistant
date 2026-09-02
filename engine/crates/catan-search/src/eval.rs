@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 use colonist_catan_core::{
-    CITY_COST, DEVELOPMENT_COST, GameState, ROAD_COST, ResourceHand, SETTLEMENT_COST,
+    Building, CITY_COST, DEVELOPMENT_COST, GameState, ROAD_COST, ResourceHand, SETTLEMENT_COST,
 };
 
 const PIPS: [f32; 13] = [
@@ -121,15 +121,75 @@ pub fn production_pips(state: &GameState, player: u8) -> [f32; 5] {
     result
 }
 
+fn acquisition_rate(production: &[f32; 5], ratios: &ResourceHand, target: usize) -> f32 {
+    production[target]
+        + production
+            .iter()
+            .enumerate()
+            .filter(|(give, _)| *give != target)
+            .map(|(give, pips)| *pips / ratios[give] as f32)
+            .sum::<f32>()
+}
+
+fn build_target_mask(state: &GameState, player: u8) -> [bool; 4] {
+    let player_state = &state.players[player as usize];
+    let road = player_state.roads_left > 0
+        && state
+            .board
+            .edges
+            .iter()
+            .enumerate()
+            .any(|(edge, candidate)| {
+                state.roads[edge].is_none()
+                    && candidate.vertices.iter().any(|vertex| {
+                        match state.buildings[*vertex as usize] {
+                            Some(building) => building.player() == player,
+                            None => state.board.vertices[*vertex as usize]
+                                .adjacent_edges
+                                .iter()
+                                .any(|neighbor| {
+                                    *neighbor as usize != edge
+                                        && state.roads[*neighbor as usize] == Some(player)
+                                }),
+                        }
+                    })
+            });
+    let settlement = player_state.settlements_left > 0
+        && state
+            .board
+            .vertices
+            .iter()
+            .enumerate()
+            .any(|(vertex, candidate)| {
+                state.buildings[vertex].is_none()
+                    && !candidate
+                        .adjacent_vertices
+                        .iter()
+                        .any(|neighbor| state.buildings[*neighbor as usize].is_some())
+                    && candidate
+                        .adjacent_edges
+                        .iter()
+                        .any(|edge| state.roads[*edge as usize] == Some(player))
+            });
+    let city = player_state.cities_left > 0
+        && state.buildings.iter().any(
+            |building| matches!(building, Some(Building::Settlement(owner)) if *owner == player),
+        );
+    let development = state.development_deck.iter().any(|count| *count > 0);
+    [road, settlement, city, development]
+}
+
 fn dynamic_resource_weights(state: &GameState, player: u8) -> [f32; 5] {
     let player_state = &state.players[player as usize];
     let production = production_pips(state, player);
     let ratios = state.trade_ratios(player);
+    let build_targets = build_target_mask(state, player);
     let mut weights = BASE_RESOURCE_WEIGHTS;
 
     let best_deficit = BUILD_COSTS
         .iter()
         .enumerate()
+        .filter(|(kind, _)| build_targets[*kind])
         .map(|(kind, cost)| {
             let missing = deficit(&player_state.resources, cost);
             let weighted = missing
@@ -167,7 +227,11 @@ fn dynamic_resource_weights(state: &GameState, player: u8) -> [f32; 5] {
     weights
 }
 
-fn hand_utility_with_weights(hand: &ResourceHand, weights: &[f32; 5]) -> f32 {
+fn hand_utility_with_weights(
+    hand: &ResourceHand,
+    weights: &[f32; 5],
+    build_targets: &[bool; 4],
+) -> f32 {
     let liquidity = hand
         .iter()
         .enumerate()
@@ -176,12 +240,13 @@ fn hand_utility_with_weights(hand: &ResourceHand, weights: &[f32; 5]) -> f32 {
     let completed = BUILD_COSTS
         .iter()
         .enumerate()
-        .filter(|(_, cost)| contains(hand, cost))
+        .filter(|(kind, cost)| build_targets[*kind] && contains(hand, cost))
         .map(|(kind, _)| [0.35, 1.45, 1.35, 0.78][kind])
         .fold(0.0, f32::max);
     let near_plan = BUILD_COSTS
         .iter()
         .enumerate()
+        .filter(|(kind, _)| build_targets[*kind])
         .map(|(kind, cost)| {
             let missing = total(&deficit(hand, cost)) as f32;
             [0.25, 1.10, 1.0, 0.58][kind] / (1.0 + missing)
@@ -205,8 +270,9 @@ pub(crate) fn hand_transition_value(
 ) -> f32 {
     let current = state.players[player as usize].resources;
     let weights = dynamic_resource_weights(state, player);
-    let current_value = hand_utility_with_weights(&current, &weights);
-    let resulting_value = hand_utility_with_weights(resulting_hand, &weights);
+    let build_targets = build_target_mask(state, player);
+    let current_value = hand_utility_with_weights(&current, &weights, &build_targets);
+    let resulting_value = hand_utility_with_weights(resulting_hand, &weights, &build_targets);
     let overflow = |hand: &ResourceHand| {
         let held = total(hand);
         if held <= state.card_discard_limit {
@@ -226,10 +292,12 @@ fn enumerate_optimal_kept_utility(
     hand: &ResourceHand,
     discard_count: u8,
     weights: &[f32; 5],
+    build_targets: &[bool; 4],
 ) -> f32 {
     fn visit(
         hand: &ResourceHand,
         weights: &[f32; 5],
+        build_targets: &[bool; 4],
         index: usize,
         remaining: u8,
         discarded: &mut ResourceHand,
@@ -241,7 +309,7 @@ fn enumerate_optimal_kept_utility(
                 for resource in 0..5 {
                     kept[resource] -= discarded[resource];
                 }
-                *best = best.max(hand_utility_with_weights(&kept, weights));
+                *best = best.max(hand_utility_with_weights(&kept, weights, build_targets));
             }
             return;
         }
@@ -250,6 +318,7 @@ fn enumerate_optimal_kept_utility(
             visit(
                 hand,
                 weights,
+                build_targets,
                 index + 1,
                 remaining - amount,
                 discarded,
@@ -260,7 +329,15 @@ fn enumerate_optimal_kept_utility(
     }
 
     let mut best: f32 = 0.0;
-    visit(hand, weights, 0, discard_count, &mut [0; 5], &mut best);
+    visit(
+        hand,
+        weights,
+        build_targets,
+        0,
+        discard_count,
+        &mut [0; 5],
+        &mut best,
+    );
     best
 }
 
@@ -325,8 +402,10 @@ pub fn expected_discard_loss(state: &GameState, player: u8) -> f32 {
             * 0.32;
     }
     let weights = dynamic_resource_weights(state, player);
-    let before = hand_utility_with_weights(&projected, &weights);
-    let kept = enumerate_optimal_kept_utility(&projected, projected_held / 2, &weights);
+    let build_targets = build_target_mask(state, player);
+    let before = hand_utility_with_weights(&projected, &weights, &build_targets);
+    let kept =
+        enumerate_optimal_kept_utility(&projected, projected_held / 2, &weights, &build_targets);
     let expected_cards_lost = probability * (projected_held / 2) as f32;
     let overflow = projected_held.saturating_sub(state.card_discard_limit) as f32;
     probability * (before - kept).max(0.0)
@@ -442,14 +521,12 @@ fn expansion_arrival_score(
     if missing.iter().sum::<f32>() <= f32::EPSILON {
         return turns_until_action(state, player);
     }
-    let production_total = production.iter().sum::<f32>();
     let ratios = state.trade_ratios(player);
     let expected_rolls = missing
         .iter()
         .enumerate()
         .map(|(resource, count)| {
-            *count * 36.0
-                / (production[resource] + production_total / ratios[resource] as f32 + 0.65)
+            *count * 36.0 / (acquisition_rate(&production, &ratios, resource) + 0.65)
         })
         .sum::<f32>();
     turns_until_action(state, player)
@@ -667,9 +744,12 @@ fn progress_card_utility(
         2 => 0.55 + expansion.value.min(4.0) * 0.16,
         3 => {
             let hand = state.players[player as usize].resources;
+            let build_targets = build_target_mask(state, player);
             let nearest = BUILD_COSTS
                 .iter()
-                .map(|cost| total(&deficit(&hand, cost)))
+                .enumerate()
+                .filter(|(kind, _)| build_targets[*kind])
+                .map(|(_, cost)| total(&deficit(&hand, cost)))
                 .min()
                 .unwrap_or(2);
             0.65 + (2.0 - nearest.min(2) as f32) * 0.28
@@ -835,9 +915,11 @@ fn expected_build_tempo(state: &GameState, player: u8) -> f32 {
     let hand = &state.players[player as usize].resources;
     let production = production_pips(state, player);
     let ratios = state.trade_ratios(player);
+    let build_targets = build_target_mask(state, player);
     BUILD_COSTS
         .iter()
         .enumerate()
+        .filter(|(kind, _)| build_targets[*kind])
         .map(|(kind, cost)| {
             let missing = deficit(hand, cost);
             let eta = missing
@@ -848,9 +930,7 @@ fn expected_build_tempo(state: &GameState, player: u8) -> f32 {
                         0.0
                     } else {
                         *amount as f32 * 36.0
-                            / (production[index]
-                                + production.iter().sum::<f32>() / ratios[index] as f32
-                                + 0.75)
+                            / (acquisition_rate(&production, &ratios, index) + 0.75)
                     }
                 })
                 .sum::<f32>();
@@ -888,7 +968,8 @@ fn strategic_utility_with_routes_and_knowledge(
         .fold(0u16, |mask, number| mask | (1u16 << number))
         .count_ones() as f32;
     let resource_diversity = production.iter().filter(|pips| **pips > 0.0).count() as f32;
-    let hand_value = hand_utility_with_weights(&player_state.resources, &weights);
+    let build_targets = build_target_mask(state, player);
+    let hand_value = hand_utility_with_weights(&player_state.resources, &weights, &build_targets);
     let expansion = expansion_option_value_with_routes_and_weights(
         state,
         player,
