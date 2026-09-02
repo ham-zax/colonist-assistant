@@ -2410,8 +2410,10 @@ static inline __device__ uint32_t road_building_pair_policy_score(
     uint32_t second
 ) {
     const uint32_t player = state_get(states, stride, STATE_CURRENT_PLAYER, lane);
-    uint32_t score = road_policy_score(states, topology, stride, lane, first)
-        + road_policy_score(states, topology, stride, lane, second);
+    uint32_t score = road_policy_score(states, topology, stride, lane, first);
+    if (second < EDGE_COUNT) {
+        score += road_policy_score(states, topology, stride, lane, second);
+    }
     const uint32_t public_vp = player_get(states, stride, lane, player, PLAYER_PUBLIC_VP);
     const uint32_t hidden_vp = player_get(states, stride, lane, player, PLAYER_DEVELOPMENT + 1u);
     const uint32_t victory_target = state_get(states, stride, STATE_VICTORY_TARGET, lane);
@@ -2450,13 +2452,17 @@ static inline __device__ uint32_t road_building_pair_policy_score(
 
     const uint32_t first_a = topo_edge_vertex(topology, first, 0u);
     const uint32_t first_b = topo_edge_vertex(topology, first, 1u);
-    const uint32_t second_a = topo_edge_vertex(topology, second, 0u);
-    const uint32_t second_b = topo_edge_vertex(topology, second, 1u);
-    if (actor_road_path_between(
-            states, topology, stride, lane, player, first_a, first_b
-        ) || actor_road_path_between(
+    int closes_existing_cycle = actor_road_path_between(
+        states, topology, stride, lane, player, first_a, first_b
+    );
+    if (!closes_existing_cycle && second < EDGE_COUNT) {
+        const uint32_t second_a = topo_edge_vertex(topology, second, 0u);
+        const uint32_t second_b = topo_edge_vertex(topology, second, 1u);
+        closes_existing_cycle = actor_road_path_between(
             states, topology, stride, lane, player, second_a, second_b
-        )) {
+        );
+    }
+    if (closes_existing_cycle) {
         score += 120000u;
     }
     return score;
@@ -2486,7 +2492,9 @@ static inline __device__ int choose_road_building_pair(
             if (!can_build_road_device(states, topology, stride, lane, first, 0xffffffffu)) {
                 continue;
             }
-            const uint32_t weight = road_policy_score(states, topology, stride, lane, first);
+            const uint32_t weight = road_building_pair_policy_score(
+                states, topology, stride, lane, first, 0xffffffffu
+            );
             const uint32_t next_total = total_weight + weight;
             if (rng_range(rng, next_total) < weight) {
                 *selected_first = first;
@@ -2546,10 +2554,13 @@ static inline __device__ uint32_t monopoly_resource_score(
     const uint32_t observed = observed_monopoly_resource_weight(
         states, topology, stride, lane, player, resource
     );
+    const uint32_t single_gain_conversion = immediate_build_completion_score(
+        states, topology, stride, lane, player, resource, 0xffffffffu
+    );
+    const uint32_t estimated_transfer = observed > 1u ? observed - 1u : 0u;
+    const uint32_t conversion_scale = estimated_transfer < 32u ? estimated_transfer : 32u;
     return resource_policy_score(resource) * observed
-        + immediate_build_completion_score(
-            states, topology, stride, lane, player, resource, 0xffffffffu
-        );
+        + single_gain_conversion * conversion_scale / 32u;
 }
 
 static inline __device__ uint32_t knight_policy_base(
@@ -2862,9 +2873,9 @@ static inline __device__ void generate_rollout_action_lane(
                 const uint32_t roads_left = player_get(
                     states, stride, lane, current, PLAYER_ROADS_LEFT
                 );
-                const uint32_t base = roads_left == 1u
-                    ? 24u
-                    : (pair_score >= 10000u ? 8000u : 1600u);
+                const uint32_t base = pair_score >= 10000u
+                    ? 8000u
+                    : (roads_left == 1u ? 24u : 1600u);
                 weighted_reservoir_action(
                     actions,
                     stride,
@@ -3228,9 +3239,9 @@ static inline __device__ void generate_rollout_action_lane(
                 const uint32_t roads_left = player_get(
                     states, stride, lane, current, PLAYER_ROADS_LEFT
                 );
-                const uint32_t base = roads_left == 1u
-                    ? 24u
-                    : (pair_score >= 10000u ? 8000u : 1600u);
+                const uint32_t base = pair_score >= 10000u
+                    ? 8000u
+                    : (roads_left == 1u ? 24u : 1600u);
                 weighted_reservoir_action(
                     actions,
                     stride,
