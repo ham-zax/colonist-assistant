@@ -206,7 +206,7 @@ describe("decision trace recorder", () => {
     ).toBeCloseTo(0.27);
   });
 
-  it("marks a fallback executed before deep completion as an override", async () => {
+  it("marks a fallback as executed only when execution actually starts", async () => {
     vi.useFakeTimers();
     const set = vi.fn(async (_value: Record<string, unknown>) => undefined);
     vi.stubGlobal("chrome", {
@@ -234,6 +234,12 @@ describe("decision trace recorder", () => {
       { kind: "turn-control", control: "end" },
       "end-turn-fallback",
     );
+    expect(recorder.snapshot(false)[0]).toMatchObject({
+      executedBeforeDeepResult: false,
+      finalActionSource: "end-turn-fallback",
+    });
+
+    recorder.executionStarted("state-pending");
     await vi.advanceTimersByTimeAsync(250);
     const payload = set.mock.calls[0]?.[0] as
       | Record<string, unknown>
@@ -244,6 +250,7 @@ describe("decision trace recorder", () => {
     >;
     expect(traces[0]).toMatchObject({
       executedBeforeDeepResult: true,
+      executionStartedAt: expect.any(Number),
       finalActionSource: "end-turn-fallback",
     });
   });

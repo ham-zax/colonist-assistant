@@ -8,7 +8,11 @@ import {
   type AssistantSettings,
 } from "../content/settings";
 import { latestSummaryKey } from "../content/session";
-import { clearCurrentGameStorage } from "../core/local-data";
+import {
+  ACTIVE_GAME_RECORD_STORAGE_KEY,
+  clearCurrentGameStorage,
+  LATEST_GAME_RECORD_STORAGE_KEY,
+} from "../core/local-data";
 import { downloadRecordedGame, readRecordedGame } from "../core/game-record";
 
 const LATEST_SUMMARY_KEY = latestSummaryKey;
@@ -122,19 +126,37 @@ const boot = async (): Promise<void> => {
   });
 
   const exportRecord = document.querySelector<HTMLButtonElement>("#export-record");
-  if (exportRecord) {
+  const syncExportRecordControl = (): void => {
+    if (!exportRecord) return;
+    exportRecord.disabled = !recordedGame;
     exportRecord.title = recordedGame
       ? `${recordedGame.decisions.length} decisions · ${recordedGame.events.length} game events`
       : "Enable Record game and play a match first";
+  };
+  syncExportRecordControl();
+  if (exportRecord) {
     exportRecord.addEventListener("click", () => {
       void (async () => {
         recordedGame = await readRecordedGame();
-        if (!recordedGame) {
-          alert("No recorded Colonist game is available yet.");
-          return;
-        }
+        syncExportRecordControl();
+        if (!recordedGame) return;
         downloadRecordedGame(recordedGame);
       })();
+    });
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (
+        area !== "local" ||
+        (
+          !changes[ACTIVE_GAME_RECORD_STORAGE_KEY] &&
+          !changes[LATEST_GAME_RECORD_STORAGE_KEY]
+        )
+      ) {
+        return;
+      }
+      void readRecordedGame().then((record) => {
+        recordedGame = record;
+        syncExportRecordControl();
+      });
     });
   }
 

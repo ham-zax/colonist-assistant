@@ -269,6 +269,9 @@ export class GameSession {
     const hadGameKey = Boolean(this.gameKey);
     this.gameKey = gameKey;
     if (hadGameKey) {
+      // A new game can reuse the same mounted log/session object. Start its
+      // record clock before reset() synchronously publishes the empty state.
+      this.startedAt = Date.now();
       // Do not immediately re-ingest the previous game's still-mounted log.
       // Colonist can publish the new game identity a frame before replacing it.
       this.reset(false);

@@ -1,6 +1,7 @@
 import type { BoardSnapshot } from "./placement";
 import { DECISION_TRACE_STORAGE_KEY } from "./local-data";
 import { RESOURCE_ORDER } from "./resources";
+import type { ResourceVector } from "./resources";
 import type {
   DeepSearchAction,
   DeepSearchAuthorityTrace,
@@ -29,6 +30,32 @@ export interface DecisionTraceCandidate {
   prior?: number;
 }
 
+export interface DecisionSearchAttempt {
+  startedAt: number;
+  finishedAt?: number;
+  latencyMs?: number;
+  slowWarningAtMs?: number;
+  status: "pending" | "complete" | "failed";
+  failureReason?: string;
+  timedOut: boolean;
+}
+
+export type DecisionResourceTuple = [number, number, number, number, number];
+
+export interface DecisionBeliefPlayerSummary {
+  player: string;
+  expected: DecisionResourceTuple;
+  pAtLeastOne: DecisionResourceTuple;
+  minimum: DecisionResourceTuple;
+  maximum: DecisionResourceTuple;
+}
+
+export interface DecisionBeliefSummary {
+  worldCount: number;
+  possibilitiesTruncated: boolean;
+  players: DecisionBeliefPlayerSummary[];
+}
+
 export interface DecisionTrace {
   stateHash: string;
   recordedAt: number;
@@ -38,6 +65,7 @@ export interface DecisionTrace {
   publicVictoryPoints: number[];
   beliefParticleCount: number;
   sourceWorldCount: number;
+  beliefSummary?: DecisionBeliefSummary;
   wasmParticleCount?: number;
   rustPosteriorParticleCount?: number;
   rustSearchParticleCount?: number;
@@ -49,6 +77,7 @@ export interface DecisionTrace {
   deepStatus: "pending" | "complete" | "failed";
   deepFailureReason?: string;
   deepTimedOut: boolean;
+  deepAttempts?: DecisionSearchAttempt[];
   decisionModel?: string;
   runtimeReason?: string;
   engineRevision?: string;
@@ -71,6 +100,7 @@ export interface DecisionTrace {
   finalActionSource?: DecisionActionSource;
   finalActionSelectedAt?: number;
   executedBeforeDeepResult: boolean;
+  executionStartedAt?: number;
   executionFinishedAt?: number;
   executionSucceeded?: boolean;
   executionFailureReason?: string;
@@ -85,20 +115,81 @@ export interface DecisionTrace {
 }
 
 const MAX_TRACES = 120;
+const MAX_SEARCH_ATTEMPTS = 8;
 
-const tuple = (
-  board: BoardSnapshot,
-): [number, number, number, number, number] =>
-  RESOURCE_ORDER.map(
-    (resource) => board.ownHand?.[resource] ?? 0,
-  ) as [number, number, number, number, number];
+const resourceTuple = (
+  resources?: Partial<ResourceVector>,
+): DecisionResourceTuple =>
+  RESOURCE_ORDER.map((resource) => resources?.[resource] ?? 0) as DecisionResourceTuple;
+
+const tuple = (board: BoardSnapshot): DecisionResourceTuple =>
+  resourceTuple(board.ownHand);
+
+const summarizeBeliefs = (
+  state: TrackerState,
+  rootPlayer?: string,
+): DecisionBeliefSummary => {
+  const players = state.playerOrder.filter((player) => player !== rootPlayer);
+  const totalWeight = state.worlds.reduce(
+    (total, world) => total + Math.max(0, world.weight ?? 0),
+    0,
+  );
+  const uniformWeight = state.worlds.length ? 1 / state.worlds.length : 0;
+  const normalizedWeight = (weight: number): number =>
+    totalWeight > Number.EPSILON ? Math.max(0, weight) / totalWeight : uniformWeight;
+
+  return {
+    worldCount: state.worlds.length,
+    possibilitiesTruncated: state.possibilitiesTruncated,
+    players: players.map((player) => {
+      const expected = [0, 0, 0, 0, 0] as DecisionResourceTuple;
+      const pAtLeastOne = [0, 0, 0, 0, 0] as DecisionResourceTuple;
+      const minimum = [Infinity, Infinity, Infinity, Infinity, Infinity] as DecisionResourceTuple;
+      const maximum = [0, 0, 0, 0, 0] as DecisionResourceTuple;
+      for (const world of state.worlds) {
+        const hand = resourceTuple(world.hands[player]);
+        const weight = normalizedWeight(world.weight ?? 0);
+        for (let index = 0; index < hand.length; index += 1) {
+          const count = hand[index] ?? 0;
+          expected[index] = (expected[index] ?? 0) + count * weight;
+          if (count > 0) {
+            pAtLeastOne[index] = (pAtLeastOne[index] ?? 0) + weight;
+          }
+          minimum[index] = Math.min(minimum[index] ?? Infinity, count);
+          maximum[index] = Math.max(maximum[index] ?? 0, count);
+        }
+      }
+      if (!state.worlds.length) minimum.fill(0);
+      return { player, expected, pAtLeastOne, minimum, maximum };
+    }),
+  };
+};
 
 export class DecisionTraceRecorder {
   private readonly traces = new Map<string, DecisionTrace>();
   private persistTimer?: ReturnType<typeof globalThis.setTimeout>;
   private storageOperations: Promise<void> = Promise.resolve();
+  private legacyStorageEnabled = true;
+  private readonly recordSignatures = new Map<string, string>();
+  private readonly recordBeliefCaptured = new Set<string>();
 
   constructor(private readonly onChange?: () => void) {}
+
+  setLegacyStorageEnabled(enabled: boolean): void {
+    if (enabled === this.legacyStorageEnabled) return;
+    this.legacyStorageEnabled = enabled;
+    if (!enabled) {
+      if (this.persistTimer !== undefined) {
+        globalThis.clearTimeout(this.persistTimer);
+        this.persistTimer = undefined;
+      }
+      void this.enqueueStorage(() =>
+        chrome.storage.local.remove(DECISION_TRACE_STORAGE_KEY),
+      ).catch(() => undefined);
+      return;
+    }
+    this.scheduleLegacyPersist();
+  }
 
   begin(
     stateHash: string,
@@ -106,7 +197,31 @@ export class DecisionTraceRecorder {
     board: BoardSnapshot,
     startedAt = performance.now(),
   ): void {
-    if (this.traces.has(stateHash)) return;
+    const existing = this.traces.get(stateHash);
+    if (existing) {
+      if (existing.deepStatus === "pending") return;
+      existing.deepRequestStartedAt = startedAt;
+      existing.deepRequestFinishedAt = undefined;
+      existing.deepLatencyMs = undefined;
+      existing.deepSlowWarningAtMs = undefined;
+      existing.deepStatus = "pending";
+      existing.deepFailureReason = undefined;
+      existing.deepTimedOut = false;
+      existing.deepAttempts ??= [];
+      existing.deepAttempts.push({
+        startedAt,
+        status: "pending",
+        timedOut: false,
+      });
+      if (existing.deepAttempts.length > MAX_SEARCH_ATTEMPTS) {
+        existing.deepAttempts.splice(
+          0,
+          existing.deepAttempts.length - MAX_SEARCH_ATTEMPTS,
+        );
+      }
+      this.schedulePersist();
+      return;
+    }
     const replayState: TrackerState = {
       ...structuredClone(state),
       worlds: [...state.worlds]
@@ -134,9 +249,11 @@ export class DecisionTraceRecorder {
         .map((player) => board.players?.[player]?.visiblePoints ?? 0),
       beliefParticleCount: state.worlds.length,
       sourceWorldCount: state.worlds.length,
+      beliefSummary: summarizeBeliefs(state, board.myPlayer),
       deepRequestStartedAt: startedAt,
       deepStatus: "pending",
       deepTimedOut: false,
+      deepAttempts: [{ startedAt, status: "pending", timedOut: false }],
       executedBeforeDeepResult: false,
       rootPlayer: board.myPlayer,
       replayState,
@@ -170,6 +287,13 @@ export class DecisionTraceRecorder {
     trace.deepStatus = "complete";
     trace.deepFailureReason = undefined;
     trace.deepTimedOut = analysis.deepSearch?.deadlineReached ?? false;
+    const attempt = trace.deepAttempts?.at(-1);
+    if (attempt?.status === "pending") {
+      attempt.finishedAt = finishedAt;
+      attempt.latencyMs = trace.deepLatencyMs;
+      attempt.status = "complete";
+      attempt.timedOut = trace.deepTimedOut;
+    }
     trace.decisionModel = analysis.model;
     trace.runtimeReason = analysis.runtimeReason;
     trace.engine = analysis.engine;
@@ -224,6 +348,10 @@ export class DecisionTraceRecorder {
       trace.deepRequestStartedAt === undefined
         ? undefined
         : performance.now() - trace.deepRequestStartedAt;
+    const attempt = trace.deepAttempts?.at(-1);
+    if (attempt?.status === "pending") {
+      attempt.slowWarningAtMs = trace.deepSlowWarningAtMs;
+    }
     this.schedulePersist();
   }
 
@@ -238,6 +366,14 @@ export class DecisionTraceRecorder {
         : finishedAt - trace.deepRequestStartedAt;
     trace.deepStatus = "failed";
     trace.deepFailureReason = reason;
+    const attempt = trace.deepAttempts?.at(-1);
+    if (attempt?.status === "pending") {
+      attempt.finishedAt = finishedAt;
+      attempt.latencyMs = trace.deepLatencyMs;
+      attempt.status = "failed";
+      attempt.failureReason = reason;
+      attempt.timedOut = false;
+    }
     this.schedulePersist();
   }
 
@@ -264,8 +400,14 @@ export class DecisionTraceRecorder {
     trace.finalAction = action;
     trace.finalActionSource = source;
     trace.finalActionSelectedAt ??= Date.now();
-    trace.executedBeforeDeepResult =
-      trace.deepRequestFinishedAt === undefined;
+    this.schedulePersist();
+  }
+
+  executionStarted(stateHash: string): void {
+    const trace = this.traces.get(stateHash);
+    if (!trace || trace.executionStartedAt !== undefined) return;
+    trace.executionStartedAt = Date.now();
+    trace.executedBeforeDeepResult = trace.deepRequestFinishedAt === undefined;
     this.schedulePersist();
   }
 
@@ -296,12 +438,45 @@ export class DecisionTraceRecorder {
     });
   }
 
+  /**
+   * Record Mode only needs traces whose analytical evidence changed since the
+   * previous capture. Compare the compact trace surface first, then clone the
+   * bounded replay state only for changed decisions.
+   */
+  snapshotForRecord(): DecisionTrace[] {
+    const changed: DecisionTrace[] = [];
+    for (const [stateHash, trace] of this.traces) {
+      const {
+        replayState: _replayState,
+        replayBoard: _replayBoard,
+        ...compact
+      } = trace;
+      const signature = JSON.stringify(compact);
+      if (this.recordSignatures.get(stateHash) === signature) continue;
+      this.recordSignatures.set(stateHash, signature);
+      if (this.recordBeliefCaptured.has(stateHash)) {
+        changed.push(structuredClone(compact));
+      } else {
+        // Raw replay evidence is transfer-only in Record Mode. Hand one detached
+        // copy to the compact encoder, then release the resident heavy state.
+        const firstCapture = structuredClone(trace);
+        this.recordBeliefCaptured.add(stateHash);
+        delete trace.replayState;
+        delete trace.replayBoard;
+        changed.push(firstCapture);
+      }
+    }
+    return changed;
+  }
+
   async reset(): Promise<void> {
     if (this.persistTimer !== undefined) {
       globalThis.clearTimeout(this.persistTimer);
       this.persistTimer = undefined;
     }
     this.traces.clear();
+    this.recordSignatures.clear();
+    this.recordBeliefCaptured.clear();
     await this.enqueueStorage(() =>
       chrome.storage.local.remove(DECISION_TRACE_STORAGE_KEY),
     );
@@ -309,10 +484,15 @@ export class DecisionTraceRecorder {
 
   private schedulePersist(): void {
     this.onChange?.();
-    if (this.persistTimer !== undefined) return;
+    this.scheduleLegacyPersist();
+  }
+
+  private scheduleLegacyPersist(): void {
+    if (!this.legacyStorageEnabled || this.persistTimer !== undefined) return;
     const storage = chrome.storage.local;
     this.persistTimer = globalThis.setTimeout(() => {
       this.persistTimer = undefined;
+      if (!this.legacyStorageEnabled) return;
       const traces = [...this.traces.values()].slice(-MAX_TRACES);
       void this.enqueueStorage(() =>
         storage.set({ [DECISION_TRACE_STORAGE_KEY]: traces }),

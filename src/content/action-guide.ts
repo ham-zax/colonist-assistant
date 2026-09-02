@@ -128,6 +128,7 @@ export interface ActionGuideOptions {
   /// clicked. The owner must observe the resulting outgoing offer or exact
   /// bank-hand transfer before the workflow may report success.
   validateTransactionCommit?: () => boolean;
+  onExecutionStart?: (result: { signature: string }) => void;
   onExecution?: (result: {
     succeeded: boolean;
     signature: string;
@@ -933,6 +934,7 @@ const scheduleBoardCommandRetry = (
     }
     command.attempt += 1;
     boardCommandAttempts.set(command.action.signature, command.attempt);
+    command.options.onExecutionStart?.({ signature: command.action.signature });
     if (!executeBoardAction(command.action, command.attempt)) {
       const { action, options } = command;
       clearBoardCommand(action.signature);
@@ -962,6 +964,7 @@ const validatedClick = (
     });
     return false;
   }
+  options.onExecutionStart?.({ signature });
   try {
     element.click();
   } catch {
@@ -1048,6 +1051,7 @@ const dispatchAutoclick = (
     };
     activeBoardCommand = command;
     boardCommandAttempts.set(action.signature, 1);
+    options.onExecutionStart?.({ signature: action.signature });
     if (!executeBoardAction(action, 1)) {
       clearBoardCommand(action.signature);
       options.onExecution?.({
@@ -1739,6 +1743,7 @@ const startWorkflow = (
           }
           const fresh = step.resolve();
           if (fresh) {
+            retryOptions.onExecutionStart?.({ signature: action.signature });
             fresh.click();
             requestBoardRefresh();
             later(
@@ -1767,7 +1772,14 @@ const startWorkflow = (
       };
       verify();
     };
-    element.addEventListener("click", advance, { once: true });
+    element.addEventListener(
+      "click",
+      () => {
+        currentOptions.onExecutionStart?.({ signature: action.signature });
+        advance();
+      },
+      { once: true },
+    );
     if (currentOptions.autonomous) {
       const startDelay =
         index === 0 ? Math.max(0, currentOptions.autopilotDelayMs ?? 0) : 0;
@@ -1921,6 +1933,7 @@ const installFollowupGuide = (
       }
       document.removeEventListener("pointerdown", handler, true);
       boardFollowupCleanup = undefined;
+      options.onExecutionStart?.({ signature: action.signature });
       executeBoardAction(action, 1);
       if (action.followupPlayer) {
         const stillCurrent = () =>
@@ -2073,6 +2086,8 @@ export const renderActionGuide = (
     // workflow result to the trace which actually started it.
     workflowOptions = {
       ...options,
+      onExecutionStart:
+        workflowOptions?.onExecutionStart ?? options.onExecutionStart,
       onExecution:
         workflowOptions?.onExecution ?? options.onExecution,
       validateTransactionCommit:

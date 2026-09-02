@@ -268,10 +268,38 @@ const playerThreat = (state: TrackerState, player: string): number => {
   );
 };
 
+const decisionStateDigest = (serialized: string): string => {
+  let first = 2166136261;
+  let second = 5381;
+  for (let index = 0; index < serialized.length; index += 1) {
+    const code = serialized.charCodeAt(index);
+    first = Math.imul(first ^ code, 16777619);
+    second = Math.imul(second ^ code, 1597334677);
+  }
+  return `d2:${(first >>> 0).toString(36)}:${(second >>> 0).toString(36)}:${serialized.length.toString(36)}`;
+};
+
+const extensionBuildInfo = (): {
+  identity: string;
+  label: string;
+  builtAt?: string;
+} => {
+  const manifest = chrome.runtime.getManifest();
+  const identity = manifest.version_name ?? `v${manifest.version}`;
+  const parts = manifest.version_name?.split(" · ");
+  return {
+    identity,
+    label: parts?.slice(0, 2).join(" · ") ?? identity,
+    builtAt: parts?.[2],
+  };
+};
+
 export class AssistantOverlay {
+  private readonly buildInfo = extensionBuildInfo();
   private readonly host: HTMLDivElement;
   private readonly shadow: ShadowRoot;
   private activeView: ViewName = "advice";
+  private lastRenderedView?: ViewName;
   private collapsed: boolean;
   private session?: GameSession;
   private board?: BoardSnapshot;
@@ -338,6 +366,7 @@ export class AssistantOverlay {
     private readonly callbacks: { reset: () => void | Promise<void> },
   ) {
     this.collapsed = settings.startCollapsed;
+    this.decisionTraces.setLegacyStorageEnabled(!settings.recordGame);
     this.host = document.createElement("div");
     this.host.id = "colonist-assistant-root";
     this.host.style.cssText =
@@ -626,6 +655,7 @@ export class AssistantOverlay {
       this.winPredictions.reset();
     }
     this.settings = settings;
+    this.decisionTraces.setLegacyStorageEnabled(!settings.recordGame);
     if (wasRecording && !settings.recordGame) {
       void this.gameRecorder.flush();
     } else if (!wasRecording && settings.recordGame) {
@@ -1016,7 +1046,19 @@ export class AssistantOverlay {
 
   private captureGameRecord(finalize = false): void {
     if (!this.settings.recordGame || !this.session) return;
-    const gameKey = this.board?.gameKey ?? this.session.gameKey;
+    const boardGameKey = this.board?.gameKey;
+    const sessionGameKey = this.session.gameKey;
+    if (
+      boardGameKey &&
+      sessionGameKey &&
+      boardGameKey !== sessionGameKey
+    ) {
+      // GameSession publishes its reset synchronously when Colonist rolls to a
+      // new game key, while the board bridge can still hold the previous game
+      // for the rest of this callback. Never combine evidence across scopes.
+      return;
+    }
+    const gameKey = boardGameKey ?? sessionGameKey;
     const capture = {
       scope: gameKey ?? this.session.id,
       sessionId: this.session.id,
@@ -1032,7 +1074,9 @@ export class AssistantOverlay {
         autopilot: this.settings.autonomousPrivateGames,
       },
       events: this.session.events,
-      decisions: this.decisionTraces.snapshot(false),
+      // Record Mode consumes bounded replay evidence only for decisions that
+      // changed since the previous capture, then aliases/deduplicates it.
+      decisions: this.decisionTraces.snapshotForRecord(),
       ...(this.board ? { board: this.board } : {}),
     };
     if (finalize || this.board?.gameOver) this.gameRecorder.finalize(capture);
@@ -1076,6 +1120,11 @@ export class AssistantOverlay {
     if (!this.renderGate.tryRender()) return;
     const mount = this.shadow.querySelector("#mount");
     if (!mount) return;
+    const previousPanel = this.shadow.querySelector<HTMLElement>(".panel");
+    const preservedScrollTop =
+      this.lastRenderedView === this.activeView
+        ? (previousPanel?.scrollTop ?? 0)
+        : 0;
     const state = this.reconciledState();
     const ready = Boolean(this.session || this.board);
     if (
@@ -1152,6 +1201,11 @@ export class AssistantOverlay {
           </main>
         </div>
       </section>`;
+    const renderedPanel = this.shadow.querySelector<HTMLElement>(".panel");
+    if (renderedPanel && preservedScrollTop > 0) {
+      renderedPanel.scrollTop = preservedScrollTop;
+    }
+    this.lastRenderedView = this.activeView;
     this.scheduleTradeVerdicts(state);
     if (this.settings.enabled && !this.board?.gameOver) {
       renderWinOdds(displayedWinAnalysis, state);
@@ -1159,7 +1213,9 @@ export class AssistantOverlay {
       destroyWinOdds();
     }
     const nextSignature = next?.signature ?? "";
-    const traceKey = this.decisionKey;
+    const traceKey = this.decisionKey
+      ? decisionStateDigest(this.decisionKey)
+      : "";
     const guideGameScope = this.board?.gameKey ?? location.pathname;
     const stillInGuideGame = (): boolean =>
       (this.board?.gameKey ?? location.pathname) === guideGameScope;
@@ -1254,6 +1310,9 @@ export class AssistantOverlay {
       ...(transactionCommit
         ? { validateTransactionCommit: transactionCommit }
         : {}),
+      onExecutionStart: () => {
+        if (traceKey) this.decisionTraces.executionStarted(traceKey);
+      },
       onExecution: ({ succeeded, reason }) => {
         if (succeeded && next?.kind === "build") {
           this.rememberBuildPlacement(next, spatial);
@@ -2072,15 +2131,16 @@ export class AssistantOverlay {
     ) {
       const searchConstraints = this.decisionSearchConstraints();
       const key = this.decisionSignature(state, board, player, searchConstraints);
+      const traceKey = decisionStateDigest(key);
       if (key !== this.decisionKey) {
         this.decisionKey = key;
         this.decisionPendingKey = "";
         this.decisionSlowKey = "";
         this.decisionRuntimeError = "";
-        this.decisionTraces.begin(key, state, board);
+        this.decisionTraces.begin(traceKey, state, board);
         // This is the parameterized continuation of the already-completed
         // deep build/development action, not a fresh strategic position.
-        this.decisionTraces.complete(key, this.decisionAnalysis);
+        this.decisionTraces.complete(traceKey, this.decisionAnalysis);
       }
       return;
     }
@@ -2098,6 +2158,7 @@ export class AssistantOverlay {
     }
     const searchConstraints = this.decisionSearchConstraints();
     const key = this.decisionSignature(state, board, player, searchConstraints);
+    const traceKey = decisionStateDigest(key);
     if (key !== this.decisionKey) {
       this.decisionKey = key;
       this.decisionAnalysis = undefined;
@@ -2105,7 +2166,7 @@ export class AssistantOverlay {
       this.decisionSlowKey = "";
       this.decisionRuntimeError = "";
       if (board.isMyTurn || hasPendingIncomingTrade) {
-        this.decisionTraces.begin(key, state, board);
+        this.decisionTraces.begin(traceKey, state, board);
       }
     }
     const requested = this.decisionWorker.request(
@@ -2126,7 +2187,7 @@ export class AssistantOverlay {
         this.decisionRuntimeError = "";
         this.decisionContextInvalidated = false;
         this.decisionAnalysis = analysis;
-        this.decisionTraces.complete(key, analysis);
+        this.decisionTraces.complete(traceKey, analysis);
         if (analysis.runtime) {
           this.decisionRuntime = analysis.runtime;
           this.decisionRuntimeDetail =
@@ -2152,7 +2213,7 @@ export class AssistantOverlay {
           return;
         }
         this.decisionSlowKey = key;
-        this.decisionTraces.slow(key);
+        this.decisionTraces.slow(traceKey);
         this.render();
       },
       (detail) => {
@@ -2170,7 +2231,7 @@ export class AssistantOverlay {
           : detail;
         this.decisionRuntimeError = displayedDetail;
         this.decisionRuntimeDetail = displayedDetail;
-        this.decisionTraces.failure(key, displayedDetail);
+        this.decisionTraces.failure(traceKey, displayedDetail);
         console.error("[Colonist Assistant] Selected decision engine failed", {
           key,
           engine: this.settings.engine,
@@ -2184,6 +2245,10 @@ export class AssistantOverlay {
       !this.settings.disablePlayerTrades,
     );
     if (requested) {
+      // A failed request may be retried for the same decision key. Associate
+      // each accepted worker request with a bounded attempt record instead of
+      // letting a later success overwrite the earlier failure evidence.
+      this.decisionTraces.begin(traceKey, state, board);
       this.decisionPendingKey = key;
       this.decisionSlowKey = "";
       this.decisionRuntimeError = "";
@@ -3056,14 +3121,14 @@ export class AssistantOverlay {
       if (deepAction.kind === "offer-trade") {
         if (this.settings.disablePlayerTrades) {
           this.decisionTraces.mappingFailure(
-            this.decisionKey,
+            decisionStateDigest(this.decisionKey),
             "rust-offer-trade-returned-while-player-trades-disabled",
           );
           return undefined;
         }
         if (!deepAction.cards || !deepAction.receiveCards) {
           this.decisionTraces.mappingFailure(
-            this.decisionKey,
+            decisionStateDigest(this.decisionKey),
             "rust-offer-trade-missing-card-bundle",
           );
           return undefined;
@@ -3102,7 +3167,7 @@ export class AssistantOverlay {
       // The changed board signature must be searched again; no legacy policy
       // is allowed to silently choose a different action.
       this.decisionTraces.mappingFailure(
-        this.decisionKey,
+        decisionStateDigest(this.decisionKey),
         "rust-action-could-not-map-to-live-control",
       );
       return undefined;
@@ -3963,11 +4028,8 @@ export class AssistantOverlay {
   }
 
   private renderSettings(): string {
-    const manifest = chrome.runtime.getManifest();
-    const buildIdentity = manifest.version_name ?? `v${manifest.version}`;
-    const buildParts = manifest.version_name?.split(" · ");
-    const buildLabel = buildParts?.slice(0, 2).join(" · ") ?? buildIdentity;
-    const builtAt = buildParts?.[2];
+    const { identity: buildIdentity, label: buildLabel, builtAt } =
+      this.buildInfo;
     const runtime = this.runtimePresentation();
     return `<section class="settings-panel">
       <header class="settings-heading">
@@ -3997,7 +4059,7 @@ export class AssistantOverlay {
         <i aria-hidden="true"></i>
       </label>
       <label class="settings-field">
-        <span><b>Record game</b><small>Keep the game timeline, engine reasoning, search timing, status, and execution results for later analysis.</small></span>
+        <span><b>Record game</b><small>Keep a compact LLM-ready timeline with engine reasoning, belief evidence, timing, status, and execution results.</small></span>
         <input type="checkbox" data-setting="recordGame"${this.settings.recordGame ? " checked" : ""}>
         <i aria-hidden="true"></i>
       </label>
@@ -4020,7 +4082,7 @@ export class AssistantOverlay {
         <strong title="${escapeHtml(buildIdentity)}">${escapeHtml(buildLabel)}</strong>
       </div>
       ${builtAt ? `<div class="settings-version"><span>BUILT AT</span><strong>${escapeHtml(builtAt)}</strong></div>` : ""}
-      <button class="reset-link" data-action="export-record">Export latest game record (.json)</button>
+      <button class="reset-link" data-action="export-record">Export compact LLM record (.txt)</button>
       <button class="reset-link" data-action="reset">Reset this game session</button>
     </section>`;
   }

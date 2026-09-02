@@ -1,4 +1,10 @@
 import type { DecisionTrace } from "./decision-trace";
+import {
+  CompactGameBuilder,
+  formatCompactGameRecord,
+  type CompactGameCapture,
+  type CompactGameRecord,
+} from "./llm-record";
 import type { BoardSnapshot } from "./placement";
 import type { StoredEvent } from "./types";
 import {
@@ -6,25 +12,51 @@ import {
   LATEST_GAME_RECORD_STORAGE_KEY,
 } from "./local-data";
 
-export type GameRecordStatus = "recording" | "completed" | "interrupted";
+export type RecordedGame = CompactGameRecord;
+export type GameRecordCapture = CompactGameCapture;
 
-export interface RecordedAssistantSettings {
-  engine: string;
-  disablePlayerTrades: boolean;
-  autopilot: boolean;
-}
+const normalizeRecordedGame = (value: unknown): RecordedGame | undefined => {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Partial<RecordedGame>;
+  if (
+    record.schema !== "catan-evidence/1" ||
+    !record.scope ||
+    !record.sessionId ||
+    !record.contracts ||
+    !record.aliases
+  ) {
+    return undefined;
+  }
+  if (
+    !Array.isArray(record.boardHexes) ||
+    !Array.isArray(record.boardVertices) ||
+    !Array.isArray(record.boardEdges) ||
+    !Array.isArray(record.frames) ||
+    !Array.isArray(record.events) ||
+    !Array.isArray(record.decisions) ||
+    !Array.isArray(record.decisionContexts) ||
+    !Array.isArray(record.decisionTrades) ||
+    !Array.isArray(record.attempts) ||
+    !Array.isArray(record.candidates) ||
+    !Array.isArray(record.roots) ||
+    !Array.isArray(record.replacements) ||
+    !Array.isArray(record.beliefs) ||
+    !Array.isArray(record.beliefSummaries) ||
+    !Array.isArray(record.beliefWorlds) ||
+    !Array.isArray(record.archetypes) ||
+    !Array.isArray(record.handVectors)
+  ) {
+    return undefined;
+  }
+  return record as RecordedGame;
+};
 
-export type RecordedDecisionTrace = Omit<
-  DecisionTrace,
-  "replayState" | "replayBoard"
->;
-
-export interface RecordedBoardFrame {
+interface LegacyBoardFrame {
   capturedAt: number;
   turn?: number;
   currentPlayer?: string;
-  isMyTurn: boolean;
-  action: BoardSnapshot["action"];
+  isMyTurn?: boolean;
+  action?: BoardSnapshot["action"];
   hasRolled?: boolean;
   gameOver?: boolean;
   winner?: string;
@@ -34,18 +66,18 @@ export interface RecordedBoardFrame {
   ownDevelopmentCards?: BoardSnapshot["ownDevelopmentCards"];
   bank?: BoardSnapshot["bank"];
   players?: BoardSnapshot["players"];
-  buildings: Array<{
+  buildings?: Array<{
     vertexId: string;
     player: string;
     kind: "settlement" | "city";
   }>;
-  roads: Array<{ edgeId: string; player: string }>;
+  roads?: Array<{ edgeId: string; player: string }>;
 }
 
-export interface RecordedGame {
+interface LegacyGameRecord {
   schema: 1;
   scope: string;
-  status: GameRecordStatus;
+  status: RecordedGame["status"];
   sessionId: string;
   gameKey?: string;
   startedAt: number;
@@ -53,132 +85,125 @@ export interface RecordedGame {
   completedAt?: number;
   partialHistory: boolean;
   unmatchedCount: number;
-  playerOrder: string[];
-  assistant: RecordedAssistantSettings;
-  events: StoredEvent[];
-  decisions: RecordedDecisionTrace[];
-  boardTimeline: RecordedBoardFrame[];
-}
-
-export interface GameRecordCapture {
-  scope: string;
-  sessionId: string;
-  gameKey?: string;
-  startedAt: number;
-  partialHistory: boolean;
-  unmatchedCount: number;
-  playerOrder: string[];
-  assistant: RecordedAssistantSettings;
+  assistant: RecordedGame["assistant"];
   events: StoredEvent[];
   decisions: DecisionTrace[];
-  board?: BoardSnapshot;
+  boardTimeline: LegacyBoardFrame[];
 }
 
-const MAX_DECISION_CANDIDATES = 12;
-const MAX_ROOT_ITEMS = 12;
-const MAX_BOARD_FRAMES = 800;
-
-const compactDecisionTrace = (trace: DecisionTrace): RecordedDecisionTrace => {
-  const {
-    replayState: _replayState,
-    replayBoard: _replayBoard,
-    deepCandidates,
-    rootProvenance,
-    ...rest
-  } = trace;
-  return {
-    ...rest,
-    ...(deepCandidates
-      ? { deepCandidates: deepCandidates.slice(0, MAX_DECISION_CANDIDATES) }
-      : {}),
-    ...(rootProvenance
-      ? {
-          rootProvenance: {
-            ...rootProvenance,
-            rankedRoots: rootProvenance.rankedRoots.slice(0, MAX_ROOT_ITEMS),
-            retainedRoots: rootProvenance.retainedRoots.slice(0, MAX_ROOT_ITEMS),
-            prunedRoots: rootProvenance.prunedRoots.slice(0, MAX_ROOT_ITEMS),
-          },
-        }
-      : {}),
-  };
-};
-
-const compactBoardFrame = (board: BoardSnapshot): RecordedBoardFrame => ({
-  capturedAt: Date.now(),
-  turn: board.turn,
-  currentPlayer: board.currentPlayer,
-  isMyTurn: Boolean(board.isMyTurn),
-  action: board.action,
-  hasRolled: board.hasRolled,
-  gameOver: board.gameOver,
-  winner: board.winner,
-  myPlayer: board.myPlayer,
-  robberHex: board.hexes.find((hex) => hex.blocked)?.id,
-  ownHand: board.ownHand ? structuredClone(board.ownHand) : undefined,
-  ownDevelopmentCards: board.ownDevelopmentCards
-    ? structuredClone(board.ownDevelopmentCards)
-    : undefined,
-  bank: board.bankVisible && board.bank ? structuredClone(board.bank) : undefined,
-  players: board.players ? structuredClone(board.players) : undefined,
-  buildings: board.vertices.flatMap((vertex) =>
-    vertex.building
-      ? [
-          {
-            vertexId: vertex.id,
-            player: vertex.building.player,
-            kind: vertex.building.kind,
-          },
-        ]
-      : [],
-  ),
-  roads: board.edges.flatMap((edge) =>
-    edge.player ? [{ edgeId: edge.id, player: edge.player }] : [],
-  ),
+const legacyBoardSnapshot = (frame: LegacyBoardFrame): BoardSnapshot => ({
+  hexes: frame.robberHex ? [{ id: frame.robberHex, blocked: true }] : [],
+  vertices: (frame.buildings ?? []).map((building) => ({
+    id: building.vertexId,
+    adjacentHexes: [],
+    adjacentVertices: [],
+    building: {
+      player: building.player,
+      kind: building.kind,
+    },
+  })),
+  edges: (frame.roads ?? []).map((road) => ({
+    id: road.edgeId,
+    vertices: ["", ""],
+    player: road.player,
+  })),
+  turn: frame.turn,
+  currentPlayer: frame.currentPlayer,
+  isMyTurn: frame.isMyTurn,
+  action: frame.action,
+  hasRolled: frame.hasRolled,
+  gameOver: frame.gameOver,
+  winner: frame.winner,
+  myPlayer: frame.myPlayer,
+  ownHand: frame.ownHand,
+  ownDevelopmentCards: frame.ownDevelopmentCards,
+  bank: frame.bank,
+  bankVisible: Boolean(frame.bank),
+  players: frame.players,
+  observedAt: frame.capturedAt,
 });
 
-const boardFrameSignature = (frame: RecordedBoardFrame): string =>
-  JSON.stringify({
-    turn: frame.turn,
-    currentPlayer: frame.currentPlayer,
-    isMyTurn: frame.isMyTurn,
-    action: frame.action,
-    hasRolled: frame.hasRolled,
-    gameOver: frame.gameOver,
-    winner: frame.winner,
-    robberHex: frame.robberHex,
-    ownHand: frame.ownHand,
-    ownDevelopmentCards: frame.ownDevelopmentCards,
-    bank: frame.bank,
-    players: frame.players,
-    buildings: frame.buildings,
-    roads: frame.roads,
-  });
-
-const normalizeRecordedGame = (value: unknown): RecordedGame | undefined => {
+const migrateLegacyRecordedGame = (value: unknown): RecordedGame | undefined => {
   if (!value || typeof value !== "object") return undefined;
-  const record = value as Partial<RecordedGame>;
-  if (record.schema !== 1 || !record.scope || !record.sessionId) return undefined;
-  if (!Array.isArray(record.events) || !Array.isArray(record.decisions)) return undefined;
-  if (!Array.isArray(record.boardTimeline)) return undefined;
-  return record as RecordedGame;
+  const legacy = value as Partial<LegacyGameRecord>;
+  if (
+    legacy.schema !== 1 ||
+    !legacy.scope ||
+    !legacy.sessionId ||
+    !legacy.startedAt ||
+    !legacy.assistant ||
+    !Array.isArray(legacy.events) ||
+    !Array.isArray(legacy.decisions) ||
+    !Array.isArray(legacy.boardTimeline)
+  ) {
+    return undefined;
+  }
+  const builder = new CompactGameBuilder();
+  const base: Omit<CompactGameCapture, "events" | "decisions" | "board"> = {
+    scope: legacy.scope,
+    sessionId: legacy.sessionId,
+    ...(legacy.gameKey ? { gameKey: legacy.gameKey } : {}),
+    startedAt: legacy.startedAt,
+    partialHistory: Boolean(legacy.partialHistory),
+    unmatchedCount: legacy.unmatchedCount ?? 0,
+    assistant: legacy.assistant,
+  };
+  for (const frame of legacy.boardTimeline) {
+    builder.apply(
+      {
+        ...base,
+        events: [],
+        decisions: [],
+        board: legacyBoardSnapshot(frame),
+      },
+      false,
+    );
+  }
+  const migrated = builder.apply(
+    {
+      ...base,
+      events: legacy.events,
+      decisions: legacy.decisions,
+    },
+    legacy.status === "completed",
+  );
+  migrated.status = legacy.status ?? "recording";
+  migrated.updatedAt = legacy.updatedAt ?? migrated.updatedAt;
+  if (legacy.completedAt !== undefined) migrated.completedAt = legacy.completedAt;
+  return migrated;
 };
+
+const normalizeAnyRecordedGame = (value: unknown): RecordedGame | undefined =>
+  normalizeRecordedGame(value) ?? migrateLegacyRecordedGame(value);
 
 export class GameRecordRecorder {
   private active?: RecordedGame;
+  private builder?: CompactGameBuilder;
   private loaded?: Promise<void>;
   private persistTimer?: ReturnType<typeof globalThis.setTimeout>;
   private storageOperations: Promise<void> = Promise.resolve();
 
+  private snapshotCapture(input: GameRecordCapture): GameRecordCapture {
+    return {
+      ...input,
+      assistant: { ...input.assistant },
+      events: structuredClone(input.events),
+      // snapshotForRecord() already returns detached changed evidence,
+      // including bounded replay worlds only on the first capture per decision.
+      decisions: input.decisions,
+      ...(input.board ? { board: structuredClone(input.board) } : {}),
+    };
+  }
+
   capture(input: GameRecordCapture): void {
-    const snapshot: GameRecordCapture = structuredClone(input);
+    const snapshot = this.snapshotCapture(input);
     void this.ensureLoaded().then(() => {
       this.applyCapture(snapshot, false);
     });
   }
 
   finalize(input: GameRecordCapture): void {
-    const snapshot: GameRecordCapture = structuredClone(input);
+    const snapshot = this.snapshotCapture(input);
     void this.ensureLoaded().then(() => {
       this.applyCapture(snapshot, true);
     });
@@ -197,6 +222,7 @@ export class GameRecordRecorder {
   async reset(): Promise<void> {
     await this.flush();
     this.active = undefined;
+    this.builder = undefined;
     this.loaded = Promise.resolve();
     await this.enqueueStorage(() =>
       chrome.storage.local.remove([
@@ -214,8 +240,9 @@ export class GameRecordRecorder {
       ])
       .then((stored) => {
         this.active =
-          normalizeRecordedGame(stored[ACTIVE_GAME_RECORD_STORAGE_KEY]) ??
-          normalizeRecordedGame(stored[LATEST_GAME_RECORD_STORAGE_KEY]);
+          normalizeAnyRecordedGame(stored[ACTIVE_GAME_RECORD_STORAGE_KEY]) ??
+          normalizeAnyRecordedGame(stored[LATEST_GAME_RECORD_STORAGE_KEY]);
+        this.builder = this.active ? new CompactGameBuilder(this.active) : undefined;
       })
       .catch(() => undefined);
     return this.loaded;
@@ -234,51 +261,11 @@ export class GameRecordRecorder {
         chrome.storage.local.set({ [LATEST_GAME_RECORD_STORAGE_KEY]: previous }),
       );
       this.active = undefined;
+      this.builder = undefined;
     }
 
-    const existing = this.active;
-    const decisions = new Map<string, RecordedDecisionTrace>(
-      existing?.decisions.map((decision) => [decision.stateHash, decision]) ?? [],
-    );
-    for (const decision of input.decisions) {
-      decisions.set(decision.stateHash, compactDecisionTrace(decision));
-    }
-
-    const boardTimeline = existing ? [...existing.boardTimeline] : [];
-    if (input.board) {
-      const frame = compactBoardFrame(input.board);
-      const previous = boardTimeline.at(-1);
-      if (!previous || boardFrameSignature(previous) !== boardFrameSignature(frame)) {
-        boardTimeline.push(frame);
-        if (boardTimeline.length > MAX_BOARD_FRAMES) {
-          boardTimeline.splice(0, boardTimeline.length - MAX_BOARD_FRAMES);
-        }
-      }
-    }
-
-    this.active = {
-      schema: 1,
-      scope: input.scope,
-      status: completed ? "completed" : "recording",
-      sessionId: input.sessionId,
-      ...(input.gameKey ? { gameKey: input.gameKey } : {}),
-      startedAt: existing?.startedAt ?? input.startedAt,
-      updatedAt: now,
-      ...(completed
-        ? { completedAt: existing?.completedAt ?? now }
-        : existing?.completedAt
-          ? { completedAt: existing.completedAt }
-          : {}),
-      partialHistory: input.partialHistory,
-      unmatchedCount: input.unmatchedCount,
-      playerOrder: [...input.playerOrder],
-      assistant: { ...input.assistant },
-      events: structuredClone(input.events),
-      decisions: [...decisions.values()].sort(
-        (left, right) => left.recordedAt - right.recordedAt,
-      ),
-      boardTimeline,
-    };
+    this.builder ??= new CompactGameBuilder(this.active);
+    this.active = this.builder.apply(input, completed);
     this.schedulePersist();
   }
 
@@ -319,10 +306,13 @@ export const readRecordedGame = async (): Promise<RecordedGame | undefined> => {
     ACTIVE_GAME_RECORD_STORAGE_KEY,
     LATEST_GAME_RECORD_STORAGE_KEY,
   ]);
-  return (
-    normalizeRecordedGame(stored[LATEST_GAME_RECORD_STORAGE_KEY]) ??
-    normalizeRecordedGame(stored[ACTIVE_GAME_RECORD_STORAGE_KEY])
-  );
+  const active = normalizeAnyRecordedGame(stored[ACTIVE_GAME_RECORD_STORAGE_KEY]);
+  const latest = normalizeAnyRecordedGame(stored[LATEST_GAME_RECORD_STORAGE_KEY]);
+  if (!active) return latest;
+  if (!latest) return active;
+  // A newly started game can be captured in the same millisecond that the
+  // previous game is archived. Prefer the active record on an updatedAt tie.
+  return active.updatedAt >= latest.updatedAt ? active : latest;
 };
 
 const safeFilenamePart = (value: string): string =>
@@ -331,13 +321,13 @@ const safeFilenamePart = (value: string): string =>
 export const downloadRecordedGame = (record: RecordedGame): void => {
   const identity = safeFilenamePart(record.gameKey ?? record.sessionId) || "game";
   const stamp = new Date(record.startedAt).toISOString().replace(/[:.]/gu, "-");
-  const blob = new Blob([JSON.stringify(record, null, 2)], {
-    type: "application/json",
+  const blob = new Blob([formatCompactGameRecord(record)], {
+    type: "text/plain;charset=utf-8",
   });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = `colonist-record-${identity}-${stamp}.json`;
+  anchor.download = `colonist-evidence-${identity}-${stamp}.txt`;
   anchor.style.display = "none";
   document.documentElement.append(anchor);
   anchor.click();
