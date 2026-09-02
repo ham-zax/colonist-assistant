@@ -140,8 +140,23 @@ pub fn load_tactical_corpus(path: &Path) -> Result<TacticalCorpus, String> {
         .map_err(|e| format!("failed to deserialize corpus JSON: {e}"))
 }
 
-/// Constructs a valid GameState from a TacticalStateSpec.
-pub fn build_state(spec: &TacticalStateSpec) -> GameState {
+fn rebalance_bank_from_hands(state: &mut GameState) -> Result<(), String> {
+    for resource in 0..5 {
+        let held = state
+            .players
+            .iter()
+            .map(|player| player.resources[resource] as u16)
+            .sum::<u16>();
+        let bank = 19u16.checked_sub(held).ok_or_else(|| {
+            format!("resource {resource} hands exceed the 19-card supply: {held}")
+        })?;
+        state.bank[resource] = bank as u8;
+    }
+    Ok(())
+}
+
+/// Constructs and validates a resource-conserving GameState from a TacticalStateSpec.
+pub fn build_state(spec: &TacticalStateSpec) -> Result<GameState, String> {
     let mut state = GameState::standard(spec.board_seed, spec.players);
     state.current_player = spec.active_player;
     state.phase = Phase::Main;
@@ -189,7 +204,16 @@ pub fn build_state(spec: &TacticalStateSpec) -> GameState {
     }
 
     state.update_longest_road();
+    rebalance_bank_from_hands(&mut state)?;
     state
+        .validate()
+        .map_err(|error| format!("invalid tactical state: {error}"))?;
+    Ok(state)
+}
+
+/// Rebalances the public bank after a benchmark-only hand override.
+pub fn rebalance_tactical_bank(state: &mut GameState) -> Result<(), String> {
+    rebalance_bank_from_hands(state)
 }
 
 /// Checks if a vertex can legally receive a settlement under public occupancy and distance rules.
@@ -254,7 +278,7 @@ fn shortest_route_distance(state: &GameState, player: u8, start: u8, goal: u8) -
 
 /// Strictly verifies G0 mechanical consequences for a tactical scenario.
 pub fn verify_mechanical_consequence(scenario: &TacticalScenario) -> Result<(), String> {
-    let base = build_state(&scenario.state);
+    let base = build_state(&scenario.state)?;
     let best_action = scenario.expected_best_root.to_action();
 
     let mut next = base.clone();

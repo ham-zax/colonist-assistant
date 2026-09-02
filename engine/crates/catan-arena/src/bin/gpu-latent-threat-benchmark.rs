@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use colonist_catan_arena::tactical_corpus::{
-    build_state, default_corpus_path, load_tactical_corpus, verify_mechanical_consequence,
-    TacticalCorpus,
+    build_state, default_corpus_path, load_tactical_corpus, rebalance_tactical_bank,
+    verify_mechanical_consequence, TacticalCorpus,
 };
 use colonist_catan_core::{Action, Phase};
 use colonist_catan_search::CudaSimEngine;
@@ -141,7 +141,8 @@ fn main() {
         let g0_result = verify_mechanical_consequence(scenario);
         let g0_passed = g0_result.is_ok();
 
-        let state = build_state(&scenario.state);
+        let state = build_state(&scenario.state)
+            .unwrap_or_else(|error| panic!("invalid tactical scenario {}: {error}", scenario.id));
         let candidate_actions: Vec<Action> = scenario
             .candidate_roots
             .iter()
@@ -184,8 +185,18 @@ fn main() {
             probe_state.phase = Phase::Main;
             probe_state.players[probe.player as usize].resources = probe.resources;
             let probe_action = probe.action.to_action();
-            let legal = probe_state.legal_actions().contains(&probe_action);
             let mut errors = 0usize;
+            let valid = match rebalance_tactical_bank(&mut probe_state)
+                .and_then(|_| probe_state.validate())
+            {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("Invalid proposal probe for {}: {error}", scenario.id);
+                    errors = 1;
+                    false
+                }
+            };
+            let legal = valid && probe_state.legal_actions().contains(&probe_action);
             let generated = if !legal {
                 Vec::new()
             } else {
