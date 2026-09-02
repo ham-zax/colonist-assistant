@@ -21,9 +21,9 @@ import {
   isExtensionContextInvalidatedError,
 } from "./extension-context";
 
-const SLOW_DECISION_MS = 1_000;
-const OPENING_SLOW_DECISION_MS = 1_500;
-const OPENING_PONDER_SLOW_DECISION_MS = 3_000;
+const SLOW_DECISION_MS = 3_000;
+const OPENING_SLOW_DECISION_MS = 3_000;
+const OPENING_PONDER_SLOW_DECISION_MS = 5_000;
 const HARD_DECISION_MS = 12_000;
 const HARD_DECISION_ERROR =
   "Strategist did not return before the 12-second safety limit";
@@ -258,11 +258,12 @@ export class DecisionWorkerClient {
               totalMs: Math.round(totalMs),
               queueWaitMs: Math.round(startedAt - request.enqueuedAt),
               serviceMs: Math.round(finishedAt - startedAt),
-              wasmSearchMs:
+              searchMs:
                 search?.elapsedMs === undefined
                   ? undefined
                   : Math.round(search.elapsedMs),
               runtime: response.analysis?.runtime ?? "no-analysis",
+              runtimeReason: response.analysis?.runtimeReason,
               selectedAction: search?.chosen?.kind ?? "none",
               nodes: search?.nodes,
               iterations: search?.iterations,
@@ -277,9 +278,7 @@ export class DecisionWorkerClient {
               stale:
                 request.generation !== this.generation ||
                 request.key !== this.desiredKey,
-              error:
-                response.error ??
-                response.analysis?.runtimeReason,
+              error: response.error,
             },
           );
         }

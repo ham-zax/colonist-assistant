@@ -140,11 +140,13 @@ still covering more than a single greedy line. Chance nodes use their
 rules-engine probabilities. Depth advances on completed turns, while a separate
 in-turn action bound prevents unbounded trade/build sequences.
 
-The normal WASM live request uses depth 4, branch cap 8, a 4,000-node limit, and
-a cooperative 350 ms strategic-search deadline. Setup uses a larger dedicated
-draft budget and deadline; optional post-draft rollouts remain off by default
-until held-out opening regret justifies enabling them. Trade responses and
-pondering use separate bounded node profiles.
+The normal WASM live request uses depth 5, branch cap 10, an
+8,000-node-per-depth-wave limit, and a cooperative 2,000 ms strategic-search
+deadline. Setup uses a 2,500 ms dedicated draft budget; trade responses use a
+1,500 ms bounded profile, while opponent-turn pondering may use 3,000 ms
+(4,000 ms during setup). Optional
+post-draft rollouts remain off by default until held-out opening regret justifies
+enabling them.
 
 Native CUDA Strategist requests use a 4,000 ms deadline floor. That budget covers
 exact/tactical arbitration, belief preparation, GPU upload, and progressive CUDA
@@ -164,11 +166,10 @@ so a superficially neutral exchange cannot consume a turn through repeated
 low-probability proposals. When an offer reduces an above-threshold hand, that
 cost is quartered to retain hand-safety conversions.
 
-The packaged cold-adapter regression crosses the generated WASM boundary and
-must remain below one second. This is a release latency/stability regression,
-not a universal timing guarantee or strength result. The one-second UI warning
-and twelve-second client cutoff are fail-closed containment, not performance
-targets.
+The packaged adapter regression remains a release latency/stability check, not
+a universal timing guarantee or strength result. Normal Strategist decisions now
+warn after three seconds (opening pondering after five seconds), while the
+12-second client cutoff remains the outer fail-closed containment boundary.
 
 Stable observation hashing, action ordering, and node allocation make the
 bounded MaxN path reproducible for the same build and request. Experimental

@@ -44,6 +44,10 @@ const DEVELOPMENT_ORDER = [
 const DEVELOPMENT_TOTAL = [14, 5, 2, 2, 2] as const;
 const MAX_PARTICLES = 96;
 const MAX_INTERACTIVE_PARTICLES = 24;
+const LIVE_WASM_DECISION_TIME_MS = 2_000;
+const LIVE_WASM_TRADE_DECISION_TIME_MS = 1_500;
+const LIVE_WASM_OPENING_DECISION_TIME_MS = 2_500;
+const LIVE_WASM_PONDER_DECISION_TIME_MS = 3_000;
 
 export type DeepSearchExecutor = (
   request: unknown,
@@ -1343,20 +1347,19 @@ export const buildDeepSearchRequest = (
             ? basePlayers.findIndex((player) => player.hasLargestArmy)
             : undefined,
       },
-      // Keep live decisions interactive. Concentrate strategic nodes on a
-      // compact root and let the engine subsample representative belief
-      // particles. Exact mandatory/tactical solvers still see the fuller
-      // posterior sent in this request.
+      // Give WASM Strategist enough room to finish a materially stronger
+      // iterative search while keeping a bounded live-decision window.
+      // Native CUDA receives its own larger deadline floor in the background.
       iterations: players.length >= 3 ? 320 : 384,
-      maxNodes: 4_000,
+      maxNodes: 8_000,
       rolloutActions: players.length >= 3 ? 96 : 108,
       tacticalDepth: 14,
       tacticalNodes: 900,
-      timeBudgetMs: 350,
+      timeBudgetMs: LIVE_WASM_DECISION_TIME_MS,
       effort: {
-        decisionTimeMs: 350,
+        decisionTimeMs: LIVE_WASM_DECISION_TIME_MS,
         tactical: { maxDepth: 14, nodeBudget: 900 },
-        cpu: { maxDepth: 4, rootCap: 8, nodesPerDepthWave: 4_000 },
+        cpu: { maxDepth: 5, rootCap: 10, nodesPerDepthWave: 8_000 },
         gpu: {
           rootCap: 8,
           rolloutBudget: players.length >= 3 ? 320 : 384,
@@ -1365,8 +1368,8 @@ export const buildDeepSearchRequest = (
       },
       seed,
       mode: "maxn",
-      depth: 4,
-      branchCap: 8,
+      depth: 5,
+      branchCap: 10,
       ponder: false,
       ...(searchConstraints.lastRejectedTrade
         ? {
@@ -1413,28 +1416,32 @@ export const analyzeDeepSearch = async (
     // budget here than on an ordinary turn: setup occurs only a handful of
     // times and dominates long-horizon outcomes.
     request.maxNodes = 12_000;
-    request.timeBudgetMs = 1_200;
+    request.timeBudgetMs = LIVE_WASM_OPENING_DECISION_TIME_MS;
     request.depth = Math.min(4, Math.max(2, players.length));
     request.branchCap = 12;
   }
   request.branchCap = board.initialPlacement
     ? request.branchCap
-    : 8;
+    : 10;
   if (request.state.phase === "trade-responses") {
     request.iterations = 64;
-    request.maxNodes = 2_000;
+    request.maxNodes = 4_000;
     request.rolloutActions = 48;
     request.tacticalNodes = 600;
+    request.timeBudgetMs = LIVE_WASM_TRADE_DECISION_TIME_MS;
+    request.depth = 4;
+    request.branchCap = 8;
   } else if (!board.isMyTurn) {
     request.ponder = true;
     request.iterations = 96;
-    request.maxNodes = 3_000;
+    request.maxNodes = 8_000;
     request.rolloutActions = 64;
     request.tacticalNodes = 600;
+    request.timeBudgetMs = LIVE_WASM_PONDER_DECISION_TIME_MS;
     // Background opening/pondering can keep accumulating while opponents act.
     if (board.initialPlacement) {
       request.maxNodes = 18_000;
-      request.timeBudgetMs = 2_500;
+      request.timeBudgetMs = 4_000;
     }
   }
   // The wire contract is backend-specific even while legacy top-level knobs
