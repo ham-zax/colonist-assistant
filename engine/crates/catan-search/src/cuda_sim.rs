@@ -19,6 +19,9 @@ const MAX_VERTEX_ADJACENCY: usize = 3;
 const INITIAL_BATCH_CAPACITY: usize = 256;
 const THREADS_PER_BLOCK: usize = 128;
 const SEARCH_CHUNK_LANES: usize = 65_536;
+const SEED_INDEX_MIX: u64 = 0xd134_2543_de82_ef95;
+const GAME_RNG_DOMAIN: u64 = 0x243f_6a88_85a3_08d3;
+const BOARD_RNG_DOMAIN: u64 = 0x1319_8a2e_0370_7344;
 
 const STATE_NUM_PLAYERS: usize = 0;
 const STATE_PHASE: usize = 1;
@@ -74,6 +77,23 @@ const ROOT_STATS_WORDS: usize = 7;
 const MATCHUP_PROFILE_WORDS: usize = 10;
 
 pub type CudaSimPolicyProfile = [u8; 5];
+
+#[inline]
+fn mix_stream_seed(base_seed: u64, global_index: u64, domain: u64) -> u64 {
+    let mut value = base_seed ^ domain ^ global_index.wrapping_mul(SEED_INDEX_MIX);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+pub fn cuda_sim_board_seed(base_seed: u64, global_game_index: u64) -> u64 {
+    mix_stream_seed(base_seed, global_game_index, BOARD_RNG_DOMAIN)
+}
+
+#[inline]
+fn cuda_sim_game_rng_seed(base_seed: u64, global_game_index: u64) -> u64 {
+    mix_stream_seed(base_seed, global_game_index, GAME_RNG_DOMAIN)
+}
 
 const TOPO_VERTEX_HEX_COUNTS: usize = 0;
 const TOPO_VERTEX_HEXES: usize = TOPO_VERTEX_HEX_COUNTS + VERTEX_COUNT;
@@ -152,9 +172,9 @@ pub struct CudaSimArenaGameSummary {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CudaSimArenaResult {
     pub games: Vec<CudaSimArenaGameSummary>,
-    pub wins: [u32; 4],
-    pub terminal_games: u32,
-    pub truncated_games: u32,
+    pub wins: [u64; 4],
+    pub terminal_games: u64,
+    pub truncated_games: u64,
     pub total_actions: u64,
 }
 
@@ -574,11 +594,8 @@ impl CudaSimEngine {
             let global_lane = game_offset
                 .checked_add(lane)
                 .ok_or(CudaSimError::BatchTooLarge)?;
-            self.rng_host.push(
-                base_seed.wrapping_add(
-                    (global_lane as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15),
-                ),
-            );
+            self.rng_host
+                .push(cuda_sim_game_rng_seed(base_seed, global_lane as u64));
         }
         self.stream
             .memcpy_htod(&self.rng_host, &mut self.rng_device)?;
@@ -686,9 +703,9 @@ impl CudaSimEngine {
             .memcpy_dtoh(&action_counts, &mut self.arena_action_count_host)?;
         self.stream.synchronize()?;
 
-        let mut wins = [0u32; 4];
-        let mut terminal_games = 0u32;
-        let mut truncated_games = 0u32;
+        let mut wins = [0u64; 4];
+        let mut terminal_games = 0u64;
+        let mut truncated_games = 0u64;
         let mut total_actions = 0u64;
         let mut games = Vec::with_capacity(count);
         for (game, actions) in summaries
@@ -724,9 +741,10 @@ impl CudaSimEngine {
         })
     }
 
-    /// Runs an arbitrarily large campaign through a bounded resident working
-    /// set. RNG identity uses the global game index, so changing `chunk_games`
-    /// does not change the simulated trajectories.
+    /// Runs an existing host corpus through a bounded resident GPU working set.
+    /// RNG identity uses the global game index, so changing `chunk_games` does
+    /// not change the simulated trajectories. The input corpus and returned
+    /// per-game summaries remain host-resident and therefore O(total games).
     pub fn run_arena_campaign(
         &mut self,
         states: &[GameState],
@@ -756,6 +774,33 @@ impl CudaSimEngine {
             chunk_games,
             Some((candidate, baseline)),
         )
+    }
+
+    /// Runs one host-generated campaign chunk while preserving global game
+    /// identity for seat rotation and RNG derivation. This is the streaming
+    /// primitive used by large strength sweeps so host memory stays O(chunk).
+    pub fn run_rotating_profile_chunk(
+        &mut self,
+        states: &[GameState],
+        candidate: CudaSimPolicyProfile,
+        baseline: CudaSimPolicyProfile,
+        config: CudaSimArenaConfig,
+        seed: u64,
+        game_offset: usize,
+    ) -> Result<CudaSimArenaResult, CudaSimError> {
+        if states.is_empty() {
+            return Ok(CudaSimArenaResult {
+                games: Vec::new(),
+                wins: [0; 4],
+                terminal_games: 0,
+                truncated_games: 0,
+                total_actions: 0,
+            });
+        }
+        self.upload_states(states)?;
+        self.assign_rotating_profiles(candidate, baseline, game_offset)?;
+        self.seed_rollout_rng_with_offset(seed, game_offset)?;
+        self.run_arena_games_seeded(config)
     }
 
     fn run_arena_campaign_inner(

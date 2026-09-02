@@ -1,10 +1,59 @@
-use colonist_catan_core::{GameState, SplitMix64};
+use colonist_catan_core::{Action, DevCard, GameState, Phase, SplitMix64};
 use colonist_catan_search::{
     CudaSimEngine, CudaSimPackedState, cuda_sim_action_supported,
 };
 
 const LANES: usize = 64;
 const STEPS: usize = 256;
+
+fn finish_setup(state: &mut GameState) -> Result<(), Box<dyn std::error::Error>> {
+    while matches!(state.phase, Phase::SetupSettlement | Phase::SetupRoad { .. }) {
+        let action = state
+            .legal_actions()
+            .into_iter()
+            .next()
+            .ok_or("setup state had no legal action")?;
+        state.apply(&action)?;
+    }
+    Ok(())
+}
+
+fn verify_end_turn_winner(engine: &mut CudaSimEngine) -> Result<(), Box<dyn std::error::Error>> {
+    let mut state = GameState::standard(69_999, 3);
+    state.player_trades_enabled = false;
+    finish_setup(&mut state)?;
+    state.phase = Phase::Main;
+    state.current_player = 0;
+    state.victory_target = 7;
+    let victory = DevCard::VictoryPoint.index();
+    state.development_deck[victory] = 0;
+    state.players[1].development[victory] = 5;
+    state.validate()?;
+
+    engine.upload_states(std::slice::from_ref(&state))?;
+    engine.apply_actions(&[Action::EndTurn])?;
+    state.apply(&Action::EndTurn)?;
+    if state.phase != Phase::Finished || state.current_player != 1 {
+        return Err("CPU EndTurn winner oracle did not enter Finished for the newly current player".into());
+    }
+    let expected = CudaSimPackedState::new(&state)?;
+    let actual = engine.download_packed_states()?.remove(0);
+    if expected != actual {
+        let first = expected
+            .words()
+            .iter()
+            .zip(actual.words())
+            .position(|(left, right)| left != right)
+            .unwrap_or(usize::MAX);
+        return Err(format!(
+            "GPU EndTurn winner mismatch at field {first}: cpu={} gpu={}",
+            expected.words().get(first).copied().unwrap_or_default(),
+            actual.words().get(first).copied().unwrap_or_default(),
+        )
+        .into());
+    }
+    Ok(())
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut states = (0..LANES)
@@ -18,6 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut engine = CudaSimEngine::new()?;
     let identity = engine.device_identity().clone();
+    verify_end_turn_winner(&mut engine)?;
     engine.upload_states(&states)?;
     let mut rng = SplitMix64::new(0x5eed_cafe_d15c_a11u64);
     let mut transitions = 0usize;

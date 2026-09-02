@@ -13,6 +13,8 @@ typedef unsigned long long uint64_t;
 #define VERTEX_COUNT 54u
 #define EDGE_COUNT 72u
 #define MAX_VERTEX_ADJACENCY 3u
+#define SEED_INDEX_MIX 0xd1342543de82ef95ull
+#define ROOT_RNG_DOMAIN 0xa4093822299f31d0ull
 
 #define STATE_NUM_PLAYERS 0u
 #define STATE_PHASE 1u
@@ -818,6 +820,17 @@ static inline __device__ void produce_roll(
             player_set(states, stride, lane, player, PLAYER_RESOURCES + resource, held + gain);
         }
     }
+}
+
+static inline __device__ uint64_t mix_stream_seed(
+    uint64_t base_seed,
+    uint64_t global_index,
+    uint64_t domain
+) {
+    uint64_t value = base_seed ^ domain ^ global_index * SEED_INDEX_MIX;
+    value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ull;
+    value = (value ^ (value >> 27)) * 0x94d049bb133111ebull;
+    return value ^ (value >> 31);
 }
 
 static inline __device__ uint64_t splitmix64_next(uint64_t *state) {
@@ -3205,6 +3218,7 @@ static inline __device__ void apply_transition_lane(
         state_set(states, stride, STATE_LAST_ROLL, lane, 0u);
         state_set(states, stride, STATE_PHASE, lane, PHASE_PRE_ROLL);
         state_set(states, stride, STATE_PHASE_ARG, lane, 0u);
+        finish_if_won(states, stride, lane);
         return;
     }
 
@@ -3392,7 +3406,7 @@ extern "C" __global__ void expand_root_rollouts_kernel(
     const uint64_t global_rollout = (uint64_t)root * (uint64_t)total_rollouts_per_action
         + (uint64_t)rollout_offset
         + (uint64_t)local_rollout;
-    rng_states[lane] = seed + (global_rollout + 1ull) * 0x9e3779b97f4a7c15ull;
+    rng_states[lane] = mix_stream_seed(seed, global_rollout, ROOT_RNG_DOMAIN);
     apply_transition_lane(states, topology, actions, status, stride, lane);
 }
 

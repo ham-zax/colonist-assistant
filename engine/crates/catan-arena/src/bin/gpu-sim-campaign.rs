@@ -4,6 +4,7 @@ use std::time::Instant;
 use colonist_catan_core::GameState;
 use colonist_catan_search::{
     CudaSimArenaConfig, CudaSimArenaResult, CudaSimEngine, CudaSimPolicyProfile,
+    cuda_sim_board_seed,
 };
 use serde::Serialize;
 
@@ -95,16 +96,16 @@ struct CampaignConfigReport {
 struct TrialReport {
     players: u8,
     candidate_profile: ProfileReport,
-    games: usize,
-    terminal_games: u32,
-    truncated_games: u32,
-    candidate_wins: u32,
-    opponent_wins: u32,
+    games: u64,
+    terminal_games: u64,
+    truncated_games: u64,
+    candidate_wins: u64,
+    opponent_wins: u64,
     candidate_win_rate_terminal: f64,
     candidate_win_rate_all_games: f64,
     candidate_win_rate_95ci: Option<[f64; 2]>,
-    candidate_games_by_seat: [u32; 4],
-    candidate_wins_by_seat: [u32; 4],
+    candidate_games_by_seat: [u64; 4],
+    candidate_wins_by_seat: [u64; 4],
     mean_candidate_victory_points: f64,
     mean_best_opponent_victory_points: f64,
     mean_victory_margin: f64,
@@ -120,10 +121,11 @@ struct TrialReport {
 #[serde(rename_all = "camelCase")]
 struct ProfileRankingReport {
     rank: usize,
+    players: u8,
     candidate_profile: ProfileReport,
-    games: usize,
-    terminal_games: u32,
-    candidate_wins: u32,
+    games: u64,
+    terminal_games: u64,
+    candidate_wins: u64,
     candidate_win_rate_terminal: f64,
     candidate_win_rate_95ci: Option<[f64; 2]>,
     mean_victory_margin: f64,
@@ -137,6 +139,101 @@ struct Output {
     config: CampaignConfigReport,
     trials: Vec<TrialReport>,
     ranking: Vec<ProfileRankingReport>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct TrialAccumulator {
+    games: u64,
+    terminal_games: u64,
+    truncated_games: u64,
+    candidate_wins: u64,
+    candidate_games_by_seat: [u64; 4],
+    candidate_wins_by_seat: [u64; 4],
+    candidate_victory_points: u64,
+    best_opponent_victory_points: u64,
+    turns: u64,
+    total_actions: u64,
+    elapsed_seconds: f64,
+}
+
+impl TrialAccumulator {
+    fn absorb(
+        &mut self,
+        players: u8,
+        global_game_offset: usize,
+        result: &CudaSimArenaResult,
+        elapsed_seconds: f64,
+    ) {
+        self.games = self.games.saturating_add(result.games.len() as u64);
+        self.terminal_games = self.terminal_games.saturating_add(result.terminal_games);
+        self.truncated_games = self.truncated_games.saturating_add(result.truncated_games);
+        self.total_actions = self.total_actions.saturating_add(result.total_actions);
+        self.elapsed_seconds += elapsed_seconds;
+
+        for (local_index, game) in result.games.iter().enumerate() {
+            let global_index = global_game_offset + local_index;
+            let candidate = global_index % players as usize;
+            self.candidate_games_by_seat[candidate] =
+                self.candidate_games_by_seat[candidate].saturating_add(1);
+            if game.game.winner == Some(candidate as u8) {
+                self.candidate_wins = self.candidate_wins.saturating_add(1);
+                self.candidate_wins_by_seat[candidate] =
+                    self.candidate_wins_by_seat[candidate].saturating_add(1);
+            }
+            self.candidate_victory_points = self
+                .candidate_victory_points
+                .saturating_add(game.game.victory_points[candidate] as u64);
+            let opponent_best = game
+                .game
+                .victory_points
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(player, _)| *player < players as usize && *player != candidate)
+                .map(|(_, vp)| vp)
+                .max()
+                .unwrap_or(0);
+            self.best_opponent_victory_points = self
+                .best_opponent_victory_points
+                .saturating_add(opponent_best as u64);
+            self.turns = self.turns.saturating_add(game.game.turn as u64);
+        }
+    }
+
+    fn into_report(self, players: u8, candidate_profile: CudaSimPolicyProfile) -> TrialReport {
+        let games = self.games.max(1) as f64;
+        let opponent_wins = self.terminal_games.saturating_sub(self.candidate_wins);
+        let mean_candidate_vp = self.candidate_victory_points as f64 / games;
+        let mean_best_opponent_vp = self.best_opponent_victory_points as f64 / games;
+        TrialReport {
+            players,
+            candidate_profile: candidate_profile.into(),
+            games: self.games,
+            terminal_games: self.terminal_games,
+            truncated_games: self.truncated_games,
+            candidate_wins: self.candidate_wins,
+            opponent_wins,
+            candidate_win_rate_terminal: if self.terminal_games == 0 {
+                0.0
+            } else {
+                self.candidate_wins as f64 / self.terminal_games as f64
+            },
+            candidate_win_rate_all_games: self.candidate_wins as f64 / games,
+            candidate_win_rate_95ci: wilson_interval(self.candidate_wins, self.terminal_games),
+            candidate_games_by_seat: self.candidate_games_by_seat,
+            candidate_wins_by_seat: self.candidate_wins_by_seat,
+            mean_candidate_victory_points: mean_candidate_vp,
+            mean_best_opponent_victory_points: mean_best_opponent_vp,
+            mean_victory_margin: mean_candidate_vp - mean_best_opponent_vp,
+            mean_turns: self.turns as f64 / games,
+            mean_actions: self.total_actions as f64 / games,
+            total_actions: self.total_actions,
+            elapsed_ms: self.elapsed_seconds * 1_000.0,
+            games_per_second: self.games as f64 / self.elapsed_seconds.max(f64::EPSILON),
+            actions_per_second: self.total_actions as f64
+                / self.elapsed_seconds.max(f64::EPSILON),
+        }
+    }
 }
 
 fn parse_profile(value: &str) -> Result<CudaSimPolicyProfile, String> {
@@ -341,17 +438,17 @@ fn print_help() {
     );
 }
 
-fn base_states(
+fn base_state_chunk(
     players: u8,
+    global_game_offset: usize,
     games: usize,
     seed: u64,
     player_trades_enabled: bool,
 ) -> Vec<GameState> {
     (0..games)
-        .map(|game| {
-            let board_seed = seed.wrapping_add(
-                (game as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15),
-            );
+        .map(|local_game| {
+            let global_game = global_game_offset + local_game;
+            let board_seed = cuda_sim_board_seed(seed, global_game as u64);
             let mut state = GameState::standard(board_seed, players);
             state.player_trades_enabled = player_trades_enabled;
             state
@@ -359,7 +456,7 @@ fn base_states(
         .collect()
 }
 
-fn wilson_interval(wins: u32, samples: u32) -> Option<[f64; 2]> {
+fn wilson_interval(wins: u64, samples: u64) -> Option<[f64; 2]> {
     if samples == 0 {
         return None;
     }
@@ -375,134 +472,73 @@ fn wilson_interval(wins: u32, samples: u32) -> Option<[f64; 2]> {
     Some([(center - radius).max(0.0), (center + radius).min(1.0)])
 }
 
-fn report_trial(
-    players: u8,
-    candidate_profile: CudaSimPolicyProfile,
-    result: &CudaSimArenaResult,
-    elapsed_seconds: f64,
-) -> TrialReport {
-    let mut candidate_wins = 0u32;
-    let mut candidate_games_by_seat = [0u32; 4];
-    let mut candidate_wins_by_seat = [0u32; 4];
-    let mut candidate_vp = 0u64;
-    let mut best_opponent_vp = 0u64;
-    let mut turns = 0u64;
-
-    for (game_index, game) in result.games.iter().enumerate() {
-        let candidate = game_index % players as usize;
-        candidate_games_by_seat[candidate] = candidate_games_by_seat[candidate].saturating_add(1);
-        if game.game.winner == Some(candidate as u8) {
-            candidate_wins = candidate_wins.saturating_add(1);
-            candidate_wins_by_seat[candidate] = candidate_wins_by_seat[candidate].saturating_add(1);
-        }
-        candidate_vp = candidate_vp.saturating_add(game.game.victory_points[candidate] as u64);
-        let opponent_best = game
-            .game
-            .victory_points
-            .iter()
-            .copied()
-            .enumerate()
-            .filter(|(player, _)| *player < players as usize && *player != candidate)
-            .map(|(_, vp)| vp)
-            .max()
-            .unwrap_or(0);
-        best_opponent_vp = best_opponent_vp.saturating_add(opponent_best as u64);
-        turns = turns.saturating_add(game.game.turn as u64);
-    }
-
-    let games = result.games.len().max(1) as f64;
-    let terminal = result.terminal_games;
-    let opponent_wins = terminal.saturating_sub(candidate_wins);
-    let mean_candidate_vp = candidate_vp as f64 / games;
-    let mean_best_opponent_vp = best_opponent_vp as f64 / games;
-    TrialReport {
-        players,
-        candidate_profile: candidate_profile.into(),
-        games: result.games.len(),
-        terminal_games: terminal,
-        truncated_games: result.truncated_games,
-        candidate_wins,
-        opponent_wins,
-        candidate_win_rate_terminal: if terminal == 0 {
-            0.0
-        } else {
-            candidate_wins as f64 / terminal as f64
-        },
-        candidate_win_rate_all_games: candidate_wins as f64 / games,
-        candidate_win_rate_95ci: wilson_interval(candidate_wins, terminal),
-        candidate_games_by_seat,
-        candidate_wins_by_seat,
-        mean_candidate_victory_points: mean_candidate_vp,
-        mean_best_opponent_victory_points: mean_best_opponent_vp,
-        mean_victory_margin: mean_candidate_vp - mean_best_opponent_vp,
-        mean_turns: turns as f64 / games,
-        mean_actions: result.total_actions as f64 / games,
-        total_actions: result.total_actions,
-        elapsed_ms: elapsed_seconds * 1_000.0,
-        games_per_second: result.games.len() as f64 / elapsed_seconds.max(f64::EPSILON),
-        actions_per_second: result.total_actions as f64 / elapsed_seconds.max(f64::EPSILON),
-    }
-}
-
 fn build_ranking(
     trials: &[TrialReport],
     profiles: &[CudaSimPolicyProfile],
+    player_counts: &[u8],
 ) -> Vec<ProfileRankingReport> {
-    let mut ranking = profiles
-        .iter()
-        .copied()
-        .map(|profile| {
-            let profile_report: ProfileReport = profile.into();
-            let matching = trials
-                .iter()
-                .filter(|trial| trial.candidate_profile == profile_report)
-                .collect::<Vec<_>>();
-            let games = matching.iter().map(|trial| trial.games).sum::<usize>();
-            let terminal_games = matching
-                .iter()
-                .map(|trial| trial.terminal_games)
-                .sum::<u32>();
-            let candidate_wins = matching
-                .iter()
-                .map(|trial| trial.candidate_wins)
-                .sum::<u32>();
-            let weighted_margin = matching
-                .iter()
-                .map(|trial| trial.mean_victory_margin * trial.games as f64)
-                .sum::<f64>();
-            ProfileRankingReport {
-                rank: 0,
-                candidate_profile: profile_report,
-                games,
-                terminal_games,
-                candidate_wins,
-                candidate_win_rate_terminal: if terminal_games == 0 {
-                    0.0
-                } else {
-                    candidate_wins as f64 / terminal_games as f64
-                },
-                candidate_win_rate_95ci: wilson_interval(candidate_wins, terminal_games),
-                mean_victory_margin: if games == 0 {
-                    0.0
-                } else {
-                    weighted_margin / games as f64
-                },
-            }
-        })
-        .collect::<Vec<_>>();
-    ranking.sort_by(|left, right| {
-        right
-            .candidate_win_rate_terminal
-            .total_cmp(&left.candidate_win_rate_terminal)
-            .then_with(|| {
-                right
-                    .mean_victory_margin
-                    .total_cmp(&left.mean_victory_margin)
+    let mut ranking = Vec::new();
+    for players in player_counts.iter().copied() {
+        let mut rows = profiles
+            .iter()
+            .copied()
+            .map(|profile| {
+                let profile_report: ProfileReport = profile.into();
+                let matching = trials
+                    .iter()
+                    .filter(|trial| {
+                        trial.players == players && trial.candidate_profile == profile_report
+                    })
+                    .collect::<Vec<_>>();
+                let games = matching.iter().map(|trial| trial.games).sum::<u64>();
+                let terminal_games = matching
+                    .iter()
+                    .map(|trial| trial.terminal_games)
+                    .sum::<u64>();
+                let candidate_wins = matching
+                    .iter()
+                    .map(|trial| trial.candidate_wins)
+                    .sum::<u64>();
+                let weighted_margin = matching
+                    .iter()
+                    .map(|trial| trial.mean_victory_margin * trial.games as f64)
+                    .sum::<f64>();
+                ProfileRankingReport {
+                    rank: 0,
+                    players,
+                    candidate_profile: profile_report,
+                    games,
+                    terminal_games,
+                    candidate_wins,
+                    candidate_win_rate_terminal: if terminal_games == 0 {
+                        0.0
+                    } else {
+                        candidate_wins as f64 / terminal_games as f64
+                    },
+                    candidate_win_rate_95ci: wilson_interval(candidate_wins, terminal_games),
+                    mean_victory_margin: if games == 0 {
+                        0.0
+                    } else {
+                        weighted_margin / games as f64
+                    },
+                }
             })
-            .then_with(|| right.terminal_games.cmp(&left.terminal_games))
-    });
-    for (index, row) in ranking.iter_mut().enumerate() {
-        row.rank = index + 1;
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| {
+            right
+                .candidate_win_rate_terminal
+                .total_cmp(&left.candidate_win_rate_terminal)
+                .then_with(|| {
+                    right
+                        .mean_victory_margin
+                        .total_cmp(&left.mean_victory_margin)
+                })
+                .then_with(|| right.terminal_games.cmp(&left.terminal_games))
+        });
+        for (index, row) in rows.iter_mut().enumerate() {
+            row.rank = index + 1;
+        }
+        ranking.extend(rows);
     }
     ranking
 }
@@ -522,32 +558,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut trials = Vec::new();
 
     for players in config.players.iter().copied() {
-        let states = base_states(
-            players,
-            config.games,
-            config.board_seed,
-            config.player_trades_enabled,
-        );
-        for candidate_profile in config.candidate_profiles.iter().copied() {
-            let started = Instant::now();
-            let result = engine.run_rotating_profile_campaign(
-                &states,
-                candidate_profile,
-                config.baseline_profile,
-                arena_config,
-                config.simulation_seed,
-                config.chunk_games,
-            )?;
-            trials.push(report_trial(
+        let mut accumulators = vec![TrialAccumulator::default(); config.candidate_profiles.len()];
+        let mut game_offset = 0usize;
+        while game_offset < config.games {
+            let chunk_games = (config.games - game_offset).min(config.chunk_games);
+            let states = base_state_chunk(
                 players,
-                candidate_profile,
-                &result,
-                started.elapsed().as_secs_f64(),
-            ));
+                game_offset,
+                chunk_games,
+                config.board_seed,
+                config.player_trades_enabled,
+            );
+            for (profile_index, candidate_profile) in
+                config.candidate_profiles.iter().copied().enumerate()
+            {
+                let started = Instant::now();
+                let result = engine.run_rotating_profile_chunk(
+                    &states,
+                    candidate_profile,
+                    config.baseline_profile,
+                    arena_config,
+                    config.simulation_seed,
+                    game_offset,
+                )?;
+                accumulators[profile_index].absorb(
+                    players,
+                    game_offset,
+                    &result,
+                    started.elapsed().as_secs_f64(),
+                );
+            }
+            game_offset += chunk_games;
         }
+        trials.extend(
+            accumulators
+                .into_iter()
+                .zip(config.candidate_profiles.iter().copied())
+                .map(|(accumulator, profile)| accumulator.into_report(players, profile)),
+        );
     }
 
-    let ranking = build_ranking(&trials, &config.candidate_profiles);
+    let ranking = build_ranking(&trials, &config.candidate_profiles, &config.players);
     let output = Output {
         kind: "cuda-resident-strength-campaign",
         device: DeviceReport {
