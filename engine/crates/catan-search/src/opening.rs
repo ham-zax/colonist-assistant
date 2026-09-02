@@ -98,7 +98,7 @@ fn opening_position_bonus(state: &GameState, player: u8, exact_hand: bool) -> f3
 /// additional roads. Ranking the top sites gives a portfolio signal instead of
 /// only the single best fragile route.
 fn opening_road_reach(state: &GameState, player: u8) -> f32 {
-    let mut site_values = Vec::<f32>::new();
+    let mut site_values = vec![None::<f32>; state.board.vertices.len()];
     let mut frontier = state
         .board
         .edges
@@ -109,9 +109,17 @@ fn opening_road_reach(state: &GameState, player: u8) -> f32 {
         .collect::<Vec<_>>();
     frontier.sort_unstable();
     frontier.dedup();
+    let mut distance = vec![u8::MAX; state.board.vertices.len()];
+    for vertex in &frontier {
+        distance[*vertex as usize] = 0;
+    }
     for depth in 1u8..=3 {
         let mut next_frontier = Vec::new();
         for vertex in &frontier {
+            if state.buildings[*vertex as usize].is_some_and(|building| building.player() != player)
+            {
+                continue;
+            }
             for next_edge in &state.board.vertices[*vertex as usize].adjacent_edges {
                 if state.roads[*next_edge as usize].is_some() {
                     continue;
@@ -121,6 +129,15 @@ fn opening_road_reach(state: &GameState, player: u8) -> f32 {
                     .into_iter()
                     .find(|other| other != vertex)
                     .unwrap_or(*vertex);
+                if distance[candidate as usize] <= depth {
+                    continue;
+                }
+                distance[candidate as usize] = depth;
+                if !state.buildings[candidate as usize]
+                    .is_some_and(|building| building.player() != player)
+                {
+                    next_frontier.push(candidate);
+                }
                 if state.buildings[candidate as usize].is_some()
                     || state.board.vertices[candidate as usize]
                         .adjacent_vertices
@@ -130,16 +147,16 @@ fn opening_road_reach(state: &GameState, player: u8) -> f32 {
                     continue;
                 }
                 let distance_penalty = 1.0 + (depth as f32 - 1.0) * 0.42;
-                site_values.push(vertex_value(state, candidate, player) / distance_penalty);
-                next_frontier.push(candidate);
+                site_values[candidate as usize] =
+                    Some(vertex_value(state, candidate, player) / distance_penalty);
             }
         }
         next_frontier.sort_unstable();
         next_frontier.dedup();
         frontier = next_frontier;
     }
+    let mut site_values = site_values.into_iter().flatten().collect::<Vec<_>>();
     site_values.sort_by(|left, right| right.total_cmp(left));
-    site_values.dedup_by(|left, right| (*left - *right).abs() < 1e-4);
     let best = site_values.first().copied().unwrap_or(0.0);
     let second = site_values.get(1).copied().unwrap_or(0.0);
     let third = site_values.get(2).copied().unwrap_or(0.0);

@@ -70,6 +70,10 @@ pub struct GameState {
     /// Benchmark/rules toggle for player-to-player trading. Maritime bank/port
     /// trades remain legal when this is false.
     pub player_trades_enabled: bool,
+    /// Product-policy mask for seats that must refuse domestic trading while
+    /// other seats continue to use the normal game rule. Bit N corresponds to
+    /// player N. This remains zero for ordinary arena/rules simulations.
+    pub domestic_trade_disabled: u8,
     pub last_rejected_trade: Option<TradeOffer>,
     pub trade: Option<TradeOffer>,
     pub trade_cursor: u8,
@@ -111,6 +115,7 @@ impl GameState {
             domestic_trade_used: false,
             domestic_trade_count: 0,
             player_trades_enabled: true,
+            domestic_trade_disabled: 0,
             last_rejected_trade: None,
             trade: None,
             trade_cursor: 0,
@@ -139,6 +144,10 @@ impl GameState {
             }
             _ => self.current_player,
         }
+    }
+
+    fn domestic_trade_allowed_for(&self, player: u8) -> bool {
+        self.player_trades_enabled && self.domestic_trade_disabled & (1 << player) == 0
     }
 
     pub fn winner(&self) -> Option<u8> {
@@ -227,6 +236,9 @@ impl GameState {
             || self.roads.len() != self.board.edges.len()
         {
             return Err("dynamic topology length does not match board".into());
+        }
+        if self.domestic_trade_disabled >> players != 0 {
+            return Err("domestic-trade policy references a nonexistent player".into());
         }
         for resource in Resource::ALL {
             let total = self.bank[resource.index()] as u16
@@ -449,6 +461,11 @@ impl GameState {
         if !self.player_trades_enabled {
             byte(&mut hash, 0x4e);
             byte(&mut hash, 0x50);
+        }
+        if self.domestic_trade_disabled != 0 {
+            byte(&mut hash, 0x50);
+            byte(&mut hash, 0x44);
+            byte(&mut hash, self.domestic_trade_disabled);
         }
         for byte_value in self.turn.to_le_bytes() {
             byte(&mut hash, byte_value);
@@ -1005,7 +1022,7 @@ impl GameState {
                 }
             }
         }
-        if self.player_trades_enabled && self.domestic_trade_count < 2 {
+        if self.domestic_trade_allowed_for(self.current_player) && self.domestic_trade_count < 2 {
             actions.extend(self.generated_domestic_trade_offers());
         }
         actions
@@ -1563,7 +1580,7 @@ impl GameState {
         give: ResourceHand,
         receive: ResourceHand,
     ) -> Result<(), RuleError> {
-        if !self.player_trades_enabled
+        if !self.domestic_trade_allowed_for(self.current_player)
             || self.phase != Phase::Main
             || recipients == 0
             || recipients & (1 << self.current_player) != 0
@@ -1599,7 +1616,7 @@ impl GameState {
         let Some(trade) = self.trade else {
             return Vec::new();
         };
-        if !self.player_trades_enabled {
+        if !self.domestic_trade_allowed_for(self.actor()) {
             return if self.trade_responses_complete(trade) {
                 vec![Action::CancelTrade]
             } else {
@@ -1761,7 +1778,7 @@ impl GameState {
     }
 
     fn respond_trade(&mut self, accept: bool) -> Result<(), RuleError> {
-        if !self.player_trades_enabled && accept {
+        if accept && !self.domestic_trade_allowed_for(self.trade_cursor) {
             return Err(RuleError::InvalidTrade);
         }
         if self.phase != Phase::TradeResponses {
@@ -1799,7 +1816,7 @@ impl GameState {
         give: ResourceHand,
         receive: ResourceHand,
     ) -> Result<(), RuleError> {
-        if !self.player_trades_enabled {
+        if !self.domestic_trade_allowed_for(self.trade_cursor) {
             return Err(RuleError::InvalidTrade);
         }
         if self.phase != Phase::TradeResponses || self.trade_negotiation_round >= 1 {
@@ -1831,7 +1848,11 @@ impl GameState {
     }
 
     fn confirm_trade(&mut self, partner: u8) -> Result<(), RuleError> {
-        if !self.player_trades_enabled {
+        let creator = self
+            .trade
+            .map(|trade| trade.creator)
+            .unwrap_or(self.current_player);
+        if !self.domestic_trade_allowed_for(creator) {
             return Err(RuleError::InvalidTrade);
         }
         if self.phase != Phase::TradeResponses {

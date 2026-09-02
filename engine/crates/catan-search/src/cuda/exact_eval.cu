@@ -226,6 +226,91 @@ static inline __device__ uint32_t topo_edge_vertex(
     return topology[TOPO_EDGE_VERTICES + edge * 2u + endpoint];
 }
 
+static inline __device__ void build_target_mask(
+    const uint32_t *state,
+    const uint32_t *topology,
+    uint32_t player,
+    uint32_t targets[4]
+) {
+    targets[0] = 0u;
+    targets[1] = 0u;
+    targets[2] = 0u;
+    targets[3] = 0u;
+
+    if (player_roads_left(state, player) > 0u) {
+        for (uint32_t edge = 0u; edge < EDGE_COUNT && targets[0] == 0u; ++edge) {
+            if (state[STATE_ROADS + edge] != 0u) {
+                continue;
+            }
+            for (uint32_t endpoint = 0u; endpoint < 2u; ++endpoint) {
+                const uint32_t vertex = topo_edge_vertex(topology, edge, endpoint);
+                const uint32_t building = state[STATE_BUILDINGS + vertex];
+                if (building != 0u) {
+                    if ((uint32_t)building_player(building) == player) {
+                        targets[0] = 1u;
+                        break;
+                    }
+                    continue;
+                }
+                const uint32_t edge_count = topo_vertex_edge_count(topology, vertex);
+                for (uint32_t slot = 0u; slot < edge_count; ++slot) {
+                    const uint32_t neighbor = topo_vertex_edge(topology, vertex, slot);
+                    if (neighbor != edge && state[STATE_ROADS + neighbor] == player + 1u) {
+                        targets[0] = 1u;
+                        break;
+                    }
+                }
+                if (targets[0] != 0u) {
+                    break;
+                }
+            }
+        }
+    }
+
+    if (player_settlements_left(state, player) > 0u) {
+        for (uint32_t vertex = 0u; vertex < VERTEX_COUNT && targets[1] == 0u; ++vertex) {
+            if (state[STATE_BUILDINGS + vertex] != 0u) {
+                continue;
+            }
+            int open = 1;
+            const uint32_t adjacent_count = topo_vertex_vertex_count(topology, vertex);
+            for (uint32_t slot = 0u; slot < adjacent_count; ++slot) {
+                const uint32_t adjacent = topo_vertex_vertex(topology, vertex, slot);
+                if (state[STATE_BUILDINGS + adjacent] != 0u) {
+                    open = 0;
+                    break;
+                }
+            }
+            if (!open) {
+                continue;
+            }
+            const uint32_t edge_count = topo_vertex_edge_count(topology, vertex);
+            for (uint32_t slot = 0u; slot < edge_count; ++slot) {
+                const uint32_t edge = topo_vertex_edge(topology, vertex, slot);
+                if (state[STATE_ROADS + edge] == player + 1u) {
+                    targets[1] = 1u;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (player_cities_left(state, player) > 0u) {
+        for (uint32_t vertex = 0u; vertex < VERTEX_COUNT; ++vertex) {
+            if (state[STATE_BUILDINGS + vertex] == player + 1u) {
+                targets[2] = 1u;
+                break;
+            }
+        }
+    }
+    for (uint32_t card = 0u; card < 5u; ++card) {
+        if (state[STATE_DEVELOPMENT_DECK + card] > 0u) {
+            targets[3] = 1u;
+            break;
+        }
+    }
+}
+
 static inline __device__ uint32_t port_ratio_value(uint32_t port, uint32_t resource) {
     return port == resource + 2u ? 2u : 4u;
 }
@@ -330,10 +415,15 @@ static inline __device__ void dynamic_resource_weights(
     production_pips(state, topology, player, production);
     uint32_t ratios[5];
     trade_ratios(state, player, ratios);
+    uint32_t build_targets[4];
+    build_target_mask(state, topology, player, build_targets);
 
     float best_score = EXACT_INFINITY;
     uint32_t best_missing[5] = {0u, 0u, 0u, 0u, 0u};
     for (uint32_t kind = 0u; kind < 4u; ++kind) {
+        if (build_targets[kind] == 0u) {
+            continue;
+        }
         uint32_t missing[5];
         deficit(hand, kind, missing);
         float weighted = 0.0f;
@@ -395,7 +485,8 @@ static inline __device__ uint32_t hand_total(const uint32_t hand[5]) {
 
 static inline __device__ float hand_utility_with_weights(
     const uint32_t hand[5],
-    const float weights[5]
+    const float weights[5],
+    const uint32_t build_targets[4]
 ) {
     float liquidity = 0.0f;
     for (uint32_t resource = 0u; resource < 5u; ++resource) {
@@ -403,12 +494,15 @@ static inline __device__ float hand_utility_with_weights(
     }
     float completed = 0.0f;
     for (uint32_t kind = 0u; kind < 4u; ++kind) {
-        if (contains_cost(hand, kind)) {
+        if (build_targets[kind] != 0u && contains_cost(hand, kind)) {
             completed = fmaxf(completed, COMPLETED_VALUE[kind]);
         }
     }
     float near_plan = 0.0f;
     for (uint32_t kind = 0u; kind < 4u; ++kind) {
+        if (build_targets[kind] == 0u) {
+            continue;
+        }
         uint32_t missing[5];
         deficit(hand, kind, missing);
         const float missing_total = (float)hand_total(missing);
@@ -441,7 +535,8 @@ static inline __device__ uint32_t rolls_before_next_spend(
 static inline __device__ float optimal_kept_utility(
     const uint32_t hand[5],
     uint32_t discard_count,
-    const float weights[5]
+    const float weights[5],
+    const uint32_t build_targets[4]
 ) {
     float best = 0.0f;
     const uint32_t first_limit = discard_count < hand[0] ? discard_count : hand[0];
@@ -466,7 +561,10 @@ static inline __device__ float optimal_kept_utility(
                     for (uint32_t resource = 0u; resource < 5u; ++resource) {
                         kept[resource] = hand[resource] - discarded[resource];
                     }
-                    best = fmaxf(best, hand_utility_with_weights(kept, weights));
+                    best = fmaxf(
+                        best,
+                        hand_utility_with_weights(kept, weights, build_targets)
+                    );
                 }
             }
         }
@@ -521,8 +619,15 @@ static inline __device__ float expected_discard_loss(
 
     float weights[5];
     dynamic_resource_weights(state, topology, player, weights);
-    const float before = hand_utility_with_weights(projected, weights);
-    const float kept = optimal_kept_utility(projected, projected_held / 2u, weights);
+    uint32_t build_targets[4];
+    build_target_mask(state, topology, player, build_targets);
+    const float before = hand_utility_with_weights(projected, weights, build_targets);
+    const float kept = optimal_kept_utility(
+        projected,
+        projected_held / 2u,
+        weights,
+        build_targets
+    );
     const float expected_cards_lost = probability * (float)(projected_held / 2u);
     const float overflow = (float)(projected_held - state[STATE_DISCARD_LIMIT]);
     return probability * fmaxf(before - kept, 0.0f)
@@ -602,6 +707,21 @@ static inline __device__ float turns_until_action(
     return (float)seats + phase_delay;
 }
 
+static inline __device__ float acquisition_rate(
+    const float production[5],
+    const uint32_t ratios[5],
+    uint32_t target
+) {
+    float rate = production[target];
+    for (uint32_t give = 0u; give < 5u; ++give) {
+        if (give == target) {
+            continue;
+        }
+        rate += production[give] / (float)ratios[give];
+    }
+    return rate;
+}
+
 static inline __device__ float expansion_arrival_score(
     const uint32_t *state,
     uint32_t player,
@@ -628,14 +748,10 @@ static inline __device__ float expansion_arrival_score(
     if (missing_total == 0u) {
         return turns_until_action(state, player);
     }
-    float production_total = 0.0f;
-    for (uint32_t resource = 0u; resource < 5u; ++resource) {
-        production_total += production[resource];
-    }
     float expected_rolls = 0.0f;
     for (uint32_t resource = 0u; resource < 5u; ++resource) {
         expected_rolls += (float)missing[resource] * 36.0f
-            / (production[resource] + production_total / (float)ratios[resource] + 0.65f);
+            / (acquisition_rate(production, ratios, resource) + 0.65f);
     }
     const uint32_t count = state[STATE_NUM_PLAYERS] > 1u
         ? state[STATE_NUM_PLAYERS]
@@ -1048,6 +1164,7 @@ static inline __device__ void largest_army_outlook(
 
 static inline __device__ float progress_card_utility(
     const uint32_t *state,
+    const uint32_t *topology,
     uint32_t player,
     uint32_t card,
     float expansion_value
@@ -1065,8 +1182,13 @@ static inline __device__ float progress_card_utility(
         for (uint32_t resource = 0u; resource < 5u; ++resource) {
             hand[resource] = resource_count(state, player, resource);
         }
+        uint32_t build_targets[4];
+        build_target_mask(state, topology, player, build_targets);
         uint32_t nearest = 0xffffffffu;
         for (uint32_t kind = 0u; kind < 4u; ++kind) {
+            if (build_targets[kind] == 0u) {
+                continue;
+            }
             uint32_t missing[5];
             deficit(hand, kind, missing);
             nearest = nearest < hand_total(missing) ? nearest : hand_total(missing);
@@ -1089,6 +1211,7 @@ static inline __device__ float progress_card_utility(
 
 static inline __device__ float development_utility(
     const uint32_t *state,
+    const uint32_t *topology,
     uint32_t player,
     float expansion_value
 ) {
@@ -1109,9 +1232,9 @@ static inline __device__ float development_utility(
         * (0.28f + army_acquire * 1.15f)
         + fmaxf(knights - 1.0f, 0.0f) * (0.12f + army_acquire * 0.24f);
     const float raw = knight_utility
-        + progress_card_utility(state, player, 2u, expansion_value)
-        + progress_card_utility(state, player, 3u, expansion_value)
-        + progress_card_utility(state, player, 4u, expansion_value);
+        + progress_card_utility(state, topology, player, 2u, expansion_value)
+        + progress_card_utility(state, topology, player, 3u, expansion_value)
+        + progress_card_utility(state, topology, player, 4u, expansion_value);
     const uint32_t action_cards = development_count(state, player, 0u)
         + development_count(state, player, 2u)
         + development_count(state, player, 3u)
@@ -1144,12 +1267,13 @@ static inline __device__ float expected_build_tempo(
     production_pips(state, topology, player, production);
     uint32_t ratios[5];
     trade_ratios(state, player, ratios);
-    float production_total = 0.0f;
-    for (uint32_t resource = 0u; resource < 5u; ++resource) {
-        production_total += production[resource];
-    }
+    uint32_t build_targets[4];
+    build_target_mask(state, topology, player, build_targets);
     float best = 0.0f;
     for (uint32_t kind = 0u; kind < 4u; ++kind) {
+        if (build_targets[kind] == 0u) {
+            continue;
+        }
         uint32_t missing[5];
         deficit(hand, kind, missing);
         float eta = 0.0f;
@@ -1158,9 +1282,7 @@ static inline __device__ float expected_build_tempo(
                 continue;
             }
             eta += (float)missing[resource] * 36.0f
-                / (production[resource]
-                    + production_total / (float)ratios[resource]
-                    + 0.75f);
+                / (acquisition_rate(production, ratios, resource) + 0.75f);
         }
         best = fmaxf(best, BUILD_TEMPO_VALUE[kind] / (1.0f + eta / 18.0f));
     }
@@ -1235,7 +1357,9 @@ static inline __device__ float strategic_utility(
     for (uint32_t resource = 0u; resource < 5u; ++resource) {
         hand[resource] = resource_count(state, player, resource);
     }
-    const float hand_value = hand_utility_with_weights(hand, weights);
+    uint32_t build_targets[4];
+    build_target_mask(state, topology, player, build_targets);
+    const float hand_value = hand_utility_with_weights(hand, weights, build_targets);
 
     float expansion_value;
     float expansion_portfolio;
@@ -1297,7 +1421,7 @@ static inline __device__ float strategic_utility(
         + expansion_portfolio * 0.22f
         + (road_acquire * road_retain) * 3.2f * race_urgency
         + (army_acquire * army_retain) * 3.2f * race_urgency
-        + development_utility(state, player, expansion_value) * 0.72f
+        + development_utility(state, topology, player, expansion_value) * 0.72f
         + port_flexibility * 0.07f
         - expected_discard_loss(state, topology, player) * 2.4f
         - speculative_road_penalty(state, player, road_acquire, road_retain);

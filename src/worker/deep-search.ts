@@ -1267,7 +1267,11 @@ export const buildDeepSearchRequest = (
         discardCursor: board.action === "discard" ? root : 0,
         robberReturnPhase: board.hasRolled === false ? "pre-roll" : "main",
         domesticTradeUsed,
-        playerTradesEnabled,
+        // `disablePlayerTrades` is an assistant policy, not a table rule. Keep
+        // domestic trading enabled in the simulated game so opponents can
+        // trade with each other, and disable only the local/root seat.
+        playerTradesEnabled: true,
+        domesticTradeDisabled: playerTradesEnabled ? 0 : 1 << root,
         ...(activeTrade
           ? {
               trade: {

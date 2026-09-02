@@ -124,6 +124,7 @@ struct StateInput {
     trade_cursor: u8,
     domestic_trade_used: bool,
     player_trades_enabled: Option<bool>,
+    domestic_trade_disabled: Option<u8>,
     longest_road_holder: Option<u8>,
     largest_army_holder: Option<u8>,
 }
@@ -540,6 +541,7 @@ fn game_states(
             // expand a full tree of redundant offers.
             domestic_trade_count: if input.domestic_trade_used { 2 } else { 0 },
             player_trades_enabled: input.player_trades_enabled.unwrap_or(true),
+            domestic_trade_disabled: input.domestic_trade_disabled.unwrap_or(0),
             last_rejected_trade: last_rejected_trade.as_ref().map(|rejected| TradeOffer {
                 creator: input.current_player,
                 recipients: ((1u8 << num_players) - 1) & !(1u8 << input.current_player),
