@@ -1598,7 +1598,7 @@ describe("action guide autopilot", () => {
     expect(sendClick).not.toHaveBeenCalled();
   });
 
-  it("selects the complete discard plan and confirms it", async () => {
+  it("retries a swallowed repeated discard before confirming", async () => {
     const modal = document.createElement("div");
     modal.className = "actionBox-fixture";
     modal.append("Selecciona cartas");
@@ -1608,13 +1608,22 @@ describe("action guide autopilot", () => {
     brick.className = "card";
     brick.innerHTML = '<img src="card_brick.svg">';
     inventory.append(brick);
+    const progress = document.createElement("span");
+    progress.textContent = "0/2";
     const confirm = document.createElement("div");
     confirm.className = "confirmButton-fixture";
     confirm.innerHTML = '<img src="icon_check.fixture.svg">';
     const brickClicks = vi.fn();
     const confirmClicks = vi.fn();
+    let selectedCount = 0;
     brick.addEventListener("click", () => {
       brickClicks();
+      // Colonist can swallow a click while keeping one collapsed selected-card
+      // stack visible. The total selected counter is the independent commit
+      // evidence for the repeated copy.
+      if (brickClicks.mock.calls.length === 2) return;
+      selectedCount = Math.min(2, selectedCount + 1);
+      progress.textContent = `${selectedCount}/2`;
       if (!modal.querySelector("[data-card-enum='2']")) {
         const selected = document.createElement("button");
         selected.dataset.cardEnum = "2";
@@ -1622,8 +1631,11 @@ describe("action guide autopilot", () => {
         modal.prepend(selected);
       }
     });
-    confirm.addEventListener("click", confirmClicks);
-    modal.append(confirm);
+    confirm.addEventListener("click", () => {
+      confirmClicks();
+      modal.remove();
+    });
+    modal.append(progress, confirm);
     document.body.append(modal, inventory);
     const cards = emptyResources();
     cards.brick = 2;
@@ -1638,9 +1650,9 @@ describe("action guide autopilot", () => {
       },
       { highlight: true, autonomous: true },
     );
-    await vi.advanceTimersByTimeAsync(1_600);
+    await vi.advanceTimersByTimeAsync(3_000);
 
-    expect(brickClicks).toHaveBeenCalledTimes(2);
+    expect(brickClicks).toHaveBeenCalledTimes(3);
     expect(confirmClicks).toHaveBeenCalledOnce();
 
     // The board bridge can briefly retain the completed mandatory phase while
@@ -1658,7 +1670,7 @@ describe("action guide autopilot", () => {
     );
     await vi.advanceTimersByTimeAsync(1_000);
 
-    expect(brickClicks).toHaveBeenCalledTimes(2);
+    expect(brickClicks).toHaveBeenCalledTimes(3);
     expect(confirmClicks).toHaveBeenCalledOnce();
   });
 

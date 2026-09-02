@@ -255,6 +255,46 @@ describe("decision trace recorder", () => {
     });
   });
 
+  it("does not revive a superseded trace when a late worker result arrives", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("chrome", {
+      storage: {
+        local: {
+          set: vi.fn(async () => undefined),
+          remove: vi.fn(async () => undefined),
+          get: vi.fn(async () => ({})),
+        },
+      },
+    });
+    let state = createTrackerState();
+    state = reduceTracker(state, { type: "discover", player: "You" });
+    const recorder = new DecisionTraceRecorder();
+    recorder.begin("late-state", state, board(), 100);
+    recorder.supersedePending();
+
+    const lateAnalysis: DecisionAnalysis = {
+      engine: "deep-search",
+      players: [],
+      actionScores: {
+        road: 0,
+        settlement: 0,
+        city: 0,
+        development: 0,
+      },
+      simulations: 0,
+      model: "late-result",
+      runtime: "background-wasm",
+    };
+    recorder.complete("late-state", lateAnalysis);
+
+    expect(recorder.snapshot(false)[0]).toMatchObject({
+      deepStatus: "superseded",
+      lifecycleStatus: "superseded",
+      deepAttempts: [{ status: "superseded" }],
+    });
+    expect(recorder.snapshot(false)[0]?.searchResultId).toBeUndefined();
+  });
+
   it("cancels pending persistence and deletes stored traces on reset", async () => {
     vi.useFakeTimers();
     const set = vi.fn(async (_value: Record<string, unknown>) => undefined);

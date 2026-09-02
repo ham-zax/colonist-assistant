@@ -2362,9 +2362,12 @@ export class AssistantOverlay {
       board.gameOver
     ) {
       this.decisionTraces.supersedePending();
+      this.decisionAnalysis = undefined;
+      this.decisionKey = "";
       this.decisionPendingKey = "";
       this.decisionSlowKey = "";
       this.decisionWaitingForPreviousSearch = false;
+      this.decisionWorker.reset();
       return;
     }
     const decisionBoardBase = board.activeTrades

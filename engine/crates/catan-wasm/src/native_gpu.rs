@@ -659,7 +659,7 @@ impl NativeGpuSearchEngine {
                 if candidate.action != representative {
                     pruned_roots.push(PrunedRootOutput {
                         action: action(candidate.action.clone()),
-                        pre_truncation_rank: Some(*rank),
+                        pre_truncation_rank: Some(*rank + 1),
                         reason: "exact-family-collapsed",
                     });
                 }
@@ -735,7 +735,7 @@ impl NativeGpuSearchEngine {
                 })
                 .map(|(rank, candidate)| PrunedRootOutput {
                     action: action(candidate.action.clone()),
-                    pre_truncation_rank: Some(rank),
+                    pre_truncation_rank: Some(rank + 1),
                     reason: "branch-truncated",
                 }),
         );
@@ -764,7 +764,8 @@ impl NativeGpuSearchEngine {
                     action: action(candidate.action.clone()),
                     pre_truncation_rank: ranked
                         .iter()
-                        .position(|ranked| ranked.action == candidate.action),
+                        .position(|ranked| ranked.action == candidate.action)
+                        .map(|rank| rank + 1),
                     reason: "trade-safety",
                 });
             }

@@ -958,6 +958,31 @@ const selectedDiscardResource = (
   };
 };
 
+const discardSelectionProgress = (required: number): number | undefined => {
+  const roots = [findDiscardRoot(), ...modalRoots()].filter(
+    (root, index, all): root is HTMLElement =>
+      Boolean(root) && all.indexOf(root) === index,
+  );
+  for (const root of roots) {
+    const match = normalized(root.textContent ?? "").match(
+      /(?:^|\D)(\d{1,3})\s*\/\s*(\d{1,3})(?:\D|$)/u,
+    );
+    if (!match) continue;
+    const selected = Number(match[1]);
+    const total = Number(match[2]);
+    if (
+      Number.isInteger(selected) &&
+      Number.isInteger(total) &&
+      total === required &&
+      selected >= 0 &&
+      selected <= total
+    ) {
+      return selected;
+    }
+  }
+  return undefined;
+};
+
 const findResourceChoice = (resource: Resource): HTMLElement | undefined => {
   for (const root of modalRoots()) {
     const choice = findResourceInRoot(root, resource);
@@ -1882,34 +1907,58 @@ const counterWorkflow = (
 const discardWorkflow = (
   action: Extract<NextClick, { kind: "discard" }>,
 ): WorkflowStep[] => {
+  const requiredTotal = Object.values(action.cards).reduce(
+    (total, count) => total + count,
+    0,
+  );
+  let selectionOrdinal = 0;
   const selectionSteps = (Object.keys(action.cards) as Resource[]).flatMap(
     (resource) =>
       Array.from({ length: action.cards[resource] }, (_, index) => {
         const expected = index + 1;
+        const totalExpected = ++selectionOrdinal;
+        let totalBeforeClick: number | undefined;
         const ready = (): boolean => {
           const selected = selectedDiscardResource(resource);
-          return (
+          if (
             selected.count >= expected &&
             (expected === 1 || selected.exactMultiplicity)
+          ) {
+            return true;
+          }
+          const progress = discardSelectionProgress(requiredTotal);
+          return (
+            expected > 1 &&
+            selected.count > 0 &&
+            progress !== undefined &&
+            progress >= totalExpected
           );
         };
         const complete = (): boolean => {
           const selected = selectedDiscardResource(resource);
           if (selected.count === 0) return false;
-          // Some Colonist layouts collapse repeated selected cards into one
-          // resource stack without a count badge. In that layout resource
-          // identity is observable but multiplicity is not; require the click
-          // for every repeated step, then accept the observed resource instead
-          // of stalling the mandatory workflow forever.
-          return selected.exactMultiplicity
-            ? selected.count >= expected
-            : true;
+          if (selected.exactMultiplicity) return selected.count >= expected;
+          if (expected === 1) return true;
+          // Colonist can collapse repeated selected cards into one resource
+          // stack without a per-resource count badge. In that layout, require
+          // the independent total-selection counter to advance across this
+          // click before accepting the Nth copy as committed.
+          const progress = discardSelectionProgress(requiredTotal);
+          return (
+            progress !== undefined &&
+            progress >= totalExpected &&
+            (totalBeforeClick === undefined || progress > totalBeforeClick)
+          );
         };
         return {
           label: `Discard ${resource}${action.cards[resource] > 1 ? ` ${expected}/${action.cards[resource]}` : ""}`,
-          resolve: () => findDiscardCard(resource),
+          resolve: () => {
+            totalBeforeClick = discardSelectionProgress(requiredTotal);
+            return findDiscardCard(resource);
+          },
           ready,
           complete,
+          retryOnIncomplete: true,
           settleMs: 180,
         };
       }),

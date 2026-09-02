@@ -164,4 +164,105 @@ describe("compact LLM game record", () => {
     const handColumn = record.contracts.frameColumns.indexOf("hand");
     expect(record.frames[1]?.[handColumn]).toBe("~");
   });
+
+  it("migrates resumed v2 decision and root rows by declared column names", () => {
+    const rootedTrace = (stateHash: string): DecisionTrace => ({
+      ...trace(stateHash, { kind: "turn-control", control: "end" }),
+      rootProvenance: {
+        rankedRootCount: 1,
+        rankedRoots: [],
+        retainedRoots: [
+          {
+            action: { kind: "end-turn" },
+            preTruncationRank: 1,
+            prior: 0.7,
+            nodeBudgetPerParticle: 12,
+            allocatedNodes: 24,
+          },
+        ],
+        prunedRootCount: 0,
+        prunedRoots: [],
+      },
+    });
+    const initial = new CompactGameBuilder().apply(
+      {
+        ...captureBase,
+        decisions: [rootedTrace("legacy-state")],
+      },
+      false,
+    );
+    const legacy = structuredClone(initial);
+    const currentDecisionColumns = [...legacy.contracts.decisionColumns];
+    const currentRootColumns = [...legacy.contracts.rootColumns];
+    const removedDecisionColumns = new Set([
+      "lifecycle",
+      "searchResult",
+      "reusedFrom",
+    ]);
+    const removedRootColumns = new Set([
+      "finalRank",
+      "terminalOutcome",
+      "terminalLcb",
+      "terminalUcb",
+      "victoryMargin",
+      "marginLcb",
+      "marginUcb",
+      "meanTurn",
+    ]);
+    const legacyDecisionColumns = currentDecisionColumns.filter(
+      (column) => !removedDecisionColumns.has(column),
+    );
+    const legacyRootColumns = currentRootColumns.filter(
+      (column) => !removedRootColumns.has(column),
+    );
+    legacy.decisions = legacy.decisions.map((row) =>
+      legacyDecisionColumns.map(
+        (column) => row[currentDecisionColumns.indexOf(column)]!,
+      ),
+    );
+    legacy.roots = legacy.roots.map((row) =>
+      legacyRootColumns.map(
+        (column) => row[currentRootColumns.indexOf(column)]!,
+      ),
+    );
+    legacy.contracts = {
+      ...legacy.contracts,
+      decisionColumns: legacyDecisionColumns,
+      rootColumns: legacyRootColumns,
+    };
+
+    const resumed = new CompactGameBuilder(legacy).apply(
+      {
+        ...captureBase,
+        decisions: [rootedTrace("fresh-state")],
+      },
+      false,
+    );
+
+    expect(
+      resumed.decisions.every(
+        (row) => row.length === resumed.contracts.decisionColumns.length,
+      ),
+    ).toBe(true);
+    expect(
+      resumed.roots.every(
+        (row) => row.length === resumed.contracts.rootColumns.length,
+      ),
+    ).toBe(true);
+    const stateColumn = resumed.contracts.decisionColumns.indexOf("state");
+    const displayColumn = resumed.contracts.decisionColumns.indexOf("display");
+    const statusColumn = resumed.contracts.decisionColumns.indexOf("status");
+    const lifecycleColumn = resumed.contracts.decisionColumns.indexOf("lifecycle");
+    const legacyDecision = resumed.decisions.find(
+      (row) => row[stateColumn] === "legacy-state",
+    );
+    expect(legacyDecision?.[displayColumn]).toBe("turn-control|ctl=end");
+    expect(legacyDecision?.[statusColumn]).toBe("complete");
+    expect(legacyDecision?.[lifecycleColumn]).toBe("search-complete");
+    const rootActionColumn = resumed.contracts.rootColumns.indexOf("action");
+    const finalRankColumn = resumed.contracts.rootColumns.indexOf("finalRank");
+    const legacyRoot = resumed.roots.find((row) => row[0] === "D1");
+    expect(legacyRoot?.[rootActionColumn]).toBe("end-turn");
+    expect(legacyRoot?.[finalRankColumn]).toBeNull();
+  });
 });

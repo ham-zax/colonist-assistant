@@ -402,6 +402,13 @@ export class DecisionTraceRecorder {
   complete(stateHash: string, analysis: DecisionAnalysis): void {
     const trace = this.traces.get(stateHash);
     if (!trace) return;
+    const attempt = trace.deepAttempts?.at(-1);
+    // Once a position is superseded its late worker response is obsolete
+    // evidence. Never revive the top-level status or attach a search result
+    // after the recorder has declared the active attempt stale.
+    if (trace.deepStatus === "superseded" || attempt?.status === "superseded") {
+      return;
+    }
     const rootIndex =
       analysis.deepSearch?.rootIndex ??
       Math.max(
@@ -421,7 +428,6 @@ export class DecisionTraceRecorder {
     trace.deepStatus = "complete";
     trace.deepFailureReason = undefined;
     trace.deepTimedOut = analysis.deepSearch?.deadlineReached ?? false;
-    const attempt = trace.deepAttempts?.at(-1);
     if (attempt?.status === "pending") {
       attempt.finishedAt = finishedAt;
       attempt.latencyMs = trace.deepLatencyMs;

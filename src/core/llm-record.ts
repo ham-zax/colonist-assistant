@@ -581,6 +581,68 @@ const updateRecordIntegrity = (record: CompactGameRecord): void => {
     canonical.has(lastWinner);
 };
 
+const sameColumns = (
+  left: readonly string[],
+  right: readonly string[],
+): boolean =>
+  left.length === right.length && left.every((column, index) => column === right[index]);
+
+const remapRowsByColumns = (
+  rows: CompactRow[],
+  previousColumns: readonly string[],
+  currentColumns: readonly string[],
+  missing: (column: string, row: CompactRow) => CompactCell,
+): CompactRow[] => {
+  if (sameColumns(previousColumns, currentColumns)) return rows;
+  const previousIndex = new Map(
+    previousColumns.map((column, index) => [column, index] as const),
+  );
+  return rows.map((row) => {
+    // d49a410 could append current-layout rows beneath an older persisted
+    // contract before this migration existed. Preserve those rows as already
+    // current instead of reinterpreting their shifted cells through the old
+    // declaration.
+    if (row.length === currentColumns.length) return [...row];
+    return currentColumns.map((column) => {
+      const index = previousIndex.get(column);
+      return index !== undefined && index < row.length
+        ? row[index]!
+        : missing(column, row);
+    });
+  });
+};
+
+const migrateCompactRecordContracts = (record: CompactGameRecord): void => {
+  const current = contracts();
+  const previousDecisionColumns = record.contracts.decisionColumns;
+  if (!sameColumns(previousDecisionColumns, current.decisionColumns)) {
+    const statusIndex = previousDecisionColumns.indexOf("status");
+    record.decisions = remapRowsByColumns(
+      record.decisions,
+      previousDecisionColumns,
+      current.decisionColumns,
+      (column, row) => {
+        if (column !== "lifecycle") return NA;
+        const status = statusIndex >= 0 ? row[statusIndex] : undefined;
+        if (status === "complete") return "search-complete";
+        if (status === "failed") return "search-failed";
+        if (status === "superseded") return "superseded";
+        return "search-pending";
+      },
+    );
+  }
+  const previousRootColumns = record.contracts.rootColumns;
+  if (!sameColumns(previousRootColumns, current.rootColumns)) {
+    record.roots = remapRowsByColumns(
+      record.roots,
+      previousRootColumns,
+      current.rootColumns,
+      () => null,
+    );
+  }
+  record.contracts = current;
+};
+
 export const normalizeCompactRecordIntegrity = (
   input: CompactGameRecord,
 ): CompactGameRecord => {
@@ -588,6 +650,7 @@ export const normalizeCompactRecordIntegrity = (
   if (!Number.isFinite(record.unmatchedIntegrityCount)) {
     record.unmatchedIntegrityCount = record.unmatchedCount;
   }
+  migrateCompactRecordContracts(record);
   const unresolved = new Set(record.meta.unresolvedPlayers ?? []);
   let count = record.meta.playerCount;
   if (!Number.isInteger(count) || count === undefined || count < 2 || count > 4) {
