@@ -21,15 +21,6 @@ $Manifest = Join-Path $DestDir "$HostName.json"
 New-Item -ItemType Directory -Force -Path $DestDir | Out-Null
 Copy-Item -Force $Source $Binary
 
-$Nvrtc = Get-Command 'nvrtc64*.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $Nvrtc -and $env:CUDA_PATH) {
-  $CudaBin = Join-Path $env:CUDA_PATH 'bin'
-  $Nvrtc = Get-ChildItem -Path $CudaBin -Filter 'nvrtc64*.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
-}
-if (-not $Nvrtc) {
-  Write-Warning 'NVRTC DLL was not found on PATH/CUDA_PATH. Install the NVIDIA CUDA toolkit or make its bin directory available before starting Chrome.'
-}
-
 $ManifestObject = [ordered]@{
   name = $HostName
   description = 'Colonist Assistant CUDA strategist'

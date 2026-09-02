@@ -31,31 +31,7 @@ MANIFEST="${MANIFEST_DIR}/${HOST_NAME}.json"
 mkdir -p "${DEST_DIR}" "${MANIFEST_DIR}"
 install -m 0755 "${SOURCE}" "${BINARY}"
 
-NVRTC_DIR=""
-for candidate in \
-  "${CUDA_PATH:-}/lib64" \
-  "/usr/local/cuda/lib64" \
-  "/usr/lib/x86_64-linux-gnu"; do
-  if [[ -n "${candidate}" ]] && compgen -G "${candidate}/libnvrtc.so*" >/dev/null; then
-    NVRTC_DIR="${candidate}"
-    break
-  fi
-done
-if [[ -z "${NVRTC_DIR}" ]]; then
-  NVRTC_FILE="$(find "${HOME}/.cache/uv" "${HOME}/.local/lib" \
-    -type f -name 'libnvrtc.so*' -path '*/nvidia/*/lib/*' -print -quit 2>/dev/null || true)"
-  if [[ -n "${NVRTC_FILE}" ]]; then
-    NVRTC_DIR="$(dirname "${NVRTC_FILE}")"
-  fi
-fi
-
-if [[ -n "${NVRTC_DIR}" ]]; then
-  printf '#!/usr/bin/env bash\nexport LD_LIBRARY_PATH=%q${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}\nexec %q\n' \
-    "${NVRTC_DIR}" "${BINARY}" > "${LAUNCHER}"
-else
-  printf '#!/usr/bin/env bash\nexec %q\n' "${BINARY}" > "${LAUNCHER}"
-  echo "warning: libnvrtc was not found during install; the GPU host will require NVRTC on the Chrome process library path." >&2
-fi
+printf '#!/usr/bin/env bash\nexec %q\n' "${BINARY}" > "${LAUNCHER}"
 chmod 0755 "${LAUNCHER}"
 
 cat > "${MANIFEST}" <<EOF

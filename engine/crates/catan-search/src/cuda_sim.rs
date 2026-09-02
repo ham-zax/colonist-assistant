@@ -9,7 +9,7 @@ use colonist_catan_core::{
 use cudarc::driver::{
     CudaContext, CudaFunction, CudaModule, CudaSlice, DriverError, LaunchConfig, PushKernelArg,
 };
-use cudarc::nvrtc::{CompileError, CompileOptions, compile_ptx_with_opts};
+use cudarc::nvrtc::Ptx;
 
 const MAX_PLAYERS: usize = 4;
 const HEX_COUNT: usize = 19;
@@ -137,7 +137,7 @@ const ACTION_COUNTER_TRADE: u32 = 20;
 const ACTION_CONFIRM_TRADE: u32 = 21;
 const ACTION_CANCEL_TRADE: u32 = 22;
 
-const CUDA_SOURCE: &str = include_str!("cuda/sim.cu");
+const CUDA_PTX: &str = include_str!("cuda/sim.ptx");
 const BACKEND_NAME: &str = "cuda-resident-sim";
 
 #[derive(Clone, Debug)]
@@ -377,7 +377,6 @@ pub enum CudaSimError {
         status: CudaSimTransitionStatus,
     },
     Cuda(DriverError),
-    Nvrtc(CompileError),
 }
 
 impl fmt::Display for CudaSimError {
@@ -411,7 +410,6 @@ impl fmt::Display for CudaSimError {
                 write!(formatter, "CUDA transition {index} failed with {status:?}")
             }
             Self::Cuda(error) => write!(formatter, "CUDA driver error: {error}"),
-            Self::Nvrtc(error) => write!(formatter, "NVRTC compile error: {error}"),
         }
     }
 }
@@ -421,12 +419,6 @@ impl std::error::Error for CudaSimError {}
 impl From<DriverError> for CudaSimError {
     fn from(error: DriverError) -> Self {
         Self::Cuda(error)
-    }
-}
-
-impl From<CompileError> for CudaSimError {
-    fn from(error: CompileError) -> Self {
-        Self::Nvrtc(error)
     }
 }
 
@@ -502,8 +494,7 @@ impl CudaSimEngine {
         let standard_board = Board::standard(0, 4);
         let topology_host = topology_words(&standard_board)?;
         let context = CudaContext::new(ordinal)?;
-        let ptx = compile_ptx_with_opts(CUDA_SOURCE, CompileOptions::default())?;
-        let module = context.load_module(ptx)?;
+        let module = context.load_module(Ptx::from_src(CUDA_PTX))?;
         let transition_kernel = module.load_function("apply_transition_batch_kernel")?;
         let rollout_action_kernel = module.load_function("generate_rollout_actions_batch_kernel")?;
         let rollout_steps_kernel = module.load_function("run_rollout_steps_kernel")?;
