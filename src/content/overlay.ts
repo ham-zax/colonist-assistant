@@ -356,7 +356,6 @@ export class AssistantOverlay {
   private lastRejectedDomesticTrade?: DomesticTradeState;
   private readonly rootTradeActionExclusions: RootTradeActionExclusion[] = [];
   private readonly failedTradeActions = new Set<string>();
-  private rootDomesticTradeExhausted = false;
   private readonly completedIncomingTradeIds = new Set<string>();
   private readonly outgoingTradeSeenAt = new Map<string, number>();
   private readonly outgoingTradeWatchdogs = new Map<string, number>();
@@ -458,7 +457,6 @@ export class AssistantOverlay {
       this.lastRejectedDomesticTrade = undefined;
       this.rootTradeActionExclusions.length = 0;
       this.failedTradeActions.clear();
-      this.rootDomesticTradeExhausted = false;
       this.completedIncomingTradeIds.clear();
       this.outgoingTradeSeenAt.clear();
       this.tradeOfferSnapshots.clear();
@@ -599,7 +597,6 @@ export class AssistantOverlay {
       this.lastRejectedDomesticTrade = undefined;
       this.rootTradeActionExclusions.length = 0;
       this.failedTradeActions.clear();
-      this.rootDomesticTradeExhausted = false;
       this.completedIncomingTradeIds.clear();
       this.outgoingTradeSeenAt.clear();
       this.clearOutgoingTradeWatchdogs();
@@ -811,7 +808,6 @@ export class AssistantOverlay {
     this.lastRejectedDomesticTrade = undefined;
     this.rootTradeActionExclusions.length = 0;
     this.failedTradeActions.clear();
-    this.rootDomesticTradeExhausted = false;
     this.completedIncomingTradeIds.clear();
     this.outgoingTradeSeenAt.clear();
     this.clearOutgoingTradeWatchdogs();
@@ -1557,16 +1553,6 @@ export class AssistantOverlay {
         }
         if (succeeded && next?.kind === "board") {
           this.registerPendingPlacement(next);
-        }
-        if (diagnostic?.domesticTradeExhausted) {
-          this.rootDomesticTradeExhausted = true;
-        }
-        if (
-          succeeded &&
-          next?.kind === "trade-cancel" &&
-          next.exhaustDomesticOffers
-        ) {
-          this.rootDomesticTradeExhausted = true;
         }
         if (traceKey) {
           const offerIndex =
@@ -2389,10 +2375,7 @@ export class AssistantOverlay {
           ),
         }
       : board;
-    const decisionBoard =
-      this.rootDomesticTradeExhausted && decisionBoardBase.isMyTurn
-        ? { ...decisionBoardBase, domesticTradeUsed: true }
-        : decisionBoardBase;
+    const decisionBoard = decisionBoardBase;
     if (this.awaitingLocalSevenProtocol()) {
       this.decisionAnalysis = undefined;
       this.decisionKey = "";
@@ -3375,7 +3358,6 @@ export class AssistantOverlay {
           tradeExecutor: trade.tradeExecutor,
           tradeCreatorGive: { ...trade.creatorGive },
           tradeCreatorReceive: { ...trade.creatorReceive },
-          exhaustDomesticOffers: true,
           label: "Cancel unanswered trade",
           signature: `${signatureBase}|cancel-trade|${trade.id}|timeout`,
           confidence: 1,
@@ -3392,7 +3374,6 @@ export class AssistantOverlay {
         tradeExecutor: trade.tradeExecutor,
         tradeCreatorGive: { ...trade.creatorGive },
         tradeCreatorReceive: { ...trade.creatorReceive },
-        exhaustDomesticOffers: true,
         label: "Close rejected trade",
         signature: `${signatureBase}|cancel-trade|${trade.id}|complete`,
         confidence: 1,

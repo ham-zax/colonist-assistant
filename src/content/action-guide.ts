@@ -84,7 +84,6 @@ export type NextClick =
       tradeExecutor?: string;
       tradeCreatorGive?: ResourceVector;
       tradeCreatorReceive?: ResourceVector;
-      exhaustDomesticOffers?: boolean;
       label: string;
       signature: string;
       confidence: number;
@@ -124,7 +123,6 @@ export interface ActionExecutionDiagnostic {
   offerIndex?: number;
   visibleTradeCount?: number;
   visibleTradeFingerprints?: string[];
-  domesticTradeExhausted?: boolean;
 }
 
 export interface ActionGuideOptions {
@@ -852,6 +850,46 @@ const findDiscardCard = (resource: Resource): HTMLElement | undefined => {
     findResourceInRoot(discardRoot, resource) ??
     findResourceCard(resource)
   );
+};
+
+const selectedDiscardResource = (
+  resource: Resource,
+): { count: number; exactMultiplicity: boolean } => {
+  const root = findDiscardRoot();
+  if (!root) return { count: 0, exactMultiplicity: false };
+  const selected = [
+    ...root.querySelectorAll<HTMLElement>(
+      `[data-card-enum="${resourceCardEnum[resource]}"], img[src], [aria-label], [title]`,
+    ),
+  ]
+    .filter((element) => resourceEvidence(element, resource))
+    .map(
+      (element) =>
+        element.closest<HTMLElement>(
+          "[data-card-enum], [class*='cardStackContainer-'], [class*='cardContainer-'], button, [role='button']",
+        ) ?? element,
+    )
+    .filter((element, index, all) => all.indexOf(element) === index);
+  const explicitCounts = selected.flatMap((element) => {
+    const badge = element.querySelector<HTMLElement>(
+      "[class*='countBadge-'], [class*='cardCount-'], [class*='amount-']",
+    );
+    const count = Number.parseInt(
+      normalized(badge?.textContent ?? "").match(/\d+/u)?.[0] ?? "",
+      10,
+    );
+    return Number.isFinite(count) && count > 0 ? [count] : [];
+  });
+  if (explicitCounts.length) {
+    return {
+      count: Math.max(...explicitCounts),
+      exactMultiplicity: true,
+    };
+  }
+  return {
+    count: selected.length,
+    exactMultiplicity: selected.length > 1,
+  };
 };
 
 const findResourceChoice = (resource: Resource): HTMLElement | undefined => {
@@ -1626,9 +1664,6 @@ const tradeResourceSteps = (
 const TRADE_FAILURE_PATTERN =
   /no one has (?:the )?wanted resource|no player has (?:the )?wanted resource|(?:nobody|none of the players?) (?:has|have) (?:the )?(?:wanted|requested|required) resource|(?:players?|opponents?) (?:do not|don't|does not|doesn't) have enough (?:cards|resources)|insufficient (?:cards|resources)(?: for (?:this )?trade)?|identical trade|trade (?:offer )?limit|too many (?:identical )?trades|cannot (?:make|send|offer) (?:this )?trade|invalid trade|not enough (?:cards|resources)/iu;
 
-const DOMESTIC_TRADE_EXHAUSTION_PATTERN =
-  /no one has (?:the )?wanted resource|no player has (?:the )?wanted resource|(?:nobody|none of the players?) (?:has|have) (?:the )?(?:wanted|requested|required) resource|identical trade|trade (?:offer )?limit|too many (?:identical )?trades/iu;
-
 const tradeFailureLogKeys = (): Set<string> => {
   const root = findLogRoot();
   if (!root) return new Set();
@@ -1781,27 +1816,38 @@ const counterWorkflow = (
 const discardWorkflow = (
   action: Extract<NextClick, { kind: "discard" }>,
 ): WorkflowStep[] => {
-  const selectionProgress = (): { selected: number; required: number } | undefined => {
-    for (const root of modalRoots()) {
-      const match = normalized(root.textContent ?? "").match(
-        /(?:^|\D)(\d{1,3})\s*\/\s*(\d{1,3})(?:\D|$)/u,
-      );
-      if (match) {
-        return { selected: Number(match[1]), required: Number(match[2]) };
-      }
-    }
-    return undefined;
-  };
-  const selectionSteps = resourceSteps(
-    action.cards,
-    "give",
-    (resource) => findDiscardCard(resource),
-    "Discard",
-  ).map((step, index) => {
-    const committed = () =>
-      (selectionProgress()?.selected ?? 0) >= index + 1;
-    return { ...step, ready: committed, complete: committed };
-  });
+  const selectionSteps = (Object.keys(action.cards) as Resource[]).flatMap(
+    (resource) =>
+      Array.from({ length: action.cards[resource] }, (_, index) => {
+        const expected = index + 1;
+        const ready = (): boolean => {
+          const selected = selectedDiscardResource(resource);
+          return (
+            selected.count >= expected &&
+            (expected === 1 || selected.exactMultiplicity)
+          );
+        };
+        const complete = (): boolean => {
+          const selected = selectedDiscardResource(resource);
+          if (selected.count === 0) return false;
+          // Some Colonist layouts collapse repeated selected cards into one
+          // resource stack without a count badge. In that layout resource
+          // identity is observable but multiplicity is not; require the click
+          // for every repeated step, then accept the observed resource instead
+          // of stalling the mandatory workflow forever.
+          return selected.exactMultiplicity
+            ? selected.count >= expected
+            : true;
+        };
+        return {
+          label: `Discard ${resource}${action.cards[resource] > 1 ? ` ${expected}/${action.cards[resource]}` : ""}`,
+          resolve: () => findDiscardCard(resource),
+          ready,
+          complete,
+          settleMs: 180,
+        };
+      }),
+  );
   return [
     ...selectionSteps,
     {
@@ -1946,18 +1992,13 @@ const startWorkflow = (
       )
     : new Map<HTMLElement, string>();
 
-  const fail = (reason: string, tradeFailure?: string): void => {
+  const fail = (reason: string): void => {
     const activeOptions = workflowOptions ?? options;
     activeOptions.onExecution?.({
       succeeded: false,
       signature: action.signature,
       reason,
-      diagnostic: {
-        ...tradeExecutionDiagnostic(action),
-        ...(tradeFailure && DOMESTIC_TRADE_EXHAUSTION_PATTERN.test(tradeFailure)
-          ? { domesticTradeExhausted: true }
-          : {}),
-      },
+      diagnostic: tradeExecutionDiagnostic(action),
     });
     if (tradeTransaction) {
       const closeTradePanel = (attempt = 0): void => {
@@ -1994,7 +2035,7 @@ const startWorkflow = (
         )
       : undefined;
     if (tradeFailure) {
-      fail(`Colonist rejected the trade workflow: ${tradeFailure}`, tradeFailure);
+      fail(`Colonist rejected the trade workflow: ${tradeFailure}`);
       return;
     }
     const step = steps[index];
@@ -2076,7 +2117,7 @@ const startWorkflow = (
             )
           : undefined;
         if (failure) {
-          fail(`Colonist rejected the trade workflow: ${failure}`, failure);
+          fail(`Colonist rejected the trade workflow: ${failure}`);
           return;
         }
         if (step.repeatUntilReady) {

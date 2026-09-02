@@ -1499,8 +1499,8 @@ fn belief_search(
                 nodes += searcher.nodes;
                 cutoffs += searcher.cutoffs;
                 wave_depth = wave_depth.max(searcher.deepest_depth);
-                if deadline.has_elapsed() {
-                    deadline_reached = true;
+                if searcher.deadline_reached || deadline.has_elapsed() {
+                    deadline_reached |= deadline.has_elapsed();
                     wave_complete = false;
                     break 'particles;
                 }
