@@ -161,10 +161,19 @@ fn board_resource_scarcity(state: &GameState) -> [f32; 5] {
 }
 
 fn opening_port_option_value(state: &GameState, player: u8) -> f32 {
+    let production = production_pips(state, player);
+    let total_production = production.iter().sum::<f32>();
+    if total_production <= f32::EPSILON {
+        return 0.0;
+    }
     state
         .trade_ratios(player)
         .iter()
-        .map(|ratio| (4 - *ratio) as f32)
+        .enumerate()
+        .map(|(resource, ratio)| {
+            let production_share = production[resource] / total_production;
+            (4 - *ratio) as f32 * production_share
+        })
         .sum::<f32>()
         * 0.11
 }
