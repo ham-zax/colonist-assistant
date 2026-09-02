@@ -1,0 +1,1806 @@
+{
+  "schema": "colonist-gpu-strategic-strength/1",
+  "suite": "wave4-strategic-strength",
+  "fixtureId": "D68-D71-eastern-road-chain",
+  "description": "Historical D68 live belief reconstruction plus the immediate eastern-settlement counterfactual.",
+  "sourceEvidence": {
+    "file": "colonist-evidence-clay6403-1-2026-09-02T21-09-16-029Z.txt",
+    "recordedAt": "2026-09-02T21:09:16.029Z",
+    "decisionId": "D68",
+    "beliefId": "B43"
+  },
+  "rootPlayer": "P0",
+  "playerTradesEnabled": false,
+  "tracker": {
+    "worlds": [
+      {
+        "weight": 0.4191176470588236,
+        "hands": {
+          "P0": {
+            "lumber": 2,
+            "brick": 2,
+            "wool": 1,
+            "grain": 1,
+            "ore": 0
+          },
+          "P1": {
+            "lumber": 1,
+            "brick": 2,
+            "wool": 2,
+            "grain": 0,
+            "ore": 0
+          },
+          "P2": {
+            "lumber": 0,
+            "brick": 0,
+            "wool": 2,
+            "grain": 1,
+            "ore": 0
+          },
+          "P3": {
+            "lumber": 0,
+            "brick": 0,
+            "wool": 3,
+            "grain": 1,
+            "ore": 0
+          }
+        }
+      },
+      {
+        "weight": 0.30147058823529405,
+        "hands": {
+          "P0": {
+            "lumber": 2,
+            "brick": 2,
+            "wool": 1,
+            "grain": 1,
+            "ore": 0
+          },
+          "P1": {
+            "lumber": 0,
+            "brick": 2,
+            "wool": 3,
+            "grain": 0,
+            "ore": 0
+          },
+          "P2": {
+            "lumber": 1,
+            "brick": 0,
+            "wool": 1,
+            "grain": 1,
+            "ore": 0
+          },
+          "P3": {
+            "lumber": 0,
+            "brick": 0,
+            "wool": 3,
+            "grain": 1,
+            "ore": 0
+          }
+        }
+      },
+      {
+        "weight": 0.27941176470588236,
+        "hands": {
+          "P0": {
+            "lumber": 2,
+            "brick": 2,
+            "wool": 1,
+            "grain": 1,
+            "ore": 0
+          },
+          "P1": {
+            "lumber": 1,
+            "brick": 1,
+            "wool": 3,
+            "grain": 0,
+            "ore": 0
+          },
+          "P2": {
+            "lumber": 0,
+            "brick": 1,
+            "wool": 1,
+            "grain": 1,
+            "ore": 0
+          },
+          "P3": {
+            "lumber": 0,
+            "brick": 0,
+            "wool": 3,
+            "grain": 1,
+            "ore": 0
+          }
+        }
+      }
+    ],
+    "playerOrder": [
+      "P0",
+      "P1",
+      "P2",
+      "P3"
+    ],
+    "eventCount": 111,
+    "currentTurn": {
+      "player": "P0",
+      "sequence": 13
+    },
+    "players": {
+      "P0": {
+        "devCards": [],
+        "playedDevCards": {
+          "knight": 1,
+          "monopoly": 0,
+          "road-building": 0,
+          "year-of-plenty": 0,
+          "victory-point": 0
+        },
+        "policyPosterior": {
+          "balanced": 0.14684374367479383,
+          "expansion": 0.40123026280524715,
+          "cityDevelopment": 0.11624119547938024,
+          "tradeFlexible": 0.1691639927133625,
+          "tradeResistant": 0.1665208053272162
+        }
+      },
+      "P1": {
+        "devCards": [],
+        "playedDevCards": {
+          "knight": 0,
+          "monopoly": 0,
+          "road-building": 0,
+          "year-of-plenty": 0,
+          "victory-point": 0
+        },
+        "policyPosterior": {
+          "balanced": 0.1153520267462013,
+          "expansion": 0.3151834926586717,
+          "cityDevelopment": 0.09131241927230653,
+          "tradeFlexible": 0.09476975908591688,
+          "tradeResistant": 0.3833823022369037
+        }
+      },
+      "P2": {
+        "devCards": [],
+        "playedDevCards": {
+          "knight": 1,
+          "monopoly": 0,
+          "road-building": 0,
+          "year-of-plenty": 0,
+          "victory-point": 0
+        },
+        "policyPosterior": {
+          "balanced": 0.10151620344426202,
+          "expansion": 0.48330519582505643,
+          "cityDevelopment": 0.06223079247569084,
+          "tradeFlexible": 0.15532911845150668,
+          "tradeResistant": 0.197618689803484
+        }
+      },
+      "P3": {
+        "devCards": [
+          {
+            "boughtOnTurn": 12
+          }
+        ],
+        "playedDevCards": {
+          "knight": 0,
+          "monopoly": 0,
+          "road-building": 0,
+          "year-of-plenty": 0,
+          "victory-point": 0
+        },
+        "policyPosterior": {
+          "balanced": 0.12498870200280751,
+          "expansion": 0.3415143777819759,
+          "cityDevelopment": 0.09894079092942841,
+          "tradeFlexible": 0.1912441978698871,
+          "tradeResistant": 0.2433119314159011
+        }
+      }
+    },
+    "recentEvents": [
+      {
+        "id": "Eq5ok44:15au96g:h",
+        "index": 108,
+        "timestamp": 103518,
+        "raw": "",
+        "type": "roll",
+        "player": "P0",
+        "dice": [
+          5,
+          6
+        ]
+      },
+      {
+        "id": "E1opni1a:1by1oza:g",
+        "index": 109,
+        "timestamp": 103518,
+        "raw": "",
+        "type": "gain",
+        "player": "P0",
+        "cards": {
+          "lumber": 0,
+          "brick": 0,
+          "wool": 0,
+          "grain": 1,
+          "ore": 0
+        },
+        "reason": "production"
+      },
+      {
+        "id": "E1js27c1:csmnbp:g",
+        "index": 110,
+        "timestamp": 103608,
+        "raw": "",
+        "type": "gain",
+        "player": "P2",
+        "cards": {
+          "lumber": 0,
+          "brick": 0,
+          "wool": 0,
+          "grain": 1,
+          "ore": 0
+        },
+        "reason": "production"
+      }
+    ]
+  },
+  "board": {
+    "hexes": [
+      {
+        "id": "h:0,-2",
+        "resource": "wool",
+        "number": 6
+      },
+      {
+        "id": "h:-1,-1",
+        "resource": "brick",
+        "number": 3
+      },
+      {
+        "id": "h:-2,0",
+        "resource": "wool",
+        "number": 8
+      },
+      {
+        "id": "h:-2,1",
+        "resource": "wool",
+        "number": 10
+      },
+      {
+        "id": "h:-2,2",
+        "resource": "grain",
+        "number": 9
+      },
+      {
+        "id": "h:-1,2",
+        "resource": "grain",
+        "number": 12
+      },
+      {
+        "id": "h:0,2",
+        "resource": "brick",
+        "number": 11
+      },
+      {
+        "id": "h:1,1"
+      },
+      {
+        "id": "h:2,0",
+        "resource": "ore",
+        "number": 4
+      },
+      {
+        "id": "h:2,-1",
+        "resource": "lumber",
+        "number": 8
+      },
+      {
+        "id": "h:2,-2",
+        "resource": "wool",
+        "number": 5
+      },
+      {
+        "id": "h:1,-2",
+        "resource": "ore",
+        "number": 2
+      },
+      {
+        "id": "h:0,-1",
+        "resource": "grain",
+        "number": 9
+      },
+      {
+        "id": "h:-1,0",
+        "resource": "lumber",
+        "number": 4
+      },
+      {
+        "id": "h:-1,1",
+        "resource": "lumber",
+        "number": 5,
+        "blocked": true
+      },
+      {
+        "id": "h:0,1",
+        "resource": "lumber",
+        "number": 6
+      },
+      {
+        "id": "h:1,0",
+        "resource": "ore",
+        "number": 3
+      },
+      {
+        "id": "h:1,-1",
+        "resource": "brick",
+        "number": 10
+      },
+      {
+        "id": "h:0,0",
+        "resource": "grain",
+        "number": 11
+      }
+    ],
+    "vertices": [
+      {
+        "id": "v:0,-2,0",
+        "adjacentHexes": [
+          "h:0,-2"
+        ],
+        "adjacentVertices": [
+          "v:1,-3,1",
+          "v:0,-3,1"
+        ],
+        "port": "generic"
+      },
+      {
+        "id": "v:1,-3,1",
+        "adjacentHexes": [
+          "h:1,-2",
+          "h:0,-2"
+        ],
+        "adjacentVertices": [
+          "v:1,-2,0",
+          "v:0,-1,0",
+          "v:0,-2,0"
+        ]
+      },
+      {
+        "id": "v:0,-1,0",
+        "adjacentHexes": [
+          "h:1,-2",
+          "h:0,-1",
+          "h:0,-2"
+        ],
+        "adjacentVertices": [
+          "v:1,-3,1",
+          "v:1,-2,1",
+          "v:0,-2,1"
+        ]
+      },
+      {
+        "id": "v:0,-2,1",
+        "adjacentHexes": [
+          "h:0,-2",
+          "h:0,-1",
+          "h:-1,-1"
+        ],
+        "adjacentVertices": [
+          "v:0,-1,0",
+          "v:-1,0,0",
+          "v:-1,-1,0"
+        ],
+        "building": {
+          "player": "P2",
+          "kind": "settlement"
+        }
+      },
+      {
+        "id": "v:-1,-1,0",
+        "adjacentHexes": [
+          "h:0,-2",
+          "h:-1,-1"
+        ],
+        "adjacentVertices": [
+          "v:0,-3,1",
+          "v:0,-2,1",
+          "v:-1,-2,1"
+        ]
+      },
+      {
+        "id": "v:0,-3,1",
+        "adjacentHexes": [
+          "h:0,-2"
+        ],
+        "adjacentVertices": [
+          "v:0,-2,0",
+          "v:-1,-1,0"
+        ],
+        "port": "generic"
+      },
+      {
+        "id": "v:-1,0,0",
+        "adjacentHexes": [
+          "h:0,-1",
+          "h:-1,0",
+          "h:-1,-1"
+        ],
+        "adjacentVertices": [
+          "v:0,-2,1",
+          "v:0,-1,1",
+          "v:-1,-1,1"
+        ]
+      },
+      {
+        "id": "v:-1,-1,1",
+        "adjacentHexes": [
+          "h:-1,-1",
+          "h:-1,0",
+          "h:-2,0"
+        ],
+        "adjacentVertices": [
+          "v:-1,0,0",
+          "v:-2,1,0",
+          "v:-2,0,0"
+        ]
+      },
+      {
+        "id": "v:-2,0,0",
+        "adjacentHexes": [
+          "h:-1,-1",
+          "h:-2,0"
+        ],
+        "adjacentVertices": [
+          "v:-1,-2,1",
+          "v:-1,-1,1",
+          "v:-2,-1,1"
+        ],
+        "port": "lumber",
+        "building": {
+          "player": "P0",
+          "kind": "settlement"
+        }
+      },
+      {
+        "id": "v:-1,-2,1",
+        "adjacentHexes": [
+          "h:-1,-1"
+        ],
+        "adjacentVertices": [
+          "v:-1,-1,0",
+          "v:-2,0,0"
+        ],
+        "port": "lumber"
+      },
+      {
+        "id": "v:-2,1,0",
+        "adjacentHexes": [
+          "h:-1,0",
+          "h:-2,1",
+          "h:-2,0"
+        ],
+        "adjacentVertices": [
+          "v:-1,-1,1",
+          "v:-1,0,1",
+          "v:-2,0,1"
+        ],
+        "building": {
+          "player": "P3",
+          "kind": "settlement"
+        }
+      },
+      {
+        "id": "v:-2,0,1",
+        "adjacentHexes": [
+          "h:-2,0",
+          "h:-2,1"
+        ],
+        "adjacentVertices": [
+          "v:-2,1,0",
+          "v:-3,2,0",
+          "v:-3,1,0"
+        ],
+        "port": "brick"
+      },
+      {
+        "id": "v:-3,1,0",
+        "adjacentHexes": [
+          "h:-2,0"
+        ],
+        "adjacentVertices": [
+          "v:-2,-1,1",
+          "v:-2,0,1"
+        ]
+      },
+      {
+        "id": "v:-2,-1,1",
+        "adjacentHexes": [
+          "h:-2,0"
+        ],
+        "adjacentVertices": [
+          "v:-2,0,0",
+          "v:-3,1,0"
+        ]
+      },
+      {
+        "id": "v:-1,0,1",
+        "adjacentHexes": [
+          "h:-1,0",
+          "h:-1,1",
+          "h:-2,1"
+        ],
+        "adjacentVertices": [
+          "v:-1,1,0",
+          "v:-2,2,0",
+          "v:-2,1,0"
+        ]
+      },
+      {
+        "id": "v:-2,2,0",
+        "adjacentHexes": [
+          "h:-1,1",
+          "h:-2,2",
+          "h:-2,1"
+        ],
+        "adjacentVertices": [
+          "v:-1,0,1",
+          "v:-1,1,1",
+          "v:-2,1,1"
+        ],
+        "building": {
+          "player": "P3",
+          "kind": "settlement"
+        }
+      },
+      {
+        "id": "v:-2,1,1",
+        "adjacentHexes": [
+          "h:-2,1",
+          "h:-2,2"
+        ],
+        "adjacentVertices": [
+          "v:-2,2,0",
+          "v:-3,3,0",
+          "v:-3,2,0"
+        ]
+      },
+      {
+        "id": "v:-3,2,0",
+        "adjacentHexes": [
+          "h:-2,1"
+        ],
+        "adjacentVertices": [
+          "v:-2,0,1",
+          "v:-2,1,1"
+        ],
+        "port": "brick"
+      },
+      {
+        "id": "v:-1,1,1",
+        "adjacentHexes": [
+          "h:-1,1",
+          "h:-1,2",
+          "h:-2,2"
+        ],
+        "adjacentVertices": [
+          "v:-1,2,0",
+          "v:-2,3,0",
+          "v:-2,2,0"
+        ]
+      },
+      {
+        "id": "v:-2,3,0",
+        "adjacentHexes": [
+          "h:-1,2",
+          "h:-2,2"
+        ],
+        "adjacentVertices": [
+          "v:-1,1,1",
+          "v:-1,2,1",
+          "v:-2,2,1"
+        ]
+      },
+      {
+        "id": "v:-2,2,1",
+        "adjacentHexes": [
+          "h:-2,2"
+        ],
+        "adjacentVertices": [
+          "v:-2,3,0",
+          "v:-3,3,0"
+        ],
+        "port": "generic"
+      },
+      {
+        "id": "v:-3,3,0",
+        "adjacentHexes": [
+          "h:-2,2"
+        ],
+        "adjacentVertices": [
+          "v:-2,1,1",
+          "v:-2,2,1"
+        ],
+        "port": "generic"
+      },
+      {
+        "id": "v:-1,2,0",
+        "adjacentHexes": [
+          "h:0,1",
+          "h:-1,2",
+          "h:-1,1"
+        ],
+        "adjacentVertices": [
+          "v:0,0,1",
+          "v:0,1,1",
+          "v:-1,1,1"
+        ],
+        "building": {
+          "player": "P2",
+          "kind": "settlement"
+        }
+      },
+      {
+        "id": "v:0,1,1",
+        "adjacentHexes": [
+          "h:0,1",
+          "h:0,2",
+          "h:-1,2"
+        ],
+        "adjacentVertices": [
+          "v:0,2,0",
+          "v:-1,3,0",
+          "v:-1,2,0"
+        ]
+      },
+      {
+        "id": "v:-1,3,0",
+        "adjacentHexes": [
+          "h:0,2",
+          "h:-1,2"
+        ],
+        "adjacentVertices": [
+          "v:0,1,1",
+          "v:0,2,1",
+          "v:-1,2,1"
+        ],
+        "port": "ore"
+      },
+      {
+        "id": "v:-1,2,1",
+        "adjacentHexes": [
+          "h:-1,2"
+        ],
+        "adjacentVertices": [
+          "v:-1,3,0",
+          "v:-2,3,0"
+        ],
+        "port": "ore"
+      },
+      {
+        "id": "v:0,2,0",
+        "adjacentHexes": [
+          "h:1,1",
+          "h:0,2",
+          "h:0,1"
+        ],
+        "adjacentVertices": [
+          "v:1,0,1",
+          "v:1,1,1",
+          "v:0,1,1"
+        ]
+      },
+      {
+        "id": "v:1,1,1",
+        "adjacentHexes": [
+          "h:1,1",
+          "h:0,2"
+        ],
+        "adjacentVertices": [
+          "v:1,2,0",
+          "v:0,3,0",
+          "v:0,2,0"
+        ],
+        "port": "generic"
+      },
+      {
+        "id": "v:0,3,0",
+        "adjacentHexes": [
+          "h:0,2"
+        ],
+        "adjacentVertices": [
+          "v:1,1,1",
+          "v:0,2,1"
+        ]
+      },
+      {
+        "id": "v:0,2,1",
+        "adjacentHexes": [
+          "h:0,2"
+        ],
+        "adjacentVertices": [
+          "v:0,3,0",
+          "v:-1,3,0"
+        ]
+      },
+      {
+        "id": "v:1,1,0",
+        "adjacentHexes": [
+          "h:2,0",
+          "h:1,1",
+          "h:1,0"
+        ],
+        "adjacentVertices": [
+          "v:2,-1,1",
+          "v:2,0,1",
+          "v:1,0,1"
+        ]
+      },
+      {
+        "id": "v:2,0,1",
+        "adjacentHexes": [
+          "h:2,0",
+          "h:1,1"
+        ],
+        "adjacentVertices": [
+          "v:2,1,0",
+          "v:1,2,0",
+          "v:1,1,0"
+        ]
+      },
+      {
+        "id": "v:1,2,0",
+        "adjacentHexes": [
+          "h:1,1"
+        ],
+        "adjacentVertices": [
+          "v:2,0,1",
+          "v:1,1,1"
+        ],
+        "port": "generic"
+      },
+      {
+        "id": "v:1,0,1",
+        "adjacentHexes": [
+          "h:1,0",
+          "h:1,1",
+          "h:0,1"
+        ],
+        "adjacentVertices": [
+          "v:1,1,0",
+          "v:0,2,0",
+          "v:0,1,0"
+        ]
+      },
+      {
+        "id": "v:2,0,0",
+        "adjacentHexes": [
+          "h:2,0",
+          "h:2,-1"
+        ],
+        "adjacentVertices": [
+          "v:3,-2,1",
+          "v:3,-1,1",
+          "v:2,-1,1"
+        ]
+      },
+      {
+        "id": "v:3,-1,1",
+        "adjacentHexes": [
+          "h:2,0"
+        ],
+        "adjacentVertices": [
+          "v:2,1,0",
+          "v:2,0,0"
+        ],
+        "port": "generic"
+      },
+      {
+        "id": "v:2,1,0",
+        "adjacentHexes": [
+          "h:2,0"
+        ],
+        "adjacentVertices": [
+          "v:3,-1,1",
+          "v:2,0,1"
+        ],
+        "port": "generic"
+      },
+      {
+        "id": "v:2,-1,1",
+        "adjacentHexes": [
+          "h:2,-1",
+          "h:2,0",
+          "h:1,0"
+        ],
+        "adjacentVertices": [
+          "v:2,0,0",
+          "v:1,1,0",
+          "v:1,0,0"
+        ],
+        "building": {
+          "player": "P1",
+          "kind": "settlement"
+        }
+      },
+      {
+        "id": "v:2,-1,0",
+        "adjacentHexes": [
+          "h:2,-1",
+          "h:2,-2"
+        ],
+        "adjacentVertices": [
+          "v:3,-3,1",
+          "v:3,-2,1",
+          "v:2,-2,1"
+        ],
+        "port": "grain"
+      },
+      {
+        "id": "v:3,-2,1",
+        "adjacentHexes": [
+          "h:2,-1"
+        ],
+        "adjacentVertices": [
+          "v:2,0,0",
+          "v:2,-1,0"
+        ],
+        "port": "grain"
+      },
+      {
+        "id": "v:1,0,0",
+        "adjacentHexes": [
+          "h:2,-1",
+          "h:1,0",
+          "h:1,-1"
+        ],
+        "adjacentVertices": [
+          "v:2,-2,1",
+          "v:2,-1,1",
+          "v:1,-1,1"
+        ]
+      },
+      {
+        "id": "v:2,-2,1",
+        "adjacentHexes": [
+          "h:2,-2",
+          "h:2,-1",
+          "h:1,-1"
+        ],
+        "adjacentVertices": [
+          "v:2,-1,0",
+          "v:1,0,0",
+          "v:1,-1,0"
+        ],
+        "building": {
+          "player": "P1",
+          "kind": "city"
+        }
+      },
+      {
+        "id": "v:2,-2,0",
+        "adjacentHexes": [
+          "h:2,-2"
+        ],
+        "adjacentVertices": [
+          "v:3,-3,1",
+          "v:2,-3,1"
+        ]
+      },
+      {
+        "id": "v:3,-3,1",
+        "adjacentHexes": [
+          "h:2,-2"
+        ],
+        "adjacentVertices": [
+          "v:2,-1,0",
+          "v:2,-2,0"
+        ]
+      },
+      {
+        "id": "v:1,-1,0",
+        "adjacentHexes": [
+          "h:2,-2",
+          "h:1,-1",
+          "h:1,-2"
+        ],
+        "adjacentVertices": [
+          "v:2,-3,1",
+          "v:2,-2,1",
+          "v:1,-2,1"
+        ]
+      },
+      {
+        "id": "v:2,-3,1",
+        "adjacentHexes": [
+          "h:2,-2",
+          "h:1,-2"
+        ],
+        "adjacentVertices": [
+          "v:2,-2,0",
+          "v:1,-1,0",
+          "v:1,-2,0"
+        ],
+        "port": "wool"
+      },
+      {
+        "id": "v:1,-2,0",
+        "adjacentHexes": [
+          "h:1,-2"
+        ],
+        "adjacentVertices": [
+          "v:2,-3,1",
+          "v:1,-3,1"
+        ],
+        "port": "wool"
+      },
+      {
+        "id": "v:1,-2,1",
+        "adjacentHexes": [
+          "h:1,-2",
+          "h:1,-1",
+          "h:0,-1"
+        ],
+        "adjacentVertices": [
+          "v:1,-1,0",
+          "v:0,0,0",
+          "v:0,-1,0"
+        ]
+      },
+      {
+        "id": "v:0,0,0",
+        "adjacentHexes": [
+          "h:1,-1",
+          "h:0,0",
+          "h:0,-1"
+        ],
+        "adjacentVertices": [
+          "v:1,-2,1",
+          "v:1,-1,1",
+          "v:0,-1,1"
+        ]
+      },
+      {
+        "id": "v:0,-1,1",
+        "adjacentHexes": [
+          "h:0,-1",
+          "h:0,0",
+          "h:-1,0"
+        ],
+        "adjacentVertices": [
+          "v:0,0,0",
+          "v:-1,1,0",
+          "v:-1,0,0"
+        ]
+      },
+      {
+        "id": "v:-1,1,0",
+        "adjacentHexes": [
+          "h:0,0",
+          "h:-1,1",
+          "h:-1,0"
+        ],
+        "adjacentVertices": [
+          "v:0,-1,1",
+          "v:0,0,1",
+          "v:-1,0,1"
+        ],
+        "building": {
+          "player": "P2",
+          "kind": "settlement"
+        }
+      },
+      {
+        "id": "v:0,0,1",
+        "adjacentHexes": [
+          "h:0,0",
+          "h:0,1",
+          "h:-1,1"
+        ],
+        "adjacentVertices": [
+          "v:0,1,0",
+          "v:-1,2,0",
+          "v:-1,1,0"
+        ]
+      },
+      {
+        "id": "v:0,1,0",
+        "adjacentHexes": [
+          "h:1,0",
+          "h:0,1",
+          "h:0,0"
+        ],
+        "adjacentVertices": [
+          "v:1,-1,1",
+          "v:1,0,1",
+          "v:0,0,1"
+        ],
+        "building": {
+          "player": "P0",
+          "kind": "settlement"
+        }
+      },
+      {
+        "id": "v:1,-1,1",
+        "adjacentHexes": [
+          "h:1,-1",
+          "h:1,0",
+          "h:0,0"
+        ],
+        "adjacentVertices": [
+          "v:1,0,0",
+          "v:0,1,0",
+          "v:0,0,0"
+        ]
+      }
+    ],
+    "edges": [
+      {
+        "id": "e:1,-3,2",
+        "vertices": [
+          "v:1,-3,1",
+          "v:0,-2,0"
+        ]
+      },
+      {
+        "id": "e:1,-2,1",
+        "vertices": [
+          "v:0,-1,0",
+          "v:1,-3,1"
+        ]
+      },
+      {
+        "id": "e:0,-1,0",
+        "vertices": [
+          "v:0,-2,1",
+          "v:0,-1,0"
+        ],
+        "player": "P2"
+      },
+      {
+        "id": "e:0,-2,2",
+        "vertices": [
+          "v:0,-2,1",
+          "v:-1,-1,0"
+        ]
+      },
+      {
+        "id": "e:0,-2,1",
+        "vertices": [
+          "v:-1,-1,0",
+          "v:0,-3,1"
+        ]
+      },
+      {
+        "id": "e:0,-2,0",
+        "vertices": [
+          "v:0,-3,1",
+          "v:0,-2,0"
+        ]
+      },
+      {
+        "id": "e:0,-1,1",
+        "vertices": [
+          "v:-1,0,0",
+          "v:0,-2,1"
+        ]
+      },
+      {
+        "id": "e:-1,0,0",
+        "vertices": [
+          "v:-1,-1,1",
+          "v:-1,0,0"
+        ]
+      },
+      {
+        "id": "e:-1,-1,2",
+        "vertices": [
+          "v:-1,-1,1",
+          "v:-2,0,0"
+        ]
+      },
+      {
+        "id": "e:-1,-1,1",
+        "vertices": [
+          "v:-2,0,0",
+          "v:-1,-2,1"
+        ]
+      },
+      {
+        "id": "e:-1,-1,0",
+        "vertices": [
+          "v:-1,-2,1",
+          "v:-1,-1,0"
+        ]
+      },
+      {
+        "id": "e:-1,0,1",
+        "vertices": [
+          "v:-2,1,0",
+          "v:-1,-1,1"
+        ],
+        "player": "P3"
+      },
+      {
+        "id": "e:-2,1,0",
+        "vertices": [
+          "v:-2,0,1",
+          "v:-2,1,0"
+        ]
+      },
+      {
+        "id": "e:-2,0,2",
+        "vertices": [
+          "v:-2,0,1",
+          "v:-3,1,0"
+        ]
+      },
+      {
+        "id": "e:-2,0,1",
+        "vertices": [
+          "v:-3,1,0",
+          "v:-2,-1,1"
+        ]
+      },
+      {
+        "id": "e:-2,0,0",
+        "vertices": [
+          "v:-2,-1,1",
+          "v:-2,0,0"
+        ],
+        "player": "P0"
+      },
+      {
+        "id": "e:-1,0,2",
+        "vertices": [
+          "v:-1,0,1",
+          "v:-2,1,0"
+        ]
+      },
+      {
+        "id": "e:-1,1,1",
+        "vertices": [
+          "v:-2,2,0",
+          "v:-1,0,1"
+        ],
+        "player": "P3"
+      },
+      {
+        "id": "e:-2,2,0",
+        "vertices": [
+          "v:-2,1,1",
+          "v:-2,2,0"
+        ]
+      },
+      {
+        "id": "e:-2,1,2",
+        "vertices": [
+          "v:-2,1,1",
+          "v:-3,2,0"
+        ]
+      },
+      {
+        "id": "e:-2,1,1",
+        "vertices": [
+          "v:-3,2,0",
+          "v:-2,0,1"
+        ]
+      },
+      {
+        "id": "e:-1,1,2",
+        "vertices": [
+          "v:-1,1,1",
+          "v:-2,2,0"
+        ]
+      },
+      {
+        "id": "e:-1,2,1",
+        "vertices": [
+          "v:-2,3,0",
+          "v:-1,1,1"
+        ]
+      },
+      {
+        "id": "e:-2,3,0",
+        "vertices": [
+          "v:-2,2,1",
+          "v:-2,3,0"
+        ]
+      },
+      {
+        "id": "e:-2,2,2",
+        "vertices": [
+          "v:-2,2,1",
+          "v:-3,3,0"
+        ]
+      },
+      {
+        "id": "e:-2,2,1",
+        "vertices": [
+          "v:-3,3,0",
+          "v:-2,1,1"
+        ]
+      },
+      {
+        "id": "e:0,1,2",
+        "vertices": [
+          "v:0,1,1",
+          "v:-1,2,0"
+        ]
+      },
+      {
+        "id": "e:0,2,1",
+        "vertices": [
+          "v:-1,3,0",
+          "v:0,1,1"
+        ]
+      },
+      {
+        "id": "e:-1,3,0",
+        "vertices": [
+          "v:-1,2,1",
+          "v:-1,3,0"
+        ]
+      },
+      {
+        "id": "e:-1,2,2",
+        "vertices": [
+          "v:-1,2,1",
+          "v:-2,3,0"
+        ]
+      },
+      {
+        "id": "e:-1,2,0",
+        "vertices": [
+          "v:-1,1,1",
+          "v:-1,2,0"
+        ]
+      },
+      {
+        "id": "e:1,1,2",
+        "vertices": [
+          "v:1,1,1",
+          "v:0,2,0"
+        ]
+      },
+      {
+        "id": "e:1,2,1",
+        "vertices": [
+          "v:0,3,0",
+          "v:1,1,1"
+        ]
+      },
+      {
+        "id": "e:0,3,0",
+        "vertices": [
+          "v:0,2,1",
+          "v:0,3,0"
+        ]
+      },
+      {
+        "id": "e:0,2,2",
+        "vertices": [
+          "v:0,2,1",
+          "v:-1,3,0"
+        ]
+      },
+      {
+        "id": "e:0,2,0",
+        "vertices": [
+          "v:0,1,1",
+          "v:0,2,0"
+        ]
+      },
+      {
+        "id": "e:2,0,2",
+        "vertices": [
+          "v:2,0,1",
+          "v:1,1,0"
+        ]
+      },
+      {
+        "id": "e:2,1,1",
+        "vertices": [
+          "v:1,2,0",
+          "v:2,0,1"
+        ]
+      },
+      {
+        "id": "e:1,2,0",
+        "vertices": [
+          "v:1,1,1",
+          "v:1,2,0"
+        ]
+      },
+      {
+        "id": "e:1,1,1",
+        "vertices": [
+          "v:0,2,0",
+          "v:1,0,1"
+        ]
+      },
+      {
+        "id": "e:1,1,0",
+        "vertices": [
+          "v:1,0,1",
+          "v:1,1,0"
+        ]
+      },
+      {
+        "id": "e:3,-1,2",
+        "vertices": [
+          "v:3,-1,1",
+          "v:2,0,0"
+        ]
+      },
+      {
+        "id": "e:3,0,1",
+        "vertices": [
+          "v:2,1,0",
+          "v:3,-1,1"
+        ]
+      },
+      {
+        "id": "e:2,1,0",
+        "vertices": [
+          "v:2,0,1",
+          "v:2,1,0"
+        ]
+      },
+      {
+        "id": "e:2,0,1",
+        "vertices": [
+          "v:1,1,0",
+          "v:2,-1,1"
+        ]
+      },
+      {
+        "id": "e:2,0,0",
+        "vertices": [
+          "v:2,-1,1",
+          "v:2,0,0"
+        ],
+        "player": "P1"
+      },
+      {
+        "id": "e:3,-2,2",
+        "vertices": [
+          "v:3,-2,1",
+          "v:2,-1,0"
+        ]
+      },
+      {
+        "id": "e:3,-1,1",
+        "vertices": [
+          "v:2,0,0",
+          "v:3,-2,1"
+        ]
+      },
+      {
+        "id": "e:2,-1,2",
+        "vertices": [
+          "v:2,-1,1",
+          "v:1,0,0"
+        ]
+      },
+      {
+        "id": "e:2,-1,1",
+        "vertices": [
+          "v:1,0,0",
+          "v:2,-2,1"
+        ]
+      },
+      {
+        "id": "e:2,-1,0",
+        "vertices": [
+          "v:2,-2,1",
+          "v:2,-1,0"
+        ],
+        "player": "P1"
+      },
+      {
+        "id": "e:3,-3,2",
+        "vertices": [
+          "v:3,-3,1",
+          "v:2,-2,0"
+        ]
+      },
+      {
+        "id": "e:3,-2,1",
+        "vertices": [
+          "v:2,-1,0",
+          "v:3,-3,1"
+        ]
+      },
+      {
+        "id": "e:2,-2,2",
+        "vertices": [
+          "v:2,-2,1",
+          "v:1,-1,0"
+        ]
+      },
+      {
+        "id": "e:2,-2,1",
+        "vertices": [
+          "v:1,-1,0",
+          "v:2,-3,1"
+        ]
+      },
+      {
+        "id": "e:2,-2,0",
+        "vertices": [
+          "v:2,-3,1",
+          "v:2,-2,0"
+        ]
+      },
+      {
+        "id": "e:2,-3,2",
+        "vertices": [
+          "v:2,-3,1",
+          "v:1,-2,0"
+        ]
+      },
+      {
+        "id": "e:1,-1,0",
+        "vertices": [
+          "v:1,-2,1",
+          "v:1,-1,0"
+        ]
+      },
+      {
+        "id": "e:1,-2,2",
+        "vertices": [
+          "v:1,-2,1",
+          "v:0,-1,0"
+        ]
+      },
+      {
+        "id": "e:1,-2,0",
+        "vertices": [
+          "v:1,-3,1",
+          "v:1,-2,0"
+        ]
+      },
+      {
+        "id": "e:1,-1,1",
+        "vertices": [
+          "v:0,0,0",
+          "v:1,-2,1"
+        ]
+      },
+      {
+        "id": "e:0,0,0",
+        "vertices": [
+          "v:0,-1,1",
+          "v:0,0,0"
+        ]
+      },
+      {
+        "id": "e:0,-1,2",
+        "vertices": [
+          "v:0,-1,1",
+          "v:-1,0,0"
+        ]
+      },
+      {
+        "id": "e:0,0,1",
+        "vertices": [
+          "v:-1,1,0",
+          "v:0,-1,1"
+        ]
+      },
+      {
+        "id": "e:-1,1,0",
+        "vertices": [
+          "v:-1,0,1",
+          "v:-1,1,0"
+        ]
+      },
+      {
+        "id": "e:0,0,2",
+        "vertices": [
+          "v:0,0,1",
+          "v:-1,1,0"
+        ],
+        "player": "P2"
+      },
+      {
+        "id": "e:0,1,1",
+        "vertices": [
+          "v:-1,2,0",
+          "v:0,0,1"
+        ],
+        "player": "P2"
+      },
+      {
+        "id": "e:1,0,2",
+        "vertices": [
+          "v:1,0,1",
+          "v:0,1,0"
+        ]
+      },
+      {
+        "id": "e:0,1,0",
+        "vertices": [
+          "v:0,0,1",
+          "v:0,1,0"
+        ]
+      },
+      {
+        "id": "e:1,0,1",
+        "vertices": [
+          "v:0,1,0",
+          "v:1,-1,1"
+        ],
+        "player": "P0"
+      },
+      {
+        "id": "e:1,0,0",
+        "vertices": [
+          "v:1,-1,1",
+          "v:1,0,0"
+        ]
+      },
+      {
+        "id": "e:1,-1,2",
+        "vertices": [
+          "v:1,-1,1",
+          "v:0,0,0"
+        ]
+      }
+    ],
+    "myPlayer": "P0",
+    "ownHand": {
+      "lumber": 2,
+      "brick": 2,
+      "wool": 1,
+      "grain": 1,
+      "ore": 0
+    },
+    "ownDevelopmentCards": {
+      "cards": {
+        "knight": 0,
+        "monopoly": 0,
+        "road-building": 0,
+        "year-of-plenty": 0,
+        "victory-point": 0
+      },
+      "playable": {
+        "knight": 0,
+        "monopoly": 0,
+        "road-building": 0,
+        "year-of-plenty": 0,
+        "victory-point": 0
+      },
+      "boughtThisTurn": {
+        "knight": 0,
+        "monopoly": 0,
+        "road-building": 0,
+        "year-of-plenty": 0,
+        "victory-point": 0
+      },
+      "hasPlayedThisTurn": true
+    },
+    "activeTrades": [],
+    "bank": {
+      "lumber": 16,
+      "brick": 15,
+      "wool": 11,
+      "grain": 16,
+      "ore": 19
+    },
+    "bankVisible": true,
+    "players": {
+      "P0": {
+        "handSize": 6,
+        "tradeRatios": {
+          "lumber": 2,
+          "brick": 4,
+          "wool": 4,
+          "grain": 4,
+          "ore": 4
+        },
+        "cardDiscardLimit": 7,
+        "developmentCards": 0,
+        "playedDevelopmentCards": {
+          "knight": 1,
+          "monopoly": 0,
+          "road-building": 0,
+          "year-of-plenty": 0,
+          "victory-point": 0
+        },
+        "hasPlayedDevelopmentThisTurn": true,
+        "visiblePoints": 2,
+        "hasLongestRoad": false,
+        "hasLargestArmy": false
+      },
+      "P3": {
+        "handSize": 4,
+        "tradeRatios": {
+          "lumber": 4,
+          "brick": 4,
+          "wool": 4,
+          "grain": 4,
+          "ore": 4
+        },
+        "cardDiscardLimit": 7,
+        "developmentCards": 1,
+        "playedDevelopmentCards": {
+          "knight": 0,
+          "monopoly": 0,
+          "road-building": 0,
+          "year-of-plenty": 0,
+          "victory-point": 0
+        },
+        "hasPlayedDevelopmentThisTurn": false,
+        "visiblePoints": 2,
+        "hasLongestRoad": false,
+        "hasLargestArmy": false
+      },
+      "P2": {
+        "handSize": 3,
+        "tradeRatios": {
+          "lumber": 4,
+          "brick": 4,
+          "wool": 4,
+          "grain": 4,
+          "ore": 4
+        },
+        "cardDiscardLimit": 7,
+        "developmentCards": 0,
+        "playedDevelopmentCards": {
+          "knight": 1,
+          "monopoly": 0,
+          "road-building": 0,
+          "year-of-plenty": 0,
+          "victory-point": 0
+        },
+        "hasPlayedDevelopmentThisTurn": false,
+        "visiblePoints": 3,
+        "hasLongestRoad": false,
+        "hasLargestArmy": false
+      },
+      "P1": {
+        "handSize": 5,
+        "tradeRatios": {
+          "lumber": 4,
+          "brick": 4,
+          "wool": 4,
+          "grain": 4,
+          "ore": 4
+        },
+        "cardDiscardLimit": 7,
+        "developmentCards": 0,
+        "playedDevelopmentCards": {
+          "knight": 0,
+          "monopoly": 0,
+          "road-building": 0,
+          "year-of-plenty": 0,
+          "victory-point": 0
+        },
+        "hasPlayedDevelopmentThisTurn": false,
+        "visiblePoints": 3,
+        "hasLongestRoad": false,
+        "hasLargestArmy": false
+      }
+    },
+    "playerOrder": [
+      "P0",
+      "P1",
+      "P2",
+      "P3"
+    ],
+    "gameKey": "/|clay6403|1",
+    "isMyTurn": true,
+    "action": "none",
+    "initialPlacement": false,
+    "victoryTarget": 10,
+    "friendlyRobber": false,
+    "botOnlyGame": true,
+    "currentPlayer": "P0",
+    "turn": 20,
+    "lastRoll": 11,
+    "hasRolled": true,
+    "domesticTradeUsed": false
+  },
+  "expected": {
+    "turn": 20,
+    "lastRoll": 11,
+    "ownHand": [
+      2,
+      2,
+      1,
+      1,
+      0
+    ],
+    "bank": [
+      16,
+      15,
+      11,
+      16,
+      19
+    ],
+    "publicVictoryPoints": [
+      2,
+      3,
+      3,
+      2
+    ],
+    "robberHex": "h:-1,1",
+    "ownSettlements": [
+      "v:0,1,0",
+      "v:-2,0,0"
+    ],
+    "ownRoads": [
+      "e:1,0,1",
+      "e:-2,0,0"
+    ],
+    "sourceResourceWorlds": 3,
+    "strata": 24,
+    "mergedParticles": 8,
+    "mergedStratumMultiplicities": [
+      2,
+      2,
+      2,
+      2,
+      2,
+      3,
+      5,
+      6
+    ],
+    "effectiveSampleSize": 6.4,
+    "semanticSeed": 825606397,
+    "hiddenDevelopment": {
+      "player": "P3",
+      "totalCards": 1,
+      "mixture": {
+        "knight": 0.5416666666666666,
+        "victory-point": 0.20833333333333334,
+        "road-building": 0.08333333333333333,
+        "year-of-plenty": 0.08333333333333333,
+        "monopoly": 0.08333333333333333
+      }
+    },
+    "strongRoad": "e:1,-1,2",
+    "weakRoad": "e:-2,0,1",
+    "immediateSettlement": "v:0,0,0",
+    "effort": {
+      "decisionTimeMs": 4000,
+      "tacticalMaxDepth": 14,
+      "tacticalNodeBudget": 900,
+      "rootCap": 12,
+      "rolloutBudget": 384,
+      "rolloutSteps": 96
+    }
+  },
+  "historicalRecorded": {
+    "engineRevision": "deep-maxn-v10",
+    "runtime": "background-gpu",
+    "device": "NVIDIA GeForce RTX 3070 Ti",
+    "selectedRoot": "e:-2,0,1",
+    "rollouts": 384,
+    "particles": 8,
+    "effectiveSampleSize": 6.4,
+    "semanticSeed": 825606397,
+    "strongRoad": {
+      "preRank": 1,
+      "prior": 0.3928,
+      "finalRank": 2,
+      "terminalOutcome": 0,
+      "victoryMargin": -0.5233,
+      "victoryMarginLowerBound": -0.6433,
+      "victoryMarginUpperBound": -0.4032,
+      "meanTurn": 29.8314
+    },
+    "weakRoad": {
+      "preRank": 7,
+      "prior": 0.0059,
+      "finalRank": 1,
+      "terminalOutcome": 0,
+      "victoryMargin": -0.4186,
+      "victoryMarginLowerBound": -0.5278,
+      "victoryMarginUpperBound": -0.3094,
+      "meanTurn": 29.8605
+    }
+  }
+}
