@@ -7,9 +7,9 @@ using System.Threading;
 
 internal static class Program
 {
-    private const string ConfigFileName = "gpu-wsl-bridge.conf";
+    private const string ConfigFileName = "gpu-runtime.conf";
 
-    private sealed class BridgeConfig
+    private sealed class RuntimeConfig
     {
         public string Distro;
         public string HostPath;
@@ -67,7 +67,7 @@ internal static class Program
                 if (child.ExitCode != 0)
                 {
                     Console.Error.WriteLine(
-                        "[Colonist Assistant GPU bridge] WSL companion exited with code {0} " +
+                        "[Colonist GPU Runtime] WSL companion exited with code {0} " +
                         "(distro={1}, host={2}).",
                         child.ExitCode,
                         config.Distro,
@@ -80,7 +80,7 @@ internal static class Program
         }
         catch (Exception error)
         {
-            Console.Error.WriteLine("[Colonist Assistant GPU bridge] {0}", error.Message);
+            Console.Error.WriteLine("[Colonist GPU Runtime] {0}", error.Message);
             return 1;
         }
     }
@@ -99,7 +99,7 @@ internal static class Program
             }
             catch (ObjectDisposedException)
             {
-                // The child can exit while Chrome still owns the bridge input pipe.
+                // The child can exit while the browser still owns the runtime input pipe.
             }
             finally
             {
@@ -131,12 +131,12 @@ internal static class Program
         }
     }
 
-    private static BridgeConfig LoadConfig(string path)
+    private static RuntimeConfig LoadConfig(string path)
     {
         if (!File.Exists(path))
         {
             throw new FileNotFoundException(
-                "bridge configuration is missing; reinstall the WSL development bridge",
+                "runtime configuration is missing; reinstall the Colonist GPU Runtime",
                 path
             );
         }
@@ -154,7 +154,7 @@ internal static class Program
             var separator = line.IndexOf('=');
             if (separator <= 0)
             {
-                throw new InvalidDataException("invalid bridge configuration line");
+                throw new InvalidDataException("invalid runtime configuration line");
             }
 
             var key = line.Substring(0, separator).Trim();
@@ -169,7 +169,7 @@ internal static class Program
             }
             else
             {
-                throw new InvalidDataException("invalid or duplicate bridge configuration key: " + key);
+                throw new InvalidDataException("invalid or duplicate runtime configuration key: " + key);
             }
         }
 
@@ -186,6 +186,6 @@ internal static class Program
             );
         }
 
-        return new BridgeConfig { Distro = distro, HostPath = hostPath };
+        return new RuntimeConfig { Distro = distro, HostPath = hostPath };
     }
 }

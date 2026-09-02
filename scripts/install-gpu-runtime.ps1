@@ -1,7 +1,8 @@
 param(
   [Parameter(Mandatory = $true)]
+  [ValidateNotNullOrEmpty()]
   [ValidatePattern('^[a-p]{32}$')]
-  [string]$ExtensionId,
+  [string[]]$ExtensionIds,
 
   [Parameter(Mandatory = $true)]
   [ValidatePattern('^[A-Za-z0-9._-]+$')]
@@ -15,11 +16,11 @@ param(
 $ErrorActionPreference = 'Stop'
 $HostName = 'io.colonist_assistant.gpu'
 $DestDir = Join-Path $env:LOCALAPPDATA 'ColonistAssistant'
-$Bridge = Join-Path $DestDir 'colonist-assistant-gpu-wsl-bridge.exe'
-$BridgeNew = Join-Path $DestDir 'colonist-assistant-gpu-wsl-bridge.new.exe'
-$Config = Join-Path $DestDir 'gpu-wsl-bridge.conf'
+$Runtime = Join-Path $DestDir 'colonist-gpu-runtime.exe'
+$RuntimeNew = Join-Path $DestDir 'colonist-gpu-runtime.new.exe'
+$Config = Join-Path $DestDir 'gpu-runtime.conf'
 $Manifest = Join-Path $DestDir "$HostName.json"
-$Source = Join-Path $PSScriptRoot 'gpu-wsl-bridge.cs'
+$Source = Join-Path $PSScriptRoot 'colonist-gpu-runtime.cs'
 $WslExe = Join-Path $env:SystemRoot 'System32\wsl.exe'
 $Compiler = Join-Path ([Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()) 'csc.exe'
 
@@ -30,7 +31,7 @@ if (-not (Test-Path $Compiler)) {
   throw "Windows C# compiler was not found at $Compiler"
 }
 if (-not (Test-Path $Source)) {
-  throw "WSL bridge source was not found at $Source"
+  throw "Colonist GPU Runtime source was not found at $Source"
 }
 
 & $WslExe -d $WslDistro --exec /usr/bin/test -x $LinuxHostPath
@@ -39,12 +40,12 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 New-Item -ItemType Directory -Force -Path $DestDir | Out-Null
-Remove-Item -Force -ErrorAction SilentlyContinue $BridgeNew
-$CompilerOutput = & $Compiler /nologo /optimize+ /target:exe "/out:$BridgeNew" $Source 2>&1
+Remove-Item -Force -ErrorAction SilentlyContinue $RuntimeNew
+$CompilerOutput = & $Compiler /nologo /optimize+ /target:exe "/out:$RuntimeNew" $Source 2>&1
 if ($LASTEXITCODE -ne 0) {
-  throw "WSL GPU bridge compilation failed:`n$($CompilerOutput -join [Environment]::NewLine)"
+  throw "Colonist GPU Runtime compilation failed:`n$($CompilerOutput -join [Environment]::NewLine)"
 }
-Move-Item -Force $BridgeNew $Bridge
+Move-Item -Force $RuntimeNew $Runtime
 
 [System.IO.File]::WriteAllLines(
   $Config,
@@ -55,12 +56,17 @@ Move-Item -Force $BridgeNew $Bridge
   [System.Text.UTF8Encoding]::new($false)
 )
 
+$AllowedOrigins = @(
+  $ExtensionIds |
+    Sort-Object -Unique |
+    ForEach-Object { "chrome-extension://$_/" }
+)
 $ManifestObject = [ordered]@{
   name = $HostName
-  description = 'Colonist Assistant WSL GPU development bridge'
-  path = $Bridge
+  description = 'Colonist GPU Runtime'
+  path = $Runtime
   type = 'stdio'
-  allowed_origins = @("chrome-extension://$ExtensionId/")
+  allowed_origins = $AllowedOrigins
 }
 $ManifestJson = $ManifestObject | ConvertTo-Json -Depth 4
 [System.IO.File]::WriteAllText(
@@ -69,12 +75,18 @@ $ManifestJson = $ManifestObject | ConvertTo-Json -Depth 4
   [System.Text.UTF8Encoding]::new($false)
 )
 
-$RegistryKey = "HKCU:\Software\Google\Chrome\NativeMessagingHosts\$HostName"
-New-Item -Path $RegistryKey -Force | Out-Null
-Set-Item -Path $RegistryKey -Value $Manifest
+$RegistryKeys = @(
+  "HKCU:\Software\Google\Chrome\NativeMessagingHosts\$HostName",
+  "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\$HostName"
+)
+foreach ($RegistryKey in $RegistryKeys) {
+  New-Item -Path $RegistryKey -Force | Out-Null
+  Set-Item -Path $RegistryKey -Value $Manifest
+}
 
-Write-Host "Installed one-time WSL development bridge for $HostName"
-Write-Host "Chrome extension: $ExtensionId"
+Write-Host "Installed Colonist GPU Runtime for $HostName"
+Write-Host "Authorized extension IDs: $($ExtensionIds -join ', ')"
 Write-Host "Trusted WSL companion: $WslDistro $LinuxHostPath"
 Write-Host "Native host manifest: $Manifest"
+Write-Host 'Registered the same runtime for Google Chrome and Microsoft Edge.'
 Write-Host 'Future Linux companion rebuilds do not require rerunning this installer.'
