@@ -16,6 +16,11 @@ pub enum OpponentThreatKind {
     ImmediateMainPhaseWin,
     LongestRoadWin,
     LargestArmyWin,
+    RoadBuildingWin,
+    YearOfPlentyWin,
+    MonopolyWin,
+    KnightWin,
+    DevelopmentPurchaseWin,
     HiddenVictoryPointWin,
     ProductionEnabledWin,
     TradeEnabledWin,
@@ -97,7 +102,98 @@ fn award_swing_bonus(state: &GameState, player: u8) -> u8 {
     bonus
 }
 
-fn opponent_can_win_main_phase(state: &GameState, opponent: u8) -> Option<OpponentThreat> {
+fn direct_win_after_progress(state: &GameState, opponent: u8) -> bool {
+    if state.winner() == Some(opponent) {
+        return true;
+    }
+    if state.phase != Phase::Main || state.current_player != opponent {
+        return false;
+    }
+    state.legal_actions().into_iter().any(|action| {
+        matches!(
+            action,
+            Action::BuildRoad { .. } | Action::BuildSettlement { .. } | Action::BuildCity { .. }
+        ) && {
+            let mut next = state.clone();
+            next.apply(&action).is_ok() && next.winner() == Some(opponent)
+        }
+    })
+}
+
+fn chance_tail_win_probability(state: &GameState, opponent: u8) -> f32 {
+    let actions = state.legal_actions();
+    let total_weight = actions
+        .iter()
+        .map(|action| state.chance_weight(action) as u32)
+        .sum::<u32>();
+    if total_weight == 0 {
+        return 0.0;
+    }
+    let winning_weight = actions
+        .into_iter()
+        .filter_map(|action| {
+            let weight = state.chance_weight(&action) as u32;
+            if weight == 0 {
+                return None;
+            }
+            let mut next = state.clone();
+            if next.apply(&action).is_err() {
+                return None;
+            }
+            (direct_win_after_progress(&next, opponent)).then_some(weight)
+        })
+        .sum::<u32>();
+    winning_weight as f32 / total_weight as f32
+}
+
+fn progress_action_win_probability(state: &GameState, opponent: u8, action: &Action) -> f32 {
+    let mut next = state.clone();
+    if next.apply(action).is_err() {
+        return 0.0;
+    }
+    if direct_win_after_progress(&next, opponent) {
+        return 1.0;
+    }
+    match next.phase {
+        Phase::DevelopmentChance | Phase::ResolveSteal { .. } => {
+            chance_tail_win_probability(&next, opponent)
+        }
+        _ => 0.0,
+    }
+}
+
+fn progress_threat_kind(action: &Action) -> Option<OpponentThreatKind> {
+    match action {
+        Action::PlayRoadBuilding { .. } => Some(OpponentThreatKind::RoadBuildingWin),
+        Action::PlayYearOfPlenty { .. } => Some(OpponentThreatKind::YearOfPlentyWin),
+        Action::PlayMonopoly { .. } => Some(OpponentThreatKind::MonopolyWin),
+        Action::PlayKnight { .. } => Some(OpponentThreatKind::KnightWin),
+        Action::BuyDevelopment => Some(OpponentThreatKind::DevelopmentPurchaseWin),
+        _ => None,
+    }
+}
+
+fn best_progress_threat(
+    state: &GameState,
+    opponent: u8,
+) -> Option<(OpponentThreatKind, f32)> {
+    let probe = main_phase_for(state, opponent);
+    probe
+        .legal_actions()
+        .into_iter()
+        .filter_map(|action| {
+            let kind = progress_threat_kind(&action)?;
+            let probability = progress_action_win_probability(&probe, opponent, &action);
+            (probability > f32::EPSILON).then_some((kind, probability))
+        })
+        .max_by(|left, right| left.1.total_cmp(&right.1))
+}
+
+fn opponent_can_win_main_phase(
+    state: &GameState,
+    opponent: u8,
+    include_progress_cards: bool,
+) -> Option<OpponentThreat> {
     let target = state.victory_target;
     // victory_points() already includes held VP cards in this rules engine.
     let base = state.players[opponent as usize].victory_points();
@@ -183,6 +279,19 @@ fn opponent_can_win_main_phase(state: &GameState, opponent: u8) -> Option<Oppone
         });
     }
 
+    if include_progress_cards
+        && let Some((kind, probability)) = best_progress_threat(state, opponent)
+        && probability >= 1.0 - 1e-6
+    {
+        return Some(OpponentThreat {
+            opponent,
+            kind,
+            blocking_vertices: Vec::new(),
+            blocking_edges: Vec::new(),
+            blocking_hexes: Vec::new(),
+        });
+    }
+
     // Public score can hide that the opponent already counts VP cards in
     // victory_points(); surface a dedicated label when those cards are the
     // decisive margin against the public board score.
@@ -231,7 +340,7 @@ fn production_enabled_win(state: &GameState, opponent: u8) -> Option<OpponentThr
         let mut next = state.clone();
         next.players[opponent as usize].resources[resource.index()] =
             next.players[opponent as usize].resources[resource.index()].saturating_add(1);
-        if opponent_can_win_main_phase(&next, opponent).is_some() {
+        if opponent_can_win_main_phase(&next, opponent, false).is_some() {
             blocking_hexes.push(hex_index as u8);
         }
     }
@@ -259,7 +368,7 @@ fn trade_enabled_win(state: &GameState, opponent: u8) -> Option<OpponentThreat> 
         let mut next = state.clone();
         next.players[opponent as usize].resources[resource as usize] =
             next.players[opponent as usize].resources[resource as usize].saturating_add(1);
-        if opponent_can_win_main_phase(&next, opponent).is_some() {
+        if opponent_can_win_main_phase(&next, opponent, false).is_some() {
             let settlements = settlement_sites(state, opponent);
             let cities = city_sites(state, opponent);
             return Some(OpponentThreat {
@@ -281,7 +390,7 @@ pub fn detect_opponent_threats(state: &GameState, protected: u8) -> Vec<Opponent
         if opponent == protected {
             continue;
         }
-        if let Some(threat) = opponent_can_win_main_phase(state, opponent) {
+        if let Some(threat) = opponent_can_win_main_phase(state, opponent, true) {
             threats.push(threat);
             continue;
         }
@@ -304,7 +413,7 @@ pub fn has_verified_immediate_opponent_win(state: &GameState, protected: u8) -> 
         return false;
     }
     (0..state.board.num_players).any(|opponent| {
-        opponent != protected && opponent_can_win_main_phase(state, opponent).is_some()
+        opponent != protected && opponent_can_win_main_phase(state, opponent, true).is_some()
     })
 }
 
@@ -316,7 +425,7 @@ fn has_verified_immediate_opponent_win_after_transition(state: &GameState, prote
     if next_turn_player == protected {
         return false;
     }
-    opponent_can_win_main_phase(state, next_turn_player).is_some()
+    opponent_can_win_main_phase(state, next_turn_player, true).is_some()
 }
 
 pub fn posterior_immediate_threat_weight<'a>(
@@ -340,14 +449,41 @@ pub fn posterior_immediate_threat_weight<'a>(
         .clamp(0.0, 1.0)
 }
 
-/// Benchmark-facing expected tactical threat mass. Before Wave 2 this is
-/// intentionally identical to the strict detector; Wave 2 can widen the
-/// expectation without changing strict forced-loss semantics.
+/// Posterior expected immediate tactical loss probability. Strict proofs stay
+/// in `posterior_immediate_threat_weight`; chance tails such as a VP development
+/// draw contribute only their weighted probability here.
 pub fn posterior_expected_tactical_threat_weight<'a>(
     worlds: impl IntoIterator<Item = (&'a GameState, f32)>,
     protected: u8,
 ) -> f32 {
-    posterior_immediate_threat_weight(worlds, protected)
+    let worlds = worlds
+        .into_iter()
+        .filter(|(_, weight)| *weight > f32::EPSILON)
+        .collect::<Vec<_>>();
+    let total = worlds
+        .iter()
+        .map(|(_, weight)| *weight)
+        .sum::<f32>()
+        .max(f32::EPSILON);
+    worlds
+        .into_iter()
+        .map(|(state, weight)| {
+            let probability = (0..state.board.num_players)
+                .filter(|opponent| *opponent != protected)
+                .map(|opponent| {
+                    if opponent_can_win_main_phase(state, opponent, true).is_some() {
+                        1.0
+                    } else {
+                        best_progress_threat(state, opponent)
+                            .map(|(_, probability)| probability)
+                            .unwrap_or(0.0)
+                    }
+                })
+                .fold(0.0_f32, f32::max);
+            probability * (weight / total)
+        })
+        .sum::<f32>()
+        .clamp(0.0, 1.0)
 }
 
 /// Posterior mass in which this root action still leaves a verified immediate

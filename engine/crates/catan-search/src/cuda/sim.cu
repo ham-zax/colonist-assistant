@@ -2143,6 +2143,467 @@ static inline __device__ int can_build_road_device(
     return 0;
 }
 
+static inline __device__ int can_afford_with_gains(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t player,
+    const uint32_t cost[5],
+    uint32_t first_gain,
+    uint32_t second_gain
+) {
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        uint32_t held = player_get(states, stride, lane, player, PLAYER_RESOURCES + resource);
+        held += first_gain == resource ? 1u : 0u;
+        held += second_gain == resource ? 1u : 0u;
+        if (held < cost[resource]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static inline __device__ uint32_t immediate_build_completion_score(
+    const uint32_t *states,
+    const uint32_t *topology,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t player,
+    uint32_t first_gain,
+    uint32_t second_gain
+) {
+    const uint32_t public_vp = player_get(states, stride, lane, player, PLAYER_PUBLIC_VP);
+    const uint32_t hidden_vp = player_get(states, stride, lane, player, PLAYER_DEVELOPMENT + 1u);
+    const uint32_t victory_target = state_get(states, stride, STATE_VICTORY_TARGET, lane);
+    uint32_t score = 0u;
+
+    if (player_get(states, stride, lane, player, PLAYER_CITIES_LEFT) > 0u
+        && can_afford_with_gains(
+            states, stride, lane, player, CITY_COST, first_gain, second_gain
+        )) {
+        for (uint32_t vertex = 0u; vertex < VERTEX_COUNT; ++vertex) {
+            if (state_get(states, stride, STATE_BUILDINGS + vertex, lane) == player + 1u) {
+                score = public_vp + hidden_vp + 1u >= victory_target ? 50000u : 12000u;
+                break;
+            }
+        }
+    }
+
+    if (player_get(states, stride, lane, player, PLAYER_SETTLEMENTS_LEFT) > 0u
+        && can_afford_with_gains(
+            states, stride, lane, player, SETTLEMENT_COST, first_gain, second_gain
+        )) {
+        for (uint32_t vertex = 0u; vertex < VERTEX_COUNT; ++vertex) {
+            if (can_place_settlement_device(states, topology, stride, lane, vertex, 0)) {
+                const uint32_t settlement_score = public_vp + hidden_vp + 1u >= victory_target
+                    ? 48000u
+                    : 10000u;
+                score = settlement_score > score ? settlement_score : score;
+                break;
+            }
+        }
+    }
+
+    if (can_afford_with_gains(
+        states, stride, lane, player, DEVELOPMENT_COST, first_gain, second_gain
+    )) {
+        score = score > 1800u ? score : 1800u;
+    }
+    if (player_get(states, stride, lane, player, PLAYER_ROADS_LEFT) > 0u
+        && can_afford_with_gains(
+            states, stride, lane, player, ROAD_COST, first_gain, second_gain
+        )) {
+        score = score > 900u ? score : 900u;
+    }
+    return score;
+}
+
+static inline __device__ uint32_t road_owner_with_pair(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t edge,
+    uint32_t first,
+    uint32_t second,
+    uint32_t player
+) {
+    if (edge == first || edge == second) {
+        return player + 1u;
+    }
+    return state_get(states, stride, STATE_ROADS + edge, lane);
+}
+
+static inline __device__ int can_place_settlement_with_pair(
+    const uint32_t *states,
+    const uint32_t *topology,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t vertex,
+    uint32_t first,
+    uint32_t second
+) {
+    if (vertex >= VERTEX_COUNT || state_get(states, stride, STATE_BUILDINGS + vertex, lane) != 0u) {
+        return 0;
+    }
+    const uint32_t adjacent_vertices = topo_vertex_vertex_count(topology, vertex);
+    for (uint32_t slot = 0u; slot < adjacent_vertices; ++slot) {
+        const uint32_t neighbor = topo_vertex_vertex(topology, vertex, slot);
+        if (state_get(states, stride, STATE_BUILDINGS + neighbor, lane) != 0u) {
+            return 0;
+        }
+    }
+    const uint32_t player = state_get(states, stride, STATE_CURRENT_PLAYER, lane);
+    const uint32_t adjacent_edges = topo_vertex_edge_count(topology, vertex);
+    for (uint32_t slot = 0u; slot < adjacent_edges; ++slot) {
+        const uint32_t edge = topo_vertex_edge(topology, vertex, slot);
+        if (road_owner_with_pair(states, stride, lane, edge, first, second, player) == player + 1u) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static inline __device__ int actor_road_path_between(
+    const uint32_t *states,
+    const uint32_t *topology,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t player,
+    uint32_t start,
+    uint32_t goal
+) {
+    uint32_t stack[VERTEX_COUNT];
+    unsigned char visited[VERTEX_COUNT];
+    for (uint32_t vertex = 0u; vertex < VERTEX_COUNT; ++vertex) {
+        visited[vertex] = 0u;
+    }
+    uint32_t size = 0u;
+    stack[size++] = start;
+    visited[start] = 1u;
+    while (size > 0u) {
+        const uint32_t vertex = stack[--size];
+        if (vertex == goal) {
+            return 1;
+        }
+        const uint32_t count = topo_vertex_edge_count(topology, vertex);
+        for (uint32_t slot = 0u; slot < count; ++slot) {
+            const uint32_t edge = topo_vertex_edge(topology, vertex, slot);
+            if (state_get(states, stride, STATE_ROADS + edge, lane) != player + 1u) {
+                continue;
+            }
+            const uint32_t a = topo_edge_vertex(topology, edge, 0u);
+            const uint32_t b = topo_edge_vertex(topology, edge, 1u);
+            const uint32_t next = a == vertex ? b : a;
+            if (visited[next] == 0u) {
+                visited[next] = 1u;
+                stack[size++] = next;
+            }
+        }
+    }
+    return 0;
+}
+
+static inline __device__ uint32_t longest_road_from_with_pair(
+    const uint32_t *states,
+    const uint32_t *topology,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t player,
+    uint32_t root_edge,
+    uint32_t root_through,
+    uint32_t first,
+    uint32_t second
+) {
+    uint32_t edge_stack[15];
+    uint32_t through_stack[15];
+    uint32_t next_slot[15];
+    int depth = 0;
+    uint64_t used_low = 0ull;
+    uint64_t used_high = 0ull;
+    edge_stack[0] = root_edge;
+    through_stack[0] = root_through;
+    next_slot[0] = 0u;
+    edge_mark(&used_low, &used_high, root_edge, 1);
+    uint32_t best = 1u;
+
+    while (depth >= 0) {
+        const uint32_t edge = edge_stack[depth];
+        const uint32_t a = topo_edge_vertex(topology, edge, 0u);
+        const uint32_t b = topo_edge_vertex(topology, edge, 1u);
+        const uint32_t next_vertex = a == through_stack[depth] ? b : a;
+        const uint32_t building = state_get(states, stride, STATE_BUILDINGS + next_vertex, lane);
+        const uint32_t owner = building_player(building);
+        if (owner != 0xffffffffu && owner != player) {
+            edge_mark(&used_low, &used_high, edge, 0);
+            --depth;
+            continue;
+        }
+        const uint32_t count = topo_vertex_edge_count(topology, next_vertex);
+        int pushed = 0;
+        for (uint32_t slot = next_slot[depth]; slot < count; ++slot) {
+            next_slot[depth] = slot + 1u;
+            const uint32_t candidate = topo_vertex_edge(topology, next_vertex, slot);
+            if (candidate == edge || edge_used(used_low, used_high, candidate)) {
+                continue;
+            }
+            if (road_owner_with_pair(
+                states, stride, lane, candidate, first, second, player
+            ) != player + 1u) {
+                continue;
+            }
+            if (depth + 1 >= 15) {
+                continue;
+            }
+            ++depth;
+            edge_stack[depth] = candidate;
+            through_stack[depth] = next_vertex;
+            next_slot[depth] = 0u;
+            edge_mark(&used_low, &used_high, candidate, 1);
+            const uint32_t length = (uint32_t)depth + 1u;
+            best = length > best ? length : best;
+            pushed = 1;
+            break;
+        }
+        if (pushed) {
+            continue;
+        }
+        edge_mark(&used_low, &used_high, edge, 0);
+        --depth;
+    }
+    return best;
+}
+
+static inline __device__ uint32_t longest_road_length_with_pair(
+    const uint32_t *states,
+    const uint32_t *topology,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t player,
+    uint32_t first,
+    uint32_t second
+) {
+    uint32_t best = 0u;
+    for (uint32_t edge = 0u; edge < EDGE_COUNT; ++edge) {
+        if (road_owner_with_pair(states, stride, lane, edge, first, second, player) != player + 1u) {
+            continue;
+        }
+        const uint32_t a = topo_edge_vertex(topology, edge, 0u);
+        const uint32_t b = topo_edge_vertex(topology, edge, 1u);
+        const uint32_t from_a = longest_road_from_with_pair(
+            states, topology, stride, lane, player, edge, a, first, second
+        );
+        const uint32_t from_b = longest_road_from_with_pair(
+            states, topology, stride, lane, player, edge, b, first, second
+        );
+        const uint32_t length = from_a > from_b ? from_a : from_b;
+        best = length > best ? length : best;
+    }
+    return best;
+}
+
+static inline __device__ uint32_t road_building_pair_policy_score(
+    const uint32_t *states,
+    const uint32_t *topology,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t first,
+    uint32_t second
+) {
+    const uint32_t player = state_get(states, stride, STATE_CURRENT_PLAYER, lane);
+    uint32_t score = road_policy_score(states, topology, stride, lane, first)
+        + road_policy_score(states, topology, stride, lane, second);
+    const uint32_t public_vp = player_get(states, stride, lane, player, PLAYER_PUBLIC_VP);
+    const uint32_t hidden_vp = player_get(states, stride, lane, player, PLAYER_DEVELOPMENT + 1u);
+    const uint32_t victory_target = state_get(states, stride, STATE_VICTORY_TARGET, lane);
+
+    if (player_get(states, stride, lane, player, PLAYER_SETTLEMENTS_LEFT) > 0u
+        && has_cost(states, stride, lane, player, SETTLEMENT_COST)) {
+        for (uint32_t vertex = 0u; vertex < VERTEX_COUNT; ++vertex) {
+            if (!can_place_settlement_device(states, topology, stride, lane, vertex, 0)
+                && can_place_settlement_with_pair(
+                    states, topology, stride, lane, vertex, first, second
+                )) {
+                score += public_vp + hidden_vp + 1u >= victory_target ? 600000u : 160000u;
+                break;
+            }
+        }
+    }
+
+    const uint32_t actor_length = longest_road_length_with_pair(
+        states, topology, stride, lane, player, first, second
+    );
+    uint32_t best_other = 0u;
+    const uint32_t players = state_get(states, stride, STATE_NUM_PLAYERS, lane);
+    for (uint32_t opponent = 0u; opponent < players; ++opponent) {
+        if (opponent == player) {
+            continue;
+        }
+        const uint32_t length = longest_road_length(states, topology, stride, lane, opponent);
+        best_other = length > best_other ? length : best_other;
+    }
+    const uint32_t old_holder = state_get(states, stride, STATE_LONGEST_HOLDER, lane);
+    const int takes_longest = actor_length >= 5u
+        && (old_holder == player + 1u || actor_length > best_other);
+    if (takes_longest && old_holder != player + 1u) {
+        score += public_vp + hidden_vp + 2u >= victory_target ? 700000u : 220000u;
+    }
+
+    const uint32_t first_a = topo_edge_vertex(topology, first, 0u);
+    const uint32_t first_b = topo_edge_vertex(topology, first, 1u);
+    const uint32_t second_a = topo_edge_vertex(topology, second, 0u);
+    const uint32_t second_b = topo_edge_vertex(topology, second, 1u);
+    if (actor_road_path_between(
+            states, topology, stride, lane, player, first_a, first_b
+        ) || actor_road_path_between(
+            states, topology, stride, lane, player, second_a, second_b
+        )) {
+        score += 120000u;
+    }
+    return score;
+}
+
+static inline __device__ int choose_road_building_pair(
+    const uint32_t *states,
+    const uint32_t *topology,
+    uint32_t stride,
+    uint32_t lane,
+    uint64_t *rng,
+    uint32_t *selected_first,
+    uint32_t *selected_second_code,
+    uint32_t *selected_score
+) {
+    const uint32_t player = state_get(states, stride, STATE_CURRENT_PLAYER, lane);
+    const uint32_t roads_left = player_get(states, stride, lane, player, PLAYER_ROADS_LEFT);
+    uint32_t total_weight = 0u;
+    *selected_first = 0xffffffffu;
+    *selected_second_code = 0u;
+    *selected_score = 0u;
+    if (roads_left == 0u) {
+        return 0;
+    }
+    if (roads_left == 1u) {
+        for (uint32_t first = 0u; first < EDGE_COUNT; ++first) {
+            if (!can_build_road_device(states, topology, stride, lane, first, 0xffffffffu)) {
+                continue;
+            }
+            const uint32_t weight = road_policy_score(states, topology, stride, lane, first);
+            const uint32_t next_total = total_weight + weight;
+            if (rng_range(rng, next_total) < weight) {
+                *selected_first = first;
+                *selected_score = weight;
+            }
+            total_weight = next_total;
+        }
+        return *selected_first != 0xffffffffu;
+    }
+    for (uint32_t first = 0u; first < EDGE_COUNT; ++first) {
+        if (!can_build_road_device(states, topology, stride, lane, first, 0xffffffffu)) {
+            continue;
+        }
+        for (uint32_t second = 0u; second < EDGE_COUNT; ++second) {
+            if (!can_build_road_device(states, topology, stride, lane, second, first)) {
+                continue;
+            }
+            const uint32_t weight = road_building_pair_policy_score(
+                states, topology, stride, lane, first, second
+            );
+            const uint32_t next_total = total_weight + weight;
+            if (rng_range(rng, next_total) < weight) {
+                *selected_first = first;
+                *selected_second_code = second + 1u;
+                *selected_score = weight;
+            }
+            total_weight = next_total;
+        }
+    }
+    return *selected_first != 0xffffffffu;
+}
+
+static inline __device__ uint32_t year_of_plenty_pair_score(
+    const uint32_t *states,
+    const uint32_t *topology,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t player,
+    uint32_t first,
+    uint32_t second
+) {
+    return resource_policy_score(first)
+        + resource_policy_score(second)
+        + immediate_build_completion_score(
+            states, topology, stride, lane, player, first, second
+        );
+}
+
+static inline __device__ uint32_t monopoly_resource_score(
+    const uint32_t *states,
+    const uint32_t *topology,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t player,
+    uint32_t resource
+) {
+    const uint32_t observed = observed_monopoly_resource_weight(
+        states, topology, stride, lane, player, resource
+    );
+    return resource_policy_score(resource) * observed
+        + immediate_build_completion_score(
+            states, topology, stride, lane, player, resource, 0xffffffffu
+        );
+}
+
+static inline __device__ uint32_t knight_policy_base(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t player
+) {
+    const uint32_t played = player_get(
+        states, stride, lane, player, PLAYER_PLAYED_KNIGHTS
+    ) + 1u;
+    if (played < 3u) {
+        return 1200u;
+    }
+    const uint32_t players = state_get(states, stride, STATE_NUM_PLAYERS, lane);
+    for (uint32_t opponent = 0u; opponent < players; ++opponent) {
+        if (opponent == player) {
+            continue;
+        }
+        if (player_get(states, stride, lane, opponent, PLAYER_PLAYED_KNIGHTS) >= played) {
+            return 1200u;
+        }
+    }
+    if (state_get(states, stride, STATE_LARGEST_HOLDER, lane) == player + 1u) {
+        return 1200u;
+    }
+    const uint32_t actor_vp = player_get(states, stride, lane, player, PLAYER_PUBLIC_VP)
+        + player_get(states, stride, lane, player, PLAYER_DEVELOPMENT + 1u);
+    const uint32_t target = state_get(states, stride, STATE_VICTORY_TARGET, lane);
+    return actor_vp + 2u >= target ? 20000000u : 7000u;
+}
+
+static inline __device__ int robber_blocks_actor_production(
+    const uint32_t *states,
+    const uint32_t *topology,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t player
+) {
+    const uint32_t robber_hex = state_get(states, stride, STATE_ROBBER_HEX, lane);
+    for (uint32_t vertex = 0u; vertex < VERTEX_COUNT; ++vertex) {
+        if (building_player(state_get(states, stride, STATE_BUILDINGS + vertex, lane)) != player) {
+            continue;
+        }
+        const uint32_t count = topology[TOPO_VERTEX_HEX_COUNTS + vertex];
+        for (uint32_t slot = 0u; slot < count; ++slot) {
+            if (topology[TOPO_VERTEX_HEXES + vertex * MAX_VERTEX_ADJACENCY + slot] == robber_hex) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 static inline __device__ int robber_hex_allowed(
     const uint32_t *states,
     const uint32_t *topology,
@@ -2367,13 +2828,22 @@ static inline __device__ void generate_rollout_action_lane(
             if (choose_weighted_robber_action(
                 states, topology, stride, lane, &rng, &hex, &victim_code
             )) {
+                const uint32_t unblock_base = robber_blocks_actor_production(
+                    states, topology, stride, lane, current
+                ) ? 4200u : 1200u;
+                const uint32_t decisive_base = knight_policy_base(
+                    states, stride, lane, current
+                );
+                const uint32_t base = decisive_base > unblock_base
+                    ? decisive_base
+                    : unblock_base;
                 weighted_reservoir_action(
                     actions,
                     stride,
                     lane,
                     &rng,
                     &total_weight,
-                    profile_scaled_weight(states, stride, lane, current, 2u, 1200u),
+                    profile_scaled_weight(states, stride, lane, current, 2u, base),
                     ACTION_PLAY_KNIGHT,
                     hex,
                     victim_code,
@@ -2383,46 +2853,25 @@ static inline __device__ void generate_rollout_action_lane(
         }
         if (development_playable(states, stride, lane, current, 2u)
             && player_get(states, stride, lane, current, PLAYER_ROADS_LEFT) > 0u) {
-            uint32_t first_weight = 0u;
             uint32_t first = 0xffffffffu;
-            for (uint32_t edge = 0u; edge < EDGE_COUNT; ++edge) {
-                if (!can_build_road_device(states, topology, stride, lane, edge, 0xffffffffu)) {
-                    continue;
-                }
-                const uint32_t weight = road_policy_score(states, topology, stride, lane, edge);
-                const uint32_t next_total = first_weight + weight;
-                if (rng_range(&rng, next_total) < weight) {
-                    first = edge;
-                }
-                first_weight = next_total;
-            }
-            if (first != 0xffffffffu) {
-                uint32_t second_code = 0u;
-                if (player_get(states, stride, lane, current, PLAYER_ROADS_LEFT) > 1u) {
-                    uint32_t second_weight = 0u;
-                    uint32_t second = 0xffffffffu;
-                    for (uint32_t edge = 0u; edge < EDGE_COUNT; ++edge) {
-                        if (!can_build_road_device(states, topology, stride, lane, edge, first)) {
-                            continue;
-                        }
-                        const uint32_t weight = road_policy_score(states, topology, stride, lane, edge);
-                        const uint32_t next_total = second_weight + weight;
-                        if (rng_range(&rng, next_total) < weight) {
-                            second = edge;
-                        }
-                        second_weight = next_total;
-                    }
-                    if (second != 0xffffffffu) {
-                        second_code = second + 1u;
-                    }
-                }
+            uint32_t second_code = 0u;
+            uint32_t pair_score = 0u;
+            if (choose_road_building_pair(
+                states, topology, stride, lane, &rng, &first, &second_code, &pair_score
+            )) {
+                const uint32_t roads_left = player_get(
+                    states, stride, lane, current, PLAYER_ROADS_LEFT
+                );
+                const uint32_t base = roads_left == 1u
+                    ? 24u
+                    : (pair_score >= 10000u ? 8000u : 1600u);
                 weighted_reservoir_action(
                     actions,
                     stride,
                     lane,
                     &rng,
                     &total_weight,
-                    profile_scaled_weight(states, stride, lane, current, 2u, 1600u),
+                    profile_scaled_weight(states, stride, lane, current, 2u, base),
                     ACTION_PLAY_ROAD_BUILDING,
                     first,
                     second_code,
@@ -2442,8 +2891,9 @@ static inline __device__ void generate_rollout_action_lane(
                         || state_get(states, stride, STATE_BANK + second, lane) == 0u) {
                         continue;
                     }
-                    const uint32_t weight = resource_policy_score(first)
-                        + resource_policy_score(second);
+                    const uint32_t weight = year_of_plenty_pair_score(
+                        states, topology, stride, lane, current, first, second
+                    );
                     const uint32_t next_total = pair_weight + weight;
                     if (rng_range(&rng, next_total) < weight) {
                         selected_first = first;
@@ -2459,7 +2909,14 @@ static inline __device__ void generate_rollout_action_lane(
                     lane,
                     &rng,
                     &total_weight,
-                    profile_scaled_weight(states, stride, lane, current, 2u, 3600u),
+                    profile_scaled_weight(
+                        states,
+                        stride,
+                        lane,
+                        current,
+                        2u,
+                        pair_weight >= 10000u ? 9000u : 3600u
+                    ),
                     ACTION_PLAY_YEAR_OF_PLENTY,
                     selected_first,
                     selected_second,
@@ -2471,10 +2928,9 @@ static inline __device__ void generate_rollout_action_lane(
             uint32_t resource_weight = 0u;
             uint32_t selected_resource = 0u;
             for (uint32_t resource = 0u; resource < 5u; ++resource) {
-                const uint32_t weight = resource_policy_score(resource)
-                    * observed_monopoly_resource_weight(
-                        states, topology, stride, lane, current, resource
-                    );
+                const uint32_t weight = monopoly_resource_score(
+                    states, topology, stride, lane, current, resource
+                );
                 const uint32_t next_total = resource_weight + weight;
                 if (rng_range(&rng, next_total) < weight) {
                     selected_resource = resource;
@@ -2487,7 +2943,14 @@ static inline __device__ void generate_rollout_action_lane(
                 lane,
                 &rng,
                 &total_weight,
-                profile_scaled_weight(states, stride, lane, current, 2u, 1400u),
+                profile_scaled_weight(
+                    states,
+                    stride,
+                    lane,
+                    current,
+                    2u,
+                    resource_weight >= 10000u ? 6000u : 1400u
+                ),
                 ACTION_PLAY_MONOPOLY,
                 selected_resource,
                 0u,
@@ -2738,13 +3201,14 @@ static inline __device__ void generate_rollout_action_lane(
             if (choose_weighted_robber_action(
                 states, topology, stride, lane, &rng, &hex, &victim_code
             )) {
+                const uint32_t base = knight_policy_base(states, stride, lane, current);
                 weighted_reservoir_action(
                     actions,
                     stride,
                     lane,
                     &rng,
                     &family_weight,
-                    profile_scaled_weight(states, stride, lane, current, 2u, 1200u),
+                    profile_scaled_weight(states, stride, lane, current, 2u, base),
                     ACTION_PLAY_KNIGHT,
                     hex,
                     victim_code,
@@ -2755,46 +3219,25 @@ static inline __device__ void generate_rollout_action_lane(
 
         if (development_playable(states, stride, lane, current, 2u)
             && player_get(states, stride, lane, current, PLAYER_ROADS_LEFT) > 0u) {
-            uint32_t first_weight = 0u;
             uint32_t first = 0xffffffffu;
-            for (uint32_t edge = 0u; edge < EDGE_COUNT; ++edge) {
-                if (!can_build_road_device(states, topology, stride, lane, edge, 0xffffffffu)) {
-                    continue;
-                }
-                const uint32_t weight = road_policy_score(states, topology, stride, lane, edge);
-                const uint32_t next_total = first_weight + weight;
-                if (rng_range(&rng, next_total) < weight) {
-                    first = edge;
-                }
-                first_weight = next_total;
-            }
-            if (first != 0xffffffffu) {
-                uint32_t second_code = 0u;
-                if (player_get(states, stride, lane, current, PLAYER_ROADS_LEFT) > 1u) {
-                    uint32_t second_weight = 0u;
-                    uint32_t second = 0xffffffffu;
-                    for (uint32_t edge = 0u; edge < EDGE_COUNT; ++edge) {
-                        if (!can_build_road_device(states, topology, stride, lane, edge, first)) {
-                            continue;
-                        }
-                        const uint32_t weight = road_policy_score(states, topology, stride, lane, edge);
-                        const uint32_t next_total = second_weight + weight;
-                        if (rng_range(&rng, next_total) < weight) {
-                            second = edge;
-                        }
-                        second_weight = next_total;
-                    }
-                    if (second != 0xffffffffu) {
-                        second_code = second + 1u;
-                    }
-                }
+            uint32_t second_code = 0u;
+            uint32_t pair_score = 0u;
+            if (choose_road_building_pair(
+                states, topology, stride, lane, &rng, &first, &second_code, &pair_score
+            )) {
+                const uint32_t roads_left = player_get(
+                    states, stride, lane, current, PLAYER_ROADS_LEFT
+                );
+                const uint32_t base = roads_left == 1u
+                    ? 24u
+                    : (pair_score >= 10000u ? 8000u : 1600u);
                 weighted_reservoir_action(
                     actions,
                     stride,
                     lane,
                     &rng,
                     &family_weight,
-                    profile_scaled_weight(states, stride, lane, current, 2u, 1600u),
+                    profile_scaled_weight(states, stride, lane, current, 2u, base),
                     ACTION_PLAY_ROAD_BUILDING,
                     first,
                     second_code,
@@ -2815,8 +3258,9 @@ static inline __device__ void generate_rollout_action_lane(
                         || state_get(states, stride, STATE_BANK + second, lane) == 0u) {
                         continue;
                     }
-                    const uint32_t weight = resource_policy_score(first)
-                        + resource_policy_score(second);
+                    const uint32_t weight = year_of_plenty_pair_score(
+                        states, topology, stride, lane, current, first, second
+                    );
                     const uint32_t next_total = pair_weight + weight;
                     if (rng_range(&rng, next_total) < weight) {
                         selected_first = first;
@@ -2832,7 +3276,14 @@ static inline __device__ void generate_rollout_action_lane(
                     lane,
                     &rng,
                     &family_weight,
-                    profile_scaled_weight(states, stride, lane, current, 2u, 3600u),
+                    profile_scaled_weight(
+                        states,
+                        stride,
+                        lane,
+                        current,
+                        2u,
+                        pair_weight >= 10000u ? 9000u : 3600u
+                    ),
                     ACTION_PLAY_YEAR_OF_PLENTY,
                     selected_first,
                     selected_second,
@@ -2845,10 +3296,9 @@ static inline __device__ void generate_rollout_action_lane(
             uint32_t resource_weight = 0u;
             uint32_t selected_resource = 0u;
             for (uint32_t resource = 0u; resource < 5u; ++resource) {
-                const uint32_t weight = resource_policy_score(resource)
-                    * observed_monopoly_resource_weight(
-                        states, topology, stride, lane, current, resource
-                    );
+                const uint32_t weight = monopoly_resource_score(
+                    states, topology, stride, lane, current, resource
+                );
                 const uint32_t next_total = resource_weight + weight;
                 if (rng_range(&rng, next_total) < weight) {
                     selected_resource = resource;
@@ -2861,7 +3311,14 @@ static inline __device__ void generate_rollout_action_lane(
                 lane,
                 &rng,
                 &family_weight,
-                profile_scaled_weight(states, stride, lane, current, 2u, 1400u),
+                profile_scaled_weight(
+                    states,
+                    stride,
+                    lane,
+                    current,
+                    2u,
+                    resource_weight >= 10000u ? 6000u : 1400u
+                ),
                 ACTION_PLAY_MONOPOLY,
                 selected_resource,
                 0u,
