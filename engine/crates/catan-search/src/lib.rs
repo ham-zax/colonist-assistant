@@ -68,7 +68,7 @@ pub use shared::{
 pub use tactical::{TacticalResult, solve_belief_current_turn, solve_current_turn};
 pub use threats::{
     OpponentThreat, OpponentThreatKind, action_blocks_threat, detect_opponent_threats,
-    force_threat_blocking_actions,
+    force_threat_blocking_actions, forced_loss_weight, posterior_immediate_threat_weight,
 };
 pub use trade_model::{
     TRADE_ACCEPTANCE_FEATURES, learned_trade_acceptance_probability, learned_trade_model_version,

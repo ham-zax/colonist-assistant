@@ -1,6 +1,9 @@
 use std::io::{self, Read, Write};
 
-use colonist_catan_wasm::{NativeGpuSearchEngine, engine_version};
+use colonist_catan_wasm::{
+    NATIVE_GPU_PROTOCOL_VERSION, NATIVE_GPU_STATE_SCHEMA_VERSION, NativeGpuSearchEngine,
+    engine_version,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -10,8 +13,17 @@ const MAX_OUTBOUND_BYTES: usize = 1024 * 1024;
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 enum HostRequest {
-    Hello { id: u64 },
-    Analyze { id: u64, request: Value },
+    Hello {
+        id: u64,
+        #[serde(rename = "protocolVersion")]
+        protocol_version: Option<u32>,
+        #[serde(rename = "stateSchemaVersion")]
+        state_schema_version: Option<u32>,
+    },
+    Analyze {
+        id: u64,
+        request: Value,
+    },
 }
 
 fn read_message(reader: &mut impl Read) -> io::Result<Option<Value>> {
@@ -71,15 +83,38 @@ fn main() -> io::Result<()> {
             }
         };
         let response = match request {
-            HostRequest::Hello { id } => match engine.as_ref() {
-                Ok(engine) => json!({
-                    "id": id,
-                    "runtime": "gpu-native",
-                    "engineRevision": engine_version(),
-                    "device": engine.device_identity(),
-                }),
-                Err(error) => json!({ "id": id, "error": error }),
-            },
+            HostRequest::Hello {
+                id,
+                protocol_version,
+                state_schema_version,
+            } => {
+                if protocol_version != Some(NATIVE_GPU_PROTOCOL_VERSION)
+                    || state_schema_version != Some(NATIVE_GPU_STATE_SCHEMA_VERSION)
+                {
+                    json!({
+                        "id": id,
+                        "error": format!(
+                            "GPU companion protocol mismatch: extension protocol/state {:?}/{:?}, host {}/{}",
+                            protocol_version,
+                            state_schema_version,
+                            NATIVE_GPU_PROTOCOL_VERSION,
+                            NATIVE_GPU_STATE_SCHEMA_VERSION,
+                        )
+                    })
+                } else {
+                    match engine.as_ref() {
+                        Ok(engine) => json!({
+                            "id": id,
+                            "runtime": "gpu-native",
+                            "protocolVersion": NATIVE_GPU_PROTOCOL_VERSION,
+                            "stateSchemaVersion": NATIVE_GPU_STATE_SCHEMA_VERSION,
+                            "engineRevision": engine_version(),
+                            "device": engine.device_identity(),
+                        }),
+                        Err(error) => json!({ "id": id, "error": error }),
+                    }
+                }
+            }
             HostRequest::Analyze { id, request } => match engine.as_mut() {
                 Ok(engine) => match engine.analyze_json(request) {
                     Ok(response) => json!({ "id": id, "response": response }),

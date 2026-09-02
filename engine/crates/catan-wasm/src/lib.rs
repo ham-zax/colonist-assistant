@@ -24,7 +24,10 @@ use wasm_bindgen::prelude::*;
 #[cfg(all(feature = "native-gpu", not(target_arch = "wasm32")))]
 mod native_gpu;
 #[cfg(all(feature = "native-gpu", not(target_arch = "wasm32")))]
-pub use native_gpu::{NativeGpuDeviceIdentity, NativeGpuSearchEngine};
+pub use native_gpu::{
+    NATIVE_GPU_PROTOCOL_VERSION, NATIVE_GPU_STATE_SCHEMA_VERSION, NativeGpuDeviceIdentity,
+    NativeGpuSearchEngine,
+};
 
 thread_local! {
     static PERSISTENT_SEARCH: RefCell<Vec<Mcts>> = const { RefCell::new(Vec::new()) };
@@ -1009,8 +1012,9 @@ fn exact_single_action(
 
 /// Mandatory protocol decisions and positions with one universally legal
 /// action are exact. Returning them before any long-range search keeps roll,
-/// end-turn, discard, robber/victim, and trade-response latency independent of
-/// the strategic simulation budget.
+/// end-turn, discard, and robber/victim latency independent of the strategic
+/// simulation budget. Trade responses remain strategic because counteroffers
+/// are a deliberately bounded candidate family rather than an exhaustive one.
 fn exact_mandatory_report(
     particles: &[BeliefParticle],
     root_exclusions: &[Action],

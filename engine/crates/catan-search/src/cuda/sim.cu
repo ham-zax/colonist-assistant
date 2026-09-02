@@ -1473,6 +1473,7 @@ static inline __device__ void consider_best_domestic_offer(
         }
     }
     if (requested_resource != 0xffffffffu
+        && state_get(states, stride, STATE_BANK_PUBLIC, lane) != 0u
         && state_get(states, stride, STATE_BANK + requested_resource, lane) > 0u) {
         for (uint32_t resource = 0u; resource < 5u; ++resource) {
             if (give[resource] >= trade_ratio(states, stride, lane, player, resource)) {
@@ -1781,6 +1782,53 @@ static inline __device__ uint32_t pips_for_number(uint32_t number) {
         return 5u;
     }
     return 0u;
+}
+
+static inline __device__ uint32_t observed_monopoly_resource_weight(
+    const uint32_t *states,
+    const uint32_t *topology,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t observer,
+    uint32_t resource
+) {
+    uint32_t score = 1u;
+    const uint32_t players = state_get(states, stride, STATE_NUM_PLAYERS, lane);
+    for (uint32_t player = 0u; player < players; ++player) {
+        if (player == observer) {
+            continue;
+        }
+        uint32_t resource_pips = 0u;
+        uint32_t total_pips = 0u;
+        for (uint32_t vertex = 0u; vertex < VERTEX_COUNT; ++vertex) {
+            const uint32_t building = state_get(states, stride, STATE_BUILDINGS + vertex, lane);
+            if (building_player(building) != player) {
+                continue;
+            }
+            const uint32_t multiplier = building_multiplier(building);
+            const uint32_t count = topology[TOPO_VERTEX_HEX_COUNTS + vertex];
+            for (uint32_t slot = 0u; slot < count; ++slot) {
+                const uint32_t hex = topology[
+                    TOPO_VERTEX_HEXES + vertex * MAX_VERTEX_ADJACENCY + slot
+                ];
+                const uint32_t pips = pips_for_number(
+                    state_get(states, stride, STATE_HEX_NUMBERS + hex, lane)
+                ) * multiplier;
+                total_pips += pips;
+                const uint32_t encoded = state_get(
+                    states, stride, STATE_HEX_RESOURCES + hex, lane
+                );
+                if (encoded == resource + 1u) {
+                    resource_pips += pips;
+                }
+            }
+        }
+        // Exact opponent resource identities are private. Estimate the resource
+        // share from public production and the public hand total instead.
+        const uint32_t hand_total = resource_total(states, stride, lane, player);
+        score += hand_total * (resource_pips + 1u) * 32u / (total_pips + 5u);
+    }
+    return score;
 }
 
 static inline __device__ uint32_t vertex_policy_score(
@@ -2464,44 +2512,49 @@ static inline __device__ void generate_rollout_action_lane(
             );
         }
 
-        uint32_t maritime_weight = 0u;
-        uint32_t maritime_give = 0xffffffffu;
-        uint32_t maritime_receive = 0xffffffffu;
-        uint32_t maritime_ratio = 0u;
-        for (uint32_t give = 0u; give < 5u; ++give) {
-            const uint32_t ratio = trade_ratio(states, stride, lane, current, give);
-            if (player_get(states, stride, lane, current, PLAYER_RESOURCES + give) < ratio) {
-                continue;
-            }
-            for (uint32_t receive = 0u; receive < 5u; ++receive) {
-                if (give == receive || state_get(states, stride, STATE_BANK + receive, lane) == 0u) {
+        // When the bank composition is hidden, choosing a receive resource
+        // from the exact determinization would leak the particle into policy.
+        // Fail closed on this optional family until the bank is observable.
+        if (state_get(states, stride, STATE_BANK_PUBLIC, lane) != 0u) {
+            uint32_t maritime_weight = 0u;
+            uint32_t maritime_give = 0xffffffffu;
+            uint32_t maritime_receive = 0xffffffffu;
+            uint32_t maritime_ratio = 0u;
+            for (uint32_t give = 0u; give < 5u; ++give) {
+                const uint32_t ratio = trade_ratio(states, stride, lane, current, give);
+                if (player_get(states, stride, lane, current, PLAYER_RESOURCES + give) < ratio) {
                     continue;
                 }
-                const uint32_t weight = maritime_policy_score(
-                    states, stride, lane, current, give, receive, ratio
-                );
-                const uint32_t next_total = maritime_weight + weight;
-                if (rng_range(&rng, next_total) < weight) {
-                    maritime_give = give;
-                    maritime_receive = receive;
-                    maritime_ratio = ratio;
+                for (uint32_t receive = 0u; receive < 5u; ++receive) {
+                    if (give == receive || state_get(states, stride, STATE_BANK + receive, lane) == 0u) {
+                        continue;
+                    }
+                    const uint32_t weight = maritime_policy_score(
+                        states, stride, lane, current, give, receive, ratio
+                    );
+                    const uint32_t next_total = maritime_weight + weight;
+                    if (rng_range(&rng, next_total) < weight) {
+                        maritime_give = give;
+                        maritime_receive = receive;
+                        maritime_ratio = ratio;
+                    }
+                    maritime_weight = next_total;
                 }
-                maritime_weight = next_total;
             }
-        }
-        if (maritime_give != 0xffffffffu) {
-            weighted_reservoir_action(
-                actions,
-                stride,
-                lane,
-                &rng,
-                &family_weight,
-                profile_scaled_weight(states, stride, lane, current, 0u, 700u),
-                ACTION_MARITIME_TRADE,
-                maritime_give,
-                maritime_receive,
-                maritime_ratio
-            );
+            if (maritime_give != 0xffffffffu) {
+                weighted_reservoir_action(
+                    actions,
+                    stride,
+                    lane,
+                    &rng,
+                    &family_weight,
+                    profile_scaled_weight(states, stride, lane, current, 0u, 700u),
+                    ACTION_MARITIME_TRADE,
+                    maritime_give,
+                    maritime_receive,
+                    maritime_ratio
+                );
+            }
         }
 
 
@@ -2576,7 +2629,8 @@ static inline __device__ void generate_rollout_action_lane(
             }
         }
 
-        if (development_playable(states, stride, lane, current, 3u)) {
+        if (development_playable(states, stride, lane, current, 3u)
+            && state_get(states, stride, STATE_BANK_PUBLIC, lane) != 0u) {
             uint32_t pair_weight = 0u;
             uint32_t selected_first = 0xffffffffu;
             uint32_t selected_second = 0xffffffffu;
@@ -2617,16 +2671,10 @@ static inline __device__ void generate_rollout_action_lane(
             uint32_t resource_weight = 0u;
             uint32_t selected_resource = 0u;
             for (uint32_t resource = 0u; resource < 5u; ++resource) {
-                uint32_t held_by_opponents = 0u;
-                for (uint32_t player = 0u; player < players; ++player) {
-                    if (player != current) {
-                        held_by_opponents += player_get(
-                            states, stride, lane, player, PLAYER_RESOURCES + resource
-                        );
-                    }
-                }
                 const uint32_t weight = resource_policy_score(resource)
-                    * (held_by_opponents + 1u);
+                    * observed_monopoly_resource_weight(
+                        states, topology, stride, lane, current, resource
+                    );
                 const uint32_t next_total = resource_weight + weight;
                 if (rng_range(&rng, next_total) < weight) {
                     selected_resource = resource;

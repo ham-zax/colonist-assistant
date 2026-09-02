@@ -1,6 +1,9 @@
 import type { WasmSearchResponse } from "../generated/wasm/colonist_search.js";
 
 export const NATIVE_GPU_HOST = "io.colonist_assistant.gpu";
+const NATIVE_GPU_PROTOCOL_VERSION = 2;
+const NATIVE_GPU_STATE_SCHEMA_VERSION = 1;
+const EXPECTED_ENGINE_REVISION = "deep-maxn-v10";
 
 export interface NativeGpuStatus {
   runtime: "gpu-native";
@@ -16,6 +19,8 @@ export interface NativeGpuStatus {
 interface NativeGpuResponse {
   id: number;
   runtime?: "gpu-native";
+  protocolVersion?: number;
+  stateSchemaVersion?: number;
   engineRevision?: string;
   device?: NativeGpuStatus["device"];
   response?: WasmSearchResponse;
@@ -26,6 +31,8 @@ interface PendingNativeRequest {
   resolve: (response: NativeGpuResponse) => void;
   reject: (error: Error) => void;
 }
+
+class NativeGpuCompatibilityError extends Error {}
 
 export class NativeGpuClient {
   private port?: chrome.runtime.Port;
@@ -86,14 +93,27 @@ export class NativeGpuClient {
       this.port = port;
       port.onMessage.addListener((message: unknown) => this.onMessage(message));
       port.onDisconnect.addListener(() => this.onDisconnect(port));
-      const hello = await this.request({ type: "hello" });
+      const hello = await this.request({
+        type: "hello",
+        protocolVersion: NATIVE_GPU_PROTOCOL_VERSION,
+        stateSchemaVersion: NATIVE_GPU_STATE_SCHEMA_VERSION,
+      });
+      if (hello.error) {
+        if (hello.error.startsWith("GPU companion protocol mismatch:")) {
+          throw new NativeGpuCompatibilityError(hello.error);
+        }
+        throw new Error(hello.error);
+      }
       if (
-        hello.error ||
         hello.runtime !== "gpu-native" ||
-        !hello.engineRevision ||
+        hello.protocolVersion !== NATIVE_GPU_PROTOCOL_VERSION ||
+        hello.stateSchemaVersion !== NATIVE_GPU_STATE_SCHEMA_VERSION ||
+        hello.engineRevision !== EXPECTED_ENGINE_REVISION ||
         !hello.device
       ) {
-        throw new Error(hello.error ?? "GPU companion returned invalid status");
+        throw new NativeGpuCompatibilityError(
+          `GPU companion is incompatible with this extension (expected protocol/state/engine ${NATIVE_GPU_PROTOCOL_VERSION}/${NATIVE_GPU_STATE_SCHEMA_VERSION}/${EXPECTED_ENGINE_REVISION})`,
+        );
       }
       const status: NativeGpuStatus = {
         runtime: hello.runtime,
@@ -108,6 +128,11 @@ export class NativeGpuClient {
       this.connectPromise = undefined;
       const detail =
         error instanceof Error ? error.message : "GPU companion connection failed";
+      if (error instanceof NativeGpuCompatibilityError) {
+        this.closePort();
+        this.fatalError = error;
+        throw error;
+      }
       if (this.everReady) {
         this.fatalError = new Error(detail);
         throw this.fatalError;
