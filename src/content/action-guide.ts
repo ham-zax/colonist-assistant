@@ -150,6 +150,10 @@ export interface ActionGuideOptions {
   /// clicked. The owner must observe the resulting outgoing offer or exact
   /// bank-hand transfer before the workflow may report success.
   validateTransactionCommit?: () => boolean;
+  /// Ordinary DOM controls can also be swallowed while Colonist replaces its
+  /// React tree. When supplied, dispatch is only tentative until the owner
+  /// observes the exact state mutation caused by this action.
+  validateControlCommit?: () => boolean;
   onExecutionStart?: (result: { signature: string }) => void;
   onExecution?: (result: {
     succeeded: boolean;
@@ -1179,6 +1183,49 @@ const validatedClick = (
   return true;
 };
 
+const awaitControlCommit = (
+  action: NextClick,
+  options: ActionGuideOptions,
+  attempt = 0,
+): void => {
+  const committed = options.validateControlCommit;
+  if (!committed) return;
+  later(() => {
+    if (committed()) {
+      options.onExecution?.({
+        succeeded: true,
+        signature: action.signature,
+      });
+      requestBoardRefresh();
+      return;
+    }
+    const stillCurrent = currentGuideAction?.signature === action.signature;
+    const stillLegal = options.validate ? options.validate() : true;
+    if (!stillCurrent || !stillLegal) {
+      if (lastClickSignature === action.signature) lastClickSignature = "";
+      options.onExecution?.({
+        succeeded: false,
+        signature: action.signature,
+        reason: "Colonist state changed without the expected control commit",
+      });
+      requestBoardRefresh();
+      return;
+    }
+    if (attempt >= 23) {
+      if (lastClickSignature === action.signature) lastClickSignature = "";
+      options.onExecution?.({
+        succeeded: false,
+        signature: action.signature,
+        reason: "Colonist did not commit the recommended control",
+      });
+      requestBoardRefresh();
+      return;
+    }
+    requestBoardRefresh();
+    awaitControlCommit(action, options, attempt + 1);
+  }, 140);
+};
+
 const installManualExecutionObserver = (
   action: NextClick,
   element: HTMLElement | undefined,
@@ -1330,16 +1377,20 @@ const dispatchAutoclick = (
       action.kind === "build" && action.build !== "development"
         ? buildControlCommitAttempts.get(action.signature) ?? 0
         : 0;
+    const waitForControlCommit = Boolean(options.validateControlCommit);
     if (
       element &&
       validatedClick(
         element,
         options,
         action.signature,
-        buildCommitAttempt === 0,
+        waitForControlCommit ? false : buildCommitAttempt === 0,
       )
     ) {
       requestBoardRefresh();
+      if (waitForControlCommit) {
+        awaitControlCommit(action, options);
+      }
       if (action.kind === "build" && action.build !== "development") {
         const attempt = buildCommitAttempt + 1;
         buildControlCommitAttempts.set(action.signature, attempt);
@@ -1564,20 +1615,40 @@ const tradeFailureLogKeys = (): Set<string> => {
   );
 };
 
-const visibleTradeFailure = (
-  ignoredLogKeys: ReadonlySet<string> = new Set(),
-): string | undefined => {
-  const candidates = [
+const floatingTradeFailures = (): Array<{
+  element: HTMLElement;
+  key: string;
+  text: string;
+}> =>
+  [
     ...document.querySelectorAll<HTMLElement>(
       "[role='alert'], [aria-live='assertive'], [class*='toast'], [class*='snackbar'], [class*='notification'], [class*='errorMessage'], [class*='error-message'], [class*='floatingText'], [class*='floating-text'], [class*='insufficient']",
     ),
-  ].filter(visible);
-  const floatingFailure = candidates
-    .map((element) => element.textContent?.trim())
-    .find(
-      (text): text is string =>
-        Boolean(text && TRADE_FAILURE_PATTERN.test(text)),
-    );
+  ]
+    .filter(visible)
+    .flatMap((element) => {
+      const text = element.textContent?.trim();
+      return text && TRADE_FAILURE_PATTERN.test(text)
+        ? [{ element, key: normalized(text), text }]
+        : [];
+    });
+
+const visibleTradeFailure = (
+  ignoredLogKeys: ReadonlySet<string> = new Set(),
+  ignoredFloating: Map<HTMLElement, string> = new Map(),
+): string | undefined => {
+  for (const [element, key] of ignoredFloating) {
+    if (
+      !document.contains(element) ||
+      !visible(element) ||
+      normalized(element.textContent ?? "") !== key
+    ) {
+      ignoredFloating.delete(element);
+    }
+  }
+  const floatingFailure = floatingTradeFailures().find(
+    ({ element, key }) => ignoredFloating.get(element) !== key,
+  )?.text;
   if (floatingFailure) return floatingFailure;
 
   const root = findLogRoot();
@@ -1682,33 +1753,39 @@ const counterWorkflow = (
 const discardWorkflow = (
   action: Extract<NextClick, { kind: "discard" }>,
 ): WorkflowStep[] => {
-  const selectionComplete = (): boolean =>
-    modalRoots().some((root) => {
+  const selectionProgress = (): { selected: number; required: number } | undefined => {
+    for (const root of modalRoots()) {
       const match = normalized(root.textContent ?? "").match(
         /(?:^|\D)(\d{1,3})\s*\/\s*(\d{1,3})(?:\D|$)/u,
       );
-      return Boolean(
-        match &&
-          Number(match[1]) > 0 &&
-          Number(match[1]) === Number(match[2]),
-      );
-    });
+      if (match) {
+        return { selected: Number(match[1]), required: Number(match[2]) };
+      }
+    }
+    return undefined;
+  };
   const selectionSteps = resourceSteps(
     action.cards,
     "give",
     (resource) => findDiscardCard(resource),
     "Discard",
-  ).map((step) => ({ ...step, ready: selectionComplete }));
+  ).map((step, index) => {
+    const committed = () =>
+      (selectionProgress()?.selected ?? 0) >= index + 1;
+    return { ...step, ready: committed, complete: committed };
+  });
   return [
-  ...selectionSteps,
-  {
-    label: "Confirm discard",
-    resolve: () => {
-      const discardRoot = findDiscardRoot();
-      return findConfirmationControl(discardRoot ?? document);
+    ...selectionSteps,
+    {
+      label: "Confirm discard",
+      resolve: () => {
+        const discardRoot = findDiscardRoot();
+        return findConfirmationControl(discardRoot ?? document);
+      },
+      complete: () => !findDiscardRoot(),
+      retryOnIncomplete: true,
+      settleMs: 240,
     },
-    settleMs: 240,
-  },
   ];
 };
 
@@ -1801,7 +1878,11 @@ export const activeWorkflowAction = (
         ? boardAction === "none" && robberVictimSelection
         : workflowAction.kind === "trade-builder"
           ? boardAction === "none" || tradePanelIsOpen()
-          : boardAction === "none";
+          : workflowAction.kind === "development"
+            ? boardAction === "none" ||
+              boardAction === "road" ||
+              boardAction === "robber"
+            : boardAction === "none";
   if (stillOwnsBoardPhase) return workflowAction;
   cancelWorkflow();
   document.getElementById(ROOT_ID)?.remove();
@@ -1831,6 +1912,11 @@ const startWorkflow = (
   const ignoredTradeFailureLogKeys = tradeTransaction
     ? tradeFailureLogKeys()
     : new Set<string>();
+  const ignoredTradeFailures = tradeTransaction
+    ? new Map(
+        floatingTradeFailures().map(({ element, key }) => [element, key]),
+      )
+    : new Map<HTMLElement, string>();
 
   const fail = (reason: string, tradeFailure?: string): void => {
     const activeOptions = workflowOptions ?? options;
@@ -1874,7 +1960,10 @@ const startWorkflow = (
       return;
     }
     const tradeFailure = tradeTransaction
-      ? visibleTradeFailure(ignoredTradeFailureLogKeys)
+      ? visibleTradeFailure(
+          ignoredTradeFailureLogKeys,
+          ignoredTradeFailures,
+        )
       : undefined;
     if (tradeFailure) {
       fail(`Colonist rejected the trade workflow: ${tradeFailure}`, tradeFailure);
@@ -1953,10 +2042,13 @@ const startWorkflow = (
           return;
         }
         const failure = tradeTransaction
-          ? visibleTradeFailure(ignoredTradeFailureLogKeys)
+          ? visibleTradeFailure(
+              ignoredTradeFailureLogKeys,
+              ignoredTradeFailures,
+            )
           : undefined;
         if (failure) {
-          fail(`Colonist rejected the trade workflow: ${failure}`);
+          fail(`Colonist rejected the trade workflow: ${failure}`, failure);
           return;
         }
         if (step.repeatUntilReady) {
@@ -2031,31 +2123,62 @@ const startWorkflow = (
         index === 0 ? Math.max(0, currentOptions.autopilotDelayMs ?? 0) : 0;
       later(() => {
         if (
-          generation === workflowGeneration &&
-          workflowSignature === action.signature
+          generation !== workflowGeneration ||
+          workflowSignature !== action.signature
         ) {
-          if (
-            !validatedClick(
-              element,
-              index === 0 || !currentOptions.validateContinuation
-                ? currentOptions
-                : {
-                    ...currentOptions,
-                    validate: currentOptions.validateContinuation,
-                  },
-              `${action.signature}|step|${index}`,
-              false,
-            )
-          ) {
-            cancelWorkflow();
-            return;
-          }
-          // React can replace the clicked card/control while handling the same
-          // event. In that case a listener attached to the old node is not a
-          // reliable transaction clock even though Colonist accepted the
-          // click. Autopilot owns this click, so advance idempotently here too.
-          advance();
+          return;
         }
+        if (step.ready?.()) {
+          workflowCurrentElement = undefined;
+          advance();
+          return;
+        }
+        // Colonist frequently replaces React controls while the workflow is
+        // waiting for its first-click delay or a modal animation. A detached
+        // node still accepts HTMLElement.click() without reaching the live UI,
+        // so resolve the authoritative control again immediately before the
+        // automatic click.
+        const freshElement = step.resolve();
+        if (!freshElement) {
+          workflowCurrentElement = undefined;
+          requestBoardRefresh();
+          later(() => run(index, attempts + 1), 180);
+          return;
+        }
+        workflowCurrentElement = freshElement;
+        if (currentOptions.highlight && freshElement !== element) {
+          drawHighlight(
+            {
+              kind: "turn-control",
+              control: "confirm",
+              label: step.label,
+              signature: `${action.signature}|step|${index}`,
+              confidence: action.confidence,
+            },
+            freshElement,
+          );
+        }
+        if (
+          !validatedClick(
+            freshElement,
+            index === 0 || !currentOptions.validateContinuation
+              ? currentOptions
+              : {
+                  ...currentOptions,
+                  validate: currentOptions.validateContinuation,
+                },
+            `${action.signature}|step|${index}`,
+            false,
+          )
+        ) {
+          cancelWorkflow();
+          return;
+        }
+        // React can replace the clicked card/control while handling the same
+        // event. In that case a listener attached to the old node is not a
+        // reliable transaction clock even though Colonist accepted the
+        // click. Autopilot owns this click, so advance idempotently here too.
+        advance();
       }, startDelay + (tradeTransaction ? 280 : 160));
     }
   };
@@ -2091,7 +2214,19 @@ const pollForFollowup = (
   if (activeOptions.highlight) drawHighlight(action, element);
   if (activeOptions.autonomous) {
     later(() => {
-      if (validatedClick(element, activeOptions, action.signature)) {
+      if (!stillCurrent()) return;
+      const freshElement = resolveElement(action);
+      if (!freshElement) {
+        pollForFollowup(
+          action,
+          activeOptions,
+          onComplete,
+          attempts + 1,
+          stillCurrent,
+        );
+        return;
+      }
+      if (validatedClick(freshElement, activeOptions, action.signature)) {
         requestBoardRefresh();
         onComplete?.();
       }
@@ -2109,18 +2244,22 @@ const pollForConfirmation = (
   stillCurrent: () => boolean = () => true,
 ): void => {
   if (!stillCurrent()) return;
-  const root = modalRoots()[0];
-  const element =
-    findConfirmationControl(root ?? document) ??
-    (
-      root
-        ? [
-            ...root.querySelectorAll<HTMLElement>(
-              "button:not([disabled]), [role='button']:not([aria-disabled='true'])",
-            ),
-          ].filter(visible).at(-1)
-        : undefined
+  const resolveConfirmation = (): HTMLElement | undefined => {
+    const root = modalRoots()[0];
+    return (
+      findConfirmationControl(root ?? document) ??
+      (
+        root
+          ? [
+              ...root.querySelectorAll<HTMLElement>(
+                "button:not([disabled]), [role='button']:not([aria-disabled='true'])",
+              ),
+            ].filter(visible).at(-1)
+          : undefined
+      )
     );
+  };
+  const element = resolveConfirmation();
   if (!element && attempts < 35) {
     later(
       () =>
@@ -2147,7 +2286,19 @@ const pollForConfirmation = (
   if (activeOptions.highlight) drawHighlight(action, element);
   if (activeOptions.autonomous) {
     later(() => {
-      if (validatedClick(element, activeOptions, action.signature)) {
+      if (!stillCurrent()) return;
+      const freshElement = resolveConfirmation();
+      if (!freshElement) {
+        pollForConfirmation(
+          label,
+          activeOptions,
+          onComplete,
+          attempts + 1,
+          stillCurrent,
+        );
+        return;
+      }
+      if (validatedClick(freshElement, activeOptions, action.signature)) {
         requestBoardRefresh();
         onComplete?.();
       }
@@ -2256,7 +2407,17 @@ const renderTradePanelPreflight = (
         tradePreflightSignature === signature &&
         tradePanelIsOpen()
       ) {
-        close.click();
+        const freshClose = findTradePanelControl();
+        if (freshClose) {
+          if (freshClose !== close) {
+            freshClose.addEventListener("click", () => later(finish, 320), {
+              once: true,
+            });
+          }
+          freshClose.click();
+        } else {
+          finish();
+        }
       } else {
         finish();
       }

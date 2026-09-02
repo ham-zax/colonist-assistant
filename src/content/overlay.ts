@@ -1370,6 +1370,88 @@ export class AssistantOverlay {
     const guideGameScope = this.board?.gameKey ?? location.pathname;
     const stillInGuideGame = (): boolean =>
       (this.board?.gameKey ?? location.pathname) === guideGameScope;
+    const controlCommit = (() => {
+      if (!next) return undefined;
+      if (next.kind === "turn-control" && next.control === "roll") {
+        const baselineTurn = this.board?.turn;
+        const baselinePlayer = this.board?.currentPlayer;
+        return (): boolean => {
+          const current = this.board;
+          if (!current || !stillInGuideGame()) return false;
+          return Boolean(
+            current.hasRolled === true ||
+              (baselineTurn !== undefined && current.turn !== baselineTurn) ||
+              (baselinePlayer !== undefined &&
+                current.currentPlayer !== baselinePlayer),
+          );
+        };
+      }
+      if (next.kind === "turn-control" && next.control === "end") {
+        const baselineTurn = this.board?.turn;
+        const baselinePlayer = this.board?.currentPlayer;
+        return (): boolean => {
+          const current = this.board;
+          if (!current || !stillInGuideGame()) return false;
+          return Boolean(
+            current.isMyTurn === false ||
+              (baselineTurn !== undefined && current.turn !== baselineTurn) ||
+              (baselinePlayer !== undefined &&
+                current.currentPlayer !== baselinePlayer),
+          );
+        };
+      }
+      if (next.kind === "trade" && next.verdict !== "counter") {
+        return (): boolean => {
+          const current = this.board;
+          if (!current || !stillInGuideGame()) return false;
+          const trade = current.activeTrades?.find(
+            (candidate) => candidate.id === next.tradeId,
+          );
+          if (!trade) return true;
+          return next.verdict === "accept"
+            ? trade.myResponse === "accepted"
+            : trade.myResponse === "rejected" ||
+                trade.myResponse === "embargoed";
+        };
+      }
+      if (next.kind === "trade-cancel") {
+        return (): boolean =>
+          Boolean(
+            this.board &&
+              stillInGuideGame() &&
+              !this.board.activeTrades?.some(
+                (trade) => trade.id === next.tradeId,
+              ),
+          );
+      }
+      if (next.kind === "trade-partner") {
+        const baselineTrade = this.board?.activeTrades?.find(
+          (trade) => trade.id === next.tradeId,
+        );
+        const baselineHand = this.board?.ownHand
+          ? { ...this.board.ownHand }
+          : undefined;
+        const bundles = baselineTrade
+          ? localTradeBundles(baselineTrade)
+          : undefined;
+        return (): boolean => {
+          const current = this.board;
+          if (!current || !stillInGuideGame()) return false;
+          if (!current.activeTrades?.some((trade) => trade.id === next.tradeId)) {
+            return true;
+          }
+          if (!baselineHand || !current.ownHand || !bundles) return false;
+          return RESOURCE_ORDER.every(
+            (resource) =>
+              current.ownHand![resource] ===
+              baselineHand[resource] -
+                bundles.give[resource] +
+                bundles.receive[resource],
+          );
+        };
+      }
+      return undefined;
+    })();
     const transactionCommit = (() => {
       if (
         !next ||
@@ -1461,10 +1543,15 @@ export class AssistantOverlay {
       ...(transactionCommit
         ? { validateTransactionCommit: transactionCommit }
         : {}),
+      ...(controlCommit ? { validateControlCommit: controlCommit } : {}),
       onExecutionStart: () => {
         if (traceKey) this.decisionTraces.executionStarted(traceKey);
       },
       onExecution: ({ succeeded, reason, diagnostic }) => {
+        const strategicTradeFailure = Boolean(
+          !succeeded &&
+            reason?.startsWith("Colonist rejected the trade workflow:"),
+        );
         if (succeeded && next?.kind === "build") {
           this.rememberBuildPlacement(next, spatial);
         }
@@ -1509,7 +1596,7 @@ export class AssistantOverlay {
           );
         }
         if (!succeeded && next?.kind === "trade-builder") {
-          this.rememberRootTradeFailure();
+          if (strategicTradeFailure) this.rememberRootTradeFailure();
           this.decisionAnalysis = undefined;
           this.decisionKey = "";
           this.decisionPendingKey = "";
@@ -1535,8 +1622,10 @@ export class AssistantOverlay {
           this.render();
         }
         if (!succeeded && next?.kind === "trade") {
-          this.rememberRootTradeFailure();
-          this.failedTradeActions.add(next.signature);
+          if (strategicTradeFailure) {
+            this.rememberRootTradeFailure();
+            this.failedTradeActions.add(next.signature);
+          }
           this.decisionAnalysis = undefined;
           this.decisionKey = "";
           this.decisionPendingKey = "";
