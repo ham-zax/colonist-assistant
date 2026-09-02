@@ -131,6 +131,14 @@ impl CudaSimRootActionStats {
     pub fn mean_victory_margin(&self) -> f32 {
         self.mean_victory_points - self.mean_best_opponent_victory_points
     }
+
+    /// Terminal wins count +1, terminal losses -1, and unfinished samples 0.
+    /// Keep this separate from VP margin so callers can inspect the evidence
+    /// instead of relying on one opaque weighted score.
+    pub fn net_terminal_outcome(&self) -> f32 {
+        let losses = self.terminal_samples.saturating_sub(self.wins);
+        (self.wins as f32 - losses as f32) / self.samples.max(1) as f32
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -138,6 +146,27 @@ pub struct CudaSimRootSearchResult {
     pub rows: Vec<Vec<CudaSimRootActionStats>>,
     pub rollouts_per_action: usize,
     pub rollout_steps: usize,
+}
+
+impl CudaSimRootSearchResult {
+    /// Picks one root per resident base state using an interpretable ordering:
+    /// terminal outcome first, then VP margin, then shorter mean game length.
+    pub fn best_actions(&self) -> Vec<Option<&CudaSimRootActionStats>> {
+        self.rows
+            .iter()
+            .map(|row| {
+                row.iter().max_by(|left, right| {
+                    left.net_terminal_outcome()
+                        .total_cmp(&right.net_terminal_outcome())
+                        .then_with(|| {
+                            left.mean_victory_margin()
+                                .total_cmp(&right.mean_victory_margin())
+                        })
+                        .then_with(|| right.mean_turn.total_cmp(&left.mean_turn))
+                })
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
