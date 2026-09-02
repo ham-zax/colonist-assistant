@@ -4,6 +4,7 @@ members = [
   "crates/catan-search",
   "crates/catan-arena",
   "crates/catan-wasm",
+  "crates/catan-native-host",
 ]
 resolver = "2"
 

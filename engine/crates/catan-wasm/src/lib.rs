@@ -21,6 +21,11 @@ use colonist_catan_search::{
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
+#[cfg(all(feature = "native-gpu", not(target_arch = "wasm32")))]
+mod native_gpu;
+#[cfg(all(feature = "native-gpu", not(target_arch = "wasm32")))]
+pub use native_gpu::{NativeGpuDeviceIdentity, NativeGpuSearchEngine};
+
 thread_local! {
     static PERSISTENT_SEARCH: RefCell<Vec<Mcts>> = const { RefCell::new(Vec::new()) };
 }
@@ -206,7 +211,7 @@ impl RequestedMode {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ActionOutput {
     kind: &'static str,
@@ -239,12 +244,14 @@ enum DecisionAuthority {
     ExactMandatory,
     TacticalProven,
     DeepMaxn,
+    #[cfg(all(feature = "native-gpu", not(target_arch = "wasm32")))]
+    GpuRootRollout,
     WeightedPolicy,
     ExactFamily,
     SafetyOverride,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ActionReplacementOutput {
     from: ActionOutput,
@@ -340,7 +347,7 @@ struct Response {
     deadline_reached: bool,
 }
 
-fn resource(value: i8) -> Result<Option<Resource>, JsValue> {
+fn resource(value: i8) -> Result<Option<Resource>, String> {
     Ok(match value {
         -1 => None,
         0 => Some(Resource::Lumber),
@@ -348,39 +355,39 @@ fn resource(value: i8) -> Result<Option<Resource>, JsValue> {
         2 => Some(Resource::Wool),
         3 => Some(Resource::Grain),
         4 => Some(Resource::Ore),
-        _ => return Err(JsValue::from_str("invalid resource code")),
+        _ => return Err("invalid resource code".into()),
     })
 }
 
-fn port(value: i8) -> Result<Option<Port>, JsValue> {
+fn port(value: i8) -> Result<Option<Port>, String> {
     Ok(match value {
         -1 => None,
         5 => Some(Port::Generic),
         0..=4 => Some(Port::Resource(
             resource(value)?.expect("resource port code is exact"),
         )),
-        _ => return Err(JsValue::from_str("invalid port code")),
+        _ => return Err("invalid port code".into()),
     })
 }
 
-fn phase(value: &str, parameter: Option<u8>) -> Result<Phase, JsValue> {
+fn phase(value: &str, parameter: Option<u8>) -> Result<Phase, String> {
     Ok(match value {
         "setup-settlement" => Phase::SetupSettlement,
         "setup-road" => Phase::SetupRoad {
-            settlement: parameter.ok_or_else(|| JsValue::from_str("setup road needs anchor"))?,
+            settlement: parameter.ok_or_else(|| "setup road needs anchor".to_string())?,
         },
         "pre-roll" => Phase::PreRoll,
         "roll-chance" => Phase::RollChance,
         "discard" => Phase::Discard,
         "move-robber" => Phase::MoveRobber,
         "resolve-steal" => Phase::ResolveSteal {
-            victim: parameter.ok_or_else(|| JsValue::from_str("steal needs victim"))?,
+            victim: parameter.ok_or_else(|| "steal needs victim".to_string())?,
         },
         "main" => Phase::Main,
         "development-chance" => Phase::DevelopmentChance,
         "trade-responses" => Phase::TradeResponses,
         "finished" => Phase::Finished,
-        _ => return Err(JsValue::from_str("invalid phase")),
+        _ => return Err("invalid phase".into()),
     })
 }
 
@@ -404,7 +411,7 @@ fn player(input: PlayerInput) -> PlayerState {
 fn game_states(
     input: StateInput,
     last_rejected_trade: Option<RejectedTradeInput>,
-) -> Result<Vec<BeliefParticle>, JsValue> {
+) -> Result<Vec<BeliefParticle>, String> {
     let num_players = input.players.len() as u8;
     let board = Board {
         num_players,
@@ -420,7 +427,7 @@ fn game_states(
                     coord: (index as i8, 0),
                 })
             })
-            .collect::<Result<Vec<_>, JsValue>>()?,
+            .collect::<Result<Vec<_>, String>>()?,
         vertices: input
             .board
             .vertices
@@ -433,7 +440,7 @@ fn game_states(
                     port: port(vertex.port)?,
                 })
             })
-            .collect::<Result<Vec<_>, JsValue>>()?,
+            .collect::<Result<Vec<_>, String>>()?,
         edges: input
             .board
             .edges
@@ -500,7 +507,7 @@ fn game_states(
                 .as_ref()
                 .is_some_and(|cards| cards.len() != players.len())
         {
-            return Err(JsValue::from_str("world player count mismatch"));
+            return Err("world player count mismatch".into());
         }
         let mut world_players = players.clone();
         for (state, hand) in world_players.iter_mut().zip(world.hands) {
@@ -562,7 +569,7 @@ fn game_states(
         };
         state
             .validate()
-            .map_err(|error| JsValue::from_str(&format!("invalid search state: {error}")))?;
+            .map_err(|error| format!("invalid search state: {error}"))?;
         result.push(BeliefParticle {
             weight: world.weight.unwrap_or(1.0).max(0.0),
             state,
@@ -1065,7 +1072,7 @@ fn exact_mandatory_report(
 fn root_exclusion_actions(
     inputs: &[RootExclusionInput],
     state: &GameState,
-) -> Result<Vec<Action>, JsValue> {
+) -> Result<Vec<Action>, String> {
     let recipients = ((1u8 << state.board.num_players) - 1) & !(1u8 << state.actor());
     inputs
         .iter()
@@ -1079,9 +1086,7 @@ fn root_exclusion_actions(
                 give: input.give,
                 receive: input.receive,
             }),
-            other => Err(JsValue::from_str(&format!(
-                "unsupported root exclusion kind: {other}"
-            ))),
+            other => Err(format!("unsupported root exclusion kind: {other}")),
         })
         .collect()
 }
@@ -1092,8 +1097,10 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let mode = RequestedMode::parse(request.mode.as_deref())?;
     let ponder = request.ponder.unwrap_or(false);
-    let particles = game_states(request.state, request.last_rejected_trade)?;
-    let root_exclusions = root_exclusion_actions(&request.root_exclusions, &particles[0].state)?;
+    let particles = game_states(request.state, request.last_rejected_trade)
+        .map_err(|error| JsValue::from_str(&error))?;
+    let root_exclusions = root_exclusion_actions(&request.root_exclusions, &particles[0].state)
+        .map_err(|error| JsValue::from_str(&error))?;
     let algorithm = mode.label();
     if !ponder && let Some(report) = exact_mandatory_report(&particles, &root_exclusions) {
         return serde_wasm_bindgen::to_value(&response(

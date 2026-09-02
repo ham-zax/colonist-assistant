@@ -25,6 +25,7 @@ export type WasmDecisionAuthority =
   | "exact-mandatory"
   | "tactical-proven"
   | "deep-maxn"
+  | "gpu-root-rollout"
   | "weighted-policy"
   | "exact-family"
   | "safety-override";

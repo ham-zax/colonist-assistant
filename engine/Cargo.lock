@@ -29,6 +29,15 @@ name = "colonist-catan-core"
 version = "0.1.0"
 
 [[package]]
+name = "colonist-catan-native-host"
+version = "0.1.0"
+dependencies = [
+ "colonist-catan-wasm",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "colonist-catan-search"
 version = "0.1.0"
 dependencies = [
@@ -45,6 +54,7 @@ dependencies = [
  "colonist-catan-search",
  "serde",
  "serde-wasm-bindgen",
+ "serde_json",
  "wasm-bindgen",
 ]
 

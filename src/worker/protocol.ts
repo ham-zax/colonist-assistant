@@ -1,4 +1,8 @@
-import type { DecisionAnalysis } from "../core/engine";
+import type {
+  DecisionAnalysis,
+  DecisionEngine,
+  DecisionRuntime,
+} from "../core/engine";
 import type { DecisionRequest } from "./analyze";
 
 export const DECISION_MESSAGE_TYPE = "colonist-assistant:decision";
@@ -20,12 +24,14 @@ export interface DecisionMessageResponse {
 export interface DecisionStatusMessage {
   type: typeof DECISION_STATUS_MESSAGE_TYPE;
   id: number;
+  engine: DecisionEngine;
 }
 
 export interface DecisionStatusMessageResponse {
   id: number;
-  runtime?: "background-wasm";
+  runtime?: Extract<DecisionRuntime, "background-gpu" | "background-wasm">;
   engineRevision?: string;
+  deviceName?: string;
   initializationMs?: number;
   error?: string;
 }

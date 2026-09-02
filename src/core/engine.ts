@@ -20,16 +20,21 @@ import {
   type PlayerBoardProfile,
 } from "./strategy";
 
-/** Live decision policy selected by the user. Both modes execute through the
- * packaged WASM rules engine; MaxN remains the default. */
+/** Live decision policy selected by the user. Strategist prefers the native
+ * GPU companion when available; both modes retain packaged WASM support. */
 export type DecisionEngine = "deep-search" | "weighted";
 
 export const isWasmDecisionEngine = (engine: DecisionEngine): boolean =>
   engine === "deep-search" || engine === "weighted";
 
 export type DecisionRuntime =
+  | "background-gpu"
   | "background-wasm"
   | "background-rollout";
+
+export const isSearchDecisionRuntime = (
+  runtime: DecisionRuntime | undefined,
+): boolean => runtime === "background-gpu" || runtime === "background-wasm";
 
 export interface DeepSearchAction {
   kind: string;
@@ -60,6 +65,7 @@ export type DecisionAuthority =
   | "exact-mandatory"
   | "tactical-proven"
   | "deep-maxn"
+  | "gpu-root-rollout"
   | "weighted-policy"
   | "exact-family"
   | "safety-override";

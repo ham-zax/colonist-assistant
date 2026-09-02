@@ -430,6 +430,7 @@ pub struct CudaSimEngine {
     expand_roots_kernel: CudaFunction,
     reduce_roots_kernel: CudaFunction,
     topology_device: CudaSlice<u32>,
+    topology_host: Vec<u32>,
     state_device: CudaSlice<u32>,
     action_device: CudaSlice<u32>,
     status_device: CudaSlice<u32>,
@@ -536,6 +537,7 @@ impl CudaSimEngine {
             expand_roots_kernel,
             reduce_roots_kernel,
             topology_device,
+            topology_host,
             state_device,
             action_device,
             status_device,
@@ -588,6 +590,16 @@ impl CudaSimEngine {
             self.resident_states = 0;
             self.state_host.clear();
             return Ok(());
+        }
+        let topology = topology_words(states[0].board.as_ref())?;
+        for state in states.iter().skip(1) {
+            if topology_words(state.board.as_ref())? != topology {
+                return Err(CudaSimError::TopologyMismatch);
+            }
+        }
+        if topology != self.topology_host {
+            self.stream.memcpy_htod(&topology, &mut self.topology_device)?;
+            self.topology_host = topology;
         }
         self.ensure_capacity(states.len())?;
         self.state_host.clear();

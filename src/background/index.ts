@@ -2,6 +2,7 @@ import {
   analyzeDecisionRequest,
 } from "../worker/analyze";
 import { warmDeepSearchEngine } from "../worker/deep-search";
+import { NativeGpuClient } from "./native-gpu";
 import {
   DECISION_MESSAGE_TYPE,
   DECISION_STATUS_MESSAGE_TYPE,
@@ -10,6 +11,8 @@ import {
   type DecisionStatusMessage,
   type DecisionStatusMessageResponse,
 } from "../worker/protocol";
+
+const nativeGpu = new NativeGpuClient();
 
 const errorDetail = (error: unknown, fallback: string): string => {
   if (error instanceof Error) return error.message;
@@ -46,36 +49,69 @@ chrome.runtime.onMessage.addListener(
       typeof (message as Partial<DecisionStatusMessage>).id === "number"
     ) {
       const status = message as DecisionStatusMessage;
-      void warmDeepSearchEngine()
-        .then(({ engineRevision, initializationMs }) => {
-          const response: DecisionStatusMessageResponse = {
-            id: status.id,
-            runtime: "background-wasm",
-            engineRevision,
-            initializationMs,
-          };
-          sendResponse(response);
-        })
-        .catch((error: unknown) => {
-          const response: DecisionStatusMessageResponse = {
-            id: status.id,
-            error: errorDetail(error, "WASM initialization failed"),
-          };
-          sendResponse(response);
-        });
+      const startedAt = performance.now();
+      void (async () => {
+        if (status.engine === "deep-search") {
+          const gpu = await nativeGpu.status();
+          if (gpu) {
+            const response: DecisionStatusMessageResponse = {
+              id: status.id,
+              runtime: "background-gpu",
+              engineRevision: gpu.engineRevision,
+              deviceName: gpu.device.name,
+              initializationMs: performance.now() - startedAt,
+            };
+            sendResponse(response);
+            return;
+          }
+        }
+        if (status.engine === "weighted") nativeGpu.release();
+        const wasm = await warmDeepSearchEngine();
+        const response: DecisionStatusMessageResponse = {
+          id: status.id,
+          runtime: "background-wasm",
+          engineRevision: wasm.engineRevision,
+          initializationMs: wasm.initializationMs,
+        };
+        sendResponse(response);
+      })().catch((error: unknown) => {
+        const response: DecisionStatusMessageResponse = {
+          id: status.id,
+          error: errorDetail(error, "Decision engine initialization failed"),
+        };
+        sendResponse(response);
+      });
       return true;
     }
     if (!isDecisionMessage(message)) return undefined;
-    void analyzeDecisionRequest(message)
+    void (async () => {
+      if (message.engine === "deep-search") {
+        const gpu = await nativeGpu.status();
+        if (gpu) {
+          const analysis = await analyzeDecisionRequest(
+            message,
+            (request) => nativeGpu.analyze(request),
+          );
+          return {
+            ...analysis,
+            runtime: "background-gpu" as const,
+            runtimeReason: `CUDA resident search on ${gpu.device.name}`,
+          };
+        }
+      }
+      if (message.engine === "weighted") nativeGpu.release();
+      const analysis = await analyzeDecisionRequest(message);
+      return {
+        ...analysis,
+        runtime: analysis.deepSearch
+          ? ("background-wasm" as const)
+          : ("background-rollout" as const),
+      };
+    })()
       .then((analysis) => {
         const response: DecisionMessageResponse = {
           id: message.id,
-          analysis: {
-            ...analysis,
-            runtime: analysis.deepSearch
-              ? "background-wasm"
-              : "background-rollout",
-          },
+          analysis,
           execution: "background",
         };
         sendResponse(response);

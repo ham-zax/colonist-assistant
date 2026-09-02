@@ -6,7 +6,10 @@ import {
 } from "../core/engine";
 import type { BoardSnapshot } from "../core/placement";
 import type { TrackerState } from "../core/types";
-import { analyzeDeepSearch } from "./deep-search";
+import {
+  analyzeDeepSearch,
+  type DeepSearchExecutor,
+} from "./deep-search";
 
 export interface DecisionRequest {
   state: TrackerState;
@@ -20,6 +23,7 @@ export interface DecisionRequest {
 
 export const analyzeDecisionRequest = async (
   request: DecisionRequest,
+  executor?: DeepSearchExecutor,
 ): Promise<DecisionAnalysis> => {
   // This inexpensive public estimate stabilizes the presentation while the
   // Strategist's own root values arrive. It is never an action authority.
@@ -36,5 +40,6 @@ export const analyzeDecisionRequest = async (
     request.searchConstraints,
     request.playerTradesEnabled ?? true,
     request.engine,
+    executor,
   );
 };

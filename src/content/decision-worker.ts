@@ -38,7 +38,7 @@ const slowDecisionThresholdMs = (
 };
 
 export interface DecisionServiceStatus {
-  runtime: "background-wasm" | "engine-error";
+  runtime: "background-gpu" | "background-wasm" | "engine-error";
   detail: string;
   initializationMs?: number;
 }
@@ -70,33 +70,56 @@ export class DecisionWorkerClient {
   private queued?: PendingDecision;
   private completedKey = "";
   private desiredKey = "";
-  private readiness?: Promise<DecisionStatusMessageResponse>;
+  private readiness?: {
+    engine: DecisionEngine;
+    promise: Promise<DecisionStatusMessageResponse>;
+  };
   private destroyed = false;
   private contextInvalidated = false;
 
-  warm(callback: (status: DecisionServiceStatus) => void): void {
-    this.readiness ??= this.queryStatus();
-    void this.readiness
+  warm(callback: (status: DecisionServiceStatus) => void): void;
+  warm(
+    engine: DecisionEngine,
+    callback: (status: DecisionServiceStatus) => void,
+  ): void;
+  warm(
+    engineOrCallback: DecisionEngine | ((status: DecisionServiceStatus) => void),
+    maybeCallback?: (status: DecisionServiceStatus) => void,
+  ): void {
+    const engine =
+      typeof engineOrCallback === "function" ? "deep-search" : engineOrCallback;
+    const callback =
+      typeof engineOrCallback === "function" ? engineOrCallback : maybeCallback!;
+    if (!this.readiness || this.readiness.engine !== engine) {
+      this.readiness = {
+        engine,
+        promise: this.queryStatus(engine),
+      };
+    }
+    const readiness = this.readiness;
+    void readiness.promise
       .then((response) => {
-        if (
-          response.runtime !== "background-wasm" ||
-          !response.engineRevision
-        ) {
-          throw new Error(response.error ?? "WASM service returned no status");
+        if (this.readiness !== readiness) return;
+        if (!response.runtime || !response.engineRevision) {
+          throw new Error(response.error ?? "Decision service returned no status");
         }
         callback({
-          runtime: "background-wasm",
-          detail: `${response.engineRevision} ready`,
+          runtime: response.runtime,
+          detail:
+            response.runtime === "background-gpu"
+              ? `${response.engineRevision} · ${response.deviceName ?? "CUDA GPU"} ready`
+              : `${response.engineRevision} ready`,
           ...(response.initializationMs !== undefined
             ? { initializationMs: response.initializationMs }
             : {}),
         });
       })
       .catch((error: unknown) => {
+        if (this.readiness !== readiness) return;
         if (isExtensionContextInvalidatedError(error)) {
           this.contextInvalidated = true;
         }
-        this.readiness = undefined;
+        if (this.readiness === readiness) this.readiness = undefined;
         callback({
           runtime: "engine-error",
           detail:
@@ -104,7 +127,7 @@ export class DecisionWorkerClient {
               ? EXTENSION_CONTEXT_RELOAD_MESSAGE
               : error instanceof Error
               ? error.message
-              : "The background WASM service did not respond",
+              : "The background decision service did not respond",
         });
       });
   }
@@ -297,15 +320,7 @@ export class DecisionWorkerClient {
       const response =
         await chrome.runtime.sendMessage<DecisionMessageResponse>(message);
       if (response?.id === message.id && response.analysis) {
-        return {
-          ...response,
-          analysis: {
-            ...response.analysis,
-            runtime: response.analysis.deepSearch
-              ? "background-wasm"
-              : "background-rollout",
-          },
-        };
+        return response;
       }
       const detail =
         response?.error ??
@@ -335,10 +350,13 @@ export class DecisionWorkerClient {
     }
   }
 
-  private queryStatus(): Promise<DecisionStatusMessageResponse> {
+  private queryStatus(
+    engine: DecisionEngine,
+  ): Promise<DecisionStatusMessageResponse> {
     const message: DecisionStatusMessage = {
       type: DECISION_STATUS_MESSAGE_TYPE,
       id: this.nextId++,
+      engine,
     };
     return chrome.runtime.sendMessage<DecisionStatusMessageResponse>(message);
   }

@@ -44,6 +44,10 @@ const DEVELOPMENT_TOTAL = [14, 5, 2, 2, 2] as const;
 const MAX_PARTICLES = 96;
 const MAX_INTERACTIVE_PARTICLES = 24;
 
+export type DeepSearchExecutor = (
+  request: unknown,
+) => Promise<WasmSearchResponse>;
+
 let wasmReady: Promise<void> | undefined;
 
 const ensureWasm = async (): Promise<void> => {
@@ -1340,8 +1344,9 @@ export const analyzeDeepSearch = async (
   searchConstraints: DecisionSearchConstraints = {},
   playerTradesEnabled = true,
   engine: DecisionEngine = "deep-search",
+  executor?: DeepSearchExecutor,
 ): Promise<DecisionAnalysis> => {
-  await ensureWasm();
+  if (!executor) await ensureWasm();
   const { request, players, root } = buildDeepSearchRequest(
     state,
     board,
@@ -1380,7 +1385,9 @@ export const analyzeDeepSearch = async (
     }
   }
   const startedAt = performance.now();
-  const response = analyzeWasm(request) as WasmSearchResponse;
+  const response = executor
+    ? await executor(request)
+    : (analyzeWasm(request) as WasmSearchResponse);
   const elapsedMs = performance.now() - startedAt;
   const mappingFailureReason =
     response.chosen && !matchingPrompt(response.chosen, board)
@@ -1461,7 +1468,7 @@ export const analyzeDeepSearch = async (
     0.44 + visibleProgress * 0.24,
   );
   const deepPlayers =
-    engine === "weighted"
+    engine === "weighted" || response.algorithm === "gpu-root-rollout"
       ? fallback.players
       : deepValueTotal > Number.EPSILON
       ? fallback.players.map((estimate) => {
@@ -1482,7 +1489,9 @@ export const analyzeDeepSearch = async (
                   `${
                     response.algorithm === "maxn"
                       ? "Deep MaxN belief search"
-                      : response.algorithm
+                      : response.algorithm === "gpu-root-rollout"
+                        ? "GPU resident root-rollout search"
+                        : response.algorithm
                   } relative race value from the current live board`,
                   ...estimate.reasons.filter(
                     (reason) =>
@@ -1504,7 +1513,9 @@ export const analyzeDeepSearch = async (
     model:
       engine === "weighted"
         ? "Weighted heuristic policy (top-5 action-prior sampling)"
-        : `Observation-safe weighted-belief Deep MaxN (${response.particles} particles, ${response.nodes.toLocaleString()} nodes, depth ${response.deepestDecisionDepth})`,
+        : response.algorithm === "gpu-root-rollout"
+          ? `Observation-safe GPU root-rollout search (${response.particles} particles, ${response.rollouts.toLocaleString()} resident rollouts)`
+          : `Observation-safe weighted-belief Deep MaxN (${response.particles} particles, ${response.nodes.toLocaleString()} nodes, depth ${response.deepestDecisionDepth})`,
     deepSearch: search,
   };
 };

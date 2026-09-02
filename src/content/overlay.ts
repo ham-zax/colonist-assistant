@@ -87,7 +87,10 @@ import type {
   DomesticTradeState,
   RootTradeActionExclusion,
 } from "../core/engine";
-import { isWasmDecisionEngine } from "../core/engine";
+import {
+  isSearchDecisionRuntime,
+  isWasmDecisionEngine,
+} from "../core/engine";
 import type { TrackerState } from "../core/types";
 import { WinPredictionStabilizer } from "../core/win-prediction";
 import type { GameSession } from "./session";
@@ -390,8 +393,11 @@ export class AssistantOverlay {
   }
 
   private warmDecisionEngine(): void {
-    this.decisionWorker.warm((status) => {
-      if (status.runtime === "background-wasm") {
+    this.decisionWorker.warm(this.settings.engine, (status) => {
+      if (
+        status.runtime === "background-gpu" ||
+        status.runtime === "background-wasm"
+      ) {
         this.decisionRuntime = status.runtime;
         this.decisionRuntimeError = "";
         this.decisionRuntimeDetail =
@@ -645,8 +651,9 @@ export class AssistantOverlay {
 
   setSettings(settings: AssistantSettings): void {
     const wasRecording = this.settings.recordGame;
+    const engineChanged = settings.engine !== this.settings.engine;
     if (
-      settings.engine !== this.settings.engine ||
+      engineChanged ||
       settings.disablePlayerTrades !== this.settings.disablePlayerTrades
     ) {
       this.decisionAnalysis = undefined;
@@ -659,6 +666,7 @@ export class AssistantOverlay {
       this.winPredictions.reset();
     }
     this.settings = settings;
+    if (engineChanged) this.warmDecisionEngine();
     this.decisionTraces.setLegacyStorageEnabled(!settings.recordGame);
     if (wasRecording && !settings.recordGame) {
       void this.gameRecorder.flush();
@@ -962,7 +970,7 @@ export class AssistantOverlay {
     }[placementAction];
     const targetId =
       (
-        this.decisionAnalysis?.runtime === "background-wasm" &&
+        isSearchDecisionRuntime(this.decisionAnalysis?.runtime) &&
         deep?.kind === deepKind
       )
         ? deep.targetId
@@ -1830,7 +1838,8 @@ export class AssistantOverlay {
     if (this.decisionPendingKey) {
       if (this.decisionSlowKey === this.decisionPendingKey) {
         return {
-          label: "WASM · 1s+",
+          label:
+            observedRuntime === "background-gpu" ? "GPU · 1s+" : "WASM · 1s+",
           detail:
             `${this.decisionEngineLabel()} is still evaluating this position. No fallback policy is allowed to replace it.`,
           state: "slow",
@@ -1838,15 +1847,18 @@ export class AssistantOverlay {
       }
       return {
         label:
-          observedRuntime === "background-wasm"
-            ? "WASM searching"
-            : "Connecting",
+          observedRuntime === "background-gpu"
+            ? "GPU searching"
+            : observedRuntime === "background-wasm"
+              ? "WASM searching"
+              : "Connecting",
         detail:
-          observedRuntime === "background-wasm"
-            ? "The background engine is evaluating this position with a bounded node budget."
-            : "Waking the packaged WASM engine before evaluating this position.",
-        state:
-          observedRuntime === "background-wasm" ? "searching" : "connecting",
+          observedRuntime === "background-gpu"
+            ? "The native CUDA companion is evaluating this position with resident rollouts."
+            : observedRuntime === "background-wasm"
+              ? "The background engine is evaluating this position with a bounded node budget."
+              : "Waking the selected decision engine before evaluating this position.",
+        state: isSearchDecisionRuntime(observedRuntime) ? "searching" : "connecting",
       };
     }
     if (this.decisionAnalysis?.runtime === "background-rollout") {
@@ -1854,6 +1866,16 @@ export class AssistantOverlay {
         label: "Background rollout",
         detail:
           "The service worker is ready; lightweight win odds run while deep search waits for your turn.",
+        state: "healthy",
+      };
+    }
+    if (observedRuntime === "background-gpu") {
+      const search = this.decisionAnalysis?.deepSearch;
+      return {
+        label: "Native CUDA GPU",
+        detail: search
+          ? `Last GPU search completed in ${Math.max(1, Math.round(search.elapsedMs)).toLocaleString()} ms across ${search.rollouts.toLocaleString()} resident rollouts.`
+          : this.decisionRuntimeDetail,
         state: "healthy",
       };
     }
@@ -1869,7 +1891,7 @@ export class AssistantOverlay {
     }
     return {
       label: "Connecting",
-      detail: "Waking the packaged background WASM engine.",
+      detail: "Waking the selected decision engine.",
       state: "connecting",
     };
   }
@@ -2177,9 +2199,11 @@ export class AssistantOverlay {
             this.freeRoadPlan?.gameKey === board.gameKey
           ? this.freeRoadPlan?.edgeIds[0]
           : undefined;
+    const retainedAnalysis = this.decisionAnalysis;
     if (
       retainedPlacementTarget &&
-      this.decisionAnalysis?.runtime === "background-wasm"
+      retainedAnalysis &&
+      isSearchDecisionRuntime(retainedAnalysis.runtime)
     ) {
       const searchConstraints = this.decisionSearchConstraints();
       const key = this.decisionSignature(state, board, player, searchConstraints);
@@ -2192,7 +2216,7 @@ export class AssistantOverlay {
         this.decisionTraces.begin(traceKey, state, board);
         // This is the parameterized continuation of the already-completed
         // deep build/development action, not a fresh strategic position.
-        this.decisionTraces.complete(traceKey, this.decisionAnalysis);
+        this.decisionTraces.complete(traceKey, retainedAnalysis);
       }
       return;
     }
@@ -2573,7 +2597,7 @@ export class AssistantOverlay {
     const deepAction = this.preferredDeepAction(state, coachPlayer);
     const authoritativeDeep =
       Boolean(this.decisionAnalysis?.deepSearch) &&
-      this.decisionAnalysis?.runtime === "background-wasm";
+      isSearchDecisionRuntime(this.decisionAnalysis?.runtime);
     const deepSpatialAction =
       deepAction?.kind === "build-road" || deepAction?.kind === "place-road"
         ? "road"
