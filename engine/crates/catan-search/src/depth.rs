@@ -921,8 +921,19 @@ fn belief_search(
     // may be merged losslessly by summing their weights; finite configured
     // limits are reserved for explicit arena/benchmark experiments.
     let posterior_particles = particles.len();
-    let posterior = particles;
-    let coalesced_storage = coalesce_identical_particles(particles);
+    // Belief particles represent a weighted distribution, not an ordered
+    // sequence. Canonicalize the exact worlds before timed planning,
+    // coalescing, or strategic selection so caller permutation cannot decide
+    // which world receives scarce wall-clock time first.
+    let mut posterior_storage = particles.to_vec();
+    posterior_storage.sort_by(|left, right| {
+        left.state
+            .state_hash()
+            .cmp(&right.state.state_hash())
+            .then_with(|| left.weight.total_cmp(&right.weight))
+    });
+    let posterior = posterior_storage.as_slice();
+    let coalesced_storage = coalesce_identical_particles(posterior);
     let coalesced = coalesced_storage.as_slice();
     let strategic_storage;
     let particles = if coalesced.len() > config.strategic_particle_limit {
@@ -945,6 +956,31 @@ fn belief_search(
         legal: bool,
     }
     let mut aggregate = Vec::<Aggregate>::new();
+    let accumulate = |aggregate: &mut Vec<Aggregate>, entry: RowEntry, weight: f32| {
+        if let Some(existing) = aggregate
+            .iter_mut()
+            .find(|candidate| candidate.action == entry.action)
+        {
+            for (sum, value) in existing.value.iter_mut().zip(entry.value) {
+                *sum += value * weight;
+            }
+            existing.covered_weight += weight;
+            if entry.legal {
+                existing.legal_weight += weight;
+            }
+            for (bound, value) in existing.lower_bound.iter_mut().zip(entry.value) {
+                *bound = bound.min(value);
+            }
+        } else {
+            aggregate.push(Aggregate {
+                action: entry.action,
+                value: entry.value.map(|value| value * weight),
+                covered_weight: weight,
+                legal_weight: if entry.legal { weight } else { 0.0 },
+                lower_bound: entry.value,
+            });
+        }
+    };
     let mut nodes = 0;
     let mut cutoffs = 0;
     let mut depth = 0;
@@ -1264,32 +1300,47 @@ fn belief_search(
             }
         }
         for entry in row {
-            if let Some(existing) = aggregate
-                .iter_mut()
-                .find(|candidate| candidate.action == entry.action)
-            {
-                for (sum, value) in existing.value.iter_mut().zip(entry.value) {
-                    *sum += value * weight;
-                }
-                existing.covered_weight += weight;
-                if entry.legal {
-                    existing.legal_weight += weight;
-                }
-                for (bound, value) in existing.lower_bound.iter_mut().zip(entry.value) {
-                    *bound = bound.min(value);
-                }
-            } else {
-                aggregate.push(Aggregate {
-                    action: entry.action,
-                    value: entry.value.map(|value| value * weight),
-                    covered_weight: weight,
-                    legal_weight: if entry.legal { weight } else { 0.0 },
-                    lower_bound: entry.value,
-                });
-            }
+            accumulate(&mut aggregate, entry, weight);
         }
     }
     deadline_reached |= deadline.has_elapsed();
+    if deadline_reached {
+        // A single posterior aggregate must never mix search depths merely
+        // because wall-clock time expired between hidden worlds. If every row
+        // did not finish under the global deadline, rebuild the complete root
+        // table from the same one-ply fallback for every particle. This makes
+        // timed values invariant to particle ordering while preserving the
+        // deeper result whenever the whole posterior completes.
+        aggregate.clear();
+        particles_searched = 0;
+        for particle in particles {
+            let weight = particle.weight.max(0.0) / total_weight;
+            if weight <= 0.0 {
+                continue;
+            }
+            particles_searched += 1;
+            for action in &root_actions {
+                let mut next = particle.state.clone();
+                let entry = if next.apply(action).is_ok() {
+                    let mut value = evaluate(&next);
+                    apply_action_friction(&mut value, &particle.state, action, observer);
+                    RowEntry {
+                        action: action.clone(),
+                        value,
+                        legal: true,
+                    }
+                } else {
+                    RowEntry {
+                        action: action.clone(),
+                        value: evaluate(&particle.state),
+                        legal: false,
+                    }
+                };
+                accumulate(&mut aggregate, entry, weight);
+            }
+        }
+        depth = 0;
+    }
     let actor = observer as usize;
     let mut actions = aggregate
         .into_iter()
