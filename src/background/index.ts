@@ -19,10 +19,12 @@ const nativeGpu = new NativeGpuClient();
 const NATIVE_GPU_ROOT_ACTIONS = 12;
 const NATIVE_GPU_GLOBAL_ROLLOUTS = 12 * 32;
 const NATIVE_GPU_ROLLOUT_STEPS = 96;
+const NATIVE_GPU_DECISION_TIME_MS = 4_000;
 
 const withNativeGpuStrengthProfile = (request: unknown): unknown => {
   if (!request || typeof request !== "object") return request;
   const typed = request as {
+    timeBudgetMs?: number;
     effort?: {
       decisionTimeMs: number;
       tactical: { maxDepth: number; nodeBudget: number };
@@ -33,8 +35,16 @@ const withNativeGpuStrengthProfile = (request: unknown): unknown => {
   if (!typed.effort) return request;
   return {
     ...typed,
+    timeBudgetMs: Math.max(
+      NATIVE_GPU_DECISION_TIME_MS,
+      typed.timeBudgetMs ?? 0,
+    ),
     effort: {
       ...typed.effort,
+      decisionTimeMs: Math.max(
+        NATIVE_GPU_DECISION_TIME_MS,
+        typed.effort.decisionTimeMs,
+      ),
       gpu: {
         rootCap: Math.max(NATIVE_GPU_ROOT_ACTIONS, typed.effort.gpu.rootCap),
         rolloutBudget: Math.max(

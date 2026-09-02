@@ -2352,13 +2352,16 @@ export class AssistantOverlay {
         this.decisionRuntimeError = displayedDetail;
         this.decisionRuntimeDetail = displayedDetail;
         this.decisionTraces.failure(traceKey, displayedDetail);
-        console.error("[Colonist Assistant] Selected decision engine failed", {
-          key,
-          engine: this.settings.engine,
-          detail: displayedDetail,
-          policy: "selected-engine-only",
-          fallbackStarted: false,
-        });
+        console.error(
+          `[Colonist Assistant] Selected decision engine failed: ${displayedDetail}`,
+          {
+            key,
+            engine: this.settings.engine,
+            detail: displayedDetail,
+            policy: "selected-engine-only",
+            fallbackStarted: false,
+          },
+        );
         this.render();
       },
       searchConstraints,

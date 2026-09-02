@@ -140,14 +140,17 @@ still covering more than a single greedy line. Chance nodes use their
 rules-engine probabilities. Depth advances on completed turns, while a separate
 in-turn action bound prevents unbounded trade/build sequences.
 
-The normal live request uses depth 4, branch cap 8, a 4,000-node limit, and a
-cooperative 350 ms strategic-search deadline. Setup uses a larger dedicated
+The normal WASM live request uses depth 4, branch cap 8, a 4,000-node limit, and
+a cooperative 350 ms strategic-search deadline. Setup uses a larger dedicated
 draft budget and deadline; optional post-draft rollouts remain off by default
 until held-out opening regret justifies enabling them. Trade responses and
 pondering use separate bounded node profiles.
 
-The browser and native search share the same wall-clock deadline. Search checks
-it between bounded slices and once more before returning. If time expires in
+Native CUDA Strategist requests use a 4,000 ms deadline floor. That budget covers
+exact/tactical arbitration, belief preparation, GPU upload, and progressive CUDA
+racing; racing may return earlier. The 12-second content-client cutoff remains
+the outer fail-closed safety limit. Search checks its active backend deadline
+between bounded slices and once more before returning. If time expires in
 the middle of one hidden world's root-action row, the complete row is replaced
 with a uniform structured fallback, so action order cannot decide which
 candidates received deep values. Setup preserves completed deep values and
