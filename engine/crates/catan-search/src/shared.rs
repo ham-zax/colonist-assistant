@@ -68,48 +68,83 @@ fn canonical_promotion_key(action: &Action) -> (u8, u8, u8) {
     }
 }
 
-/// Merges promoted candidate actions with ordinary observation-ranked roots,
-/// ensuring promoted actions are granted search width while preserving
-/// deduplication, ordinary ordering for non-promoted actions, and `EndTurn` retention.
-///
-/// Both CPU search (`depth.rs`) and native GPU (`native_gpu.rs`) consume this
-/// function so that root admission is 100% synchronized across backends.
-///
-/// Promotion overflow rule:
-/// When promoted actions exceed available width, promoted actions are prioritized
-/// by a canonical backend-independent key (settlements > roads > cities, then
-/// deterministic vertex/edge index). If `EndTurn` was legal in `ranked`, one width
-/// slot is strictly reserved for `EndTurn` so promotion overflow can never drop it.
+/// Merges mandatory blockers and promoted candidate actions with ordinary
+/// observation-ranked roots, ensuring:
+/// 1. Mandatory blockers (proven forced-loss escapes) take absolute precedence
+///    over spatial promotions and `EndTurn`, ordered by the least residual
+///    forced-loss mass with deterministic action tie-breaking.
+/// 2. Spatial promotions are admitted into remaining non-`EndTurn` capacity.
+/// 3. `EndTurn` is preserved when capacity remains after mandatory blockers.
+/// 4. Deduplication and backend-independent ordering are shared by CPU/native GPU.
 pub fn admit_promoted_roots(
     ranked: &[(Action, f32)],
-    promoted: &[Action],
+    mandatory_blockers: &[(Action, f32)],
+    spatial_promotions: &[Action],
     cap: usize,
 ) -> Vec<(Action, f32)> {
     let cap = cap.max(1);
     let has_end_turn = ranked.iter().any(|(action, _)| matches!(action, Action::EndTurn));
 
-    // Deduplicate and filter promoted actions that are present in the candidate pool
-    let mut canonical_promoted = Vec::new();
-    for action in promoted {
-        if !canonical_promoted.contains(action) && ranked.iter().any(|(a, _)| a == action) {
-            canonical_promoted.push(action.clone());
+    let mut canonical_blockers = Vec::<(Action, f32)>::new();
+    for (action, residual_loss) in mandatory_blockers {
+        if !ranked.iter().any(|(candidate, _)| candidate == action) {
+            continue;
+        }
+        if let Some((_, existing_loss)) = canonical_blockers
+            .iter_mut()
+            .find(|(candidate, _)| candidate == action)
+        {
+            *existing_loss = existing_loss.min(*residual_loss);
+        } else {
+            canonical_blockers.push((action.clone(), *residual_loss));
         }
     }
-    // Canonical backend-independent sorting ensures CPU and native GPU always
-    // select the exact same promoted subset regardless of caller candidate order.
-    canonical_promoted.sort_by_key(canonical_promotion_key);
+    canonical_blockers.sort_by(|left, right| {
+        left.1
+            .total_cmp(&right.1)
+            .then_with(|| canonical_promotion_key(&left.0).cmp(&canonical_promotion_key(&right.0)))
+            .then_with(|| format!("{:?}", left.0).cmp(&format!("{:?}", right.0)))
+    });
 
-    // If EndTurn is legal, reserve 1 slot for it so promotions never starve EndTurn
-    let non_end_turn_cap = if has_end_turn {
-        cap.saturating_sub(1)
-    } else {
-        cap
-    };
+    let mut canonical_spatial = Vec::new();
+    for action in spatial_promotions {
+        if !canonical_blockers.iter().any(|(candidate, _)| candidate == action)
+            && !canonical_spatial.contains(action)
+            && ranked.iter().any(|(candidate, _)| candidate == action)
+        {
+            canonical_spatial.push(action.clone());
+        }
+    }
+    canonical_spatial.sort_by(|left, right| {
+        canonical_promotion_key(left)
+            .cmp(&canonical_promotion_key(right))
+            .then_with(|| format!("{left:?}").cmp(&format!("{right:?}")))
+    });
 
     let mut admitted: Vec<(Action, f32)> = Vec::with_capacity(cap);
 
-    // 1. Admit canonically ordered promoted actions up to non_end_turn_cap
-    for action in &canonical_promoted {
+    // Tier 0: safety actions can consume the whole cap when necessary.
+    for (action, _) in &canonical_blockers {
+        if admitted.len() >= cap {
+            break;
+        }
+        let prior = ranked
+            .iter()
+            .find(|(candidate, _)| candidate == action)
+            .map_or(0.01, |(_, prior)| *prior);
+        admitted.push((action.clone(), prior));
+    }
+
+    let reserve_end_turn = has_end_turn
+        && admitted.len() < cap
+        && !admitted
+            .iter()
+            .any(|(action, _)| matches!(action, Action::EndTurn));
+    let non_end_turn_cap = cap.saturating_sub(usize::from(reserve_end_turn));
+
+    // Tier 1: spatial coverage cannot evict a mandatory blocker or the remaining
+    // EndTurn slot.
+    for action in &canonical_spatial {
         if admitted.len() >= non_end_turn_cap {
             break;
         }
@@ -120,7 +155,7 @@ pub fn admit_promoted_roots(
         admitted.push((action.clone(), prior));
     }
 
-    // 2. Fill remaining capacity up to non_end_turn_cap from ordinary ranked actions
+    // Tier 2: ordinary ranked roots fill the remaining non-EndTurn capacity.
     for (action, prior) in ranked {
         if admitted.len() >= non_end_turn_cap {
             break;
@@ -133,8 +168,8 @@ pub fn admit_promoted_roots(
         }
     }
 
-    // 3. Guarantee EndTurn is preserved in its reserved slot
-    if has_end_turn {
+    // Tier 3: preserve EndTurn only after mandatory safety coverage is satisfied.
+    if reserve_end_turn {
         let end_turn_prior = ranked
             .iter()
             .find(|(action, _)| matches!(action, Action::EndTurn))
@@ -662,8 +697,8 @@ mod tests {
         ];
 
         // Suppose Action::BuildSettlement { vertex: 20 } was promoted for cutting an opponent's road
-        let promoted = vec![Action::BuildSettlement { vertex: 20 }];
-        let admitted = admit_promoted_roots(&ranked, &promoted, 4);
+        let spatial = vec![Action::BuildSettlement { vertex: 20 }];
+        let admitted = admit_promoted_roots(&ranked, &[], &spatial, 4);
 
         assert_eq!(admitted.len(), 4);
         assert!(
@@ -685,12 +720,12 @@ mod tests {
             (Action::EndTurn, 0.01),
         ];
 
-        // cap = 2 with 2 promoted actions and legal EndTurn
-        let promoted = vec![
+        // cap = 2 with 2 spatial promoted actions and legal EndTurn
+        let spatial = vec![
             Action::BuildSettlement { vertex: 20 },
             Action::BuildRoad { edge: 1 },
         ];
-        let admitted = admit_promoted_roots(&ranked, &promoted, 2);
+        let admitted = admit_promoted_roots(&ranked, &[], &spatial, 2);
 
         assert_eq!(admitted.len(), 2);
         assert_eq!(
@@ -706,6 +741,74 @@ mod tests {
     }
 
     #[test]
+    fn mandatory_blocker_takes_absolute_precedence_over_spatial_promotion() {
+        let ranked = vec![
+            (Action::BuildSettlement { vertex: 20 }, 0.05),
+            (Action::BuildRoad { edge: 1 }, 0.04),
+            (Action::EndTurn, 0.01),
+        ];
+
+        // Mandatory blocker is a road; spatial promotion is a settlement.
+        let blockers = vec![(Action::BuildRoad { edge: 1 }, 0.0)];
+        let spatial = vec![Action::BuildSettlement { vertex: 20 }];
+
+        let admitted = admit_promoted_roots(&ranked, &blockers, &spatial, 2);
+
+        assert_eq!(admitted.len(), 2);
+        assert_eq!(
+            admitted[0].0,
+            Action::BuildRoad { edge: 1 },
+            "mandatory blocker must take the slot ahead of spatial promotion"
+        );
+        assert_eq!(
+            admitted[1].0,
+            Action::EndTurn,
+            "EndTurn must be preserved in reserved slot"
+        );
+    }
+
+    #[test]
+    fn mandatory_blocker_outranks_end_turn_at_width_one() {
+        let ranked = vec![
+            (Action::EndTurn, 0.9),
+            (Action::BuildRoad { edge: 1 }, 0.1),
+        ];
+        let blockers = vec![(Action::BuildRoad { edge: 1 }, 0.0)];
+
+        let admitted = admit_promoted_roots(&ranked, &blockers, &[], 1);
+
+        assert_eq!(admitted, vec![(Action::BuildRoad { edge: 1 }, 0.1)]);
+    }
+
+    #[test]
+    fn mandatory_blocker_order_uses_residual_loss_not_backend_rank() {
+        let ranked_cpu = vec![
+            (Action::BuildRoad { edge: 5 }, 2.0),
+            (Action::BuildSettlement { vertex: 10 }, 1.0),
+            (Action::EndTurn, 0.1),
+        ];
+        let ranked_gpu = vec![
+            (Action::BuildSettlement { vertex: 10 }, 1.0),
+            (Action::BuildRoad { edge: 5 }, 2.0),
+            (Action::EndTurn, 0.1),
+        ];
+        let blockers_a = vec![
+            (Action::BuildRoad { edge: 5 }, 0.20),
+            (Action::BuildSettlement { vertex: 10 }, 0.05),
+        ];
+        let blockers_b = vec![
+            (Action::BuildSettlement { vertex: 10 }, 0.05),
+            (Action::BuildRoad { edge: 5 }, 0.20),
+        ];
+
+        let admitted_a = admit_promoted_roots(&ranked_cpu, &blockers_a, &[], 1);
+        let admitted_b = admit_promoted_roots(&ranked_gpu, &blockers_b, &[], 1);
+
+        assert_eq!(admitted_a, admitted_b);
+        assert_eq!(admitted_a[0].0, Action::BuildSettlement { vertex: 10 });
+    }
+
+    #[test]
     fn admit_promoted_roots_is_backend_order_independent() {
         let ranked_cpu = vec![
             (Action::BuildRoad { edge: 5 }, 2.0),
@@ -718,17 +821,17 @@ mod tests {
             (Action::EndTurn, 0.1),
         ];
 
-        let promoted_a = vec![
+        let spatial_a = vec![
             Action::BuildRoad { edge: 5 },
             Action::BuildSettlement { vertex: 10 },
         ];
-        let promoted_b = vec![
+        let spatial_b = vec![
             Action::BuildSettlement { vertex: 10 },
             Action::BuildRoad { edge: 5 },
         ];
 
-        let admitted_a = admit_promoted_roots(&ranked_cpu, &promoted_a, 2);
-        let admitted_b = admit_promoted_roots(&ranked_gpu, &promoted_b, 2);
+        let admitted_a = admit_promoted_roots(&ranked_cpu, &[], &spatial_a, 2);
+        let admitted_b = admit_promoted_roots(&ranked_gpu, &[], &spatial_b, 2);
 
         assert_eq!(
             admitted_a, admitted_b,

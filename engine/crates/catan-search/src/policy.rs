@@ -501,7 +501,9 @@ fn action_prior_nonwinning_cached(
 ) -> f32 {
     let base = match action {
         Action::PlaceRoad { edge } | Action::BuildRoad { edge } => {
-            0.02 + cached_road_frontier_value(state, *edge, actor, road_cache, road_context)
+            0.02
+                + cached_road_frontier_value(state, *edge, actor, road_cache, road_context)
+                + cheap_road_disruption(state, *edge, actor)
         }
         Action::PlayRoadBuilding { first, second } => {
             1.0
@@ -985,10 +987,42 @@ mod tests {
     use colonist_catan_core::{Action, GameState, Phase};
 
     use super::{
-        action_prior, allocate_root_node_budgets, normalize_observed_priors, normalize_priors,
-        order_scored_with_state_quotas, policy_family, rank_with_class_quotas,
+        action_prior, action_prior_nonwinning, action_prior_nonwinning_cached,
+        allocate_root_node_budgets, cheap_road_disruption, normalize_observed_priors,
+        normalize_priors, order_scored_with_state_quotas, policy_family, rank_with_class_quotas,
         trade_acceptance_probability, truncate_root_preserving_end_turn,
     };
+
+    #[test]
+    fn cached_road_prior_preserves_disruption_term() {
+        let mut state = GameState::standard(229, 3);
+        state.roads[0] = Some(1);
+        let [a, b] = state.board.edges[0].vertices;
+        let edge = state.board.vertices[a as usize]
+            .adjacent_edges
+            .iter()
+            .chain(&state.board.vertices[b as usize].adjacent_edges)
+            .copied()
+            .find(|candidate| *candidate != 0 && state.roads[*candidate as usize].is_none())
+            .expect("fixture exposes an unbuilt road next to the opponent");
+        assert!(cheap_road_disruption(&state, edge, 0) > 0.0);
+
+        let action = Action::BuildRoad { edge };
+        let direct = action_prior_nonwinning(&state, &action, 0);
+        let mut road_cache = vec![None; state.board.edges.len()];
+        let mut road_context = None;
+        let mut robber_context = None;
+        let cached = action_prior_nonwinning_cached(
+            &state,
+            &action,
+            0,
+            &mut road_cache,
+            &mut road_context,
+            &mut robber_context,
+        );
+
+        assert!((direct - cached).abs() < 1e-6);
+    }
 
     #[test]
     fn unpromoted_policy_weights_cannot_change_production_prior_scores() {

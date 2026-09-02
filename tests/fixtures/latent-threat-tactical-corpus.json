@@ -303,7 +303,7 @@
     },
     {
       "id": "road-defensive-expansion-protection",
-      "description": "Building road secures corridor and unlocks settlement reach to open vertex 2",
+      "description": "Building road secures a contested expansion corridor without changing Longest Road ownership",
       "family": "RoadTopology",
       "state": {
         "boardSeed": 910300003,
@@ -329,6 +329,22 @@
           {
             "player": 1,
             "edge": 0
+          },
+          {
+            "player": 1,
+            "edge": 1
+          },
+          {
+            "player": 1,
+            "edge": 2
+          },
+          {
+            "player": 1,
+            "edge": 3
+          },
+          {
+            "player": 1,
+            "edge": 4
           }
         ],
         "buildings": [
@@ -345,10 +361,10 @@
         ],
         "resources": [
           [
+            2,
+            2,
             1,
             1,
-            0,
-            0,
             0
           ],
           [
@@ -376,6 +392,20 @@
           "kind": "end-turn"
         }
       ],
+      "proposalProbe": {
+        "player": 1,
+        "resources": [
+          1,
+          1,
+          1,
+          1,
+          0
+        ],
+        "action": {
+          "kind": "build-settlement",
+          "vertex": 2
+        }
+      },
       "expectedBestRoot": {
         "kind": "build-road",
         "edge": 19
@@ -400,6 +430,10 @@
             "edge": 0
           },
           {
+            "player": 0,
+            "edge": 20
+          },
+          {
             "player": 1,
             "edge": 2
           }
@@ -420,8 +454,8 @@
           [
             1,
             1,
-            0,
-            0,
+            1,
+            1,
             0
           ],
           [

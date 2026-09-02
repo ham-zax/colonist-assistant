@@ -674,17 +674,17 @@ impl NativeGpuSearchEngine {
         let verified_blockers = if immediate_threat_weight > f32::EPSILON {
             ranked
                 .iter()
-                .filter(|candidate| {
-                    forced_loss_weight(
+                .filter_map(|candidate| {
+                    let residual_loss = forced_loss_weight(
                         particles
                             .iter()
                             .map(|particle| (&particle.state, particle.weight)),
                         actor,
                         &candidate.action,
-                    ) + 1e-6
-                        < immediate_threat_weight
+                    );
+                    (residual_loss + 1e-6 < immediate_threat_weight)
+                        .then(|| (candidate.action.clone(), residual_loss))
                 })
-                .cloned()
                 .collect::<Vec<_>>()
         } else {
             Vec::new()
@@ -708,12 +708,12 @@ impl NativeGpuSearchEngine {
                     .collect()
             })
             .unwrap_or_default();
-        let all_promotions: Vec<Action> = verified_blockers
-            .into_iter()
-            .map(|b| b.action)
-            .chain(promoted_spatial_actions)
-            .collect();
-        let admitted = admit_promoted_roots(&ranked_tuples, &all_promotions, root_cap);
+        let admitted = admit_promoted_roots(
+            &ranked_tuples,
+            &verified_blockers,
+            &promoted_spatial_actions,
+            root_cap,
+        );
         let mut pre_trade_retained = Vec::with_capacity(admitted.len());
         for (action, _) in admitted {
             if let Some(r) = ranked.iter().find(|r| r.action == action) {

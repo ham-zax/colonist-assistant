@@ -89,12 +89,22 @@ pub struct TacticalStateSpec {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TacticalProposalProbe {
+    pub player: u8,
+    pub resources: ResourceHand,
+    pub action: TacticalActionSpec,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TacticalScenario {
     pub id: String,
     pub description: String,
     pub family: String,
     pub state: TacticalStateSpec,
     pub candidate_roots: Vec<TacticalActionSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_probe: Option<TacticalProposalProbe>,
     pub expected_best_root: TacticalActionSpec,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub negative_control_root: Option<TacticalActionSpec>,
@@ -201,6 +211,47 @@ fn player_can_settle_vertex(state: &GameState, player: u8, vertex: u8) -> bool {
             .any(|&e| state.roads[e as usize] == Some(player))
 }
 
+fn shortest_route_distance(state: &GameState, player: u8, start: u8, goal: u8) -> Option<u8> {
+    if start == goal {
+        return Some(0);
+    }
+    let mut min_cost = vec![u8::MAX; state.board.vertices.len()];
+    let mut deque = std::collections::VecDeque::new();
+    min_cost[start as usize] = 0;
+    deque.push_back((start, 0u8));
+
+    while let Some((curr, cost)) = deque.pop_front() {
+        if curr == goal {
+            return Some(cost);
+        }
+        if cost > min_cost[curr as usize] {
+            continue;
+        }
+        for &e in &state.board.vertices[curr as usize].adjacent_edges {
+            let owner = state.roads[e as usize];
+            if owner.is_some_and(|o| o != player) {
+                continue;
+            }
+            let [a, b] = state.board.edges[e as usize].vertices;
+            let next_v = if a == curr { b } else { a };
+            if state.buildings[next_v as usize].is_some_and(|bld| bld.player() != player && next_v != goal) {
+                continue;
+            }
+            let edge_cost = if owner == Some(player) { 0 } else { 1 };
+            let new_cost = cost.saturating_add(edge_cost);
+            if new_cost < min_cost[next_v as usize] {
+                min_cost[next_v as usize] = new_cost;
+                if edge_cost == 0 {
+                    deque.push_front((next_v, new_cost));
+                } else {
+                    deque.push_back((next_v, new_cost));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Strictly verifies G0 mechanical consequences for a tactical scenario.
 pub fn verify_mechanical_consequence(scenario: &TacticalScenario) -> Result<(), String> {
     let base = build_state(&scenario.state);
@@ -244,6 +295,9 @@ pub fn verify_mechanical_consequence(scenario: &TacticalScenario) -> Result<(), 
             let Action::BuildRoad { edge } = best_action else {
                 return Err("preserves_expansion_lane requires a BuildRoad action".into());
             };
+            if next.longest_road_holder != base.longest_road_holder {
+                return Err("expansion-lane control is confounded by a Longest Road transfer".into());
+            }
             let [a, b] = base.board.edges[edge as usize].vertices;
             // Identify the newly reached vertex that was not reachable before
             let target_vertex = if player_can_settle_vertex(&base, actor, a) {
@@ -260,7 +314,15 @@ pub fn verify_mechanical_consequence(scenario: &TacticalScenario) -> Result<(), 
                 return Err(format!("target vertex {target_vertex} is not open for settlement"));
             }
             if !player_can_settle_vertex(&next, actor, target_vertex) {
-                return Err(format!("next state cannot place settlement on target vertex {target_vertex}"));
+                return Err(format!("next state cannot connect a settlement on target vertex {target_vertex}"));
+            }
+            let settlement = Action::BuildSettlement {
+                vertex: target_vertex,
+            };
+            if !next.legal_actions().contains(&settlement) {
+                return Err(format!(
+                    "defensive road does not unlock a legal same-turn settlement on vertex {target_vertex}"
+                ));
             }
         }
         "detour_available" => {
@@ -278,17 +340,19 @@ pub fn verify_mechanical_consequence(scenario: &TacticalScenario) -> Result<(), 
             if let Err(e) = choked.apply(&neg_action) {
                 return Err(format!("choke action {:?} is illegal: {e:?}", neg_action));
             }
-            // Target player is player 1; verify player 1 still has an unbuilt detour edge adjacent to their road network
             let rival = 1u8;
-            let has_detour = choked.board.edges.iter().enumerate().any(|(e, edge)| {
-                e as u8 != choke_edge
-                    && choked.roads[e].is_none()
-                    && (choked.roads[edge.vertices[0] as usize] == Some(rival)
-                        || choked.board.vertices[edge.vertices[0] as usize].adjacent_edges.iter().any(|&ae| choked.roads[ae as usize] == Some(rival))
-                        || choked.board.vertices[edge.vertices[1] as usize].adjacent_edges.iter().any(|&ae| choked.roads[ae as usize] == Some(rival)))
-            });
-            if !has_detour {
-                return Err("no viable parallel detour edge remains after choke edge was claimed".into());
+            // Identify rival's route endpoints: from rival settlement (vertex 3) to unbuilt destination vertex 17
+            let start_v = 3u8;
+            let goal_v = 17u8;
+
+            let d_base = shortest_route_distance(&base, rival, start_v, goal_v)
+                .ok_or_else(|| format!("rival {rival} cannot reach goal {goal_v} in base state"))?;
+            let d_choked = shortest_route_distance(&choked, rival, start_v, goal_v)
+                .ok_or_else(|| format!("rival {rival} cannot reach goal {goal_v} after choke"))?;
+
+            // The choke edge did not lengthen rival's route; a parallel detour of equal cost exists
+            if d_choked > d_base {
+                return Err(format!("choke edge {choke_edge} increased distance from {d_base} to {d_choked}"));
             }
         }
         "negative_control_vanity_branch" => {

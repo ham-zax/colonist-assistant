@@ -4,8 +4,8 @@ use colonist_catan_arena::tactical_corpus::{
     build_state, default_corpus_path, load_tactical_corpus, verify_mechanical_consequence,
     TacticalCorpus,
 };
-use colonist_catan_core::Action;
-use colonist_catan_search::{CudaSimEngine, CudaSimRootActionStats};
+use colonist_catan_core::{Action, Phase};
+use colonist_catan_search::CudaSimEngine;
 use serde::Serialize;
 
 #[derive(Debug)]
@@ -79,6 +79,16 @@ struct ActionReport {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ProposalProbeReport {
+    action: String,
+    legal: bool,
+    proposal_frequency: usize,
+    proposal_rate: f32,
+    errors: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ScenarioReport {
     id: String,
     family: String,
@@ -88,6 +98,8 @@ struct ScenarioReport {
     negative_control_root: Option<String>,
     selected_root: String,
     tactical_contract_passed: bool,
+    proposal_errors: usize,
+    proposal_probe: Option<ProposalProbeReport>,
     actions: Vec<ActionReport>,
 }
 
@@ -142,17 +154,71 @@ fn main() {
         // Sample the CUDA rollout proposal policy directly without advancing state
         const PROPOSAL_SAMPLES: usize = 256;
         let proposal_batch = vec![state.clone(); PROPOSAL_SAMPLES];
+        let mut proposal_errors = 0usize;
         let sampled_actions = if let Err(e) = engine.upload_states(&proposal_batch) {
             eprintln!("Failed to upload states for proposal test {}: {e:?}", scenario.id);
+            proposal_errors = 1;
             Vec::new()
         } else if let Err(e) = engine.seed_rollout_rng(scenario_seed ^ 0xa5a5_5a5a) {
             eprintln!("Failed to seed rollout RNG for proposal test {}: {e:?}", scenario.id);
+            proposal_errors = 1;
             Vec::new()
         } else if let Err(e) = engine.generate_rollout_actions() {
             eprintln!("Failed to generate rollout actions for proposal test {}: {e:?}", scenario.id);
+            proposal_errors = 1;
             Vec::new()
         } else {
-            engine.download_generated_actions().unwrap_or_default()
+            match engine.download_generated_actions() {
+                Ok(actions) => actions,
+                Err(e) => {
+                    eprintln!("Failed to download proposal actions for {}: {e:?}", scenario.id);
+                    proposal_errors = 1;
+                    Vec::new()
+                }
+            }
+        };
+
+        let proposal_probe_report = if let Some(probe) = &scenario.proposal_probe {
+            let mut probe_state = state.clone();
+            probe_state.current_player = probe.player;
+            probe_state.phase = Phase::Main;
+            probe_state.players[probe.player as usize].resources = probe.resources;
+            let probe_action = probe.action.to_action();
+            let legal = probe_state.legal_actions().contains(&probe_action);
+            let mut errors = 0usize;
+            let generated = if !legal {
+                Vec::new()
+            } else {
+                let probe_batch = vec![probe_state; PROPOSAL_SAMPLES];
+                if engine.upload_states(&probe_batch).is_err()
+                    || engine.seed_rollout_rng(scenario_seed ^ 0x5a5a_a5a5).is_err()
+                    || engine.generate_rollout_actions().is_err()
+                {
+                    errors = 1;
+                    Vec::new()
+                } else {
+                    match engine.download_generated_actions() {
+                        Ok(actions) => actions,
+                        Err(_) => {
+                            errors = 1;
+                            Vec::new()
+                        }
+                    }
+                }
+            };
+            let proposal_frequency = generated
+                .iter()
+                .filter(|action| **action == probe_action)
+                .count();
+            Some(ProposalProbeReport {
+                action: format!("{probe_action:?}"),
+                legal,
+                proposal_frequency,
+                proposal_rate: proposal_frequency as f32 / PROPOSAL_SAMPLES as f32,
+                errors,
+            })
+        } else {
+            None
         };
 
         // 2. Explicit-Root Tactical Search:
@@ -177,18 +243,7 @@ fn main() {
         };
 
         let row = search_result.rows.first().cloned().unwrap_or_default();
-
-        // Reject errorful rows when determining best action
-        let valid_rows: Vec<&CudaSimRootActionStats> = row.iter().filter(|s| s.errors == 0).collect();
-        let best_stat = valid_rows
-            .iter()
-            .max_by(|a, b| {
-                a.mean_victory_margin()
-                    .partial_cmp(&b.mean_victory_margin())
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .copied();
-
+        let best_stat = search_result.best_actions().into_iter().next().flatten();
         let any_errors = row.iter().any(|s| s.errors > 0);
 
         let selected_action_str = best_stat
@@ -228,23 +283,30 @@ fn main() {
             })
             .collect();
 
-        // Check tactical contract:
-        // 1. G0 mechanical proof must pass.
-        // 2. CUDA root errors must be zero.
-        // 3. If negative control, selected action must NOT be negative control action.
-        // 4. If positive control, selected action must match expected best action or decisively beat negative control.
-        let tactical_passed = if !g0_passed || any_errors || best_stat.is_none() {
+        let proposal_probe_ok = proposal_probe_report
+            .as_ref()
+            .is_none_or(|probe| probe.legal && probe.errors == 0);
+
+        // Check only the scenario's declared mechanical/ordering contract.
+        // `best_actions()` uses the benchmark's required explicit-root ordering:
+        // net terminal outcome, then VP margin, then shorter mean game length.
+        let tactical_passed = if !g0_passed || proposal_errors > 0 || !proposal_probe_ok || any_errors {
+            false
+        } else if best_stat.map(|stat| &stat.action) != Some(&expected_best_action) {
             false
         } else if scenario.is_negative_control {
-            if let Some(neg_act) = &negative_control_action {
-                best_stat.map(|s| &s.action) != Some(neg_act)
-            } else {
-                true
-            }
+            negative_control_action.as_ref().is_some_and(|negative| {
+                row.iter().find(|stat| &stat.action == negative).is_some_and(|negative_stat| {
+                    let best = best_stat.expect("expected root was selected");
+                    best.net_terminal_outcome() > negative_stat.net_terminal_outcome() + 0.001
+                        || ((best.net_terminal_outcome() - negative_stat.net_terminal_outcome()).abs()
+                            <= 0.001
+                            && best.mean_victory_margin()
+                                > negative_stat.mean_victory_margin() + 0.001)
+                })
+            })
         } else {
-            best_stat.map(|s| &s.action) == Some(&expected_best_action)
-                || (negative_control_action.is_some()
-                    && best_stat.map(|s| &s.action) != negative_control_action.as_ref())
+            true
         };
 
         if tactical_passed {
@@ -262,6 +324,8 @@ fn main() {
             negative_control_root: negative_control_str,
             selected_root: selected_action_str,
             tactical_contract_passed: tactical_passed,
+            proposal_errors,
+            proposal_probe: proposal_probe_report,
             actions: action_reports,
         });
     }

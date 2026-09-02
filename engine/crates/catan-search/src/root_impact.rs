@@ -63,18 +63,25 @@ pub fn compute_spatial_root_impacts(
 
         match action {
             Action::BuildSettlement { vertex } | Action::PlaceSettlement { vertex } => {
-                // 1. Check if building this settlement cuts any opponent's road network
-                for &(_opp, ref opp_res) in &opponent_resiliences {
+                let mut probe = state.clone();
+                probe.buildings[*vertex as usize] = Some(Building::Settlement(actor));
+                probe.update_longest_road();
+
+                // 1. Check the actual actor-specific settlement consequence for each
+                // opponent whose route or expansion portfolio touches this vertex.
+                for &(opp, ref opp_res) in &opponent_resiliences {
                     if let Some(cut) = opp_res.critical_vertices.iter().find(|c| c.vertex == *vertex) {
-                        if cut.road_loss > 0 {
+                        let road_loss = state
+                            .longest_road_length(opp)
+                            .saturating_sub(probe.longest_road_length(opp));
+                        if road_loss > 0 {
                             road_delta.longest_road_loss_inflicted =
-                                road_delta.longest_road_loss_inflicted.max(cut.road_loss as i8);
+                                road_delta.longest_road_loss_inflicted.max(road_loss as i8);
                             promotion = Some(RootPromotionReason::OpponentRouteCut);
                         }
-                        if cut.award_loss {
-                            let mut probe = state.clone();
-                            probe.buildings[*vertex as usize] = Some(Building::Settlement(actor));
-                            probe.update_longest_road();
+                        if state.longest_road_holder == Some(opp)
+                            && probe.longest_road_holder != Some(opp)
+                        {
                             if probe.longest_road_holder == Some(actor) {
                                 road_delta.award_vp_swing = 2;
                             }
@@ -84,7 +91,7 @@ pub fn compute_spatial_root_impacts(
                             road_delta.expansion_portfolio_delta =
                                 road_delta.expansion_portfolio_delta.max(cut.expansion_loss);
                             if promotion.is_none() {
-                                promotion = Some(RootPromotionReason::CriticalExpansionProtection);
+                                promotion = Some(RootPromotionReason::OpponentRouteCut);
                             }
                         }
                     }
@@ -125,19 +132,33 @@ pub fn compute_spatial_root_impacts(
                     }
                 }
 
-                // 3. Check if building this road denies a critical edge to an opponent
-                for &(_opp, ref opp_res) in &opponent_resiliences {
-                    if let Some(cut_edge) = opp_res.critical_edges.iter().find(|c| c.edge == *edge) {
-                        if cut_edge.award_loss {
-                            road_delta.award_vp_swing = 2;
-                            promotion = Some(RootPromotionReason::OpponentRouteCut);
+                // 3. Check if building this road protects actor's own critical edge
+                if let Some(own_cut) = baseline_road.critical_edges.iter().find(|c| c.edge == *edge) {
+                    if own_cut.award_loss {
+                        road_delta.award_vp_swing = 2;
+                        promotion = Some(RootPromotionReason::RoadAwardProtection);
+                    }
+                    if own_cut.expansion_loss > 0.35 {
+                        road_delta.expansion_portfolio_delta =
+                            road_delta.expansion_portfolio_delta.max(own_cut.expansion_loss);
+                        if promotion.is_none() {
+                            promotion = Some(RootPromotionReason::CriticalExpansionProtection);
                         }
-                        if cut_edge.expansion_loss > 0.35 {
-                            road_delta.expansion_portfolio_delta =
-                                road_delta.expansion_portfolio_delta.max(cut_edge.expansion_loss);
-                            if promotion.is_none() {
-                                promotion = Some(RootPromotionReason::CriticalExpansionProtection);
-                            }
+                    }
+                }
+
+                // 4. Claiming an opponent-critical empty edge can deny expansion,
+                // but it cannot shorten the opponent's already-built road. Any
+                // actual Longest Road transfer caused by this root was handled by
+                // the actor-specific probe above.
+                for &(_opp, ref opp_res) in &opponent_resiliences {
+                    if let Some(cut_edge) = opp_res.critical_edges.iter().find(|c| c.edge == *edge)
+                        && cut_edge.expansion_loss > 0.35
+                    {
+                        road_delta.expansion_portfolio_delta =
+                            road_delta.expansion_portfolio_delta.max(cut_edge.expansion_loss);
+                        if promotion.is_none() {
+                            promotion = Some(RootPromotionReason::OpponentRouteCut);
                         }
                     }
                 }
@@ -231,5 +252,44 @@ mod tests {
         let report = compute_spatial_root_impacts(&state, 0, &[road_action.clone()]);
         let impact = report.actions.iter().find(|i| i.action == road_action).unwrap();
         assert_eq!(impact.promotion, None, "vanity road branch must not receive synthetic promotion");
+    }
+
+    #[test]
+    fn own_critical_expansion_edge_is_promoted() {
+        let mut state = GameState::standard(910300003, 3);
+        for edge in [32usize, 33, 34] {
+            state.roads[edge] = Some(0);
+            state.players[0].roads_left -= 1;
+        }
+        for edge in 0usize..=4 {
+            state.roads[edge] = Some(1);
+            state.players[1].roads_left -= 1;
+        }
+        state.buildings[26] = Some(Building::Settlement(0));
+        state.players[0].settlements_left -= 1;
+        state.buildings[0] = Some(Building::Settlement(1));
+        state.players[1].settlements_left -= 1;
+        state.update_longest_road();
+
+        let road_action = Action::BuildRoad { edge: 31 };
+        let baseline = analyze_road_resilience(&state, 0);
+        let critical = baseline
+            .critical_edges
+            .iter()
+            .find(|cut| cut.edge == 31)
+            .expect("fixture must expose an actor-critical expansion edge");
+        assert!(critical.expansion_loss > 0.35);
+
+        let report = compute_spatial_root_impacts(&state, 0, &[road_action.clone()]);
+        let impact = report
+            .actions
+            .iter()
+            .find(|candidate| candidate.action == road_action)
+            .unwrap();
+        assert_eq!(
+            impact.promotion,
+            Some(RootPromotionReason::CriticalExpansionProtection)
+        );
+        assert!(impact.road_delta.expansion_portfolio_delta > 0.35);
     }
 }

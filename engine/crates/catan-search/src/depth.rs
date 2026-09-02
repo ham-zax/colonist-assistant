@@ -1204,17 +1204,17 @@ fn belief_search(
     let verified_blockers = if immediate_threat_weight > f32::EPSILON {
         root_scored
             .iter()
-            .filter(|(action, _)| {
-                forced_loss_weight(
+            .filter_map(|(action, _)| {
+                let residual_loss = forced_loss_weight(
                     posterior
                         .iter()
                         .map(|particle| (&particle.state, particle.weight)),
                     observer,
                     action,
-                ) + 1e-6
-                    < immediate_threat_weight
+                );
+                (residual_loss + 1e-6 < immediate_threat_weight)
+                    .then(|| (action.clone(), residual_loss))
             })
-            .map(|(action, _)| action.clone())
             .collect::<Vec<_>>()
     } else {
         Vec::new()
@@ -1234,11 +1234,12 @@ fn belief_search(
                 .collect()
         })
         .unwrap_or_default();
-    let all_promotions: Vec<Action> = verified_blockers
-        .into_iter()
-        .chain(promoted_spatial_actions)
-        .collect();
-    let retained = admit_promoted_roots(&root_scored, &all_promotions, branch_cap);
+    let retained = admit_promoted_roots(
+        &root_scored,
+        &verified_blockers,
+        &promoted_spatial_actions,
+        branch_cap,
+    );
     for (action, _) in &root_scored {
         if !retained
             .iter()
@@ -2775,17 +2776,17 @@ fn cuda_belief_search_with_batch(
     let verified_blockers = if immediate_threat_weight > f32::EPSILON {
         root_scored
             .iter()
-            .filter(|(action, _)| {
-                forced_loss_weight(
+            .filter_map(|(action, _)| {
+                let residual_loss = forced_loss_weight(
                     posterior
                         .iter()
                         .map(|particle| (&particle.state, particle.weight)),
                     observer,
                     action,
-                ) + 1e-6
-                    < immediate_threat_weight
+                );
+                (residual_loss + 1e-6 < immediate_threat_weight)
+                    .then(|| (action.clone(), residual_loss))
             })
-            .map(|(action, _)| action.clone())
             .collect::<Vec<_>>()
     } else {
         Vec::new()
@@ -2805,11 +2806,12 @@ fn cuda_belief_search_with_batch(
                 .collect()
         })
         .unwrap_or_default();
-    let all_promotions: Vec<Action> = verified_blockers
-        .into_iter()
-        .chain(promoted_spatial_actions)
-        .collect();
-    let retained = admit_promoted_roots(&root_scored, &all_promotions, branch_cap);
+    let retained = admit_promoted_roots(
+        &root_scored,
+        &verified_blockers,
+        &promoted_spatial_actions,
+        branch_cap,
+    );
     for (action, _) in &root_scored {
         if !retained
             .iter()

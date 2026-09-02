@@ -9,6 +9,8 @@ use std::collections::VecDeque;
 
 use colonist_catan_core::{Building, GameState};
 
+use crate::eval::{road_distances, settlement_vertex_open};
+
 const PUBLIC_PIPS: [f32; 13] = [0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 0.0, 5.0, 4.0, 3.0, 2.0, 1.0];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -44,14 +46,6 @@ pub struct RoadResilience {
     pub minimum_bypass_roads: Option<u8>,
 }
 
-/// Checks if a vertex is currently open and satisfies the Catan distance rule.
-pub fn settlement_vertex_open(state: &GameState, vertex: usize) -> bool {
-    state.buildings.get(vertex).is_some_and(Option::is_none)
-        && state.board.vertices[vertex]
-            .adjacent_vertices
-            .iter()
-            .all(|neighbor| state.buildings[*neighbor as usize].is_none())
-}
 
 /// Searches for the shortest path of unbuilt edges connecting any two distinct
 /// branch endpoints around a cut vertex, without traversing the cut vertex or
@@ -95,6 +89,11 @@ fn shortest_road_path(
     if start == target {
         return Some(0);
     }
+    if [start, target].into_iter().any(|vertex| {
+        state.buildings[vertex as usize].is_some_and(|building| building.player() != player)
+    }) {
+        return None;
+    }
 
     let vertex_count = state.board.vertices.len();
     let mut min_cost = vec![u8::MAX; vertex_count];
@@ -127,9 +126,7 @@ fn shortest_road_path(
             }
 
             // An opponent building blocks road continuation through that vertex.
-            if next_v != target
-                && state.buildings[next_v as usize].is_some_and(|bld| bld.player() != player)
-            {
+            if state.buildings[next_v as usize].is_some_and(|bld| bld.player() != player) {
                 continue;
             }
 
@@ -162,68 +159,11 @@ pub fn public_expansion_opportunity(state: &GameState, player: u8) -> f32 {
         return 0.0;
     }
 
-    let vertex_count = state.board.vertices.len();
-    let mut min_cost = vec![u8::MAX; vertex_count];
-    let mut deque = VecDeque::new();
-
-    // Multi-source BFS starting at all vertices connected to player's road network or buildings
-    for (v, bld) in state.buildings.iter().enumerate() {
-        if bld.as_ref().is_some_and(|b| b.player() == player) {
-            min_cost[v] = 0;
-            deque.push_back((v as u8, 0u8));
-        }
-    }
-    for (e, &owner) in state.roads.iter().enumerate() {
-        if owner == Some(player) {
-            let [a, b] = state.board.edges[e].vertices;
-            if min_cost[a as usize] != 0 {
-                min_cost[a as usize] = 0;
-                deque.push_back((a, 0u8));
-            }
-            if min_cost[b as usize] != 0 {
-                min_cost[b as usize] = 0;
-                deque.push_back((b, 0u8));
-            }
-        }
-    }
-
-    if deque.is_empty() {
-        return 0.0;
-    }
-
-    while let Some((curr, cost)) = deque.pop_front() {
-        if cost > min_cost[curr as usize] {
-            continue;
-        }
-        for &edge in &state.board.vertices[curr as usize].adjacent_edges {
-            let edge_owner = state.roads[edge as usize];
-            if edge_owner.is_some_and(|owner| owner != player) {
-                continue;
-            }
-            let [a, b] = state.board.edges[edge as usize].vertices;
-            let next_v = if a == curr { b } else { a };
-
-            // Opponent buildings block through-travel unless next_v is the destination site
-            if state.buildings[next_v as usize].is_some_and(|b| b.player() != player) {
-                continue;
-            }
-
-            let edge_cost = if edge_owner == Some(player) { 0 } else { 1 };
-            let new_cost = cost.saturating_add(edge_cost);
-            if new_cost < min_cost[next_v as usize] && new_cost <= roads_left {
-                min_cost[next_v as usize] = new_cost;
-                if edge_cost == 0 {
-                    deque.push_front((next_v, new_cost));
-                } else {
-                    deque.push_back((next_v, new_cost));
-                }
-            }
-        }
-    }
+    let distances = road_distances(state, player);
 
     let mut top = [0.0f32; 3];
-    for (v, &cost) in min_cost.iter().enumerate() {
-        if cost == u8::MAX || !settlement_vertex_open(state, v) {
+    for (v, &cost) in distances.iter().enumerate() {
+        if cost == u8::MAX || cost > roads_left || !settlement_vertex_open(state, v) {
             continue;
         }
         let mut pips = 0.0f32;
@@ -286,20 +226,16 @@ pub fn evaluate_vertex_cut(
 
     let new_len = probe.longest_road_length(target_player);
     let road_loss = base_len.saturating_sub(new_len);
-    let award_loss =
-        base_holder == Some(target_player) && probe.longest_road_holder != Some(target_player);
-
-    let base_vp = if base_holder == Some(target_player) {
-        2i8
-    } else {
-        0i8
-    };
-    let new_vp = if probe.longest_road_holder == Some(target_player) {
-        2i8
-    } else {
-        0i8
-    };
-    let award_vp_swing = new_vp - base_vp;
+    let award_loss = base_holder == Some(target_player)
+        && (0..state.board.num_players)
+            .filter(|attacker| *attacker != target_player)
+            .any(|attacker| {
+                let mut award_probe = state.clone();
+                award_probe.buildings[vertex as usize] = Some(Building::Settlement(attacker));
+                award_probe.update_longest_road();
+                award_probe.longest_road_holder != Some(target_player)
+            });
+    let award_vp_swing = if award_loss { -2 } else { 0 };
 
     let new_exp = public_expansion_opportunity(&probe, target_player);
     let expansion_loss = (base_exp - new_exp).max(0.0);
@@ -362,15 +298,24 @@ pub fn evaluate_edge_cut(
     let base_exp = public_expansion_opportunity(state, target_player);
     let base_holder = state.longest_road_holder;
 
+    // Expansion denial depends only on the edge becoming unavailable to the
+    // target player, so any non-target owner is an equivalent public probe.
     let mut probe = state.clone();
     probe.roads[edge as usize] = Some(opponent);
-    probe.update_longest_road();
 
-    let award_loss =
-        base_holder == Some(target_player) && probe.longest_road_holder != Some(target_player);
-    let base_vp = if base_holder == Some(target_player) { 2i8 } else { 0i8 };
-    let new_vp = if probe.longest_road_holder == Some(target_player) { 2i8 } else { 0i8 };
-    let award_vp_swing = new_vp - base_vp;
+    // Award vulnerability is structural: report it when at least one opponent
+    // claiming this edge would strip the current holder. Opponent reachability
+    // and affordability remain a later policy/search question.
+    let award_loss = base_holder == Some(target_player)
+        && (0..state.board.num_players)
+            .filter(|attacker| *attacker != target_player)
+            .any(|attacker| {
+                let mut award_probe = state.clone();
+                award_probe.roads[edge as usize] = Some(attacker);
+                award_probe.update_longest_road();
+                award_probe.longest_road_holder != Some(target_player)
+            });
+    let award_vp_swing = if award_loss { -2 } else { 0 };
 
     let new_exp = public_expansion_opportunity(&probe, target_player);
     let expansion_loss = (base_exp - new_exp).max(0.0);
@@ -415,12 +360,14 @@ pub fn analyze_road_resilience(state: &GameState, player: u8) -> RoadResilience 
     let maximum_award_vp_swing = critical_vertices
         .iter()
         .map(|c| c.award_vp_swing)
+        .chain(critical_edges.iter().map(|c| c.award_vp_swing))
         .min()
         .unwrap_or(0);
 
     let maximum_expansion_value_loss = critical_vertices
         .iter()
         .map(|c| c.expansion_loss)
+        .chain(critical_edges.iter().map(|c| c.expansion_loss))
         .reduce(f32::max)
         .unwrap_or(0.0);
 

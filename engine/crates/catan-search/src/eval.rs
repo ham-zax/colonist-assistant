@@ -413,7 +413,7 @@ pub fn expected_discard_loss(state: &GameState, player: u8) -> f32 {
         + probability * overflow.powf(1.35) * 0.15
 }
 
-fn settlement_vertex_open(state: &GameState, vertex: usize) -> bool {
+pub(crate) fn settlement_vertex_open(state: &GameState, vertex: usize) -> bool {
     state.buildings[vertex].is_none()
         && state.board.vertices[vertex]
             .adjacent_vertices
@@ -421,7 +421,7 @@ fn settlement_vertex_open(state: &GameState, vertex: usize) -> bool {
             .all(|neighbor| state.buildings[*neighbor as usize].is_none())
 }
 
-fn road_distances(state: &GameState, player: u8) -> Vec<u8> {
+pub(crate) fn road_distances(state: &GameState, player: u8) -> Vec<u8> {
     let mut distances = vec![u8::MAX; state.board.vertices.len()];
     let mut queue = BinaryHeap::new();
     for (vertex, building) in state.buildings.iter().enumerate() {
