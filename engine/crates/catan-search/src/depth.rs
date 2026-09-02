@@ -18,7 +18,10 @@ use crate::policy::{
     allocate_root_node_budgets, normalize_observed_priors, normalize_priors,
     order_scored_with_state_quotas, rank_with_class_quotas, truncate_root_preserving_end_turn,
 };
-use crate::shared::{coalesce_identical_particles, select_experimental_strategic_particles};
+use crate::root_impact::compute_spatial_root_impacts;
+use crate::shared::{
+    admit_promoted_roots, coalesce_identical_particles, select_experimental_strategic_particles,
+};
 use crate::threats::{forced_loss_weight, posterior_immediate_threat_weight};
 use crate::trade_safety::belief_domestic_trade_threat;
 
@@ -1211,21 +1214,31 @@ fn belief_search(
                 ) + 1e-6
                     < immediate_threat_weight
             })
-            .cloned()
+            .map(|(action, _)| action.clone())
             .collect::<Vec<_>>()
     } else {
         Vec::new()
     };
-    let ordinarily_retained = truncate_root_preserving_end_turn(root_scored.clone(), branch_cap);
-    let mut retained = Vec::with_capacity(branch_cap.max(1));
-    for candidate in verified_blockers.into_iter().chain(ordinarily_retained) {
-        if retained.len() >= branch_cap.max(1) {
-            break;
-        }
-        if !retained.iter().any(|(action, _)| action == &candidate.0) {
-            retained.push(candidate);
-        }
-    }
+    let root_actions_list: Vec<Action> = root_scored.iter().map(|(a, _)| a.clone()).collect();
+    let spatial_impact_report = particles
+        .first()
+        .map(|first| compute_spatial_root_impacts(&first.state, observer, &root_actions_list));
+    let promoted_spatial_actions: Vec<Action> = spatial_impact_report
+        .as_ref()
+        .map(|report| {
+            report
+                .actions
+                .iter()
+                .filter(|impact| impact.promotion.is_some())
+                .map(|impact| impact.action.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let all_promotions: Vec<Action> = verified_blockers
+        .into_iter()
+        .chain(promoted_spatial_actions)
+        .collect();
+    let retained = admit_promoted_roots(&root_scored, &all_promotions, branch_cap);
     for (action, _) in &root_scored {
         if !retained
             .iter()
@@ -2772,21 +2785,31 @@ fn cuda_belief_search_with_batch(
                 ) + 1e-6
                     < immediate_threat_weight
             })
-            .cloned()
+            .map(|(action, _)| action.clone())
             .collect::<Vec<_>>()
     } else {
         Vec::new()
     };
-    let ordinarily_retained = truncate_root_preserving_end_turn(root_scored.clone(), branch_cap);
-    let mut retained = Vec::with_capacity(branch_cap.max(1));
-    for candidate in verified_blockers.into_iter().chain(ordinarily_retained) {
-        if retained.len() >= branch_cap.max(1) {
-            break;
-        }
-        if !retained.iter().any(|(action, _)| action == &candidate.0) {
-            retained.push(candidate);
-        }
-    }
+    let root_actions_list: Vec<Action> = root_scored.iter().map(|(a, _)| a.clone()).collect();
+    let spatial_impact_report = particles
+        .first()
+        .map(|first| compute_spatial_root_impacts(&first.state, observer, &root_actions_list));
+    let promoted_spatial_actions: Vec<Action> = spatial_impact_report
+        .as_ref()
+        .map(|report| {
+            report
+                .actions
+                .iter()
+                .filter(|impact| impact.promotion.is_some())
+                .map(|impact| impact.action.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let all_promotions: Vec<Action> = verified_blockers
+        .into_iter()
+        .chain(promoted_spatial_actions)
+        .collect();
+    let retained = admit_promoted_roots(&root_scored, &all_promotions, branch_cap);
     for (action, _) in &root_scored {
         if !retained
             .iter()

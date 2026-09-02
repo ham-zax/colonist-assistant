@@ -1,0 +1,535 @@
+{
+  "description": "Authoritative road tactical corpus with positive and negative controls",
+  "schemaVersion": 1,
+  "scenarios": [
+    {
+      "id": "road-fragile-chain-cut",
+      "description": "Opponent has a 5-road chain holding Longest Road; actor cuts with settlement on v2",
+      "family": "RoadTopology",
+      "state": {
+        "boardSeed": 910300003,
+        "players": 3,
+        "activePlayer": 0,
+        "roads": [
+          {
+            "player": 1,
+            "edge": 0
+          },
+          {
+            "player": 1,
+            "edge": 1
+          },
+          {
+            "player": 1,
+            "edge": 2
+          },
+          {
+            "player": 1,
+            "edge": 3
+          },
+          {
+            "player": 1,
+            "edge": 4
+          },
+          {
+            "player": 0,
+            "edge": 19
+          },
+          {
+            "player": 0,
+            "edge": 18
+          }
+        ],
+        "buildings": [
+          {
+            "player": 1,
+            "vertex": 0,
+            "kind": "settlement"
+          },
+          {
+            "player": 0,
+            "vertex": 16,
+            "kind": "settlement"
+          }
+        ],
+        "resources": [
+          [
+            1,
+            1,
+            1,
+            1,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "candidateRoots": [
+        {
+          "kind": "build-settlement",
+          "vertex": 2
+        },
+        {
+          "kind": "end-turn"
+        }
+      ],
+      "expectedBestRoot": {
+        "kind": "build-settlement",
+        "vertex": 2
+      },
+      "negativeControlRoot": {
+        "kind": "end-turn"
+      },
+      "declaredConsequence": "strips_longest_road",
+      "isNegativeControl": false
+    },
+    {
+      "id": "road-bypassed-cycle",
+      "description": "Opponent has a 6-edge loop plus tail; actor cut on opposite hex vertex preserves award",
+      "family": "RoadTopology",
+      "state": {
+        "boardSeed": 910300003,
+        "players": 3,
+        "activePlayer": 0,
+        "roads": [
+          {
+            "player": 1,
+            "edge": 0
+          },
+          {
+            "player": 1,
+            "edge": 1
+          },
+          {
+            "player": 1,
+            "edge": 2
+          },
+          {
+            "player": 1,
+            "edge": 3
+          },
+          {
+            "player": 1,
+            "edge": 4
+          },
+          {
+            "player": 1,
+            "edge": 5
+          },
+          {
+            "player": 1,
+            "edge": 7
+          },
+          {
+            "player": 0,
+            "edge": 19
+          },
+          {
+            "player": 0,
+            "edge": 18
+          }
+        ],
+        "buildings": [
+          {
+            "player": 1,
+            "vertex": 0,
+            "kind": "settlement"
+          },
+          {
+            "player": 0,
+            "vertex": 16,
+            "kind": "settlement"
+          }
+        ],
+        "resources": [
+          [
+            1,
+            1,
+            1,
+            1,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "candidateRoots": [
+        {
+          "kind": "build-settlement",
+          "vertex": 2
+        },
+        {
+          "kind": "end-turn"
+        }
+      ],
+      "expectedBestRoot": {
+        "kind": "build-settlement",
+        "vertex": 2
+      },
+      "negativeControlRoot": {
+        "kind": "end-turn"
+      },
+      "declaredConsequence": "bypassed_cycle_retains_award",
+      "isNegativeControl": false
+    },
+    {
+      "id": "road-low-prod-settlement-transfers-award",
+      "description": "Settlement on low-production cut vertex strips Longest Road from rival and transfers to actor",
+      "family": "RoadTopology",
+      "state": {
+        "boardSeed": 910300003,
+        "players": 3,
+        "activePlayer": 0,
+        "roads": [
+          {
+            "player": 1,
+            "edge": 0
+          },
+          {
+            "player": 1,
+            "edge": 1
+          },
+          {
+            "player": 1,
+            "edge": 2
+          },
+          {
+            "player": 1,
+            "edge": 3
+          },
+          {
+            "player": 1,
+            "edge": 4
+          },
+          {
+            "player": 0,
+            "edge": 19
+          },
+          {
+            "player": 0,
+            "edge": 18
+          },
+          {
+            "player": 0,
+            "edge": 17
+          },
+          {
+            "player": 0,
+            "edge": 16
+          },
+          {
+            "player": 0,
+            "edge": 20
+          }
+        ],
+        "buildings": [
+          {
+            "player": 1,
+            "vertex": 0,
+            "kind": "settlement"
+          },
+          {
+            "player": 0,
+            "vertex": 16,
+            "kind": "settlement"
+          }
+        ],
+        "resources": [
+          [
+            1,
+            1,
+            1,
+            1,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "candidateRoots": [
+        {
+          "kind": "build-settlement",
+          "vertex": 2
+        },
+        {
+          "kind": "end-turn"
+        }
+      ],
+      "expectedBestRoot": {
+        "kind": "build-settlement",
+        "vertex": 2
+      },
+      "negativeControlRoot": {
+        "kind": "end-turn"
+      },
+      "declaredConsequence": "transfers_longest_road",
+      "isNegativeControl": false
+    },
+    {
+      "id": "road-defensive-expansion-protection",
+      "description": "Building road secures corridor and unlocks settlement reach to open vertex 2",
+      "family": "RoadTopology",
+      "state": {
+        "boardSeed": 910300003,
+        "players": 3,
+        "activePlayer": 0,
+        "roads": [
+          {
+            "player": 0,
+            "edge": 32
+          },
+          {
+            "player": 0,
+            "edge": 33
+          },
+          {
+            "player": 0,
+            "edge": 34
+          },
+          {
+            "player": 0,
+            "edge": 18
+          },
+          {
+            "player": 1,
+            "edge": 0
+          }
+        ],
+        "buildings": [
+          {
+            "player": 0,
+            "vertex": 26,
+            "kind": "settlement"
+          },
+          {
+            "player": 1,
+            "vertex": 0,
+            "kind": "settlement"
+          }
+        ],
+        "resources": [
+          [
+            1,
+            1,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "candidateRoots": [
+        {
+          "kind": "build-road",
+          "edge": 19
+        },
+        {
+          "kind": "end-turn"
+        }
+      ],
+      "expectedBestRoot": {
+        "kind": "build-road",
+        "edge": 19
+      },
+      "negativeControlRoot": {
+        "kind": "end-turn"
+      },
+      "declaredConsequence": "preserves_expansion_lane",
+      "isNegativeControl": false
+    },
+    {
+      "id": "road-choke-with-cheap-detour",
+      "description": "Edge appears to choke, but parallel detour is available; wasting resources on false choke is negative control",
+      "family": "RoadTopology",
+      "state": {
+        "boardSeed": 910300003,
+        "players": 3,
+        "activePlayer": 0,
+        "roads": [
+          {
+            "player": 0,
+            "edge": 0
+          },
+          {
+            "player": 1,
+            "edge": 2
+          }
+        ],
+        "buildings": [
+          {
+            "player": 0,
+            "vertex": 0,
+            "kind": "settlement"
+          },
+          {
+            "player": 1,
+            "vertex": 3,
+            "kind": "settlement"
+          }
+        ],
+        "resources": [
+          [
+            1,
+            1,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "candidateRoots": [
+        {
+          "kind": "build-road",
+          "edge": 1
+        },
+        {
+          "kind": "end-turn"
+        }
+      ],
+      "expectedBestRoot": {
+        "kind": "end-turn"
+      },
+      "negativeControlRoot": {
+        "kind": "build-road",
+        "edge": 1
+      },
+      "declaredConsequence": "detour_available",
+      "isNegativeControl": true
+    },
+    {
+      "id": "road-vanity-branch-negative-control",
+      "description": "Vanity branch adds road count but no longest road length or award value",
+      "family": "RoadTopology",
+      "state": {
+        "boardSeed": 910300003,
+        "players": 3,
+        "activePlayer": 0,
+        "roads": [
+          {
+            "player": 0,
+            "edge": 0
+          },
+          {
+            "player": 0,
+            "edge": 1
+          },
+          {
+            "player": 0,
+            "edge": 2
+          }
+        ],
+        "buildings": [
+          {
+            "player": 0,
+            "vertex": 0,
+            "kind": "settlement"
+          }
+        ],
+        "resources": [
+          [
+            1,
+            1,
+            1,
+            1,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "candidateRoots": [
+        {
+          "kind": "build-road",
+          "edge": 20
+        },
+        {
+          "kind": "end-turn"
+        }
+      ],
+      "expectedBestRoot": {
+        "kind": "end-turn"
+      },
+      "negativeControlRoot": {
+        "kind": "build-road",
+        "edge": 20
+      },
+      "declaredConsequence": "negative_control_vanity_branch",
+      "isNegativeControl": true
+    }
+  ]
+}

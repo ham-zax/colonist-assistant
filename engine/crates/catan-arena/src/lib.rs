@@ -3,6 +3,8 @@ use colonist_catan_core::{
 };
 use colonist_catan_search::BeliefParticle;
 
+pub mod tactical_corpus;
+
 const PARTICLE_COUNT: usize = 4;
 const PARTICLE_MIX: u64 = 0x9e37_79b9_7f4a_7c15;
 

@@ -284,6 +284,60 @@ fn road_pair_coherence_cached(
     road_pair_coherence_from_values(state, first, second, first_value, second_value)
 }
 
+fn cheap_settlement_disruption(state: &GameState, vertex: u8, actor: u8) -> f32 {
+    let mut bonus = 0.0f32;
+    for opp in 0..state.board.num_players {
+        if opp == actor {
+            continue;
+        }
+        let opp_edges = state.board.vertices[vertex as usize]
+            .adjacent_edges
+            .iter()
+            .filter(|&&e| state.roads[e as usize] == Some(opp))
+            .count();
+        if opp_edges >= 2 {
+            if state.longest_road_holder == Some(opp) {
+                bonus += 2.8;
+            } else if state.players[opp as usize].roads_left <= 10 {
+                bonus += 1.4;
+            } else {
+                bonus += 0.8;
+            }
+        } else if opp_edges == 1 {
+            bonus += 0.35;
+        }
+    }
+    let own_edges = state.board.vertices[vertex as usize]
+        .adjacent_edges
+        .iter()
+        .filter(|&&e| state.roads[e as usize] == Some(actor))
+        .count();
+    if own_edges >= 2 && state.longest_road_holder == Some(actor) {
+        bonus += 1.2;
+    }
+    bonus
+}
+
+fn cheap_road_disruption(state: &GameState, edge: u8, actor: u8) -> f32 {
+    let mut bonus = 0.0f32;
+    let [a, b] = state.board.edges[edge as usize].vertices;
+    for &endpoint in &[a, b] {
+        for opp in 0..state.board.num_players {
+            if opp == actor {
+                continue;
+            }
+            let opp_has_road = state.board.vertices[endpoint as usize]
+                .adjacent_edges
+                .iter()
+                .any(|&e| e != edge && state.roads[e as usize] == Some(opp));
+            if opp_has_road {
+                bonus += 0.35;
+            }
+        }
+    }
+    bonus
+}
+
 /// Strategic prior used for PUCT and the stochastic rollout policy.
 ///
 /// Priors are deliberately shallow. Long-horizon consequences come from the
@@ -304,9 +358,11 @@ fn action_prior_nonwinning(state: &GameState, action: &Action, actor: u8) -> f32
     let base = match action {
         Action::PlaceSettlement { vertex } | Action::BuildSettlement { vertex } => {
             3.0 + vertex_value(state, *vertex, actor)
+                + cheap_settlement_disruption(state, *vertex, actor)
         }
         Action::PlaceRoad { edge } | Action::BuildRoad { edge } => {
             0.02 + road_frontier_value(state, *edge, actor)
+                + cheap_road_disruption(state, *edge, actor)
         }
         Action::Roll => 6.0,
         Action::ResolveRoll { .. } | Action::ResolveDevelopment { .. } => {

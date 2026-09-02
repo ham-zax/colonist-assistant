@@ -2040,7 +2040,7 @@ impl GameState {
             .unwrap_or(0)
     }
 
-    fn update_longest_road(&mut self) {
+    pub fn update_longest_road(&mut self) {
         let lengths = (0..self.board.num_players)
             .map(|player| self.longest_road_length(player))
             .collect::<Vec<_>>();

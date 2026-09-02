@@ -3,7 +3,8 @@ use colonist_catan_search::{
     ActionStats, BeliefParticle, CudaSimEngine, CudaSimError, CudaSimRootActionStats,
     DEVELOPMENT_EXACT_FAMILIES, ExactActionFamily, ExactDecisionResult, SearchReport,
     SearchStatistics,
-    belief_domestic_trade_threat, exact_family_for_action, forced_loss_weight,
+    admit_promoted_roots, belief_domestic_trade_threat, compute_spatial_root_impacts,
+    exact_family_for_action, forced_loss_weight,
     posterior_immediate_threat_weight, safer_end_turn_alternative, shared_root_candidates,
     solve_belief_current_turn_timed, solve_exact_belief_excluding_controlled,
 };
@@ -368,26 +369,6 @@ fn racing_contenders(active: &[usize], roots: &[AggregatedRoot]) -> Vec<usize> {
     contenders
 }
 
-fn truncate_ranked_preserving_end_turn(ranked: &[RankedGpuRoot], cap: usize) -> Vec<RankedGpuRoot> {
-    let cap = cap.max(1);
-    if ranked.len() <= cap {
-        return ranked.to_vec();
-    }
-    let end_turn = ranked
-        .iter()
-        .find(|candidate| candidate.action == Action::EndTurn)
-        .cloned();
-    let mut retained = ranked.iter().take(cap).cloned().collect::<Vec<_>>();
-    if let Some(end_turn) = end_turn
-        && !retained
-            .iter()
-            .any(|candidate| candidate.action == Action::EndTurn)
-    {
-        retained.pop();
-        retained.push(end_turn);
-    }
-    retained
-}
 
 impl NativeGpuSearchEngine {
     pub fn new() -> Result<Self, String> {
@@ -708,20 +689,35 @@ impl NativeGpuSearchEngine {
         } else {
             Vec::new()
         };
-        let ordinarily_retained = truncate_ranked_preserving_end_turn(&ranked, root_cap);
-        let mut pre_trade_retained = Vec::<RankedGpuRoot>::with_capacity(root_cap);
-        for candidate in verified_blockers
+        let ranked_tuples: Vec<(Action, f32)> = ranked
+            .iter()
+            .map(|r| (r.action.clone(), r.prior))
+            .collect();
+        let root_actions_list: Vec<Action> = ranked.iter().map(|r| r.action.clone()).collect();
+        let spatial_impact_report = particles
+            .first()
+            .map(|first| compute_spatial_root_impacts(&first.state, actor, &root_actions_list));
+        let promoted_spatial_actions: Vec<Action> = spatial_impact_report
+            .as_ref()
+            .map(|report| {
+                report
+                    .actions
+                    .iter()
+                    .filter(|impact| impact.promotion.is_some())
+                    .map(|impact| impact.action.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let all_promotions: Vec<Action> = verified_blockers
             .into_iter()
-            .chain(ordinarily_retained.into_iter())
-        {
-            if pre_trade_retained.len() >= root_cap.max(1) {
-                break;
-            }
-            if !pre_trade_retained
-                .iter()
-                .any(|existing| existing.action == candidate.action)
-            {
-                pre_trade_retained.push(candidate);
+            .map(|b| b.action)
+            .chain(promoted_spatial_actions)
+            .collect();
+        let admitted = admit_promoted_roots(&ranked_tuples, &all_promotions, root_cap);
+        let mut pre_trade_retained = Vec::with_capacity(admitted.len());
+        for (action, _) in admitted {
+            if let Some(r) = ranked.iter().find(|r| r.action == action) {
+                pre_trade_retained.push(r.clone());
             }
         }
         pruned_roots.extend(

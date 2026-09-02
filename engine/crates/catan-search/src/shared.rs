@@ -53,6 +53,98 @@ pub fn shared_root_candidates(
     truncate_root_preserving_end_turn(ordered, cap.max(1))
 }
 
+fn canonical_promotion_key(action: &Action) -> (u8, u8, u8) {
+    match action {
+        // 0: Settlements (highest tactical cut/claim priority)
+        Action::BuildSettlement { vertex } | Action::PlaceSettlement { vertex } => (0, *vertex, 0),
+        // 1: Roads (route cut / expansion corridor defense)
+        Action::BuildRoad { edge } | Action::PlaceRoad { edge } => (1, *edge, 0),
+        // 2: Cities
+        Action::BuildCity { vertex } => (2, *vertex, 0),
+        // 3: EndTurn
+        Action::EndTurn => (254, 0, 0),
+        // 4: Other actions
+        _ => (255, 0, 0),
+    }
+}
+
+/// Merges promoted candidate actions with ordinary observation-ranked roots,
+/// ensuring promoted actions are granted search width while preserving
+/// deduplication, ordinary ordering for non-promoted actions, and `EndTurn` retention.
+///
+/// Both CPU search (`depth.rs`) and native GPU (`native_gpu.rs`) consume this
+/// function so that root admission is 100% synchronized across backends.
+///
+/// Promotion overflow rule:
+/// When promoted actions exceed available width, promoted actions are prioritized
+/// by a canonical backend-independent key (settlements > roads > cities, then
+/// deterministic vertex/edge index). If `EndTurn` was legal in `ranked`, one width
+/// slot is strictly reserved for `EndTurn` so promotion overflow can never drop it.
+pub fn admit_promoted_roots(
+    ranked: &[(Action, f32)],
+    promoted: &[Action],
+    cap: usize,
+) -> Vec<(Action, f32)> {
+    let cap = cap.max(1);
+    let has_end_turn = ranked.iter().any(|(action, _)| matches!(action, Action::EndTurn));
+
+    // Deduplicate and filter promoted actions that are present in the candidate pool
+    let mut canonical_promoted = Vec::new();
+    for action in promoted {
+        if !canonical_promoted.contains(action) && ranked.iter().any(|(a, _)| a == action) {
+            canonical_promoted.push(action.clone());
+        }
+    }
+    // Canonical backend-independent sorting ensures CPU and native GPU always
+    // select the exact same promoted subset regardless of caller candidate order.
+    canonical_promoted.sort_by_key(canonical_promotion_key);
+
+    // If EndTurn is legal, reserve 1 slot for it so promotions never starve EndTurn
+    let non_end_turn_cap = if has_end_turn {
+        cap.saturating_sub(1)
+    } else {
+        cap
+    };
+
+    let mut admitted: Vec<(Action, f32)> = Vec::with_capacity(cap);
+
+    // 1. Admit canonically ordered promoted actions up to non_end_turn_cap
+    for action in &canonical_promoted {
+        if admitted.len() >= non_end_turn_cap {
+            break;
+        }
+        let prior = ranked
+            .iter()
+            .find(|(candidate, _)| candidate == action)
+            .map_or(0.01, |(_, prior)| *prior);
+        admitted.push((action.clone(), prior));
+    }
+
+    // 2. Fill remaining capacity up to non_end_turn_cap from ordinary ranked actions
+    for (action, prior) in ranked {
+        if admitted.len() >= non_end_turn_cap {
+            break;
+        }
+        if matches!(action, Action::EndTurn) {
+            continue;
+        }
+        if !admitted.iter().any(|(existing, _)| existing == action) {
+            admitted.push((action.clone(), *prior));
+        }
+    }
+
+    // 3. Guarantee EndTurn is preserved in its reserved slot
+    if has_end_turn {
+        let end_turn_prior = ranked
+            .iter()
+            .find(|(action, _)| matches!(action, Action::EndTurn))
+            .map_or(0.01, |(_, prior)| *prior);
+        admitted.push((Action::EndTurn, end_turn_prior));
+    }
+
+    admitted
+}
+
 /// Losslessly merge particles whose complete game states are exactly equal.
 /// State hashes are only a lookup accelerator; equality is checked before mass
 /// is combined, so a hash collision cannot merge distinct worlds.
@@ -315,10 +407,10 @@ pub fn select_experimental_strategic_particles(
 
 #[cfg(test)]
 mod tests {
-    use colonist_catan_core::{CITY_COST, DevCard, GameState, Resource, SETTLEMENT_COST};
+    use colonist_catan_core::{Action, CITY_COST, DevCard, GameState, Resource, SETTLEMENT_COST};
 
     use super::{
-        EXPERIMENTAL_STRATEGIC_PARTICLE_TARGET, coalesce_identical_particles,
+        EXPERIMENTAL_STRATEGIC_PARTICLE_TARGET, admit_promoted_roots, coalesce_identical_particles,
         group_particles_by_observation, particle_signature,
         select_experimental_strategic_particles, shared_root_candidates,
     };
@@ -554,5 +646,93 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(summarize(&forward), summarize(&reverse));
+    }
+
+    #[test]
+    fn admit_promoted_roots_preserves_promoted_and_end_turn() {
+        let ranked = vec![
+            (Action::Roll, 10.0),
+            (Action::BuildRoad { edge: 1 }, 5.0),
+            (Action::BuildRoad { edge: 2 }, 4.0),
+            (Action::BuildRoad { edge: 3 }, 3.0),
+            (Action::BuildRoad { edge: 4 }, 2.0),
+            (Action::BuildRoad { edge: 5 }, 1.0),
+            (Action::BuildSettlement { vertex: 20 }, 0.05),
+            (Action::EndTurn, 0.01),
+        ];
+
+        // Suppose Action::BuildSettlement { vertex: 20 } was promoted for cutting an opponent's road
+        let promoted = vec![Action::BuildSettlement { vertex: 20 }];
+        let admitted = admit_promoted_roots(&ranked, &promoted, 4);
+
+        assert_eq!(admitted.len(), 4);
+        assert!(
+            admitted.iter().any(|(a, _)| *a == Action::BuildSettlement { vertex: 20 }),
+            "promoted action must be admitted despite low prior"
+        );
+        assert!(
+            admitted.iter().any(|(a, _)| *a == Action::EndTurn),
+            "EndTurn must be preserved when room allows or via replacement"
+        );
+    }
+
+    #[test]
+    fn admit_promoted_roots_overflow_strictly_reserves_end_turn() {
+        let ranked = vec![
+            (Action::BuildSettlement { vertex: 20 }, 0.05),
+            (Action::BuildRoad { edge: 1 }, 5.0),
+            (Action::BuildRoad { edge: 2 }, 4.0),
+            (Action::EndTurn, 0.01),
+        ];
+
+        // cap = 2 with 2 promoted actions and legal EndTurn
+        let promoted = vec![
+            Action::BuildSettlement { vertex: 20 },
+            Action::BuildRoad { edge: 1 },
+        ];
+        let admitted = admit_promoted_roots(&ranked, &promoted, 2);
+
+        assert_eq!(admitted.len(), 2);
+        assert_eq!(
+            admitted[0].0,
+            Action::BuildSettlement { vertex: 20 },
+            "highest-priority promoted action must take the non-EndTurn slot"
+        );
+        assert_eq!(
+            admitted[1].0,
+            Action::EndTurn,
+            "EndTurn must NEVER be dropped by promotion overflow"
+        );
+    }
+
+    #[test]
+    fn admit_promoted_roots_is_backend_order_independent() {
+        let ranked_cpu = vec![
+            (Action::BuildRoad { edge: 5 }, 2.0),
+            (Action::BuildSettlement { vertex: 10 }, 1.0),
+            (Action::EndTurn, 0.1),
+        ];
+        let ranked_gpu = vec![
+            (Action::BuildSettlement { vertex: 10 }, 1.0),
+            (Action::BuildRoad { edge: 5 }, 2.0),
+            (Action::EndTurn, 0.1),
+        ];
+
+        let promoted_a = vec![
+            Action::BuildRoad { edge: 5 },
+            Action::BuildSettlement { vertex: 10 },
+        ];
+        let promoted_b = vec![
+            Action::BuildSettlement { vertex: 10 },
+            Action::BuildRoad { edge: 5 },
+        ];
+
+        let admitted_a = admit_promoted_roots(&ranked_cpu, &promoted_a, 2);
+        let admitted_b = admit_promoted_roots(&ranked_gpu, &promoted_b, 2);
+
+        assert_eq!(
+            admitted_a, admitted_b,
+            "admission must be strictly identical regardless of caller ordering"
+        );
     }
 }

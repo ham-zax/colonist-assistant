@@ -29,6 +29,11 @@ name = "gpu-sim-agent-benchmark"
 path = "src/bin/gpu-sim-agent-benchmark.rs"
 required-features = ["cuda-sim"]
 
+[[bin]]
+name = "gpu-latent-threat-benchmark"
+path = "src/bin/gpu-latent-threat-benchmark.rs"
+required-features = ["cuda-sim"]
+
 [features]
 cuda-exact = ["colonist-catan-search/cuda-exact"]
 cuda-sim = ["colonist-catan-search/cuda-sim"]

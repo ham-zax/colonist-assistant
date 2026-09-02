@@ -14,6 +14,8 @@ mod model;
 mod opening;
 mod planner;
 mod policy;
+mod resilience;
+mod root_impact;
 mod shared;
 mod tactical;
 mod threats;
@@ -63,10 +65,18 @@ pub use policy::{
     ActionClass, action_prior, allocate_root_node_budgets, choose_rollout_action,
     trade_acceptance_probability,
 };
+pub use resilience::{
+    CriticalEdge, CriticalVertex, RoadResilience, analyze_road_resilience,
+    evaluate_edge_cut, evaluate_vertex_cut,
+};
+pub use root_impact::{
+    RoadImpactDelta, RootImpactReport, RootPromotionReason, RootStrategicImpact,
+    compute_spatial_root_impacts,
+};
 pub use shared::{
-    EXPERIMENTAL_STRATEGIC_PARTICLE_TARGET, STRATEGIC_ROOT_WIDTH, coalesce_identical_particles,
-    group_particles_by_observation, select_experimental_strategic_particles,
-    shared_root_candidates,
+    EXPERIMENTAL_STRATEGIC_PARTICLE_TARGET, STRATEGIC_ROOT_WIDTH, admit_promoted_roots,
+    coalesce_identical_particles, group_particles_by_observation,
+    select_experimental_strategic_particles, shared_root_candidates,
 };
 pub use tactical::{
     TacticalResult, solve_belief_current_turn, solve_belief_current_turn_timed, solve_current_turn,
