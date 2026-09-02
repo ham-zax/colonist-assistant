@@ -616,19 +616,33 @@ const migrateCompactRecordContracts = (record: CompactGameRecord): void => {
   const current = contracts();
   const previousDecisionColumns = record.contracts.decisionColumns;
   if (!sameColumns(previousDecisionColumns, current.decisionColumns)) {
-    const statusIndex = previousDecisionColumns.indexOf("status");
+    const previousDecisionColumn = (name: string): number =>
+      previousDecisionColumns.indexOf(name);
+    const previousCell = (row: CompactRow, name: string): CompactCell | undefined => {
+      const index = previousDecisionColumn(name);
+      return index >= 0 ? row[index] : undefined;
+    };
+    const lifecycleFromLegacyRow = (row: CompactRow): CompactCell => {
+      const status = previousCell(row, "status");
+      const selectedAt = previousCell(row, "selectedAtMs");
+      const executionStartedAt = previousCell(row, "executionStartedAtMs");
+      const executionFinishedAt = previousCell(row, "executionFinishedAtMs");
+      const executionOk = previousCell(row, "executionOk");
+      if (typeof executionFinishedAt === "number") {
+        return executionOk === true ? "execution-complete" : "execution-failed";
+      }
+      if (status === "superseded") return "superseded";
+      if (typeof executionStartedAt === "number") return "execution-pending";
+      if (typeof selectedAt === "number") return "action-selected";
+      if (status === "complete") return "search-complete";
+      if (status === "failed") return "search-failed";
+      return "search-pending";
+    };
     record.decisions = remapRowsByColumns(
       record.decisions,
       previousDecisionColumns,
       current.decisionColumns,
-      (column, row) => {
-        if (column !== "lifecycle") return NA;
-        const status = statusIndex >= 0 ? row[statusIndex] : undefined;
-        if (status === "complete") return "search-complete";
-        if (status === "failed") return "search-failed";
-        if (status === "superseded") return "superseded";
-        return "search-pending";
-      },
+      (column, row) => (column === "lifecycle" ? lifecycleFromLegacyRow(row) : NA),
     );
   }
   const previousRootColumns = record.contracts.rootColumns;

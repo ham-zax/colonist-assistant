@@ -1674,6 +1674,63 @@ describe("action guide autopilot", () => {
     expect(confirmClicks).toHaveBeenCalledOnce();
   });
 
+  it("does not use total discard progress as proof of a repeated resource", async () => {
+    const modal = document.createElement("div");
+    modal.className = "actionBox-fixture";
+    modal.append("Selecciona cartas");
+    const progress = document.createElement("span");
+    progress.textContent = "3/3";
+    const selectedBrick = document.createElement("button");
+    selectedBrick.dataset.cardEnum = "2";
+    selectedBrick.innerHTML = '<img src="card_brick.svg">';
+    const selectedWool = document.createElement("button");
+    selectedWool.dataset.cardEnum = "3";
+    selectedWool.innerHTML = '<img src="card_wool.svg">';
+    const confirm = document.createElement("div");
+    confirm.className = "confirmButton-fixture";
+    confirm.innerHTML = '<img src="icon_check.fixture.svg">';
+    const inventory = document.createElement("div");
+    inventory.id = "player-card-inventory";
+    const brick = document.createElement("button");
+    brick.innerHTML = '<img src="card_brick.svg">';
+    const wool = document.createElement("button");
+    wool.innerHTML = '<img src="card_wool.svg">';
+    inventory.append(brick, wool);
+    const brickClicks = vi.fn();
+    const confirmClicks = vi.fn();
+    brick.addEventListener("click", () => {
+      brickClicks();
+      const secondBrick = document.createElement("button");
+      secondBrick.dataset.cardEnum = "2";
+      secondBrick.innerHTML = '<img src="card_brick.svg">';
+      modal.prepend(secondBrick);
+    });
+    confirm.addEventListener("click", () => {
+      confirmClicks();
+      modal.remove();
+    });
+    modal.append(selectedBrick, selectedWool, progress, confirm);
+    document.body.append(modal, inventory);
+    const cards = emptyResources();
+    cards.brick = 2;
+    cards.wool = 1;
+
+    renderActionGuide(
+      {
+        kind: "discard",
+        cards,
+        label: "Discard 3 cards",
+        signature: "discard-preselected-mismatch",
+        confidence: 1,
+      },
+      { highlight: true, autonomous: true },
+    );
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(brickClicks).toHaveBeenCalledOnce();
+    expect(confirmClicks).toHaveBeenCalledOnce();
+  });
+
   it("releases a mandatory workflow as soon as Colonist advances phases", () => {
     const cards = emptyResources();
     cards.grain = 3;

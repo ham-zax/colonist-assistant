@@ -1920,18 +1920,9 @@ const discardWorkflow = (
         let totalBeforeClick: number | undefined;
         const ready = (): boolean => {
           const selected = selectedDiscardResource(resource);
-          if (
+          return (
             selected.count >= expected &&
             (expected === 1 || selected.exactMultiplicity)
-          ) {
-            return true;
-          }
-          const progress = discardSelectionProgress(requiredTotal);
-          return (
-            expected > 1 &&
-            selected.count > 0 &&
-            progress !== undefined &&
-            progress >= totalExpected
           );
         };
         const complete = (): boolean => {

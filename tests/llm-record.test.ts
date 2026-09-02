@@ -184,10 +184,35 @@ describe("compact LLM game record", () => {
         prunedRoots: [],
       },
     });
+    const lifecycleTraces: DecisionTrace[] = [
+      {
+        ...trace("selected-state", { kind: "turn-control", control: "end" }),
+        finalActionSelectedAt: 1_100,
+      },
+      {
+        ...trace("execution-pending-state", { kind: "turn-control", control: "end" }),
+        finalActionSelectedAt: 1_100,
+        executionStartedAt: 1_200,
+      },
+      {
+        ...trace("execution-complete-state", { kind: "turn-control", control: "end" }),
+        finalActionSelectedAt: 1_100,
+        executionStartedAt: 1_200,
+        executionFinishedAt: 1_300,
+        executionSucceeded: true,
+      },
+      {
+        ...trace("execution-failed-state", { kind: "turn-control", control: "end" }),
+        finalActionSelectedAt: 1_100,
+        executionStartedAt: 1_200,
+        executionFinishedAt: 1_300,
+        executionSucceeded: false,
+      },
+    ];
     const initial = new CompactGameBuilder().apply(
       {
         ...captureBase,
-        decisions: [rootedTrace("legacy-state")],
+        decisions: [rootedTrace("legacy-state"), ...lifecycleTraces],
       },
       false,
     );
@@ -259,6 +284,15 @@ describe("compact LLM game record", () => {
     expect(legacyDecision?.[displayColumn]).toBe("turn-control|ctl=end");
     expect(legacyDecision?.[statusColumn]).toBe("complete");
     expect(legacyDecision?.[lifecycleColumn]).toBe("search-complete");
+    const lifecycleByState = Object.fromEntries(
+      resumed.decisions.map((row) => [String(row[stateColumn]), row[lifecycleColumn]]),
+    );
+    expect(lifecycleByState).toMatchObject({
+      "selected-state": "action-selected",
+      "execution-pending-state": "execution-pending",
+      "execution-complete-state": "execution-complete",
+      "execution-failed-state": "execution-failed",
+    });
     const rootActionColumn = resumed.contracts.rootColumns.indexOf("action");
     const finalRankColumn = resumed.contracts.rootColumns.indexOf("finalRank");
     const legacyRoot = resumed.roots.find((row) => row[0] === "D1");
