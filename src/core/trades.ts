@@ -573,6 +573,38 @@ export const evaluateTradeOffer = (
     };
   }
   const { give, receive } = localTradeBundles(trade);
+  const fullySpecified =
+    resourceTotal(trade.creatorGive) > 0 &&
+    resourceTotal(trade.creatorReceive) > 0;
+  if (!fullySpecified) {
+    const counter = generateTradeProposals(
+      state,
+      board,
+      player,
+      context,
+      trade.creator,
+    )[0];
+    if (counter) {
+      return {
+        tradeId: trade.id,
+        kind: "counter",
+        score: 0,
+        label: "COUNTER",
+        reason: "The open-ended offer needs a concrete exchange",
+        detail: `Counter with ${vectorLabel(counter.give)} for ${vectorLabel(counter.receive)}; modeled acceptance ${Math.round(counter.acceptanceProbability * 100)}%.`,
+        counterGive: counter.give,
+        counterReceive: counter.receive,
+      };
+    }
+    return {
+      tradeId: trade.id,
+      kind: "decline",
+      score: -100,
+      label: "DECLINE",
+      reason: "The open-ended offer has no useful concrete counter",
+      detail: "Do not map an unspecified side of the offer to a zero-card trade.",
+    };
+  }
   if (!trade.canAccept || !hasResources(hand, give)) {
     return {
       tradeId: trade.id,

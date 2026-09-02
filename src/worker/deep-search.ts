@@ -29,6 +29,7 @@ import type {
   DecisionEngine,
   DecisionSearchConstraints,
 } from "../core/engine";
+import { isFullySpecifiedTrade } from "../core/trade-guard";
 
 const RESOURCE_CODE = new Map<Resource, number>(
   RESOURCE_ORDER.map((resource, index) => [resource, index]),
@@ -462,10 +463,11 @@ const currentPlayerIndex = (
 const isProtocolActiveTrade = (
   trade: NonNullable<BoardSnapshot["activeTrades"]>[number],
 ): boolean =>
-  (trade.incoming && (!trade.myResponse || trade.myResponse === "pending")) ||
-  (!trade.incoming &&
-    trade.responsesComplete === true &&
-    Boolean(trade.acceptedPlayers?.length || trade.rejectedPlayers?.length));
+  isFullySpecifiedTrade(trade) &&
+  ((trade.incoming && (!trade.myResponse || trade.myResponse === "pending")) ||
+    (!trade.incoming &&
+      trade.responsesComplete === true &&
+      Boolean(trade.acceptedPlayers?.length || trade.rejectedPlayers?.length)));
 
 const inferPhase = (
   board: BoardSnapshot,
@@ -931,14 +933,15 @@ export const buildDeepSearchRequest = (
   const tradeCreator = activeTrade
     ? requirePlayerIndex(activeTrade.creator, "trade creator")
     : 0;
+  const observedTradeRecipients = activeTrade
+    ? bitset([
+        ...(activeTrade.acceptedPlayers ?? []),
+        ...(activeTrade.pendingPlayers ?? []),
+        ...(activeTrade.rejectedPlayers ?? []),
+      ]) & ~(1 << tradeCreator)
+    : 0;
   const tradeRecipients = activeTrade
-    ? activeTrade.incoming
-      ? 1 << root
-      : bitset([
-          ...(activeTrade.acceptedPlayers ?? []),
-          ...(activeTrade.pendingPlayers ?? []),
-          ...(activeTrade.rejectedPlayers ?? []),
-        ])
+    ? observedTradeRecipients || (activeTrade.incoming ? 1 << root : 0)
     : 0;
   const tradeCursor = activeTrade
     ? activeTrade.responsesComplete

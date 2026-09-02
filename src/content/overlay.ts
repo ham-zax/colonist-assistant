@@ -68,6 +68,7 @@ import {
   localTradeBundles,
 } from "../core/trades";
 import {
+  isFullySpecifiedTrade,
   outgoingTradeDisposition,
   tradeMemoryScopeChanged,
   tradeOfferKey,
@@ -1497,7 +1498,8 @@ export class AssistantOverlay {
       return Boolean(
         trade?.incoming &&
         trade.id === next.tradeId &&
-        (!trade.myResponse || trade.myResponse === "pending"),
+        (!trade.myResponse || trade.myResponse === "pending") &&
+        (next.verdict !== "accept" || trade.canAccept),
       );
     }
     if (next.kind === "trade-partner") {
@@ -2111,12 +2113,10 @@ export class AssistantOverlay {
     player: string | undefined,
   ): void {
     const board = this.board;
-    const hasPendingIncomingTrade = Boolean(
-      unansweredIncomingTrades(
-        board?.activeTrades,
-        this.completedIncomingTradeIds,
-      ).length,
-    );
+    const hasPendingIncomingTrade = unansweredIncomingTrades(
+      board?.activeTrades,
+      this.completedIncomingTradeIds,
+    ).some(isFullySpecifiedTrade);
     if (
       !state ||
       !player ||

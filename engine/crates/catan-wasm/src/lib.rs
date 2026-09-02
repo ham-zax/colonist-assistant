@@ -1024,6 +1024,16 @@ fn exact_mandatory_report(
     let exact = if mandatory.applicable {
         mandatory
     } else {
+        // `legal_actions()` deliberately exposes only a bounded counteroffer
+        // family during trade negotiation. A single generated response is not
+        // proof that the rules domain contains only one legal response, so the
+        // generic single-action exact shortcut must not certify this phase.
+        if particles
+            .first()
+            .is_some_and(|particle| particle.state.phase == Phase::TradeResponses)
+        {
+            return None;
+        }
         exact_single_action(particles, root_exclusions)?
     };
     if !exact.applicable {

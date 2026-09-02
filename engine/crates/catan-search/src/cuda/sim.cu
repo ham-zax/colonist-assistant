@@ -278,6 +278,27 @@ static inline __device__ uint32_t next_trade_recipient(
     return 0xffffffffu;
 }
 
+static inline __device__ uint32_t next_unanswered_trade_recipient(
+    const uint32_t *states,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t base,
+    uint32_t current,
+    uint32_t players
+) {
+    const uint32_t recipients = trade_get(states, stride, lane, base, TRADE_RECIPIENTS);
+    const uint32_t responded = trade_get(states, stride, lane, base, TRADE_ACCEPTED)
+        | trade_get(states, stride, lane, base, TRADE_REJECTED);
+    for (uint32_t offset = 1u; offset <= players; ++offset) {
+        const uint32_t player = (current + offset) % players;
+        if ((recipients & (1u << player)) != 0u
+            && (responded & (1u << player)) == 0u) {
+            return player;
+        }
+    }
+    return 0xffffffffu;
+}
+
 static inline __device__ uint32_t action_hand_total(
     const uint32_t *actions,
     uint32_t stride,
@@ -2320,6 +2341,119 @@ static inline __device__ void generate_rollout_action_lane(
                 );
             }
         }
+        if (development_playable(states, stride, lane, current, 2u)
+            && player_get(states, stride, lane, current, PLAYER_ROADS_LEFT) > 0u) {
+            uint32_t first_weight = 0u;
+            uint32_t first = 0xffffffffu;
+            for (uint32_t edge = 0u; edge < EDGE_COUNT; ++edge) {
+                if (!can_build_road_device(states, topology, stride, lane, edge, 0xffffffffu)) {
+                    continue;
+                }
+                const uint32_t weight = road_policy_score(states, topology, stride, lane, edge);
+                const uint32_t next_total = first_weight + weight;
+                if (rng_range(&rng, next_total) < weight) {
+                    first = edge;
+                }
+                first_weight = next_total;
+            }
+            if (first != 0xffffffffu) {
+                uint32_t second_code = 0u;
+                if (player_get(states, stride, lane, current, PLAYER_ROADS_LEFT) > 1u) {
+                    uint32_t second_weight = 0u;
+                    uint32_t second = 0xffffffffu;
+                    for (uint32_t edge = 0u; edge < EDGE_COUNT; ++edge) {
+                        if (!can_build_road_device(states, topology, stride, lane, edge, first)) {
+                            continue;
+                        }
+                        const uint32_t weight = road_policy_score(states, topology, stride, lane, edge);
+                        const uint32_t next_total = second_weight + weight;
+                        if (rng_range(&rng, next_total) < weight) {
+                            second = edge;
+                        }
+                        second_weight = next_total;
+                    }
+                    if (second != 0xffffffffu) {
+                        second_code = second + 1u;
+                    }
+                }
+                weighted_reservoir_action(
+                    actions,
+                    stride,
+                    lane,
+                    &rng,
+                    &total_weight,
+                    profile_scaled_weight(states, stride, lane, current, 2u, 1600u),
+                    ACTION_PLAY_ROAD_BUILDING,
+                    first,
+                    second_code,
+                    0u
+                );
+            }
+        }
+        if (development_playable(states, stride, lane, current, 3u)
+            && state_get(states, stride, STATE_BANK_PUBLIC, lane) != 0u) {
+            uint32_t pair_weight = 0u;
+            uint32_t selected_first = 0xffffffffu;
+            uint32_t selected_second = 0xffffffffu;
+            for (uint32_t first = 0u; first < 5u; ++first) {
+                for (uint32_t second = first; second < 5u; ++second) {
+                    const uint32_t needed = first == second ? 2u : 1u;
+                    if (state_get(states, stride, STATE_BANK + first, lane) < needed
+                        || state_get(states, stride, STATE_BANK + second, lane) == 0u) {
+                        continue;
+                    }
+                    const uint32_t weight = resource_policy_score(first)
+                        + resource_policy_score(second);
+                    const uint32_t next_total = pair_weight + weight;
+                    if (rng_range(&rng, next_total) < weight) {
+                        selected_first = first;
+                        selected_second = second;
+                    }
+                    pair_weight = next_total;
+                }
+            }
+            if (selected_first != 0xffffffffu) {
+                weighted_reservoir_action(
+                    actions,
+                    stride,
+                    lane,
+                    &rng,
+                    &total_weight,
+                    profile_scaled_weight(states, stride, lane, current, 2u, 3600u),
+                    ACTION_PLAY_YEAR_OF_PLENTY,
+                    selected_first,
+                    selected_second,
+                    0u
+                );
+            }
+        }
+        if (development_playable(states, stride, lane, current, 4u)) {
+            uint32_t resource_weight = 0u;
+            uint32_t selected_resource = 0u;
+            for (uint32_t resource = 0u; resource < 5u; ++resource) {
+                const uint32_t weight = resource_policy_score(resource)
+                    * observed_monopoly_resource_weight(
+                        states, topology, stride, lane, current, resource
+                    );
+                const uint32_t next_total = resource_weight + weight;
+                if (rng_range(&rng, next_total) < weight) {
+                    selected_resource = resource;
+                }
+                resource_weight = next_total;
+            }
+            weighted_reservoir_action(
+                actions,
+                stride,
+                lane,
+                &rng,
+                &total_weight,
+                profile_scaled_weight(states, stride, lane, current, 2u, 1400u),
+                ACTION_PLAY_MONOPOLY,
+                selected_resource,
+                0u,
+                0u
+            );
+        }
         seen = total_weight > 0u ? 1u : 0u;
     } else if (phase == PHASE_ROLL_CHANCE) {
         const uint32_t roll = rng_range(&rng, 6u) + rng_range(&rng, 6u) + 2u;
@@ -3271,7 +3405,7 @@ static inline __device__ void apply_transition_lane(
     }
 
     if (tag == ACTION_PLAY_ROAD_BUILDING) {
-        if (phase != PHASE_MAIN) {
+        if (phase != PHASE_PRE_ROLL && phase != PHASE_MAIN) {
             status[lane] = STATUS_INVALID_PHASE;
             return;
         }
@@ -3299,7 +3433,7 @@ static inline __device__ void apply_transition_lane(
     }
 
     if (tag == ACTION_PLAY_YEAR_OF_PLENTY) {
-        if (phase != PHASE_MAIN) {
+        if (phase != PHASE_PRE_ROLL && phase != PHASE_MAIN) {
             status[lane] = STATUS_INVALID_PHASE;
             return;
         }
@@ -3353,7 +3487,7 @@ static inline __device__ void apply_transition_lane(
     }
 
     if (tag == ACTION_PLAY_MONOPOLY) {
-        if (phase != PHASE_MAIN) {
+        if (phase != PHASE_PRE_ROLL && phase != PHASE_MAIN) {
             status[lane] = STATUS_INVALID_PHASE;
             return;
         }
@@ -3516,7 +3650,9 @@ static inline __device__ void apply_transition_lane(
             trade_get(states, stride, lane, STATE_TRADE, response_field) | (1u << cursor)
         );
         if (!trade_complete(states, stride, lane, STATE_TRADE)) {
-            const uint32_t next = next_trade_recipient(recipients, cursor + 1u, players);
+            const uint32_t next = next_unanswered_trade_recipient(
+                states, stride, lane, STATE_TRADE, cursor, players
+            );
             if (next == 0xffffffffu) {
                 status[lane] = STATUS_INVALID_ACTION;
                 return;
@@ -3556,13 +3692,14 @@ static inline __device__ void apply_transition_lane(
         clear_trade(states, stride, lane, STATE_TRADE);
         trade_set(states, stride, lane, STATE_TRADE, TRADE_PRESENT, 1u);
         trade_set(states, stride, lane, STATE_TRADE, TRADE_CREATOR, actor);
+        const uint32_t recipients = ((1u << players) - 1u) & ~(1u << actor);
         trade_set(
             states,
             stride,
             lane,
             STATE_TRADE,
             TRADE_RECIPIENTS,
-            1u << previous_creator
+            recipients
         );
         for (uint32_t resource = 0u; resource < 5u; ++resource) {
             trade_set(

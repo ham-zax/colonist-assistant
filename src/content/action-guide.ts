@@ -407,32 +407,18 @@ const findTradeControl = (
       ].filter(visible);
   const offer = offers[offerIndex];
   if (!offer) return undefined;
-  const tradeButtons = [
-    ...offer.querySelectorAll<HTMLElement>(
-      "[class*='tradeButton-'], button, [role='button']",
-    ),
-  ]
-    .map((element) => activeColonistControl(element) ?? element)
-    .filter(visible);
   if (verdict === "accept") {
-    return (
-      findControl(["accept", "check", "yes"], ["counter", "reject"], offer) ??
-      tradeButtons.at(-1)
-    );
+    // Open-ended Colonist offers can have no genuine accept control. Never
+    // reinterpret an unrelated visible trade button as permission to accept.
+    return findControl(["accept", "check", "yes"], ["counter", "reject"], offer);
   }
   if (verdict === "counter") {
-    return (
-      findControl(["counter", "edit"], ["accept", "reject"], offer) ??
-      tradeButtons[0]
-    );
+    return findControl(["counter", "edit"], ["accept", "reject"], offer);
   }
-  return (
-    findControl(
-      ["decline", "reject", "cancel", "close", "no"],
-      ["accept", "counter"],
-      offer,
-    ) ??
-    tradeButtons[Math.min(1, tradeButtons.length - 1)]
+  return findControl(
+    ["decline", "reject", "cancel", "close", "no"],
+    ["accept", "counter"],
+    offer,
   );
 };
 

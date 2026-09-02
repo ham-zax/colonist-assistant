@@ -48,13 +48,11 @@ fn matches_family(state: &GameState, action: &Action, family: ExactActionFamily)
         ExactActionFamily::Mandatory => match state.phase {
             Phase::Discard => matches!(action, Action::Discard { .. }),
             Phase::MoveRobber => matches!(action, Action::MoveRobber { .. }),
-            Phase::TradeResponses => matches!(
-                action,
-                Action::RespondTrade { .. }
-                    | Action::CounterTrade { .. }
-                    | Action::ConfirmTrade { .. }
-                    | Action::CancelTrade
-            ),
+            // Trade responses intentionally stay in the strategic search path.
+            // `GameState::legal_actions()` exposes a bounded counteroffer
+            // candidate family, so treating that family as exhaustive would
+            // overstate exact authority and can suppress a better legal counter.
+            Phase::TradeResponses => false,
             _ => false,
         },
         ExactActionFamily::Knight => matches!(action, Action::PlayKnight { .. }),
@@ -399,8 +397,10 @@ fn post_action_development_score(
 /// weighted belief. Missing/unavailable worlds retain their baseline value
 /// instead of disappearing from the denominator.
 ///
-/// This is used authoritatively for discard, robber/victim, and trade-response
-/// deadlines. The same routine is exposed for exact Monopoly, Year of Plenty,
+/// This is used authoritatively for discard and robber/victim deadlines. Trade
+/// responses remain strategic because their counteroffer domain is deliberately
+/// bounded by the rules/search candidate generator. The same routine is exposed
+/// for exact Monopoly, Year of Plenty,
 /// and Road Building parameter selection and regression tests.
 pub fn solve_exact_belief(
     particles: &[BeliefParticle],
@@ -418,8 +418,7 @@ pub fn solve_exact_belief_excluding(
         return ExactDecisionResult::default();
     };
     let actor = first.state.actor() as usize;
-    // Parameter legality can itself depend on hidden state (for example a
-    // counteroffer requesting a card the sender may or may not hold, or Year
+    // Parameter legality can itself depend on hidden state (for example Year
     // of Plenty with a non-public bank). Build the observable candidate union
     // across the posterior and score every candidate over the full mass.
     // Road Building can expose hundreds of parameter pairs. Recomputing the

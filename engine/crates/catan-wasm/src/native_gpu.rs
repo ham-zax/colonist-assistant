@@ -176,9 +176,7 @@ impl NativeGpuSearchEngine {
             .iterations
             .map(|value| value as usize)
             .unwrap_or(root_samples.saturating_mul(self.config.rollouts_per_action));
-        let rollouts_per_action = total_root_rollouts
-            .div_ceil(root_samples)
-            .clamp(8, 96);
+        let rollouts_per_action = total_root_rollouts.div_ceil(root_samples).clamp(8, 96);
         let search_config = CudaSimAgentSearchConfig {
             root_samples,
             rollouts_per_action,

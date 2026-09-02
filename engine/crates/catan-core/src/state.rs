@@ -594,7 +594,7 @@ impl GameState {
                 .collect(),
             Phase::PreRoll => {
                 let mut actions = vec![Action::Roll];
-                actions.extend(self.playable_development_actions(true));
+                actions.extend(self.playable_development_actions());
                 actions
             }
             Phase::RollChance => (2..=12)
@@ -1007,7 +1007,7 @@ impl GameState {
         {
             actions.push(Action::BuyDevelopment);
         }
-        actions.extend(self.playable_development_actions(false));
+        actions.extend(self.playable_development_actions());
         for give in Resource::ALL {
             let ratio = self.trade_ratios(self.current_player)[give.index()];
             if player.resources[give.index()] >= ratio {
@@ -1258,7 +1258,7 @@ impl GameState {
         actions
     }
 
-    fn playable_development_actions(&self, pre_roll: bool) -> Vec<Action> {
+    fn playable_development_actions(&self) -> Vec<Action> {
         let player = &self.players[self.current_player as usize];
         if player.played_development_this_turn {
             return Vec::new();
@@ -1274,9 +1274,6 @@ impl GameState {
                 };
                 actions.push(Action::PlayKnight { hex, victim });
             }
-        }
-        if pre_roll {
-            return actions;
         }
         if playable(DevCard::RoadBuilding) && player.roads_left > 0 {
             let first_roads = (0..self.board.edges.len() as u8)
@@ -1353,7 +1350,7 @@ impl GameState {
     }
 
     fn build_road(&mut self, edge: u8, free: bool) -> Result<(), RuleError> {
-        if self.phase != Phase::Main {
+        if self.phase != Phase::Main && !(free && self.phase == Phase::PreRoll) {
             return Err(RuleError::WrongPhase);
         }
         if !self.can_build_road(edge) {
@@ -1486,7 +1483,7 @@ impl GameState {
     }
 
     fn play_road_building(&mut self, first: u8, second: Option<u8>) -> Result<(), RuleError> {
-        if self.phase != Phase::Main {
+        if !matches!(self.phase, Phase::PreRoll | Phase::Main) {
             return Err(RuleError::WrongPhase);
         }
         self.consume_development(DevCard::RoadBuilding)?;
@@ -1498,7 +1495,7 @@ impl GameState {
     }
 
     fn play_year_of_plenty(&mut self, first: Resource, second: Resource) -> Result<(), RuleError> {
-        if self.phase != Phase::Main {
+        if !matches!(self.phase, Phase::PreRoll | Phase::Main) {
             return Err(RuleError::WrongPhase);
         }
         let first_needed = if first == second { 2 } else { 1 };
@@ -1514,7 +1511,7 @@ impl GameState {
     }
 
     fn play_monopoly(&mut self, resource: Resource) -> Result<(), RuleError> {
-        if self.phase != Phase::Main {
+        if !matches!(self.phase, Phase::PreRoll | Phase::Main) {
             return Err(RuleError::WrongPhase);
         }
         self.consume_development(DevCard::Monopoly)?;
@@ -1805,7 +1802,7 @@ impl GameState {
         self.trade = Some(trade);
         if !self.trade_responses_complete(trade) {
             self.trade_cursor = self
-                .next_trade_recipient(trade.recipients, self.trade_cursor + 1)
+                .next_unanswered_trade_recipient(trade, self.trade_cursor)
                 .ok_or(RuleError::InvalidTrade)?;
         }
         Ok(())
@@ -1834,14 +1831,17 @@ impl GameState {
         {
             return Err(RuleError::InvalidTrade);
         }
+        let recipients = ((1u8 << self.board.num_players) - 1) & !(1u8 << actor);
         self.trade = Some(TradeOffer {
             creator: actor,
-            recipients: 1 << previous.creator,
+            recipients,
             give,
             receive,
             accepted: 0,
             rejected: 0,
         });
+        // Colonist counteroffers remain table-wide: the original proposer and
+        // every other eligible player may respond to the new offer.
         self.trade_cursor = previous.creator;
         self.trade_negotiation_round += 1;
         Ok(())
@@ -1907,6 +1907,13 @@ impl GameState {
 
     fn next_trade_recipient(&self, recipients: u8, start: u8) -> Option<u8> {
         (start..self.board.num_players).find(|player| recipients & (1 << player) != 0)
+    }
+
+    fn next_unanswered_trade_recipient(&self, trade: TradeOffer, current: u8) -> Option<u8> {
+        let responded = trade.accepted | trade.rejected;
+        (1..=self.board.num_players)
+            .map(|offset| (current + offset) % self.board.num_players)
+            .find(|player| trade.recipients & (1 << player) != 0 && responded & (1 << player) == 0)
     }
 
     fn end_turn(&mut self) -> Result<(), RuleError> {

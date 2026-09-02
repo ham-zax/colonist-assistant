@@ -7,6 +7,10 @@ export const tradeOfferKey = (
 ): string =>
   `${RESOURCE_ORDER.map((resource) => give[resource]).join(",")}>${RESOURCE_ORDER.map((resource) => receive[resource]).join(",")}`;
 
+export const isFullySpecifiedTrade = (trade: ActiveTradeOffer): boolean =>
+  RESOURCE_ORDER.some((resource) => trade.creatorGive[resource] > 0) &&
+  RESOURCE_ORDER.some((resource) => trade.creatorReceive[resource] > 0);
+
 export const outgoingTradeDisposition = (
   responsesComplete: boolean | undefined,
   firstSeenAt: number,
