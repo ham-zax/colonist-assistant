@@ -1,0 +1,11 @@
+[package]
+name = "latent-threat-cross-version-benchmark"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+colonist-catan-core = { path = "../../engine/crates/catan-core" }
+colonist-catan-search = { path = "../../engine/crates/catan-search", features = ["cuda-sim"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
