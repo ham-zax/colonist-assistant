@@ -67,6 +67,10 @@ export interface CompactGameRecord {
     friendlyRobber?: boolean;
     privateGame?: boolean;
     botOnlyGame?: boolean;
+    playerCount?: number;
+    unresolvedPlayers?: string[];
+    integrityIssues?: string[];
+    benchmarkEligible?: boolean;
   };
   boardHexes: CompactRow[];
   boardVertices: CompactRow[];
@@ -171,7 +175,7 @@ const actionLabel = (
     if (vector) parts.push(`${key}=${vector.join(",")}`);
   };
   const addAliasedPlayer = (key: string, value: unknown): void => {
-    if (typeof value === "string") add(key, alias(value) ?? value);
+    if (typeof value === "string") add(key, alias(value) ?? NA);
   };
 
   add("t", record.targetId);
@@ -214,7 +218,7 @@ const actionLabel = (
     parts.push(
       `to=${record.recipients
         .map((player) =>
-          typeof player === "string" ? alias(player) ?? player : String(player),
+          typeof player === "string" ? alias(player) ?? NA : String(player),
         )
         .join(",")}`,
     );
@@ -271,7 +275,7 @@ const encodeEvent = (
     case "trade-offered":
       return row(
         alias(event.player) ?? NA,
-        event.recipients.map((player) => alias(player) ?? player),
+        event.recipients.map((player) => alias(player) ?? NA),
         toResourceVector(event.give),
         toResourceVector(event.receive),
       );
@@ -295,7 +299,7 @@ const encodeEvent = (
     case "trade-expired":
       return row(
         alias(event.player) ?? NA,
-        event.recipients?.map((player) => alias(player) ?? player) ?? [],
+        event.recipients?.map((player) => alias(player) ?? NA) ?? [],
         toResourceVector(event.give),
         toResourceVector(event.receive),
       );
@@ -314,23 +318,198 @@ const encodeEvent = (
   }
 };
 
-const aliasManager = (existing?: Record<string, string>) => {
-  const aliases: Record<string, string> = { ...(existing ?? {}) };
-  const reverse = new Map(Object.entries(aliases).map(([alias, name]) => [name, alias]));
-  let next = Object.keys(aliases).reduce((max, alias) => {
-    const match = /^P(\d+)$/u.exec(alias);
-    return Math.max(max, match ? Number(match[1]) + 1 : 0);
-  }, 0);
+const canonicalRoster = (board?: BoardSnapshot): string[] =>
+  board?.playerOrder?.length
+    ? [...new Set(board.playerOrder.filter((name) => Boolean(name)))]
+    : [];
+
+const aliasManager = (
+  existing?: Record<string, string>,
+  roster: string[] = [],
+) => {
+  const aliases: Record<string, string> = roster.length
+    ? Object.fromEntries(roster.map((name, index) => [`P${index}`, name]))
+    : { ...(existing ?? {}) };
+  const reverse = new Map(
+    Object.entries(aliases).map(([playerAlias, name]) => [name, playerAlias]),
+  );
+  const unresolved = new Set<string>();
   const alias = (name?: string): string | null => {
     if (!name) return null;
     const found = reverse.get(name);
     if (found) return found;
-    const created = `P${next++}`;
-    aliases[created] = name;
-    reverse.set(name, created);
-    return created;
+    unresolved.add(name);
+    return null;
   };
-  return { aliases, alias };
+  return { aliases, alias, unresolved };
+};
+
+const rebindRecordAliases = (
+  record: CompactGameRecord,
+  nextAliases: Record<string, string>,
+  unresolved: Set<string>,
+): void => {
+  const previousAliases = record.aliases;
+  if (JSON.stringify(previousAliases) === JSON.stringify(nextAliases)) return;
+  const nextByName = new Map(
+    Object.entries(nextAliases).map(([playerAlias, name]) => [name, playerAlias]),
+  );
+  const replacements = new Map<string, string>();
+  for (const [playerAlias, name] of Object.entries(previousAliases)) {
+    const replacement = nextByName.get(name);
+    replacements.set(playerAlias, replacement ?? NA);
+    if (!replacement) unresolved.add(name);
+  }
+  const rewriteString = (value: string): string => {
+    if (replacements.has(value)) return replacements.get(value)!;
+    return value.replace(/\bP\d+\b/gu, (token) => replacements.get(token) ?? token);
+  };
+  const rewriteCell = (cell: CompactCell): CompactCell => {
+    if (typeof cell === "string") return rewriteString(cell);
+    if (Array.isArray(cell) && cell.every((value) => typeof value === "string")) {
+      return cell.map((value) => rewriteString(value));
+    }
+    return cell;
+  };
+  const collections: CompactRow[][] = [
+    record.frames,
+    record.buildings,
+    record.roads,
+    record.players,
+    record.decisions,
+    record.decisionContexts,
+    record.decisionTrades,
+    record.candidates,
+    record.roots,
+    record.replacements,
+    record.beliefs,
+    record.beliefSummaries,
+    record.archetypes,
+    record.events,
+  ];
+  for (const rows of collections) {
+    for (const row of rows) {
+      for (let index = 0; index < row.length; index += 1) {
+        row[index] = rewriteCell(row[index]!);
+      }
+    }
+  }
+  if (record.meta.myPlayer) {
+    record.meta.myPlayer = rewriteString(record.meta.myPlayer);
+  }
+  record.aliases = { ...nextAliases };
+};
+
+const updateRecordIntegrity = (record: CompactGameRecord): void => {
+  const issues: string[] = [];
+  const count = record.meta.playerCount;
+  const canonical = new Set<string>();
+  if (!Number.isInteger(count) || count === undefined || count < 2 || count > 4) {
+    issues.push("missing-or-invalid-player-count");
+  } else {
+    for (let player = 0; player < count; player += 1) canonical.add(`P${player}`);
+    const aliasKeys = Object.keys(record.aliases);
+    if (aliasKeys.length !== count || aliasKeys.some((key) => !canonical.has(key))) {
+      issues.push("alias-cardinality-mismatch");
+    }
+    if (new Set(Object.values(record.aliases)).size !== aliasKeys.length) {
+      issues.push("duplicate-roster-name");
+    }
+  }
+  const participantRows: CompactRow[][] = [
+    record.frames,
+    record.buildings,
+    record.roads,
+    record.players,
+    record.decisions,
+    record.decisionContexts,
+    record.decisionTrades,
+    record.candidates,
+    record.roots,
+    record.replacements,
+    record.beliefs,
+    record.beliefSummaries,
+    record.archetypes,
+    record.events,
+  ];
+  const invalidAliases = new Set<string>();
+  const inspect = (cell: CompactCell): void => {
+    if (typeof cell === "string") {
+      for (const token of cell.match(/\bP\d+\b/gu) ?? []) {
+        if (!canonical.has(token)) invalidAliases.add(token);
+      }
+    } else if (Array.isArray(cell) && cell.every((value) => typeof value === "string")) {
+      for (const value of cell) inspect(value);
+    }
+  };
+  for (const rows of participantRows) {
+    for (const row of rows) for (const cell of row) inspect(cell);
+  }
+  if (invalidAliases.size) {
+    issues.push(`unknown-canonical-player:${[...invalidAliases].sort().join(",")}`);
+  }
+  for (const frame of record.frames) {
+    const winner = frame[16];
+    if (
+      typeof winner === "string" &&
+      winner !== U &&
+      winner !== NA &&
+      !canonical.has(winner)
+    ) {
+      issues.push(`invalid-winner:${winner}`);
+      break;
+    }
+  }
+  if (record.partialHistory) issues.push("partial-history");
+  if (record.unmatchedCount > 0) issues.push(`unmatched-events:${record.unmatchedCount}`);
+  if (record.meta.unresolvedPlayers?.length) issues.push("unresolved-player-evidence");
+  record.meta.integrityIssues = [...new Set(issues)];
+  const lastWinner = [...record.frames]
+    .reverse()
+    .map((frame) => frame[16])
+    .find((winner) => winner !== U);
+  record.meta.benchmarkEligible =
+    record.status === "completed" &&
+    record.meta.integrityIssues.length === 0 &&
+    typeof lastWinner === "string" &&
+    canonical.has(lastWinner);
+};
+
+export const normalizeCompactRecordIntegrity = (
+  input: CompactGameRecord,
+): CompactGameRecord => {
+  const record = structuredClone(input);
+  const unresolved = new Set(record.meta.unresolvedPlayers ?? []);
+  let count = record.meta.playerCount;
+  if (!Number.isInteger(count) || count === undefined || count < 2 || count > 4) {
+    const playerAliases = [
+      ...new Set(
+        record.players.flatMap((row) =>
+          typeof row[1] === "string" && /^P\d+$/u.test(row[1]) ? [row[1]] : [],
+        ),
+      ),
+    ].sort((left, right) => Number(left.slice(1)) - Number(right.slice(1)));
+    if (
+      playerAliases.length >= 2 &&
+      playerAliases.length <= 4 &&
+      playerAliases.every((playerAlias, index) => playerAlias === `P${index}`)
+    ) {
+      count = playerAliases.length;
+    }
+  }
+  if (count !== undefined && Number.isInteger(count) && count >= 2 && count <= 4) {
+    const nextAliases: Record<string, string> = {};
+    for (let player = 0; player < count; player += 1) {
+      const playerAlias = `P${player}`;
+      const name = record.aliases[playerAlias];
+      if (name) nextAliases[playerAlias] = name;
+    }
+    rebindRecordAliases(record, nextAliases, unresolved);
+    record.meta.playerCount = count;
+  }
+  record.meta.unresolvedPlayers = [...unresolved];
+  updateRecordIntegrity(record);
+  return record;
 };
 
 const contracts = (): CompactRecordContracts => ({
@@ -576,27 +755,28 @@ export class CompactGameBuilder {
 
   constructor(seed?: CompactGameRecord) {
     if (seed) {
-      this.record = structuredClone(seed);
+      const normalized = normalizeCompactRecordIntegrity(seed);
+      this.record = normalized;
       this.eventIds = new Set(
-        seed.events.flatMap((row) =>
+        normalized.events.flatMap((row) =>
           typeof row[0] === "string" ? [row[0]] : [],
         ),
       );
-      seed.decisions.forEach((row, index) => {
+      normalized.decisions.forEach((row, index) => {
         const state = row[4];
         if (typeof state === "string") this.decisionIndexByState.set(state, index);
       });
-      for (const row of seed.beliefs) {
+      for (const row of normalized.beliefs) {
         const id = row[0];
         const digest = row[1];
         if (typeof id === "string" && typeof digest === "string") {
           this.beliefIdByDigest.set(digest, id);
         }
       }
-      seed.handVectors.forEach((vector, index) => {
+      normalized.handVectors.forEach((vector, index) => {
         this.handVectorIndex.set(vector.join(","), index);
       });
-      this.snapshot = this.restoreSnapshot(seed);
+      this.snapshot = this.restoreSnapshot(normalized);
     }
   }
 
@@ -625,7 +805,9 @@ export class CompactGameBuilder {
       if (typeof delta === "number") capturedAt += Math.max(0, delta);
     }
     const nameFor = (player: CompactCell | undefined): string | undefined =>
-      typeof player === "string" ? seed.aliases[player] ?? player : undefined;
+      typeof player === "string" && player !== NA
+        ? seed.aliases[player]
+        : undefined;
     const buildings = new Map<string, { kind: string; player: string }>();
     for (const row of seed.buildings) {
       const op = row[1];
@@ -679,8 +861,16 @@ export class CompactGameBuilder {
 
   apply(input: CompactGameCapture, completed: boolean): CompactGameRecord {
     const now = Date.now();
-    const aliasing = aliasManager(this.record?.aliases);
     const existing = this.record;
+    const roster = canonicalRoster(input.board);
+    const aliasing = aliasManager(existing?.aliases, roster);
+    for (const name of existing?.meta.unresolvedPlayers ?? []) {
+      if (!roster.includes(name)) aliasing.unresolved.add(name);
+    }
+    if (existing && roster.length) {
+      rebindRecordAliases(existing, aliasing.aliases, aliasing.unresolved);
+      existing.meta.playerCount = roster.length;
+    }
     const isCompleted = completed || existing?.status === "completed";
     if (!existing) {
       this.record = {
@@ -697,7 +887,7 @@ export class CompactGameBuilder {
         assistant: { ...input.assistant },
         aliases: aliasing.aliases,
         contracts: contracts(),
-        meta: {},
+        meta: roster.length ? { playerCount: roster.length } : {},
         boardHexes: [],
         boardVertices: [],
         boardEdges: [],
@@ -750,6 +940,9 @@ export class CompactGameBuilder {
     for (const trace of input.decisions) {
       this.appendDecision(trace, aliasing.alias);
     }
+    for (const name of roster) aliasing.unresolved.delete(name);
+    record.meta.unresolvedPlayers = [...aliasing.unresolved].sort();
+    updateRecordIntegrity(record);
     return record;
   }
 
@@ -852,7 +1045,7 @@ export class CompactGameBuilder {
       changed(ownDevPlayed, previous?.ownDevPlayed),
       changed(robber, previous?.robber),
       Boolean(board.gameOver),
-      alias(board.winner) ?? (board.winner ? board.winner : NA),
+      alias(board.winner) ?? NA,
     ]);
 
     const currentBuildings = new Map(
@@ -892,7 +1085,8 @@ export class CompactGameBuilder {
 
     const playerSignatures = new Map<string, string>();
     for (const [name, player] of Object.entries(board.players ?? {})) {
-      const playerAlias = alias(name)!;
+      const playerAlias = alias(name);
+      if (!playerAlias) continue;
       const row = encodePlayerState(frameIndex, playerAlias, player);
       const signature = playerStateSignature(row);
       playerSignatures.set(playerAlias, signature);
@@ -965,7 +1159,7 @@ export class CompactGameBuilder {
 
     const record = this.record!;
     const id = `B${record.beliefs.length + 1}`;
-    const playerAliases = players.map((player) => alias(player) ?? player);
+    const playerAliases = players.map((player) => alias(player) ?? NA);
     record.beliefs.push([
       id,
       digest,
@@ -977,7 +1171,7 @@ export class CompactGameBuilder {
     for (const summary of trace.beliefSummary?.players ?? []) {
       record.beliefSummaries.push([
         id,
-        alias(summary.player) ?? summary.player,
+        alias(summary.player) ?? NA,
         summary.expected.map((value) => compactNumber(value, 4) ?? 0),
         summary.pAtLeastOne.map((value) => compactNumber(value, 4) ?? 0),
         [...summary.minimum],
@@ -997,7 +1191,7 @@ export class CompactGameBuilder {
       if (!model) return;
       record.archetypes.push([
         id,
-        alias(player) ?? player,
+        alias(player) ?? NA,
         compactNumber(model.balanced),
         compactNumber(model.expansion),
         compactNumber(model.cityDevelopment),
@@ -1028,7 +1222,7 @@ export class CompactGameBuilder {
         board.discardCount ?? null,
         board.hexes.find((hex) => hex.blocked)?.id ?? NA,
         board.robberVictimSelection ?? false,
-        board.robberVictimPlayers?.map((player) => alias(player) ?? player) ?? [],
+        board.robberVictimPlayers?.map((player) => alias(player) ?? NA) ?? [],
         board.domesticTradeUsed ?? false,
         [...(board.buildableSettlementIds ?? [])],
         [...(board.buildableCityIds ?? [])],
@@ -1053,16 +1247,16 @@ export class CompactGameBuilder {
       record.decisionTrades.push([
         decisionId,
         `T${compactDigest(trade.id)}`,
-        alias(trade.creator) ?? trade.creator,
-        alias(trade.tradeExecutor) ?? trade.tradeExecutor,
+        alias(trade.creator) ?? NA,
+        alias(trade.tradeExecutor) ?? NA,
         trade.incoming,
         trade.counterOffer,
         trade.canAccept,
         toResourceVector(trade.creatorGive),
         toResourceVector(trade.creatorReceive),
-        trade.acceptedPlayers?.map((player) => alias(player) ?? player) ?? [],
-        trade.pendingPlayers?.map((player) => alias(player) ?? player) ?? [],
-        trade.rejectedPlayers?.map((player) => alias(player) ?? player) ?? [],
+        trade.acceptedPlayers?.map((player) => alias(player) ?? NA) ?? [],
+        trade.pendingPlayers?.map((player) => alias(player) ?? NA) ?? [],
+        trade.rejectedPlayers?.map((player) => alias(player) ?? NA) ?? [],
         trade.responsesComplete ?? false,
         trade.myResponse ?? NA,
       ]);
@@ -1106,7 +1300,7 @@ export class CompactGameBuilder {
       trace.rustAuthority ?? trace.finalActionSource ?? NA,
       trace.authorityTrace?.initialAuthority ?? NA,
       trace.finalActionSource ?? NA,
-      alias(trace.rootPlayer) ?? trace.rootPlayer ?? NA,
+      alias(trace.rootPlayer) ?? NA,
       trace.deepChosenAction ? actionLabel(trace.deepChosenAction, alias) : NA,
       trace.finalAction ? actionLabel(trace.finalAction, alias) : NA,
       trace.deepStatus,

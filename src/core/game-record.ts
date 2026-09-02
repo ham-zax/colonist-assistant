@@ -2,6 +2,7 @@ import type { DecisionTrace } from "./decision-trace";
 import {
   CompactGameBuilder,
   formatCompactGameRecord,
+  normalizeCompactRecordIntegrity,
   type CompactGameCapture,
   type CompactGameRecord,
 } from "./llm-record";
@@ -48,7 +49,7 @@ const normalizeRecordedGame = (value: unknown): RecordedGame | undefined => {
   ) {
     return undefined;
   }
-  return record as RecordedGame;
+  return normalizeCompactRecordIntegrity(record as RecordedGame);
 };
 
 interface LegacyBoardFrame {
