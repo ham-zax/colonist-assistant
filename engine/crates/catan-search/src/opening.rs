@@ -6,7 +6,7 @@ use colonist_catan_core::{
 };
 
 use crate::deadline::CooperativeDeadline;
-use crate::eval::{evaluate, production_pips, vertex_value};
+use crate::eval::{evaluate, expansion_option_value, production_pips, vertex_value};
 use crate::policy::{choose_rollout_action, normalize_priors};
 
 const NUMBER_PIPS: [f32; 13] = [
@@ -94,10 +94,10 @@ fn opening_position_bonus(state: &GameState, player: u8, exact_hand: bool) -> f3
         - shared_hex_exposure * 0.38
 }
 
-/// Values where the opening roads leave the player after one to three
-/// additional roads. Ranking the top sites gives a portfolio signal instead of
-/// only the single best fragile route.
-fn opening_road_reach(state: &GameState, player: u8) -> f32 {
+/// Cheap partial-setup ordering prior for where the free opening roads leave
+/// the player after one to three additional roads. Completed setup leaves use
+/// the shared paid-expansion ETA/race model instead.
+fn opening_setup_reach_prior(state: &GameState, player: u8) -> f32 {
     let mut site_values = vec![None::<f32>; state.board.vertices.len()];
     let mut frontier = state
         .board
@@ -210,9 +210,18 @@ fn opening_position_value(state: &GameState, player: u8, exact_hand: bool) -> f3
         .zip(scarcity)
         .map(|(pips, scarce)| *pips * scarce * 0.012)
         .sum::<f32>();
+    let expansion_value = if matches!(
+        state.phase,
+        Phase::SetupSettlement | Phase::SetupRoad { .. }
+    ) {
+        opening_setup_reach_prior(state, player)
+    } else {
+        let expansion = expansion_option_value(state, player);
+        expansion.value * 0.32 + expansion.portfolio_value * 0.22
+    };
     state.players[player as usize].public_victory_points as f32 * 1.8
         + opening_position_bonus(state, player, exact_hand)
-        + opening_road_reach(state, player)
+        + expansion_value
         + opening_port_option_value(state, player)
         + scarcity_alignment
         - opening_robber_concentration(state, player) * 0.22
@@ -605,9 +614,11 @@ pub(crate) fn opening_adjusted_priors(
 mod tests {
     use std::sync::Arc;
 
-    use colonist_catan_core::{Action, Building, GameState, Phase};
+    use colonist_catan_core::{Action, Building, GameState, Phase, SETTLEMENT_COST};
 
-    use super::{OpeningConfig, opening_position_bonus, solve_opening};
+    use super::{
+        OpeningConfig, opening_position_bonus, opening_position_value, solve_opening,
+    };
 
     #[test]
     fn second_road_is_anchored_to_the_second_settlement() {
@@ -694,6 +705,58 @@ mod tests {
                 .is_some_and(|action| legal.contains(action))
         );
         assert!(report.nodes < 250_000);
+    }
+
+    #[test]
+    fn completed_opening_expansion_prices_rival_affordability() {
+        let mut state = GameState::standard(103, 3);
+        state.phase = Phase::PreRoll;
+        state.current_player = 1;
+        state.buildings.fill(None);
+        state.roads.fill(None);
+        let (target, own_edge, rival_edge) = state
+            .board
+            .vertices
+            .iter()
+            .enumerate()
+            .find_map(|(vertex, candidate)| {
+                (candidate.adjacent_edges.len() >= 2).then_some((
+                    vertex,
+                    candidate.adjacent_edges[0],
+                    candidate.adjacent_edges[1],
+                ))
+            })
+            .expect("standard topology has a contested expansion vertex");
+        state.roads[own_edge as usize] = Some(0);
+        state.roads[rival_edge as usize] = Some(1);
+        state.players[0].roads_left = 14;
+        state.players[1].roads_left = 14;
+        state.players[0].settlements_left = 5;
+        state.players[1].settlements_left = 5;
+        state.players[0].resources = SETTLEMENT_COST;
+        state.players[1].resources = SETTLEMENT_COST;
+
+        let target_hexes = state.board.vertices[target].adjacent_hexes.clone();
+        let board = Arc::make_mut(&mut state.board);
+        for tile in &mut board.hexes {
+            if tile.resource.is_some() {
+                tile.number = 2;
+            }
+        }
+        for hex in target_hexes {
+            if board.hexes[hex as usize].resource.is_some() {
+                board.hexes[hex as usize].number = 6;
+            }
+        }
+
+        let funded_rival = opening_position_value(&state, 0, true);
+        state.players[1].resources = [0; 5];
+        let starved_rival = opening_position_value(&state, 0, true);
+
+        assert!(
+            starved_rival > funded_rival + 0.05,
+            "completed opening value must discount expansion sites that a funded rival can win before a resource-starved rival",
+        );
     }
 
     #[test]
