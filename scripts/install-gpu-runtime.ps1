@@ -84,9 +84,13 @@ foreach ($RegistryKey in $RegistryKeys) {
   Set-Item -Path $RegistryKey -Value $Manifest
 }
 
+$ObsoleteWindowsHost = Join-Path $DestDir 'colonist-assistant-gpu.exe'
+Remove-Item -Force -ErrorAction SilentlyContinue $ObsoleteWindowsHost
+
 Write-Host "Installed Colonist GPU Runtime for $HostName"
 Write-Host "Authorized extension IDs: $($ExtensionIds -join ', ')"
 Write-Host "Trusted WSL companion: $WslDistro $LinuxHostPath"
 Write-Host "Native host manifest: $Manifest"
 Write-Host 'Registered the same runtime for Google Chrome and Microsoft Edge.'
+Write-Host 'Removed the obsolete Windows strategy companion if it was present.'
 Write-Host 'Future Linux companion rebuilds do not require rerunning this installer.'

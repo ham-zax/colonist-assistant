@@ -45,6 +45,8 @@ The installer writes these stable Windows-side artifacts under `%LOCALAPPDATA%\C
 - `gpu-runtime.conf`, containing only the trusted WSL distribution and Linux companion path;
 - `io.colonist_assistant.gpu.json`, whose `allowed_origins` contains only the exact supplied extension IDs.
 
+After the new runtime and both browser registrations are in place, the installer removes the obsolete Windows strategy binary `colonist-assistant-gpu.exe` if it is present. It does not remove the Linux/WSL companion.
+
 The same manifest is registered for both browsers:
 
 ```text
@@ -75,4 +77,4 @@ No development-only manifest key is added. Rebuilding the contents of the same u
 
 ## Windows strategy ownership
 
-The former `scripts/install-gpu-host.ps1` Windows-native strategy installation path is retired. The repository had no demonstrated release or fallback consumer for maintaining a second Windows copy of the Catan/CUDA strategy engine. On Windows, the permanent Colonist GPU Runtime is the browser-facing component and WSL is the trusted strategy/GPU backend.
+The former `scripts/install-gpu-host.ps1` Windows-native strategy installation path is retired. The repository had no demonstrated release or fallback consumer for maintaining a second Windows copy of the Catan/CUDA strategy engine. On Windows, the permanent Colonist GPU Runtime is the browser-facing component and WSL is the trusted strategy/GPU backend; the one-time migration removes an obsolete installed `colonist-assistant-gpu.exe` after the Runtime registration succeeds.
