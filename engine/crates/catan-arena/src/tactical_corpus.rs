@@ -259,6 +259,8 @@ pub struct TacticalProposalProbe {
     #[serde(default)]
     pub match_kind: bool,
     #[serde(default)]
+    pub match_consequence: bool,
+    #[serde(default)]
     pub min_proposal_rate: Option<f32>,
     #[serde(default)]
     pub max_proposal_rate: Option<f32>,

@@ -2,9 +2,9 @@ use std::path::PathBuf;
 
 use colonist_catan_arena::tactical_corpus::{
     apply_hidden_variant, build_state, default_corpus_path, load_tactical_corpus,
-    rebalance_tactical_bank, verify_mechanical_consequence, TacticalCorpus,
+    rebalance_tactical_bank, verify_mechanical_consequence, TacticalCorpus, TacticalScenario,
 };
-use colonist_catan_core::{Action, GameState};
+use colonist_catan_core::{Action, GameState, Phase, SETTLEMENT_COST};
 use colonist_catan_search::{
     posterior_expected_tactical_threat_weight, posterior_immediate_threat_weight, CudaSimEngine,
 };
@@ -161,6 +161,54 @@ fn same_action_kind(left: &Action, right: &Action) -> bool {
     std::mem::discriminant(left) == std::mem::discriminant(right)
 }
 
+fn proposal_matches_declared_consequence(
+    scenario: &TacticalScenario,
+    state: &GameState,
+    action: &Action,
+) -> bool {
+    let mut next = state.clone();
+    if next.apply(action).is_err() {
+        return false;
+    }
+    let actor = scenario.state.active_player;
+    match scenario.declared_consequence.as_str() {
+        "road_building_settlement_win" => next.legal_actions().into_iter().any(|follow_up| {
+            if !matches!(follow_up, Action::BuildSettlement { .. }) {
+                return false;
+            }
+            let mut won = next.clone();
+            won.apply(&follow_up).is_ok() && won.winner() == Some(actor)
+        }),
+        "road_building_longest_road_win" => {
+            next.longest_road_holder == Some(actor) && next.winner() == Some(actor)
+        }
+        "road_building_bypass" => {
+            let Some(expect) = &scenario.mechanical else {
+                return false;
+            };
+            let (Some(vertex), Some(cut_player), Some(holder)) = (
+                expect.bypass_cut_vertex,
+                expect.bypass_cut_player,
+                expect.bypass_holder,
+            ) else {
+                return false;
+            };
+            let mut cut = next;
+            cut.current_player = cut_player;
+            cut.phase = Phase::Main;
+            cut.players[cut_player as usize].resources = SETTLEMENT_COST;
+            if rebalance_tactical_bank(&mut cut).is_err() {
+                return false;
+            }
+            let cut_action = Action::BuildSettlement { vertex };
+            cut.legal_actions().contains(&cut_action)
+                && cut.apply(&cut_action).is_ok()
+                && cut.longest_road_holder == Some(holder)
+        }
+        _ => false,
+    }
+}
+
 fn sample_proposals(
     engine: &mut CudaSimEngine,
     state: &GameState,
@@ -268,7 +316,9 @@ fn main() {
             let proposal_frequency = generated
                 .iter()
                 .filter(|action| {
-                    if probe.match_kind {
+                    if probe.match_consequence {
+                        proposal_matches_declared_consequence(scenario, &probe_state, action)
+                    } else if probe.match_kind {
                         same_action_kind(action, &probe_action)
                     } else {
                         **action == probe_action

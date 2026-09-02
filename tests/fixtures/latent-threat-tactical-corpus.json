@@ -586,7 +586,7 @@
         {"kind":"play-road-building","edge":5,"secondEdge":7},
         {"kind":"end-turn"}
       ],
-      "proposalProbe": {"player":1,"resources":[1,1,1,1,0],"action":{"kind":"play-road-building","edge":1,"secondEdge":19},"minProposalRate":0.20},
+      "proposalProbe": {"player":1,"resources":[1,1,1,1,0],"action":{"kind":"play-road-building","edge":1,"secondEdge":19},"matchConsequence":true,"minProposalRate":0.20},
       "threatProbe": {"protectedPlayer":0,"expectedWeight":1.0},
       "mechanical": {"action":{"kind":"play-road-building","edge":1,"secondEdge":19},"followUp":{"kind":"build-settlement","vertex":17},"winnerAfterSequence":1},
       "expectedBestRoot": {"kind":"play-road-building","edge":1,"secondEdge":19},
@@ -616,7 +616,7 @@
         {"kind":"play-road-building","edge":5,"secondEdge":7},
         {"kind":"end-turn"}
       ],
-      "proposalProbe": {"player":1,"resources":[0,0,0,0,0],"action":{"kind":"play-road-building","edge":4,"secondEdge":8},"minProposalRate":0.20},
+      "proposalProbe": {"player":1,"resources":[0,0,0,0,0],"action":{"kind":"play-road-building","edge":4,"secondEdge":8},"matchConsequence":true,"minProposalRate":0.20},
       "threatProbe": {"protectedPlayer":0,"expectedWeight":1.0},
       "mechanical": {"action":{"kind":"play-road-building","edge":4,"secondEdge":8},"longestRoadHolderAfterAction":1,"winnerAfterSequence":1},
       "expectedBestRoot": {"kind":"play-road-building","edge":4,"secondEdge":8},
@@ -636,7 +636,7 @@
         "development":[[0,0,0,0,0],[0,0,1,0,0],[0,0,0,0,0]]
       },
       "candidateRoots":[{"kind":"play-road-building","edge":5,"secondEdge":8},{"kind":"play-road-building","edge":7,"secondEdge":23},{"kind":"end-turn"}],
-      "proposalProbe":{"player":1,"resources":[0,0,0,0,0],"action":{"kind":"play-road-building","edge":5,"secondEdge":8},"minProposalRate":0.15},
+      "proposalProbe":{"player":1,"resources":[0,0,0,0,0],"action":{"kind":"play-road-building","edge":5,"secondEdge":8},"matchConsequence":true,"minProposalRate":0.15},
       "threatProbe":{"protectedPlayer":0,"expectedWeight":0.0},
       "mechanical":{"action":{"kind":"play-road-building","edge":5,"secondEdge":8},"longestRoadHolderAfterAction":1,"bypassCutVertex":2,"bypassCutPlayer":0,"bypassHolder":1},
       "enforceExplicitRootOrdering":false,
