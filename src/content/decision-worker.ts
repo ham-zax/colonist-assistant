@@ -43,6 +43,14 @@ export interface DecisionServiceStatus {
   initializationMs?: number;
 }
 
+export type DecisionRequestDisposition =
+  | "started"
+  | "queued"
+  | "duplicate"
+  | "completed"
+  | "context-invalidated"
+  | "destroyed";
+
 interface PendingDecision extends DecisionRequest {
   id: number;
   key: string;
@@ -51,6 +59,8 @@ interface PendingDecision extends DecisionRequest {
   callback: (analysis: DecisionAnalysis) => void;
   slowCallback?: (elapsedMs: number) => void;
   failureCallback?: (detail: string) => void;
+  startCallback?: () => void;
+  waitedForActive: boolean;
 }
 
 export class DecisionWorkerClient {
@@ -110,10 +120,11 @@ export class DecisionWorkerClient {
     failureCallback?: (detail: string) => void,
     searchConstraints?: DecisionSearchConstraints,
     playerTradesEnabled = true,
-  ): boolean {
+    startCallback?: () => void,
+  ): DecisionRequestDisposition {
+    if (this.destroyed) return "destroyed";
+    if (this.contextInvalidated) return "context-invalidated";
     if (
-      this.destroyed ||
-      this.contextInvalidated ||
       (
         this.active?.key === key &&
         this.active.generation === this.generation
@@ -121,11 +132,12 @@ export class DecisionWorkerClient {
       (
         this.queued?.key === key &&
         this.queued.generation === this.generation
-      ) ||
-      key === this.completedKey
+      )
     ) {
-      return false;
+      return "duplicate";
     }
+    if (key === this.completedKey) return "completed";
+    const waitedForActive = Boolean(this.active);
     this.queued = {
       id: this.nextId++,
       key,
@@ -138,12 +150,14 @@ export class DecisionWorkerClient {
       callback,
       ...(slowCallback ? { slowCallback } : {}),
       ...(failureCallback ? { failureCallback } : {}),
+      ...(startCallback ? { startCallback } : {}),
       ...(searchConstraints ? { searchConstraints } : {}),
       playerTradesEnabled,
+      waitedForActive,
     };
     this.desiredKey = key;
     this.pump();
-    return true;
+    return waitedForActive ? "queued" : "started";
   }
 
   private pump(): void {
@@ -151,6 +165,7 @@ export class DecisionWorkerClient {
     const request = this.queued;
     this.queued = undefined;
     this.active = request;
+    if (request.waitedForActive) request.startCallback?.();
     const startedAt = performance.now();
     const slowDecisionMs = slowDecisionThresholdMs(request);
     const message: DecisionMessage = {
@@ -190,6 +205,7 @@ export class DecisionWorkerClient {
       if (!stale) request.slowCallback?.(elapsedMs);
     }, slowDecisionMs);
     let recoveryTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
+    let settledFailure: string | undefined;
     const response = Promise.race([
       this.send(message),
       new Promise<DecisionMessageResponse>((resolve) => {
@@ -250,9 +266,8 @@ export class DecisionWorkerClient {
           return;
         }
         if (!response.analysis) {
-          request.failureCallback?.(
-            response.error ?? "Decision service returned no analysis",
-          );
+          settledFailure =
+            response.error ?? "Decision service returned no analysis";
           return;
         }
         this.completedKey = request.key;
@@ -264,6 +279,13 @@ export class DecisionWorkerClient {
           globalThis.clearTimeout(recoveryTimer);
         }
         if (this.active?.id === request.id) this.active = undefined;
+        if (
+          settledFailure &&
+          request.generation === this.generation &&
+          request.key === this.desiredKey
+        ) {
+          request.failureCallback?.(settledFailure);
+        }
         this.pump();
       });
   }

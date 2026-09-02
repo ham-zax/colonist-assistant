@@ -73,6 +73,38 @@ afterEach(() => {
 });
 
 describe("overlay settings interaction", () => {
+  it("does not reread the extension manifest when settings rerender after context invalidation", () => {
+    const getManifest = vi.fn(() => ({
+      manifest_version: 3 as const,
+      name: "Colonist Assistant",
+      version: "0.7.12",
+    }));
+    chrome.runtime.getManifest = getManifest;
+
+    const overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS },
+      { reset: vi.fn() },
+    );
+    const root = document.querySelector<HTMLDivElement>(
+      "#colonist-assistant-root",
+    )!;
+    const shadow = root.shadowRoot!;
+
+    shadow
+      .querySelector<HTMLElement>("[data-action='view'][data-view='settings']")!
+      .click();
+
+    getManifest.mockImplementation(() => {
+      throw new Error("Extension context invalidated.");
+    });
+
+    expect(() => overlay.update(undefined)).not.toThrow();
+    expect(
+      shadow.querySelector<HTMLElement>(".settings-version strong")?.textContent,
+    ).toContain("v0.7.12");
+    overlay.destroy();
+  });
+
   it("allows autonomous clicks whenever autopilot is enabled", () => {
     expect(autonomousExecutionAllowed(false)).toBe(false);
     expect(autonomousExecutionAllowed(true)).toBe(true);
@@ -430,7 +462,7 @@ describe("overlay settings interaction", () => {
     overlay.destroy();
   });
 
-  it("presents Strategist as the single decision authority", () => {
+  it("presents the connected MaxN and Weighted engine selector", () => {
     const overlay = new AssistantOverlay(
       { ...DEFAULT_SETTINGS },
       { reset: vi.fn() },
@@ -442,10 +474,15 @@ describe("overlay settings interaction", () => {
     shadow
       .querySelector<HTMLElement>("[data-action='view'][data-view='settings']")!
       .click();
-    expect(shadow.querySelector("select[data-setting='engine']")).toBeNull();
-    expect(
-      shadow.querySelector<HTMLElement>(".engine-field strong")?.textContent,
-    ).toContain("Strategist");
+    const engine = shadow.querySelector<HTMLSelectElement>(
+      "select[data-setting='engine']",
+    );
+    expect(engine).not.toBeNull();
+    expect(engine?.value).toBe("deep-search");
+    expect([...(engine?.options ?? [])].map((option) => option.value)).toEqual([
+      "deep-search",
+      "weighted",
+    ]);
     overlay.destroy();
   });
 

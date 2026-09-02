@@ -346,6 +346,7 @@ export class AssistantOverlay {
   private decisionRuntimeDetail = "Connecting to the packaged search engine.";
   private decisionRuntimeError = "";
   private decisionContextInvalidated = false;
+  private decisionWaitingForPreviousSearch = false;
   private lastRejectedDomesticTrade?: DomesticTradeState;
   private readonly rootTradeActionExclusions: RootTradeActionExclusion[] = [];
   private readonly failedTradeActions = new Set<string>();
@@ -393,14 +394,14 @@ export class AssistantOverlay {
       if (status.runtime === "background-wasm") {
         this.decisionRuntime = status.runtime;
         this.decisionRuntimeError = "";
-        this.decisionContextInvalidated = false;
         this.decisionRuntimeDetail =
           `${status.detail}${status.initializationMs !== undefined ? ` in ${Math.max(1, Math.round(status.initializationMs))} ms` : ""}.`;
       } else {
         this.decisionRuntime = undefined;
         this.decisionRuntimeError = status.detail;
-        this.decisionContextInvalidated =
-          status.detail === EXTENSION_CONTEXT_RELOAD_MESSAGE;
+        if (status.detail === EXTENSION_CONTEXT_RELOAD_MESSAGE) {
+          this.decisionContextInvalidated = true;
+        }
       }
       this.render();
     });
@@ -568,6 +569,7 @@ export class AssistantOverlay {
       this.decisionKey = "";
       this.decisionPendingKey = "";
       this.decisionSlowKey = "";
+      this.decisionWaitingForPreviousSearch = false;
       this.decisionRuntimeError = "";
       this.decisionWorker.reset();
       this.winPredictions.reset();
@@ -623,6 +625,7 @@ export class AssistantOverlay {
       this.decisionKey = "";
       this.decisionPendingKey = "";
       this.decisionSlowKey = "";
+      this.decisionWaitingForPreviousSearch = false;
       this.decisionRuntimeError = "";
       this.decisionWorker.reset();
       this.activeSpatial = undefined;
@@ -650,6 +653,7 @@ export class AssistantOverlay {
       this.decisionKey = "";
       this.decisionPendingKey = "";
       this.decisionSlowKey = "";
+      this.decisionWaitingForPreviousSearch = false;
       this.decisionRuntimeError = "";
       this.decisionWorker.reset();
       this.winPredictions.reset();
@@ -673,6 +677,7 @@ export class AssistantOverlay {
     this.decisionKey = "";
     this.decisionPendingKey = "";
     this.decisionSlowKey = "";
+    this.decisionWaitingForPreviousSearch = false;
     this.decisionRuntimeError = "";
     this.decisionWorker.reset();
     this.winPredictions.reset();
@@ -757,6 +762,10 @@ export class AssistantOverlay {
         void this.exportGameRecord();
         return;
       }
+      if (action === "retry-engine") {
+        this.retryDecisionEngine();
+        return;
+      }
       this.render();
     });
 
@@ -780,6 +789,7 @@ export class AssistantOverlay {
       }
       if (target instanceof HTMLSelectElement) {
         if (target.dataset.setting === "engine") {
+          this.releaseSettingsInteraction(target, false);
           this.applySettings({
             ...this.settings,
             engine: normalizeDecisionEngine(target.value),
@@ -787,43 +797,30 @@ export class AssistantOverlay {
           return;
         }
         if (target.dataset.setting === "autopilotDelaySeconds") {
+          this.releaseSettingsInteraction(target, false);
           this.applySettings({
             ...this.settings,
             autopilotDelaySeconds: normalizeAutopilotDelaySeconds(
               Number(target.value),
             ),
           });
-          this.renderGate.release("autopilot-delay");
         }
       }
     });
 
     this.shadow.addEventListener("pointerdown", (event) => {
       const target = event.composedPath?.()?.[0];
-      if (
-        target instanceof HTMLSelectElement &&
-        target.dataset.setting === "autopilotDelaySeconds"
-      ) {
-        this.renderGate.hold("autopilot-delay");
-      }
+      const key = this.settingsInteractionKey(target);
+      if (key) this.renderGate.hold(key);
     });
     this.shadow.addEventListener("focusin", (event) => {
       const target = event.composedPath?.()?.[0];
-      if (
-        target instanceof HTMLSelectElement &&
-        target.dataset.setting === "autopilotDelaySeconds"
-      ) {
-        this.renderGate.hold("autopilot-delay");
-      }
+      const key = this.settingsInteractionKey(target);
+      if (key) this.renderGate.hold(key);
     });
     this.shadow.addEventListener("focusout", (event) => {
       const target = event.composedPath?.()?.[0];
-      if (
-        target instanceof HTMLSelectElement &&
-        target.dataset.setting === "autopilotDelaySeconds"
-      ) {
-        this.renderGate.release("autopilot-delay");
-      }
+      this.releaseSettingsInteraction(target, true);
     });
 
     this.shadow.addEventListener("pointerdown", (event) => {
@@ -1037,6 +1034,38 @@ export class AssistantOverlay {
     this.decisionKey = "";
     this.decisionPendingKey = "";
     this.decisionWorker.reset();
+  }
+
+  private settingsInteractionKey(
+    target: EventTarget | null | undefined,
+  ): string | undefined {
+    if (!(target instanceof HTMLSelectElement)) return undefined;
+    const setting = target.dataset.setting;
+    return setting === "engine" || setting === "autopilotDelaySeconds"
+      ? `settings-select:${setting}`
+      : undefined;
+  }
+
+  private releaseSettingsInteraction(
+    target: EventTarget | null | undefined,
+    renderDeferred: boolean,
+  ): void {
+    const key = this.settingsInteractionKey(target);
+    if (!key) return;
+    const shouldRender = this.renderGate.release(key);
+    if (renderDeferred && shouldRender) this.render();
+  }
+
+  private retryDecisionEngine(): void {
+    if (this.decisionContextInvalidated) return;
+    this.decisionAnalysis = undefined;
+    this.decisionPendingKey = "";
+    this.decisionSlowKey = "";
+    this.decisionWaitingForPreviousSearch = false;
+    this.decisionRuntimeError = "";
+    this.decisionRuntimeDetail = "Retrying the selected WASM engine.";
+    this.decisionWorker.reset();
+    this.render();
   }
 
   private applySettings(settings: AssistantSettings): void {
@@ -1774,18 +1803,28 @@ export class AssistantOverlay {
   } {
     const observedRuntime =
       this.decisionAnalysis?.runtime ?? this.decisionRuntime;
+    if (this.decisionContextInvalidated) {
+      return {
+        label: "Reload tab",
+        detail: EXTENSION_CONTEXT_RELOAD_MESSAGE,
+        state: "error",
+      };
+    }
     if (this.decisionRuntimeError) {
-      if (this.decisionContextInvalidated) {
-        return {
-          label: "Reload tab",
-          detail: EXTENSION_CONTEXT_RELOAD_MESSAGE,
-          state: "error",
-        };
-      }
       return {
         label: "WASM error",
-        detail: `${this.decisionRuntimeError} The selected engine will retry on the next board update; reload the extension and this Colonist tab if it persists. No other algorithm was substituted.`,
+        detail: `${this.decisionRuntimeError} Retry the selected engine when ready. No other algorithm was substituted.`,
         state: "error",
+      };
+    }
+    if (
+      this.decisionWaitingForPreviousSearch &&
+      this.decisionPendingKey
+    ) {
+      return {
+        label: "Waiting for previous search",
+        detail: `An obsolete search is still finishing. ${this.decisionEngineLabel()} is queued and will start as soon as the background worker is free.`,
+        state: "connecting",
       };
     }
     if (this.decisionPendingKey) {
@@ -2064,6 +2103,19 @@ export class AssistantOverlay {
     ) {
       this.decisionPendingKey = "";
       this.decisionSlowKey = "";
+      this.decisionWaitingForPreviousSearch = false;
+      return;
+    }
+    if (this.decisionContextInvalidated) {
+      this.decisionPendingKey = "";
+      this.decisionSlowKey = "";
+      this.decisionWaitingForPreviousSearch = false;
+      return;
+    }
+    if (this.decisionRuntimeError) {
+      this.decisionPendingKey = "";
+      this.decisionSlowKey = "";
+      this.decisionWaitingForPreviousSearch = false;
       return;
     }
     if (
@@ -2162,14 +2214,15 @@ export class AssistantOverlay {
     if (key !== this.decisionKey) {
       this.decisionKey = key;
       this.decisionAnalysis = undefined;
-      this.decisionPendingKey = key;
+      this.decisionPendingKey = "";
       this.decisionSlowKey = "";
+      this.decisionWaitingForPreviousSearch = false;
       this.decisionRuntimeError = "";
       if (board.isMyTurn || hasPendingIncomingTrade) {
         this.decisionTraces.begin(traceKey, state, board);
       }
     }
-    const requested = this.decisionWorker.request(
+    const requestDisposition = this.decisionWorker.request(
       key,
       state,
       {
@@ -2184,8 +2237,8 @@ export class AssistantOverlay {
         if (this.decisionKey !== key) return;
         this.decisionPendingKey = "";
         this.decisionSlowKey = "";
+        this.decisionWaitingForPreviousSearch = false;
         this.decisionRuntimeError = "";
-        this.decisionContextInvalidated = false;
         this.decisionAnalysis = analysis;
         this.decisionTraces.complete(traceKey, analysis);
         if (analysis.runtime) {
@@ -2212,6 +2265,7 @@ export class AssistantOverlay {
         if (this.decisionKey !== key || this.decisionPendingKey !== key) {
           return;
         }
+        this.decisionWaitingForPreviousSearch = false;
         this.decisionSlowKey = key;
         this.decisionTraces.slow(traceKey);
         this.render();
@@ -2220,12 +2274,14 @@ export class AssistantOverlay {
         if (this.decisionKey !== key) return;
         // Keep authoritative-decision gates closed. A failed WASM request
         // must never expose an executable coaching fallback.
-        this.decisionPendingKey = key;
+        this.decisionPendingKey = "";
         this.decisionSlowKey = "";
+        this.decisionWaitingForPreviousSearch = false;
         this.decisionAnalysis = undefined;
-        this.decisionContextInvalidated =
+        const contextInvalidated =
           detail === EXTENSION_CONTEXT_RELOAD_MESSAGE ||
           isExtensionContextInvalidatedError(detail);
+        if (contextInvalidated) this.decisionContextInvalidated = true;
         const displayedDetail = this.decisionContextInvalidated
           ? EXTENSION_CONTEXT_RELOAD_MESSAGE
           : detail;
@@ -2243,16 +2299,41 @@ export class AssistantOverlay {
       },
       searchConstraints,
       !this.settings.disablePlayerTrades,
+      () => {
+        if (
+          this.decisionKey !== key ||
+          this.decisionContextInvalidated ||
+          this.decisionPendingKey !== key
+        ) {
+          return;
+        }
+        this.decisionWaitingForPreviousSearch = false;
+        this.render();
+      },
     );
-    if (requested) {
+    if (
+      requestDisposition === "started" ||
+      requestDisposition === "queued"
+    ) {
       // A failed request may be retried for the same decision key. Associate
       // each accepted worker request with a bounded attempt record instead of
       // letting a later success overwrite the earlier failure evidence.
       this.decisionTraces.begin(traceKey, state, board);
       this.decisionPendingKey = key;
       this.decisionSlowKey = "";
+      this.decisionWaitingForPreviousSearch = requestDisposition === "queued";
       this.decisionRuntimeError = "";
-      this.decisionContextInvalidated = false;
+      return;
+    }
+    if (requestDisposition === "context-invalidated") {
+      this.decisionPendingKey = "";
+      this.decisionSlowKey = "";
+      this.decisionWaitingForPreviousSearch = false;
+      this.decisionAnalysis = undefined;
+      this.decisionContextInvalidated = true;
+      this.decisionRuntimeError = EXTENSION_CONTEXT_RELOAD_MESSAGE;
+      this.decisionRuntimeDetail = EXTENSION_CONTEXT_RELOAD_MESSAGE;
+      this.decisionTraces.failure(traceKey, EXTENSION_CONTEXT_RELOAD_MESSAGE);
     }
   }
 
@@ -3301,17 +3382,23 @@ export class AssistantOverlay {
       return this.renderPlacementSync(this.pendingPlacement);
     }
     if (
-      this.decisionRuntimeError &&
+      (this.decisionRuntimeError || this.decisionContextInvalidated) &&
       isWasmDecisionEngine(this.settings.engine)
     ) {
+      const reloadRequired = this.decisionContextInvalidated;
+      const detail = reloadRequired
+        ? EXTENSION_CONTEXT_RELOAD_MESSAGE
+        : this.decisionRuntimeError;
       return `<section class="decision pending-decision" aria-live="assertive">
         <div class="decision-meta"><span>STRATEGIST PAUSED</span><span>NO FALLBACK</span></div>
         <div class="decision-command">
           <span class="command-art">${assistantMark()}</span>
-          <h1>Waiting for a valid engine result</h1>
+          <h1>${reloadRequired ? "Reload this Colonist tab" : "Waiting for a valid engine result"}</h1>
         </div>
-        <p class="why">${escapeHtml(this.decisionRuntimeError)}. No heuristic recommendation or autonomous action can replace the failed decision.</p>
-        <div class="board-confirm pending"><i></i><span>The engine will retry after the next authoritative board update</span></div>
+        <p class="why">${escapeHtml(detail)}. No heuristic recommendation or autonomous action can replace the failed decision.</p>
+        ${reloadRequired
+          ? `<div class="board-confirm pending"><i></i><span>Reload the tab to reconnect this content script</span></div>`
+          : `<div class="board-confirm pending"><i></i><span>The selected engine is paused after a transient failure</span></div><button class="reset-link" type="button" data-action="retry-engine">Retry selected engine</button>`}
       </section>`;
     }
     const discard = this.discardRecommendation(state);

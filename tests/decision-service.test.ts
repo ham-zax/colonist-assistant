@@ -203,7 +203,7 @@ describe("decision service client", () => {
         "deep-search",
         callback,
       ),
-    ).toBe(false);
+    ).toBe("context-invalidated");
     expect(sendMessage).toHaveBeenCalledOnce();
     client.destroy();
   });
@@ -255,7 +255,9 @@ describe("decision service client", () => {
     expect(failure).not.toHaveBeenCalled();
     expect(sendMessage).toHaveBeenCalledOnce();
     expect(warning).toHaveBeenCalledWith(
-      "[Colonist Assistant] Decision still running",
+      expect.stringMatching(
+        /^\[Colonist Assistant\] Decision still running \(deep-search, \d+ ms\)$/u,
+      ),
       expect.objectContaining({
         engine: "deep-search",
         policy: "selected-engine-only",
@@ -501,7 +503,9 @@ describe("decision service client", () => {
     await vi.advanceTimersByTimeAsync(1_100);
 
     expect(warning).toHaveBeenCalledWith(
-      "[Colonist Assistant] Slow decision",
+      expect.stringMatching(
+        /^\[Colonist Assistant\] Slow decision \(deep-search, \d+ ms total\)$/u,
+      ),
       expect.objectContaining({
         key: "slow-position",
         engine: "deep-search",

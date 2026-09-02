@@ -6,8 +6,11 @@ export class InteractionRenderGate {
     this.locks.add(key);
   }
 
-  release(key: string): void {
+  release(key: string): boolean {
     this.locks.delete(key);
+    if (this.locks.size > 0 || !this.deferred) return false;
+    this.deferred = false;
+    return true;
   }
 
   tryRender(): boolean {

@@ -149,6 +149,7 @@ let workflowOptions: ActionGuideOptions | undefined;
 let workflowCurrentElement: HTMLElement | undefined;
 let currentGuideOptions: ActionGuideOptions | undefined;
 let currentGuideAction: NextClick | undefined;
+let manualExecutionCleanup: (() => void) | undefined;
 let activeBoardFollowupSignature = "";
 let tradePreflightSignature = "";
 const boardCommandAttempts = new Map<string, number>();
@@ -980,6 +981,38 @@ const validatedClick = (
     options.onExecution?.({ succeeded: true, signature });
   }
   return true;
+};
+
+const installManualExecutionObserver = (
+  action: NextClick,
+  element: HTMLElement | undefined,
+  options: ActionGuideOptions,
+): void => {
+  manualExecutionCleanup?.();
+  manualExecutionCleanup = undefined;
+  if (options.autonomous || !element || action.kind === "board") return;
+
+  const handler = () => {
+    manualExecutionCleanup = undefined;
+    if (options.validate && !options.validate()) {
+      options.onExecution?.({
+        succeeded: false,
+        signature: action.signature,
+        reason: "State signature or legal target set changed before execution",
+      });
+      requestBoardRefresh();
+      return;
+    }
+    lastClickSignature = action.signature;
+    options.onExecutionStart?.({ signature: action.signature });
+    options.onExecution?.({
+      succeeded: true,
+      signature: action.signature,
+    });
+    requestBoardRefresh();
+  };
+  element.addEventListener("click", handler, { once: true });
+  manualExecutionCleanup = () => element.removeEventListener("click", handler);
 };
 
 const maybeAutoclick = (
@@ -2030,6 +2063,8 @@ export const renderActionGuide = (
   if (deactivatingAutopilot) cancelAutonomousContinuations();
   currentGuideOptions = options;
   currentGuideAction = action;
+  manualExecutionCleanup?.();
+  manualExecutionCleanup = undefined;
   if (
     pendingAutopilotSignature &&
     pendingAutopilotSignature !== action?.signature
@@ -2147,6 +2182,7 @@ export const renderActionGuide = (
   if (options.highlight) drawHighlight(action, element);
   else document.getElementById(ROOT_ID)?.remove();
   installFollowupGuide(action, element, options);
+  installManualExecutionObserver(action, element, options);
   maybeAutoclick(action, element, options);
 };
 
@@ -2157,6 +2193,8 @@ export const destroyActionGuide = (): void => {
   cancelWorkflow();
   currentGuideOptions = undefined;
   currentGuideAction = undefined;
+  manualExecutionCleanup?.();
+  manualExecutionCleanup = undefined;
   tradePreflightSignature = "";
   for (const timer of followupTimers) window.clearTimeout(timer);
   followupTimers.clear();
