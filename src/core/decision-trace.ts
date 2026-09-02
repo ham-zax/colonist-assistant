@@ -2,11 +2,13 @@ import type { BoardSnapshot } from "./placement";
 import { DECISION_TRACE_STORAGE_KEY } from "./local-data";
 import { RESOURCE_ORDER } from "./resources";
 import type { ResourceVector } from "./resources";
+import { explainDeepSearchDecision } from "./engine";
 import type {
   DeepSearchAction,
   DeepSearchAuthorityTrace,
   DeepSearchEffectiveEffort,
   DeepSearchRootProvenance,
+  DecisionRationale,
   DecisionAnalysis,
   DecisionAuthority,
   DecisionSearchConstraints,
@@ -130,6 +132,7 @@ export interface DecisionTrace {
   engineRevision?: string;
   algorithm?: string;
   effectiveSearchEffort?: DeepSearchEffectiveEffort;
+  decisionRationale?: DecisionRationale;
   searchElapsedMs?: number;
   searchStages?: DecisionTraceSearchStages;
   iterations?: number;
@@ -387,6 +390,9 @@ export class DecisionTraceRecorder {
     trace.algorithm = analysis.deepSearch?.algorithm;
     trace.effectiveSearchEffort = analysis.deepSearch?.effectiveSearchEffort
       ? structuredClone(analysis.deepSearch.effectiveSearchEffort)
+      : undefined;
+    trace.decisionRationale = analysis.deepSearch
+      ? explainDeepSearchDecision(analysis.deepSearch)
       : undefined;
     trace.searchElapsedMs = analysis.deepSearch?.elapsedMs;
     trace.searchStages = analysis.deepSearch?.searchStages;

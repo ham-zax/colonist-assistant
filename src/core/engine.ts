@@ -1,5 +1,6 @@
 import {
   BUILD_COSTS,
+  RESOURCE_LABELS,
   RESOURCE_ORDER,
   RESOURCE_STRATEGIC_WEIGHTS,
   cloneResources,
@@ -213,6 +214,295 @@ export interface DeepSearchResult {
   elapsedMs: number;
   seed: number;
 }
+
+export interface DecisionRationale {
+  summary: string;
+  reasons: string[];
+  evidence: string[];
+}
+
+const deepSearchActionKey = (action: DeepSearchAction | undefined): string =>
+  JSON.stringify(
+    action
+      ? [
+          action.kind,
+          action.tradeId ?? null,
+          action.targetId ?? null,
+          action.secondTargetId ?? null,
+          action.player ?? null,
+          action.resource ?? null,
+          action.otherResource ?? null,
+          action.ratio ?? null,
+          action.cards ?? null,
+          action.receiveCards ?? null,
+          action.recipients ?? null,
+          action.accept ?? null,
+        ]
+      : null,
+  );
+
+const sameDeepSearchAction = (
+  left: DeepSearchAction | undefined,
+  right: DeepSearchAction | undefined,
+): boolean => deepSearchActionKey(left) === deepSearchActionKey(right);
+
+const fixedScore = (value: number | undefined): string =>
+  Number.isFinite(value) ? (value as number).toFixed(3) : "n/a";
+
+const percentWeight = (value: number | undefined): string =>
+  `${Math.round(Math.max(0, Math.min(1, value ?? 0)) * 100)}%`;
+
+const tupleLabel = (
+  cards: [number, number, number, number, number] | undefined,
+): string => {
+  if (!cards) return "resources";
+  const parts = RESOURCE_ORDER.flatMap((resource, index) => {
+    const count = cards[index] ?? 0;
+    return count > 0
+      ? [`${count > 1 ? `${count}× ` : ""}${RESOURCE_LABELS[resource].toLowerCase()}`]
+      : [];
+  });
+  return parts.length ? parts.join(" + ") : "nothing";
+};
+
+export const describeDeepSearchAction = (action: DeepSearchAction): string => {
+  const target = action.targetId ? ` at ${action.targetId}` : "";
+  switch (action.kind) {
+    case "roll":
+      return "roll the dice";
+    case "end-turn":
+      return "end the turn";
+    case "place-settlement":
+    case "build-settlement":
+      return `build a settlement${target}`;
+    case "build-city":
+      return `build a city${target}`;
+    case "place-road":
+    case "build-road":
+      return `build a road${target}`;
+    case "buy-development":
+      return "buy a development card";
+    case "move-robber":
+      return `move the robber${target}${action.player ? ` and steal from ${action.player}` : ""}`;
+    case "discard":
+      return `discard ${tupleLabel(action.cards)}`;
+    case "maritime-trade":
+      return `trade ${action.ratio ?? 4}× ${action.resource ? RESOURCE_LABELS[action.resource].toLowerCase() : "a resource"} for ${action.otherResource ? RESOURCE_LABELS[action.otherResource].toLowerCase() : "another resource"}`;
+    case "offer-trade":
+      return `offer ${tupleLabel(action.cards)} for ${tupleLabel(action.receiveCards)}`;
+    case "counter-trade":
+      return `counter with ${tupleLabel(action.cards)} for ${tupleLabel(action.receiveCards)}`;
+    case "respond-trade":
+      return action.accept ? "accept the trade" : "decline the trade";
+    case "confirm-trade":
+      return action.player ? `trade with ${action.player}` : "confirm the accepted trade";
+    case "cancel-trade":
+      return "cancel the trade";
+    case "play-knight":
+      return `play Knight${target}${action.player ? ` and steal from ${action.player}` : ""}`;
+    case "play-monopoly":
+      return `play Monopoly${action.resource ? ` on ${RESOURCE_LABELS[action.resource]}` : ""}`;
+    case "play-road-building":
+      return "play Road Building";
+    case "play-year-of-plenty":
+      return `play Year of Plenty${action.resource ? ` for ${RESOURCE_LABELS[action.resource]}` : ""}${action.otherResource ? ` + ${RESOURCE_LABELS[action.otherResource]}` : ""}`;
+    default:
+      return action.kind.replaceAll("-", " ");
+  }
+};
+
+export const explainDeepSearchDecision = (
+  search: DeepSearchResult,
+): DecisionRationale | undefined => {
+  const chosen = search.chosen;
+  if (!chosen) return undefined;
+  const chosenLabel = describeDeepSearchAction(chosen);
+  const reasons: string[] = [];
+  const evidence: string[] = [];
+  let summary = `Strategist chose to ${chosenLabel}`;
+
+  const replacement =
+    search.authorityTrace.safetyReplacement ??
+    search.rootProvenance.safetyReplacement;
+  const exactReplacement =
+    search.authorityTrace.exactFamilyReplacement ??
+    search.rootProvenance.exactFamilyReplacement;
+  const exactCandidates = [...(search.exactActions ?? [])].sort(
+    (left, right) => right.comparatorScore - left.comparatorScore,
+  );
+  const chosenExact = exactCandidates.find((candidate) =>
+    sameDeepSearchAction(candidate.action, chosen),
+  );
+  const exactRunnerUp = exactCandidates.find(
+    (candidate) => !sameDeepSearchAction(candidate.action, chosen),
+  );
+  const chosenStats = search.actions.find((candidate) =>
+    sameDeepSearchAction(candidate.action, chosen),
+  );
+  const strategicRunnerUp = [...search.actions]
+    .filter((candidate) => !sameDeepSearchAction(candidate.action, chosen))
+    .sort(
+      (left, right) =>
+        (right.value[search.rootIndex] ?? Number.NEGATIVE_INFINITY) -
+        (left.value[search.rootIndex] ?? Number.NEGATIVE_INFINITY),
+    )[0];
+
+  if (search.authority === "exact-mandatory") {
+    summary = `Exact rules arbitration chose to ${chosenLabel}`;
+    reasons.push(
+      search.exactWorlds > 1
+        ? `The mandatory solver compared the legal choices across ${search.exactWorlds} weighted belief worlds`
+        : "The mandatory solver resolved the legal choices for this exact state",
+    );
+  } else if (search.authority === "tactical-proven") {
+    summary = `The current-turn tactical solver proved a line beginning with ${chosenLabel}`;
+    reasons.push(
+      search.tacticalLine.length > 1
+        ? `It found a forced tactical line ${search.tacticalLine.length} actions long`
+        : "It found a forced current-turn result, so deeper strategic ranking was not needed",
+    );
+  } else if (search.authority === "safety-override" && replacement) {
+    summary = `Safety arbitration chose to ${chosenLabel} instead of ${describeDeepSearchAction(replacement.from)}`;
+    reasons.push(
+      "The raw search leader triggered the engine's forced-loss or unsafe end-turn guard, so the safer legal alternative became authoritative",
+    );
+  } else if (search.authority === "exact-family") {
+    const family = search.authorityTrace.exactFamily?.replaceAll("-", " ");
+    summary = `Exact ${family ? `${family} ` : ""}arbitration chose to ${chosenLabel}`;
+    reasons.push(
+      "Strategic search chose the action family first; exact arbitration then selected the strongest concrete parameterization across the current belief set",
+    );
+  } else if (search.authority === "gpu-root-rollout") {
+    summary = `GPU root racing chose to ${chosenLabel}`;
+    reasons.push(
+      `The surviving root won the native GPU comparison after ${search.rollouts.toLocaleString()} rollout samples across ${search.rustSearchParticleCount.toLocaleString()} searched belief worlds`,
+    );
+    evidence.push(
+      "GPU roots are ordered by terminal outcome, then victory margin, then faster completion, with strategic prior as the final tie-break",
+    );
+  } else if (search.authority === "weighted-policy") {
+    summary = `The weighted policy chose to ${chosenLabel}`;
+    reasons.push(
+      "It had the highest one-step weighted value across the belief set, with strategic prior used only as a tie-break",
+    );
+  } else {
+    summary = `Deep MaxN chose to ${chosenLabel}`;
+  }
+
+  if (chosenExact) {
+    const comparison = exactRunnerUp
+      ? ` versus ${fixedScore(exactRunnerUp.comparatorScore)} for ${describeDeepSearchAction(exactRunnerUp.action)}`
+      : "";
+    reasons.push(
+      `Its exact comparator was ${fixedScore(chosenExact.comparatorScore)}${comparison}`,
+    );
+    evidence.push(
+      `Exact decision score ${fixedScore(chosenExact.decisionScore)}, lower score ${fixedScore(chosenExact.lowerScore)}, legal weight ${percentWeight(chosenExact.legalWeight)}`,
+    );
+  } else if (
+    chosenStats &&
+    (search.authority === "deep-maxn" || search.authority === "weighted-policy")
+  ) {
+    const chosenValue = chosenStats.value[search.rootIndex];
+    const runnerValue = strategicRunnerUp?.value[search.rootIndex];
+    if (Number.isFinite(chosenValue)) {
+      if (strategicRunnerUp && Number.isFinite(runnerValue)) {
+        const delta = (chosenValue ?? 0) - (runnerValue ?? 0);
+        reasons.push(
+          `Its completed root value was ${fixedScore(chosenValue)}, ${fixedScore(Math.abs(delta))} ${delta >= 0 ? "ahead of" : "behind"} ${describeDeepSearchAction(strategicRunnerUp.action)}`,
+        );
+      } else {
+        reasons.push(`Its completed root value was ${fixedScore(chosenValue)}`);
+      }
+    }
+  }
+
+  if (chosenStats) {
+    evidence.push(
+      `Chosen root legal weight ${percentWeight(chosenStats.legalWeight)}${Number.isFinite(chosenStats.lowerConfidenceValue[search.rootIndex]) ? `; lower-confidence value ${fixedScore(chosenStats.lowerConfidenceValue[search.rootIndex])}` : ""}`,
+    );
+  }
+
+  const ranked = search.rootProvenance.rankedRoots.find((candidate) =>
+    sameDeepSearchAction(candidate.action, chosen),
+  );
+  const retained = search.rootProvenance.retainedRoots.find((candidate) =>
+    sameDeepSearchAction(candidate.action, chosen),
+  );
+  if (ranked?.rank) {
+    evidence.push(
+      `Planner pre-rank #${ranked.rank}${retained ? `; ${retained.allocatedNodes.toLocaleString()} search nodes allocated across belief worlds` : ""}`,
+    );
+  }
+  const pruneCounts = search.rootProvenance.prunedRoots.reduce(
+    (counts, candidate) => {
+      counts[candidate.reason] = (counts[candidate.reason] ?? 0) + 1;
+      return counts;
+    },
+    {} as Partial<Record<DeepSearchPrunedRoot["reason"], number>>,
+  );
+  const pruneSummary = Object.entries(pruneCounts)
+    .filter(([, count]) => Boolean(count))
+    .map(([reason, count]) => `${count} ${reason.replaceAll("-", " ")}`)
+    .join(", ");
+  if (pruneSummary) {
+    evidence.push(`Root filtering removed ${pruneSummary}`);
+  }
+  if (exactReplacement && sameDeepSearchAction(exactReplacement.to, chosen)) {
+    evidence.push(
+      `Exact-family arbitration replaced ${describeDeepSearchAction(exactReplacement.from)} with this concrete action`,
+    );
+  }
+  if (replacement && sameDeepSearchAction(replacement.to, chosen)) {
+    evidence.push(
+      `Safety arbitration replaced ${describeDeepSearchAction(replacement.from)} with the final action`,
+    );
+  }
+
+  const effort = search.effectiveSearchEffort;
+  if (effort?.backend === "cpu") {
+    evidence.push(
+      `CPU effort: ${effort.timeBudgetMs} ms, depth cap ${effort.maxDepth}, root cap ${effort.rootCap}, ${effort.nodesPerDepthWave.toLocaleString()} nodes per depth wave`,
+    );
+  } else if (effort?.backend === "gpu") {
+    evidence.push(
+      `GPU effort: ${effort.timeBudgetMs} ms, root cap ${effort.rootCap}, rollout budget ${effort.rolloutBudget.toLocaleString()}, ${effort.rolloutSteps} rollout steps`,
+    );
+  }
+
+  if (search.searchStages) {
+    const stages = search.searchStages;
+    if (search.deadlineReached && !stages.floorComplete) {
+      evidence.push(
+        "The deadline was reached before the complete one-ply floor finished, so this recommendation has weaker fallback evidence",
+      );
+    } else if (
+      search.deadlineReached &&
+      stages.attemptedDepth > search.deepestDecisionDepth
+    ) {
+      evidence.push(
+        `The deadline arrived while attempting depth ${stages.attemptedDepth}; the returned recommendation uses the last completed decision depth ${search.deepestDecisionDepth}`,
+      );
+    }
+    evidence.push(
+      `Stage time: particle prep ${stages.particlePreparationMs} ms, root scoring ${stages.rootScoringMs} ms, exact families ${stages.exactFamiliesMs} ms, threat/safety ${stages.threatSafetyMs} ms, one-ply ${stages.onePlyFloorMs} ms, deep waves ${stages.deepWavesMs} ms`,
+    );
+  } else if (search.deadlineReached) {
+    evidence.push("The backend reached its decision deadline before returning");
+  }
+
+  if (search.tacticalProven) {
+    evidence.push(
+      `Tactical win estimate ${Math.round(search.tacticalWinProbability * 100)}% with ${Math.round(search.tacticalLowerBound * 100)}% lower bound`,
+    );
+  }
+
+  return {
+    summary,
+    reasons: reasons.slice(0, 4),
+    evidence: evidence.slice(0, 6),
+  };
+};
 
 export interface PlayerWinEstimate {
   player: string;
