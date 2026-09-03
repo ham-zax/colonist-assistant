@@ -2159,3 +2159,55 @@ fn building_code(building: Building) -> u32 {
         Building::City(player) => player as u32 + 5,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bank_shortage_single_player_cpu_gpu_parity() -> Result<(), Box<dyn std::error::Error>> {
+        const ROLL: u8 = 6;
+        let resource = Resource::Ore;
+        let resource_index = resource.index();
+        let mut state = GameState::standard(69_998, 3);
+        state.buildings.fill(None);
+        state.bank = [19; 5];
+        for player in &mut state.players {
+            player.resources = [0; 5];
+        }
+        for hex in &mut Arc::make_mut(&mut state.board).hexes {
+            hex.number = 2;
+        }
+        let target_hex = 0u8;
+        {
+            let tile = &mut Arc::make_mut(&mut state.board).hexes[target_hex as usize];
+            tile.resource = Some(resource);
+            tile.number = ROLL;
+        }
+        let vertex = state
+            .board
+            .vertices
+            .iter()
+            .position(|data| data.adjacent_hexes.contains(&target_hex))
+            .ok_or("production parity fixture had no vertex touching target hex")?;
+        state.buildings[vertex] = Some(Building::City(0));
+        state.robber_hex = 18;
+        state.bank[resource_index] = 1;
+        state.players[2].resources[resource_index] = 18;
+        state.phase = Phase::RollChance;
+
+        let mut engine = CudaSimEngine::new()?;
+        engine.upload_states(std::slice::from_ref(&state))?;
+        let action = Action::ResolveRoll { value: ROLL };
+        engine.apply_actions(std::slice::from_ref(&action))?;
+        state.apply(&action)?;
+
+        assert_eq!(state.players[0].resources[resource_index], 1);
+        assert_eq!(state.bank[resource_index], 0);
+        assert_eq!(
+            engine.download_packed_states()?.remove(0),
+            CudaSimPackedState::new(&state)?
+        );
+        Ok(())
+    }
+}

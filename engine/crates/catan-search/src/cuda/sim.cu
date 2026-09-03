@@ -964,11 +964,36 @@ static inline __device__ void produce_roll(
     const uint32_t players = state_get(states, stride, STATE_NUM_PLAYERS, lane);
     for (uint32_t resource = 0u; resource < 5u; ++resource) {
         uint32_t total = 0u;
+        uint32_t affected_players = 0u;
+        uint32_t sole_player = 0xffffffffu;
         for (uint32_t player = 0u; player < players; ++player) {
-            total += demand[player * 5u + resource];
+            const uint32_t owed = demand[player * 5u + resource];
+            total += owed;
+            if (owed > 0u) {
+                affected_players += 1u;
+                sole_player = player;
+            }
         }
         const uint32_t bank = state_get(states, stride, STATE_BANK + resource, lane);
         if (total > bank) {
+            if (affected_players == 1u && bank > 0u) {
+                const uint32_t held = player_get(
+                    states,
+                    stride,
+                    lane,
+                    sole_player,
+                    PLAYER_RESOURCES + resource
+                );
+                player_set(
+                    states,
+                    stride,
+                    lane,
+                    sole_player,
+                    PLAYER_RESOURCES + resource,
+                    held + bank
+                );
+                state_set(states, stride, STATE_BANK + resource, lane, 0u);
+            }
             continue;
         }
         state_set(states, stride, STATE_BANK + resource, lane, bank - total);

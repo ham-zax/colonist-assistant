@@ -867,13 +867,27 @@ impl GameState {
             }
         }
         for resource in Resource::ALL {
-            let total = demand.iter().map(|hand| hand[resource.index()]).sum::<u8>();
-            if total > self.bank[resource.index()] {
+            let index = resource.index();
+            let total = demand.iter().map(|hand| hand[index]).sum::<u8>();
+            if total > self.bank[index] {
+                let mut affected = demand
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, hand)| hand[index] > 0);
+                let Some((player, _)) = affected.next() else {
+                    continue;
+                };
+                if affected.next().is_some() {
+                    continue;
+                }
+                let payout = self.bank[index];
+                self.bank[index] = 0;
+                self.players[player].resources[index] += payout;
                 continue;
             }
-            self.bank[resource.index()] -= total;
+            self.bank[index] -= total;
             for (player, hand) in demand.iter().enumerate() {
-                self.players[player].resources[resource.index()] += hand[resource.index()];
+                self.players[player].resources[index] += hand[index];
             }
         }
     }
@@ -2150,6 +2164,60 @@ mod tests {
         }
     }
 
+    const PRODUCTION_TEST_ROLL: u8 = 6;
+
+    fn production_fixture() -> GameState {
+        let mut state = GameState::standard(41_001, 3);
+        state.buildings.fill(None);
+        state.bank = [19; 5];
+        for player in &mut state.players {
+            player.resources = [0; 5];
+        }
+        for hex in &mut std::sync::Arc::make_mut(&mut state.board).hexes {
+            hex.number = 2;
+        }
+        state.robber_hex = 18;
+        state
+    }
+
+    fn configure_production_hex(state: &mut GameState, hex: u8, resource: Resource) {
+        let tile = &mut std::sync::Arc::make_mut(&mut state.board).hexes[hex as usize];
+        tile.resource = Some(resource);
+        tile.number = PRODUCTION_TEST_ROLL;
+    }
+
+    fn vertices_touching_hex(state: &GameState, hex: u8) -> Vec<usize> {
+        state
+            .board
+            .vertices
+            .iter()
+            .enumerate()
+            .filter_map(|(vertex, data)| data.adjacent_hexes.contains(&hex).then_some(vertex))
+            .collect()
+    }
+
+    fn set_test_bank_supply(state: &mut GameState, resource: Resource, supply: u8) {
+        assert!(supply <= 19);
+        let index = resource.index();
+        for player in &mut state.players {
+            player.resources[index] = 0;
+        }
+        state.bank[index] = supply;
+        let reserve_player = state.players.len() - 1;
+        state.players[reserve_player].resources[index] = 19 - supply;
+    }
+
+    fn assert_resource_conservation(state: &GameState, resource: Resource) {
+        let index = resource.index();
+        let total = state.bank[index] as u16
+            + state
+                .players
+                .iter()
+                .map(|player| player.resources[index] as u16)
+                .sum::<u16>();
+        assert_eq!(total, 19);
+    }
+
     #[test]
     fn setup_snakes_and_grants_second_settlement_resources() {
         let mut state = GameState::standard(7, 4);
@@ -2218,6 +2286,101 @@ mod tests {
             .apply(&Action::ResolveRoll { value: tile.number })
             .unwrap();
         assert!(state.players[0].resources[resource.index()] >= before + 2);
+    }
+
+    #[test]
+    fn production_full_supply_pays_all_affected_players() {
+        let mut state = production_fixture();
+        let resource = Resource::Ore;
+        configure_production_hex(&mut state, 0, resource);
+        let vertices = vertices_touching_hex(&state, 0);
+        state.buildings[vertices[0]] = Some(Building::Settlement(0));
+        state.buildings[vertices[1]] = Some(Building::City(1));
+        set_test_bank_supply(&mut state, resource, 3);
+
+        state.produce(PRODUCTION_TEST_ROLL);
+
+        assert_eq!(state.players[0].resources[resource.index()], 1);
+        assert_eq!(state.players[1].resources[resource.index()], 2);
+        assert_eq!(state.bank[resource.index()], 0);
+        assert_resource_conservation(&state, resource);
+    }
+
+    #[test]
+    fn production_shortage_with_multiple_affected_players_pays_nobody() {
+        let mut state = production_fixture();
+        let resource = Resource::Ore;
+        configure_production_hex(&mut state, 0, resource);
+        let vertices = vertices_touching_hex(&state, 0);
+        state.buildings[vertices[0]] = Some(Building::Settlement(0));
+        state.buildings[vertices[1]] = Some(Building::City(1));
+        set_test_bank_supply(&mut state, resource, 2);
+
+        state.produce(PRODUCTION_TEST_ROLL);
+
+        assert_eq!(state.players[0].resources[resource.index()], 0);
+        assert_eq!(state.players[1].resources[resource.index()], 0);
+        assert_eq!(state.bank[resource.index()], 2);
+        assert_resource_conservation(&state, resource);
+    }
+
+    #[test]
+    fn production_shortage_with_one_affected_player_pays_remaining_bank() {
+        let mut state = production_fixture();
+        let resource = Resource::Ore;
+        configure_production_hex(&mut state, 0, resource);
+        let vertex = vertices_touching_hex(&state, 0)[0];
+        state.buildings[vertex] = Some(Building::City(0));
+        set_test_bank_supply(&mut state, resource, 1);
+
+        state.produce(PRODUCTION_TEST_ROLL);
+
+        assert_eq!(state.players[0].resources[resource.index()], 1);
+        assert_eq!(state.bank[resource.index()], 0);
+        assert_resource_conservation(&state, resource);
+    }
+
+    #[test]
+    fn production_single_player_exact_supply_pays_full_demand() {
+        let mut state = production_fixture();
+        let resource = Resource::Ore;
+        configure_production_hex(&mut state, 0, resource);
+        let vertex = vertices_touching_hex(&state, 0)[0];
+        state.buildings[vertex] = Some(Building::City(0));
+        set_test_bank_supply(&mut state, resource, 2);
+
+        state.produce(PRODUCTION_TEST_ROLL);
+
+        assert_eq!(state.players[0].resources[resource.index()], 2);
+        assert_eq!(state.bank[resource.index()], 0);
+        assert_resource_conservation(&state, resource);
+    }
+
+    #[test]
+    fn production_single_player_multi_source_city_takes_remaining_bank() {
+        let mut state = production_fixture();
+        let resource = Resource::Ore;
+        let vertex = state
+            .board
+            .vertices
+            .iter()
+            .position(|data| data.adjacent_hexes.len() >= 2)
+            .unwrap();
+        let producing_hexes = state.board.vertices[vertex].adjacent_hexes[..2].to_vec();
+        for hex in &producing_hexes {
+            configure_production_hex(&mut state, *hex, resource);
+        }
+        state.robber_hex = (0..state.board.hexes.len())
+            .find(|hex| !producing_hexes.contains(&(*hex as u8)))
+            .unwrap() as u8;
+        state.buildings[vertex] = Some(Building::City(0));
+        set_test_bank_supply(&mut state, resource, 3);
+
+        state.produce(PRODUCTION_TEST_ROLL);
+
+        assert_eq!(state.players[0].resources[resource.index()], 3);
+        assert_eq!(state.bank[resource.index()], 0);
+        assert_resource_conservation(&state, resource);
     }
 
     #[test]
