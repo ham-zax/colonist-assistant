@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 use std::env;
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 #[cfg(feature = "cuda-exact")]
@@ -11,14 +12,15 @@ use std::time::{Duration, Instant};
 
 use colonist_catan_arena::belief_particles;
 use colonist_catan_core::{
-    Action, Building, GameState, NodeKind, Phase, PlayerState, SplitMix64, TradeOffer,
+    Action, Building, DevCard, GameState, NodeKind, Phase, PlayerState, Port, Resource, SplitMix64,
+    TradeOffer,
 };
 use colonist_catan_search::{
-    BeliefDepthConfig, BeliefParticle, DepthActionValue, ENGINE_REVISION, Mcts,
-    RootPromotionReason, SearchConfig, SearchMode, SearchReport, action_prior,
-    choose_rollout_action, compute_spatial_root_impacts, encode_action, encode_heterogeneous_graph,
-    evaluate, expansion_option_value, pool_heterogeneous_graph, production_pips,
-    search_maxn_bounded_timed, search_paranoid_bounded_timed,
+    BeliefDepthConfig, BeliefParticle, BeliefSearchProvenance, DepthActionValue, ENGINE_REVISION,
+    Mcts, RootPromotionReason, RootPruneReason, SearchConfig, SearchMode, SearchReport,
+    action_prior, choose_rollout_action, compute_spatial_root_impacts, encode_action,
+    encode_heterogeneous_graph, evaluate, expansion_option_value, pool_heterogeneous_graph,
+    production_pips, search_maxn_bounded_timed, search_paranoid_bounded_timed,
     search_weighted_belief_maxn_with_config, search_weighted_belief_paranoid_with_config,
     strategic_utility, trade_acceptance_features,
 };
@@ -27,6 +29,7 @@ use colonist_catan_search::{
     CudaExactEvaluator, cuda_exact_search_stats, search_weighted_belief_maxn_cuda_with_config_mutex,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Engine {
@@ -186,6 +189,11 @@ struct Config {
     takeover_input: Option<String>,
     takeover_output: Option<String>,
     takeover_engine: Option<Engine>,
+    takeover_native_gpu_host: Option<String>,
+    takeover_native_gpu_revision: Option<String>,
+    takeover_root_only: bool,
+    takeover_random_followup: bool,
+    takeover_target_seat: Option<u8>,
     expert_output: Option<String>,
     trade_output: Option<String>,
     trajectory_output: Option<String>,
@@ -233,6 +241,11 @@ impl Default for Config {
             takeover_input: None,
             takeover_output: None,
             takeover_engine: None,
+            takeover_native_gpu_host: None,
+            takeover_native_gpu_revision: None,
+            takeover_root_only: false,
+            takeover_random_followup: false,
+            takeover_target_seat: None,
             expert_output: None,
             trade_output: None,
             trajectory_output: None,
@@ -289,6 +302,22 @@ fn parse_config() -> Config {
                         std::process::exit(2);
                     }
                 }
+            }
+            "--takeover-native-gpu-host" => {
+                config.takeover_native_gpu_host = value.map(str::to_string);
+            }
+            "--takeover-native-gpu-revision" => {
+                config.takeover_native_gpu_revision = value.map(str::to_string);
+            }
+            "--takeover-root-only" => {
+                config.takeover_root_only = true;
+                index += 1;
+                continue;
+            }
+            "--takeover-random-followup" => {
+                config.takeover_random_followup = true;
+                index += 1;
+                continue;
             }
             "--expert-output" => config.expert_output = value.map(str::to_string),
             "--trade-output" => config.trade_output = value.map(str::to_string),
@@ -405,6 +434,8 @@ fn parse_config() -> Config {
                      [--checkpoint-output progress.jsonl] [--challenge-output challenges.jsonl] \\
                      [--takeover-input challenges.jsonl] [--takeover-output outcomes.jsonl] \\
                      [--takeover-engine control|random|weighted|maxn|alphabeta|uct|puct] \\
+                     [--takeover-native-gpu-host PATH] [--takeover-native-gpu-revision SHA] \\
+                     [--takeover-root-only] [--takeover-random-followup] \\
                      [--expert-output samples.jsonl] [--trade-output trades.jsonl] \\
                      [--trajectory-output trajectory.jsonl] \\
                      [--expert-stride N] [--expert-iterations N] \\
@@ -435,6 +466,28 @@ fn parse_config() -> Config {
     }
     if config.takeover_input.is_some() != config.takeover_output.is_some() {
         eprintln!("--takeover-input and --takeover-output must be provided together");
+        std::process::exit(2);
+    }
+    if config.takeover_root_only && config.takeover_input.is_none() {
+        eprintln!("--takeover-root-only requires --takeover-input/--takeover-output");
+        std::process::exit(2);
+    }
+    if config.takeover_random_followup && config.takeover_input.is_none() {
+        eprintln!("--takeover-random-followup requires --takeover-input/--takeover-output");
+        std::process::exit(2);
+    }
+    if config.takeover_native_gpu_host.is_some() && config.takeover_input.is_none() {
+        eprintln!("--takeover-native-gpu-host requires --takeover-input/--takeover-output");
+        std::process::exit(2);
+    }
+    if config.takeover_native_gpu_host.is_some() && config.takeover_engine.is_some() {
+        eprintln!("--takeover-native-gpu-host and --takeover-engine are mutually exclusive");
+        std::process::exit(2);
+    }
+    if config.takeover_native_gpu_revision.is_some() != config.takeover_native_gpu_host.is_some() {
+        eprintln!(
+            "--takeover-native-gpu-revision must be provided with --takeover-native-gpu-host"
+        );
         std::process::exit(2);
     }
     if config.blocks == 0 {
@@ -486,6 +539,122 @@ fn parse_config() -> Config {
     config
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RootReplacementTrace {
+    from: String,
+    to: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PrunedRootTrace {
+    action: String,
+    reason: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RootEvidenceTrace {
+    action: String,
+    promotion_reason: Option<String>,
+    admitted_by_promotion: bool,
+    trade_risk_posterior: f32,
+    dirty_monopoly_posterior: f32,
+    trade_hard_veto_posterior: f32,
+    trade_hard_veto: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RootProvenanceTrace {
+    retained_roots: Vec<String>,
+    pruned_roots: Vec<PrunedRootTrace>,
+    root_evidence: Vec<RootEvidenceTrace>,
+    search_winner: Option<String>,
+    exact_family_replacement: Option<RootReplacementTrace>,
+    safety_replacement: Option<RootReplacementTrace>,
+}
+
+fn root_prune_reason(reason: RootPruneReason) -> &'static str {
+    match reason {
+        RootPruneReason::RootExcluded => "root-excluded",
+        RootPruneReason::BranchTruncated => "branch-truncated",
+        RootPruneReason::TradeSafety => "trade-safety",
+        RootPruneReason::ExactFamilyCollapsed => "exact-family-collapsed",
+    }
+}
+
+fn root_promotion_reason(reason: RootPromotionReason) -> &'static str {
+    match reason {
+        RootPromotionReason::RoadAwardProtection => "road-award-protection",
+        RootPromotionReason::CriticalExpansionProtection => "critical-expansion-protection",
+        RootPromotionReason::OpponentRouteCut => "opponent-route-cut",
+        RootPromotionReason::CloseoutCompression => "closeout-compression",
+    }
+}
+
+fn root_provenance_trace(provenance: &BeliefSearchProvenance) -> RootProvenanceTrace {
+    RootProvenanceTrace {
+        retained_roots: provenance
+            .retained_roots
+            .iter()
+            .map(|entry| format!("{:?}", entry.action))
+            .collect(),
+        pruned_roots: provenance
+            .pruned_roots
+            .iter()
+            .map(|entry| PrunedRootTrace {
+                action: format!("{:?}", entry.action),
+                reason: root_prune_reason(entry.reason).to_string(),
+            })
+            .collect(),
+        root_evidence: provenance
+            .root_evidence
+            .iter()
+            .map(|entry| RootEvidenceTrace {
+                action: format!("{:?}", entry.action),
+                promotion_reason: entry
+                    .promotion_reason
+                    .map(root_promotion_reason)
+                    .map(str::to_string),
+                admitted_by_promotion: entry.admitted_by_promotion,
+                trade_risk_posterior: entry.trade_risk_posterior,
+                dirty_monopoly_posterior: entry.dirty_monopoly_posterior,
+                trade_hard_veto_posterior: entry.trade_hard_veto_posterior,
+                trade_hard_veto: entry.trade_hard_veto,
+            })
+            .collect(),
+        search_winner: provenance
+            .search_winner
+            .as_ref()
+            .map(|action| format!("{action:?}")),
+        exact_family_replacement: provenance
+            .exact_family_replacement
+            .as_ref()
+            .map(|(from, to)| RootReplacementTrace {
+                from: format!("{from:?}"),
+                to: format!("{to:?}"),
+            }),
+        safety_replacement: provenance.safety_replacement.as_ref().map(|(from, to)| {
+            RootReplacementTrace {
+                from: format!("{from:?}"),
+                to: format!("{to:?}"),
+            }
+        }),
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RootDecisionTrace {
+    action: String,
+    selected_value: Option<f32>,
+    best_value: Option<f32>,
+    regret: Option<f32>,
+    provenance: Option<RootProvenanceTrace>,
+}
+
 struct EngineChoice {
     action: Action,
     root_value: Option<[f32; 4]>,
@@ -495,6 +664,7 @@ struct EngineChoice {
     strategic_particles: usize,
     deadline_reached: bool,
     action_values: Vec<DepthActionValue>,
+    provenance: Option<RootProvenanceTrace>,
     search: Option<SearchReport>,
 }
 
@@ -509,8 +679,619 @@ impl EngineChoice {
             strategic_particles: 0,
             deadline_reached: false,
             action_values: Vec::new(),
+            provenance: None,
             search: None,
         }
+    }
+
+    fn root_trace(&self, actor: usize) -> RootDecisionTrace {
+        let selected_value = self
+            .action_values
+            .iter()
+            .find(|entry| entry.action == self.action)
+            .map(|entry| entry.value[actor]);
+        let best_value = (!self.action_values.is_empty()).then(|| {
+            self.action_values
+                .iter()
+                .map(|entry| entry.value[actor])
+                .max_by(f32::total_cmp)
+                .expect("non-empty action values have a maximum")
+        });
+        let regret = selected_value
+            .zip(best_value)
+            .map(|(selected, best)| (best - selected).max(0.0));
+        RootDecisionTrace {
+            action: format!("{:?}", self.action),
+            selected_value,
+            best_value,
+            regret,
+            provenance: self.provenance.clone(),
+        }
+    }
+}
+
+const NATIVE_GPU_PROTOCOL_VERSION: u32 = 6;
+const NATIVE_GPU_STATE_SCHEMA_VERSION: u32 = 2;
+
+struct NativeGpuClient {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: ChildStdout,
+    next_id: u64,
+    identity: Value,
+}
+
+struct NativeGpuDecision {
+    action: Action,
+    response: Value,
+    root_trace: RootDecisionTrace,
+    action_count: usize,
+    posterior_particles: usize,
+    rollouts: u64,
+    rollout_steps: u64,
+    deadline_reached: bool,
+}
+
+fn native_gpu_exchange(
+    stdin: &mut ChildStdin,
+    stdout: &mut ChildStdout,
+    message: &Value,
+) -> Result<Value, String> {
+    let payload = serde_json::to_vec(message)
+        .map_err(|error| format!("failed to encode native GPU request: {error}"))?;
+    let length = u32::try_from(payload.len())
+        .map_err(|_| "native GPU request exceeded protocol size".to_string())?;
+    stdin
+        .write_all(&length.to_ne_bytes())
+        .and_then(|_| stdin.write_all(&payload))
+        .and_then(|_| stdin.flush())
+        .map_err(|error| format!("failed to write native GPU request: {error}"))?;
+
+    let mut length_bytes = [0u8; 4];
+    stdout
+        .read_exact(&mut length_bytes)
+        .map_err(|error| format!("failed to read native GPU response header: {error}"))?;
+    let response_length = u32::from_ne_bytes(length_bytes) as usize;
+    let mut response_bytes = vec![0u8; response_length];
+    stdout
+        .read_exact(&mut response_bytes)
+        .map_err(|error| format!("failed to read native GPU response: {error}"))?;
+    serde_json::from_slice(&response_bytes)
+        .map_err(|error| format!("invalid native GPU response JSON: {error}"))
+}
+
+impl NativeGpuClient {
+    fn spawn(path: &str) -> Result<Self, String> {
+        let mut child = Command::new(path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|error| format!("failed to start native GPU host {path}: {error}"))?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "native GPU host stdin was unavailable".to_string())?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "native GPU host stdout was unavailable".to_string())?;
+        let hello = native_gpu_exchange(
+            &mut stdin,
+            &mut stdout,
+            &json!({
+                "type": "hello",
+                "id": 0,
+                "protocolVersion": NATIVE_GPU_PROTOCOL_VERSION,
+                "stateSchemaVersion": NATIVE_GPU_STATE_SCHEMA_VERSION,
+            }),
+        )?;
+        if let Some(error) = hello.get("error").and_then(Value::as_str) {
+            return Err(format!("native GPU hello failed: {error}"));
+        }
+        if hello.get("runtime").and_then(Value::as_str) != Some("gpu-native") {
+            return Err("native GPU hello did not identify gpu-native runtime".to_string());
+        }
+        Ok(Self {
+            child,
+            stdin,
+            stdout,
+            next_id: 1,
+            identity: hello,
+        })
+    }
+
+    fn identity(&self) -> &Value {
+        &self.identity
+    }
+
+    fn analyze(
+        &mut self,
+        state: &GameState,
+        actor: usize,
+        config: &Config,
+    ) -> Result<NativeGpuDecision, String> {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        let request = native_gpu_request(state, actor as u8, config);
+        let message = json!({ "type": "analyze", "id": id, "request": request });
+        let payload = serde_json::to_vec(&message)
+            .map_err(|error| format!("failed to encode native GPU request: {error}"))?;
+        let length = u32::try_from(payload.len())
+            .map_err(|_| "native GPU request exceeded protocol size".to_string())?;
+        self.stdin
+            .write_all(&length.to_ne_bytes())
+            .and_then(|_| self.stdin.write_all(&payload))
+            .and_then(|_| self.stdin.flush())
+            .map_err(|error| format!("failed to write native GPU request: {error}"))?;
+
+        let mut length_bytes = [0u8; 4];
+        self.stdout
+            .read_exact(&mut length_bytes)
+            .map_err(|error| format!("failed to read native GPU response header: {error}"))?;
+        let response_length = u32::from_ne_bytes(length_bytes) as usize;
+        let mut response_bytes = vec![0u8; response_length];
+        self.stdout
+            .read_exact(&mut response_bytes)
+            .map_err(|error| format!("failed to read native GPU response: {error}"))?;
+        let envelope: Value = serde_json::from_slice(&response_bytes)
+            .map_err(|error| format!("invalid native GPU response JSON: {error}"))?;
+        if envelope.get("id").and_then(Value::as_u64) != Some(id) {
+            return Err(format!("native GPU response id did not match request {id}"));
+        }
+        if let Some(error) = envelope.get("error").and_then(Value::as_str) {
+            return Err(format!("native GPU analysis failed: {error}"));
+        }
+        let response = envelope
+            .get("response")
+            .cloned()
+            .ok_or_else(|| "native GPU response omitted response payload".to_string())?;
+        let action_value = response
+            .get("chosen")
+            .ok_or_else(|| "native GPU response omitted chosen action".to_string())?;
+        let action = native_gpu_action(action_value)?;
+        if !state.legal_actions().contains(&action) {
+            return Err(format!(
+                "native GPU returned illegal action {action:?} at state {:016x}",
+                state.state_hash()
+            ));
+        }
+        let root_trace = native_gpu_root_trace(&response, &action);
+        let action_count = response
+            .get("actions")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        let posterior_particles = response
+            .get("rustPosteriorParticles")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(0);
+        let rollouts = response
+            .get("rollouts")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let rollout_steps = response
+            .get("effectiveEffort")
+            .and_then(|effort| effort.get("gpu"))
+            .and_then(|gpu| gpu.get("rolloutSteps"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let deadline_reached = response
+            .get("deadlineReached")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        Ok(NativeGpuDecision {
+            action,
+            response,
+            root_trace,
+            action_count,
+            posterior_particles,
+            rollouts,
+            rollout_steps,
+            deadline_reached,
+        })
+    }
+}
+
+impl Drop for NativeGpuClient {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn native_phase(phase: Phase) -> (&'static str, Option<u8>) {
+    match phase {
+        Phase::SetupSettlement => ("setup-settlement", None),
+        Phase::SetupRoad { settlement } => ("setup-road", Some(settlement)),
+        Phase::PreRoll => ("pre-roll", None),
+        Phase::RollChance => ("roll-chance", None),
+        Phase::Discard => ("discard", None),
+        Phase::MoveRobber => ("move-robber", None),
+        Phase::ResolveSteal { victim } => ("resolve-steal", Some(victim)),
+        Phase::Main => ("main", None),
+        Phase::DevelopmentChance => ("development-chance", None),
+        Phase::TradeResponses => ("trade-responses", None),
+        Phase::Finished => ("finished", None),
+    }
+}
+
+fn native_port(port: Option<Port>) -> i8 {
+    match port {
+        None => -1,
+        Some(Port::Generic) => 5,
+        Some(Port::Resource(resource)) => resource as i8,
+    }
+}
+
+fn native_gpu_request(state: &GameState, actor: u8, config: &Config) -> Value {
+    let particles = belief_particles(
+        state,
+        actor,
+        config.belief_particles,
+        state.observation_hash(actor) ^ config.seed,
+    );
+    let players = state
+        .players
+        .iter()
+        .map(|player| {
+            json!({
+                "resources": player.resources,
+                "development": player.development,
+                "boughtDevelopment": player.bought_development,
+                "publicVictoryPoints": player.public_victory_points,
+                "playedKnights": player.played_knights,
+                "roadsLeft": player.roads_left,
+                "settlementsLeft": player.settlements_left,
+                "citiesLeft": player.cities_left,
+                "hasLongestRoad": player.has_longest_road,
+                "hasLargestArmy": player.has_largest_army,
+                "playedDevelopmentThisTurn": player.played_development_this_turn,
+                "policyProfile": player.policy_profile,
+            })
+        })
+        .collect::<Vec<_>>();
+    let worlds = particles
+        .iter()
+        .map(|particle| {
+            json!({
+                "weight": particle.weight,
+                "hands": particle.state.players.iter().map(|player| player.resources).collect::<Vec<_>>(),
+                "development": particle.state.players.iter().map(|player| player.development).collect::<Vec<_>>(),
+                "boughtDevelopment": particle.state.players.iter().map(|player| player.bought_development).collect::<Vec<_>>(),
+                "developmentDeck": particle.state.development_deck,
+                "bank": particle.state.bank,
+            })
+        })
+        .collect::<Vec<_>>();
+    let (phase, phase_parameter) = native_phase(state.phase);
+    let (robber_return_phase, _) = native_phase(state.robber_return_phase);
+    let trade = state.trade.map(|trade| {
+        json!({
+            "creator": trade.creator,
+            "recipients": trade.recipients,
+            "give": trade.give,
+            "receive": trade.receive,
+            "accepted": trade.accepted,
+            "rejected": trade.rejected,
+        })
+    });
+    let last_rejected_trade = state.last_rejected_trade.map(|trade| {
+        json!({
+            "give": trade.give,
+            "receive": trade.receive,
+        })
+    });
+    let buildings = state
+        .buildings
+        .iter()
+        .map(|building| match building {
+            None => -1,
+            Some(Building::Settlement(player)) => i16::from(*player) * 2,
+            Some(Building::City(player)) => i16::from(*player) * 2 + 1,
+        })
+        .collect::<Vec<_>>();
+    let roads = state
+        .roads
+        .iter()
+        .map(|owner| owner.map_or(-1, i16::from))
+        .collect::<Vec<_>>();
+    let board = json!({
+        "hexes": state.board.hexes.iter().map(|hex| json!({
+            "resource": hex.resource.map_or(-1, |resource| resource as i8),
+            "number": hex.number,
+        })).collect::<Vec<_>>(),
+        "vertices": state.board.vertices.iter().map(|vertex| json!({
+            "adjacentHexes": vertex.adjacent_hexes,
+            "adjacentVertices": vertex.adjacent_vertices,
+            "adjacentEdges": vertex.adjacent_edges,
+            "port": native_port(vertex.port),
+        })).collect::<Vec<_>>(),
+        "edges": state.board.edges.iter().map(|edge| json!({
+            "vertices": edge.vertices,
+            "adjacentHexes": edge.adjacent_hexes,
+        })).collect::<Vec<_>>(),
+    });
+    json!({
+        "state": {
+            "board": board,
+            "players": players,
+            "worlds": worlds,
+            "buildings": buildings,
+            "roads": roads,
+            "bank": state.bank,
+            "bankVisible": state.bank_is_public,
+            "developmentDeck": state.development_deck,
+            "playedDevelopment": state.played_development,
+            "robberHex": state.robber_hex,
+            "currentPlayer": state.current_player,
+            "phase": phase,
+            "phaseParameter": phase_parameter,
+            "turn": state.turn,
+            "lastRoll": state.last_roll,
+            "victoryTarget": state.victory_target,
+            "cardDiscardLimit": state.card_discard_limit,
+            "friendlyRobber": state.friendly_robber,
+            "setupStep": state.setup_step,
+            "discardRemaining": state.discard_remaining,
+            "discardCursor": state.discard_cursor,
+            "robberReturnPhase": robber_return_phase,
+            "trade": trade,
+            "tradeCursor": state.trade_cursor,
+            "domesticTradeUsed": state.domestic_trade_used,
+            "playerTradesEnabled": state.player_trades_enabled,
+            "domesticTradeDisabled": state.domestic_trade_disabled,
+            "domesticTradeEmbargoes": state.domestic_trade_embargoes,
+            "longestRoadHolder": state.longest_road_holder,
+            "largestArmyHolder": state.largest_army_holder,
+        },
+        "effort": {
+            "decisionTimeMs": 4000,
+            "tactical": { "maxDepth": 14, "nodeBudget": 900 },
+            "cpu": { "maxDepth": 5, "rootCap": 10, "nodesPerDepthWave": 8000 },
+            "gpu": { "rootCap": 12, "rolloutBudget": 384, "rolloutSteps": 96 },
+        },
+        "lastRejectedTrade": last_rejected_trade,
+        "rootExclusions": [],
+        "iterations": 384,
+        "maxNodes": 8000,
+        "rolloutActions": 96,
+        "tacticalDepth": 14,
+        "tacticalNodes": 900,
+        "timeBudgetMs": 4000,
+        "seed": state.observation_hash(actor) ^ config.seed,
+        "mode": "maxn",
+        "depth": 5,
+        "branchCap": 10,
+        "ponder": false,
+    })
+}
+
+fn native_u8(value: &Value, field: &str) -> Result<u8, String> {
+    value
+        .get(field)
+        .and_then(Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok())
+        .ok_or_else(|| format!("native GPU action omitted valid {field}"))
+}
+
+fn native_optional_u8(value: &Value, field: &str) -> Result<Option<u8>, String> {
+    match value.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .and_then(|value| u8::try_from(value).ok())
+            .map(Some)
+            .ok_or_else(|| format!("native GPU action has invalid {field}")),
+    }
+}
+
+fn native_hand(value: &Value, field: &str) -> Result<[u8; 5], String> {
+    let values = value
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("native GPU action omitted {field}"))?;
+    if values.len() != 5 {
+        return Err(format!(
+            "native GPU action {field} must contain five resources"
+        ));
+    }
+    let mut hand = [0u8; 5];
+    for (index, value) in values.iter().enumerate() {
+        hand[index] = value
+            .as_u64()
+            .and_then(|value| u8::try_from(value).ok())
+            .ok_or_else(|| format!("native GPU action {field}[{index}] is invalid"))?;
+    }
+    Ok(hand)
+}
+
+fn native_resource(value: &Value, field: &str) -> Result<Resource, String> {
+    let index = native_u8(value, field)? as usize;
+    Resource::ALL
+        .get(index)
+        .copied()
+        .ok_or_else(|| format!("native GPU action has invalid {field} resource {index}"))
+}
+
+fn native_gpu_action(value: &Value) -> Result<Action, String> {
+    let kind = value
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "native GPU action omitted kind".to_string())?;
+    Ok(match kind {
+        "place-settlement" => Action::PlaceSettlement {
+            vertex: native_u8(value, "first")?,
+        },
+        "place-road" => Action::PlaceRoad {
+            edge: native_u8(value, "first")?,
+        },
+        "roll" => Action::Roll,
+        "resolve-roll" => Action::ResolveRoll {
+            value: native_u8(value, "first")?,
+        },
+        "discard" => Action::Discard {
+            cards: native_hand(value, "cards")?,
+        },
+        "move-robber" => Action::MoveRobber {
+            hex: native_u8(value, "first")?,
+            victim: native_optional_u8(value, "player")?,
+        },
+        "resolve-steal" => Action::ResolveSteal {
+            victim: native_u8(value, "player")?,
+            resource: native_resource(value, "resource")?,
+        },
+        "build-road" => Action::BuildRoad {
+            edge: native_u8(value, "first")?,
+        },
+        "build-settlement" => Action::BuildSettlement {
+            vertex: native_u8(value, "first")?,
+        },
+        "build-city" => Action::BuildCity {
+            vertex: native_u8(value, "first")?,
+        },
+        "buy-development" => Action::BuyDevelopment,
+        "resolve-development" => {
+            let index = native_u8(value, "resource")? as usize;
+            Action::ResolveDevelopment {
+                card: DevCard::ALL.get(index).copied().ok_or_else(|| {
+                    format!("native GPU action has invalid development card {index}")
+                })?,
+            }
+        }
+        "play-knight" => Action::PlayKnight {
+            hex: native_u8(value, "first")?,
+            victim: native_optional_u8(value, "player")?,
+        },
+        "play-road-building" => Action::PlayRoadBuilding {
+            first: native_u8(value, "first")?,
+            second: native_optional_u8(value, "second")?,
+        },
+        "play-year-of-plenty" => Action::PlayYearOfPlenty {
+            first: native_resource(value, "resource")?,
+            second: native_resource(value, "otherResource")?,
+        },
+        "play-monopoly" => Action::PlayMonopoly {
+            resource: native_resource(value, "resource")?,
+        },
+        "maritime-trade" => Action::MaritimeTrade {
+            give: native_resource(value, "resource")?,
+            receive: native_resource(value, "otherResource")?,
+            ratio: native_u8(value, "first")?,
+        },
+        "offer-trade" => Action::OfferTrade {
+            recipients: native_u8(value, "first")?,
+            give: native_hand(value, "cards")?,
+            receive: native_hand(value, "receiveCards")?,
+        },
+        "respond-trade" => Action::RespondTrade {
+            accept: value
+                .get("accept")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| "native GPU action omitted accept".to_string())?,
+        },
+        "counter-trade" => Action::CounterTrade {
+            give: native_hand(value, "cards")?,
+            receive: native_hand(value, "receiveCards")?,
+        },
+        "confirm-trade" => Action::ConfirmTrade {
+            partner: native_u8(value, "player")?,
+        },
+        "cancel-trade" => Action::CancelTrade,
+        "end-turn" => Action::EndTurn,
+        other => return Err(format!("unsupported native GPU action kind {other}")),
+    })
+}
+
+fn native_gpu_action_string(value: &Value) -> Option<String> {
+    native_gpu_action(value)
+        .ok()
+        .map(|action| format!("{action:?}"))
+}
+
+fn native_gpu_replacement(value: Option<&Value>) -> Option<RootReplacementTrace> {
+    let value = value?;
+    Some(RootReplacementTrace {
+        from: native_gpu_action_string(value.get("from")?)?,
+        to: native_gpu_action_string(value.get("to")?)?,
+    })
+}
+
+fn native_gpu_provenance(response: &Value) -> Option<RootProvenanceTrace> {
+    let provenance = response.get("rootProvenance")?;
+    let retained_roots = provenance
+        .get("retainedRoots")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("action").and_then(native_gpu_action_string))
+        .collect::<Vec<_>>();
+    let pruned_roots = provenance
+        .get("prunedRoots")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            Some(PrunedRootTrace {
+                action: native_gpu_action_string(entry.get("action")?)?,
+                reason: entry.get("reason")?.as_str()?.to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let root_evidence = provenance
+        .get("rootEvidence")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            Some(RootEvidenceTrace {
+                action: native_gpu_action_string(entry.get("action")?)?,
+                promotion_reason: entry
+                    .get("promotionReason")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                admitted_by_promotion: entry
+                    .get("admittedByPromotion")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                trade_risk_posterior: entry
+                    .get("tradeRiskPosterior")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0) as f32,
+                dirty_monopoly_posterior: entry
+                    .get("dirtyMonopolyPosterior")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0) as f32,
+                trade_hard_veto_posterior: entry
+                    .get("tradeHardVetoPosterior")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0) as f32,
+                trade_hard_veto: entry
+                    .get("tradeHardVeto")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            })
+        })
+        .collect::<Vec<_>>();
+    Some(RootProvenanceTrace {
+        retained_roots,
+        pruned_roots,
+        root_evidence,
+        search_winner: provenance
+            .get("searchWinner")
+            .and_then(native_gpu_action_string),
+        exact_family_replacement: native_gpu_replacement(provenance.get("exactFamilyReplacement")),
+        safety_replacement: native_gpu_replacement(provenance.get("safetyReplacement")),
+    })
+}
+
+fn native_gpu_root_trace(response: &Value, action: &Action) -> RootDecisionTrace {
+    RootDecisionTrace {
+        action: format!("{action:?}"),
+        selected_value: None,
+        best_value: None,
+        regret: None,
+        provenance: native_gpu_provenance(response),
     }
 }
 
@@ -1059,6 +1840,7 @@ fn choose_action(
                     posterior_particles: report.posterior_particles,
                     strategic_particles: report.particles,
                     deadline_reached: report.deadline_reached,
+                    provenance: Some(root_provenance_trace(&report.provenance)),
                     action_values: report.actions,
                     search: None,
                 }
@@ -1090,6 +1872,7 @@ fn choose_action(
                     strategic_particles: 1,
                     deadline_reached: report.deadline_reached,
                     action_values: report.actions,
+                    provenance: None,
                     search: None,
                 }
             }
@@ -1120,6 +1903,7 @@ fn choose_action(
                 strategic_particles: search_particles.as_ref().map_or(1, Vec::len),
                 deadline_reached: false,
                 action_values: Vec::new(),
+                provenance: None,
                 search: Some(report),
             }
         }
@@ -1291,6 +2075,8 @@ struct GameMetrics {
     end_turns_over_seven: [u32; 4],
     cards_lost_to_sevens: [u32; 4],
     robber_blocked_production: [u32; 4],
+    first_decisions: [Option<RootDecisionTrace>; 4],
+    native_gpu_initial_diagnostics: [Option<Value>; 4],
     decision_count: [u32; 4],
     decision_time: [Duration; 4],
     search_decision_count: [u32; 4],
@@ -1841,6 +2627,7 @@ fn play_game(
         state,
         chance_rng,
         policy_rngs,
+        None,
     )
 }
 
@@ -1854,6 +2641,7 @@ fn play_game_from_state(
     mut state: GameState,
     mut chance_rng: SplitMix64,
     mut policy_rngs: Vec<SplitMix64>,
+    mut native_gpu: Option<&mut NativeGpuClient>,
 ) -> GameResult {
     state.player_trades_enabled = config.player_trades_enabled;
     let mut actions = 0u32;
@@ -1920,14 +2708,59 @@ fn play_game_from_state(
         } else {
             let actor = state.actor() as usize;
             let started = Instant::now();
-            let choice = choose_action(
-                engines[actor],
-                &state,
-                &mut policy_rngs[actor],
-                config,
-                &mut persistent_searches,
-            );
+            let legal_actions = state.legal_actions();
+            let takeover_target = config.takeover_target_seat == Some(actor as u8);
+            let first_root_pending = takeover_target && metrics.first_decisions[actor].is_none();
+            let choice = if first_root_pending && legal_actions.len() == 1 {
+                // Forced protocol steps are not strategic roots. Execute them
+                // directly so native-GPU takeover never falls through to CPU
+                // MaxN before the first real fork.
+                EngineChoice::simple(legal_actions[0].clone())
+            } else if first_root_pending && config.takeover_native_gpu_host.is_some() {
+                let decision = native_gpu
+                    .as_deref_mut()
+                    .expect("native GPU takeover configured its host")
+                    .analyze(&state, actor, config)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "native GPU takeover failed at state {:016x}: {error}",
+                            state.state_hash()
+                        )
+                    });
+                metrics.first_decisions[actor] = Some(decision.root_trace.clone());
+                metrics.native_gpu_initial_diagnostics[actor] = Some(decision.response.clone());
+                metrics.search_decision_count[actor] += 1;
+                metrics.search_nodes[actor] = metrics.search_nodes[actor]
+                    .saturating_add(decision.rollouts.saturating_mul(decision.rollout_steps));
+                metrics.posterior_particles[actor] = metrics.posterior_particles[actor]
+                    .saturating_add(decision.posterior_particles as u64);
+                metrics.strategic_particles[actor] = metrics.strategic_particles[actor]
+                    .saturating_add(decision.posterior_particles as u64);
+                metrics.search_deadlines[actor] += u32::from(decision.deadline_reached);
+                metrics.search_action_values[actor] = metrics.search_action_values[actor]
+                    .saturating_add(decision.action_count as u64);
+                EngineChoice::simple(decision.action)
+            } else {
+                let decision_engine = if config.takeover_random_followup
+                    && takeover_target
+                    && metrics.first_decisions[actor].is_some()
+                {
+                    Engine::Random
+                } else {
+                    engines[actor]
+                };
+                choose_action(
+                    decision_engine,
+                    &state,
+                    &mut policy_rngs[actor],
+                    config,
+                    &mut persistent_searches,
+                )
+            };
             metrics.decision_time[actor] += started.elapsed();
+            if metrics.first_decisions[actor].is_none() && choice.action_values.len() > 1 {
+                metrics.first_decisions[actor] = Some(choice.root_trace(actor));
+            }
             metrics.decision_count[actor] += 1;
             if choice.root_value.is_some() {
                 metrics.search_decision_count[actor] += 1;
@@ -2240,6 +3073,13 @@ fn play_game_from_state(
                 )
             });
         }
+        if config.takeover_root_only
+            && config
+                .takeover_target_seat
+                .is_some_and(|seat| metrics.first_decisions[seat as usize].is_some())
+        {
+            break;
+        }
     }
     let terminal_winner = state.winner();
     let winner = terminal_winner.unwrap_or_else(|| {
@@ -2333,6 +3173,10 @@ struct TakeoverOutcome {
     kind: &'static str,
     snapshot_id: String,
     state_hash: String,
+    board_seed: u64,
+    chance_seed: u64,
+    chance_rng_state: u64,
+    policy_rng_states: Vec<u64>,
     players: u8,
     target_seat: u8,
     source_block: u32,
@@ -2344,11 +3188,19 @@ struct TakeoverOutcome {
     build_git_sha: &'static str,
     build_dirty: bool,
     search_profile: ArenaSearchProfileSnapshot,
+    decision_backend: &'static str,
+    decision_revision: Option<String>,
+    native_gpu_identity: Option<Value>,
+    continuation_mode: &'static str,
+    initial_root: Option<RootDecisionTrace>,
+    native_gpu_initial_diagnostics: Option<Value>,
     terminal: bool,
     winner: u8,
     target_win: bool,
     final_rank: f32,
     final_victory_points: u8,
+    best_opponent_victory_points: u8,
+    victory_point_margin: i16,
     victory_points_gained: u8,
     final_turn: u16,
     turns_elapsed: u16,
@@ -2356,6 +3208,16 @@ struct TakeoverOutcome {
     cutoff: bool,
     longest_road_acquired: bool,
     largest_army_acquired: bool,
+    road_cuts: u32,
+    award_transfers: u32,
+    expansion_denial_events: u32,
+    expansion_portfolio_denied: f32,
+    expansion_protection_events: u32,
+    progress_card_plays: [u32; 4],
+    progress_card_conversions: [u32; 4],
+    monopoly_cards_transferred: u32,
+    dirty_monopoly_sequences: u32,
+    one_turn_closeouts: u32,
     roads: u32,
     settlements: u32,
     cities: u32,
@@ -2392,6 +3254,11 @@ fn run_takeover_mode(config: &Config) {
         BufWriter::new(File::create(output_path).unwrap_or_else(|error| {
             panic!("failed to create takeover output {output_path}: {error}")
         }));
+    let mut native_gpu = config.takeover_native_gpu_host.as_deref().map(|path| {
+        NativeGpuClient::spawn(path).unwrap_or_else(|error| {
+            panic!("failed to initialize takeover native GPU host: {error}")
+        })
+    });
     for (line_index, line) in input.lines().enumerate() {
         let line = line.unwrap_or_else(|error| {
             panic!(
@@ -2419,6 +3286,7 @@ fn run_takeover_mode(config: &Config) {
         replay_config.challenge_output = None;
         replay_config.takeover_input = None;
         replay_config.takeover_output = None;
+        replay_config.takeover_target_seat = Some(snapshot.target_seat);
         let state = snapshot
             .game_state
             .clone()
@@ -2461,7 +3329,9 @@ fn run_takeover_mode(config: &Config) {
         assert_eq!(engines.len(), snapshot.players as usize);
         let target = snapshot.target_seat as usize;
         let source_engine = engines[target].as_str().to_string();
-        let arm = if let Some(engine) = config.takeover_engine {
+        let arm = if config.takeover_native_gpu_host.is_some() {
+            "native-gpu".to_string()
+        } else if let Some(engine) = config.takeover_engine {
             engines[target] = engine;
             engine.as_str().to_string()
         } else {
@@ -2478,15 +3348,29 @@ fn run_takeover_mode(config: &Config) {
             state,
             chance_rng,
             policy_rngs,
+            native_gpu.as_mut(),
         );
         let metrics = &result.metrics;
         let decisions = metrics.decision_count[target].max(1) as f64;
         let searches = metrics.search_decision_count[target].max(1) as f64;
+        let best_opponent_victory_points = result.points[..snapshot.players as usize]
+            .iter()
+            .enumerate()
+            .filter(|(player, _)| *player != target)
+            .map(|(_, points)| *points)
+            .max()
+            .unwrap_or(0);
+        let victory_point_margin =
+            i16::from(result.points[target]) - i16::from(best_opponent_victory_points);
         let outcome = TakeoverOutcome {
-            schema_version: 1,
+            schema_version: 3,
             kind: "colonist-native-takeover-outcome",
             snapshot_id: snapshot.snapshot_id,
             state_hash: snapshot.state_hash,
+            board_seed: snapshot.board_seed,
+            chance_seed: snapshot.chance_seed,
+            chance_rng_state: snapshot.chance_rng_state,
+            policy_rng_states: snapshot.policy_rng_states.clone(),
             players: snapshot.players,
             target_seat: snapshot.target_seat,
             source_block: snapshot.source_block,
@@ -2498,11 +3382,31 @@ fn run_takeover_mode(config: &Config) {
             build_git_sha: replay_config.build_git_sha,
             build_dirty: replay_config.build_dirty,
             search_profile: ArenaSearchProfileSnapshot::capture(&replay_config),
+            decision_backend: if config.takeover_native_gpu_host.is_some() {
+                "native-gpu"
+            } else {
+                "arena"
+            },
+            decision_revision: config.takeover_native_gpu_revision.clone(),
+            native_gpu_identity: native_gpu.as_ref().map(|client| client.identity().clone()),
+            continuation_mode: if config.takeover_native_gpu_host.is_some()
+                && config.takeover_random_followup
+            {
+                "native-gpu-first-root-then-random"
+            } else if config.takeover_random_followup {
+                "first-root-then-random"
+            } else {
+                "target-engine"
+            },
+            initial_root: metrics.first_decisions[target].clone(),
+            native_gpu_initial_diagnostics: metrics.native_gpu_initial_diagnostics[target].clone(),
             terminal: !result.cutoff,
             winner: result.winner,
             target_win: !result.cutoff && result.winner as usize == target,
             final_rank: result.ranks[target],
             final_victory_points: result.points[target],
+            best_opponent_victory_points,
+            victory_point_margin,
             victory_points_gained: result.points[target]
                 .saturating_sub(snapshot.target_victory_points),
             final_turn: result.turns,
@@ -2513,6 +3417,16 @@ fn run_takeover_mode(config: &Config) {
                 && initial_longest_road_holder != Some(snapshot.target_seat),
             largest_army_acquired: result.largest_army_holder == Some(snapshot.target_seat)
                 && initial_largest_army_holder != Some(snapshot.target_seat),
+            road_cuts: metrics.road_cuts[target],
+            award_transfers: metrics.award_transfers[target],
+            expansion_denial_events: metrics.expansion_denial_events[target],
+            expansion_portfolio_denied: metrics.expansion_portfolio_denied[target],
+            expansion_protection_events: metrics.expansion_protection_events[target],
+            progress_card_plays: metrics.progress_card_plays[target],
+            progress_card_conversions: metrics.progress_card_conversions[target],
+            monopoly_cards_transferred: metrics.monopoly_cards_transferred[target],
+            dirty_monopoly_sequences: metrics.dirty_monopoly_sequences[target],
+            one_turn_closeouts: metrics.one_turn_closeouts[target],
             roads: metrics.roads[target],
             settlements: metrics.settlements[target],
             cities: metrics.cities[target],
