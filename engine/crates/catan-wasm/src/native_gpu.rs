@@ -996,30 +996,6 @@ impl NativeGpuSearchEngine {
         if aggregated.iter().all(|candidate| candidate.samples == 0) {
             return Err("GPU native decision deadline expired before any rollout completed".into());
         }
-        // Priors only stabilize a wholly ordinary unresolved survivor set. Mandatory blockers,
-        // promotion-only admissions, exact families, and EndTurn have admission/evidence
-        // semantics that deliberately cannot make the shallow policy prior authoritative.
-        let prefer_prior_for_survivors = active
-            .iter()
-            .filter_map(|index| aggregated.get(*index))
-            .filter(|candidate| candidate.errors == 0 && candidate.samples > 0)
-            .all(|candidate| {
-                candidate.action != Action::EndTurn
-                    && exact_family_for_action(&candidate.action).is_none()
-                    && !admitted_by_promotion.contains(&candidate.action)
-                    && !verified_blockers
-                        .iter()
-                        .any(|(action, _)| action == &candidate.action)
-            });
-        let chosen_root = active
-            .iter()
-            .filter_map(|index| aggregated.get(*index))
-            .filter(|candidate| candidate.errors == 0 && candidate.samples > 0)
-            .max_by(|left, right| compare_surviving_roots(left, right, prefer_prior_for_survivors))
-            .cloned()
-            .ok_or_else(|| {
-                "GPU native search had no error-free surviving root candidate".to_string()
-            })?;
         let mut final_root_order = active
             .iter()
             .copied()
@@ -1028,6 +1004,32 @@ impl NativeGpuSearchEngine {
                 candidate.errors == 0 && candidate.samples > 0
             })
             .collect::<Vec<_>>();
+        let pairwise_unresolved = final_root_order.iter().enumerate().all(|(position, left)| {
+            final_root_order[position + 1..]
+                .iter()
+                .all(|right| racing_contenders(&[*left, *right], &aggregated).len() == 2)
+        });
+        // Priors only stabilize a wholly ordinary survivor set after every final pair has been
+        // checked by the racer's own confidence rule. Mandatory blockers, promotion-only
+        // admissions, exact families, and EndTurn keep rollout-first final arbitration.
+        let prefer_prior_for_survivors = pairwise_unresolved
+            && final_root_order.iter().all(|index| {
+                let candidate = &aggregated[*index];
+                candidate.action != Action::EndTurn
+                    && exact_family_for_action(&candidate.action).is_none()
+                    && !admitted_by_promotion.contains(&candidate.action)
+                    && !verified_blockers
+                        .iter()
+                        .any(|(action, _)| action == &candidate.action)
+            });
+        let chosen_root = final_root_order
+            .iter()
+            .map(|index| &aggregated[*index])
+            .max_by(|left, right| compare_surviving_roots(left, right, prefer_prior_for_survivors))
+            .cloned()
+            .ok_or_else(|| {
+                "GPU native search had no error-free surviving root candidate".to_string()
+            })?;
         final_root_order.sort_by(|left, right| {
             compare_surviving_roots(
                 &aggregated[*left],
