@@ -219,6 +219,7 @@ pub enum DepthBeliefError {
 #[derive(Clone, Copy)]
 enum Algorithm {
     MaxN,
+    HostilityStress { root: u8, hostility: f32 },
     Paranoid { root: u8 },
 }
 
@@ -537,6 +538,24 @@ impl Searcher {
         value
     }
 
+    fn decision_maximizes(&self, actor: u8) -> bool {
+        match self.algorithm {
+            Algorithm::MaxN | Algorithm::HostilityStress { .. } => true,
+            Algorithm::Paranoid { root } => actor == root,
+        }
+    }
+
+    fn decision_scalar(&self, actor: u8, value: &[f32; 4]) -> f32 {
+        match self.algorithm {
+            Algorithm::MaxN => value[actor as usize],
+            Algorithm::HostilityStress { root, .. } if actor == root => value[root as usize],
+            Algorithm::HostilityStress { root, hostility } => {
+                (1.0 - hostility) * value[actor as usize] + hostility * (1.0 - value[root as usize])
+            }
+            Algorithm::Paranoid { root } => value[root as usize],
+        }
+    }
+
     fn visit_ranked_decision(
         &mut self,
         state: &GameState,
@@ -557,17 +576,10 @@ impl Searcher {
             return (self.evaluate_cached(state), None);
         }
         ranked.truncate(ranked.len().min(remaining as usize));
-        let maximize_root = match self.algorithm {
-            Algorithm::MaxN => true,
-            Algorithm::Paranoid { root } => actor == root,
-        };
-        let component = match self.algorithm {
-            Algorithm::MaxN => actor as usize,
-            Algorithm::Paranoid { root } => root as usize,
-        };
+        let maximize = self.decision_maximizes(actor);
         let mut best = [0.0; 4];
         let mut chosen = None;
-        let mut best_scalar = if maximize_root {
+        let mut best_scalar = if maximize {
             f32::NEG_INFINITY
         } else {
             f32::INFINITY
@@ -609,8 +621,8 @@ impl Searcher {
                 return (self.evaluate_cached(state), None);
             }
             apply_action_friction(&mut child, state, &action, actor);
-            let scalar = child[component];
-            let improves = if maximize_root {
+            let scalar = self.decision_scalar(actor, &child);
+            let improves = if maximize {
                 scalar > best_scalar
             } else {
                 scalar < best_scalar
@@ -621,7 +633,7 @@ impl Searcher {
                 chosen = Some(action);
             }
             if let Algorithm::Paranoid { .. } = self.algorithm {
-                if maximize_root {
+                if maximize {
                     alpha = alpha.max(best_scalar);
                 } else {
                     beta = beta.min(best_scalar);
@@ -857,14 +869,7 @@ impl Searcher {
             ranked = safe_ranked;
         }
         let root_budgets = allocate_root_node_budgets(ranked.len(), self.maximum_nodes);
-        let component = match self.algorithm {
-            Algorithm::MaxN => actor as usize,
-            Algorithm::Paranoid { root } => root as usize,
-        };
-        let maximize = match self.algorithm {
-            Algorithm::MaxN => true,
-            Algorithm::Paranoid { root } => actor == root,
-        };
+        let maximize = self.decision_maximizes(actor);
         let mut chosen = None;
         let mut value = [0.0; 4];
         let mut action_values = Vec::new();
@@ -903,7 +908,7 @@ impl Searcher {
                 )
             };
             apply_action_friction(&mut child, state, &action, actor);
-            let scalar = child[component];
+            let scalar = self.decision_scalar(actor, &child);
             action_values.push(DepthActionValue {
                 action: action.clone(),
                 value: child,
@@ -1949,6 +1954,53 @@ pub fn search_maxn_bounded(
     maximum_nodes: u32,
 ) -> DepthSearchResult {
     search_maxn_bounded_timed(state, depth, branch_cap, maximum_nodes, 0)
+}
+
+/// Runs an explicit offline MaxN hostility stress search.
+///
+/// The root player keeps ordinary MaxN utility. Simulated opponents maximize
+/// `(1 - h) * V_i + h * (1 - V_root)` while leaf evaluation, root ordering,
+/// branch/node budgeting, and state transitions remain the ordinary bounded
+/// MaxN implementation. This entry point is diagnostic-only; production
+/// callers use `search_maxn_bounded[_timed]` and cannot enable hostility.
+pub fn search_maxn_hostility_stress_bounded(
+    state: &GameState,
+    hostility: f32,
+    depth: u8,
+    branch_cap: usize,
+    maximum_nodes: u32,
+) -> Result<DepthSearchResult, String> {
+    if !hostility.is_finite() || !(0.0..=1.0).contains(&hostility) {
+        return Err(format!(
+            "hostility stress must be finite and within [0, 1], got {hostility}"
+        ));
+    }
+    if hostility == 0.0 {
+        return Ok(search_maxn_bounded(state, depth, branch_cap, maximum_nodes));
+    }
+    if matches!(
+        state.phase,
+        Phase::SetupSettlement | Phase::SetupRoad { .. }
+    ) {
+        return Err("hostility stress diagnostic does not support setup decisions".into());
+    }
+
+    let root = state.actor();
+    Ok(Searcher {
+        algorithm: Algorithm::HostilityStress { root, hostility },
+        maximum_depth: depth,
+        maximum_nodes: maximum_nodes.max(1),
+        node_limit: maximum_nodes.max(1),
+        branch_cap: branch_cap.max(1),
+        nodes: 0,
+        cutoffs: 0,
+        deepest_depth: 0,
+        deadline: CooperativeDeadline::start(0),
+        deadline_reached: false,
+        observation_safe_recursive: false,
+        evaluation_cache: Rc::new(RefCell::new(HashMap::new())),
+    }
+    .root(state))
 }
 
 pub fn search_maxn_bounded_timed(
