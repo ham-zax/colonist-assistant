@@ -35,6 +35,24 @@ pub struct OpponentThreat {
     pub blocking_hexes: Vec<u8>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RoadCutContinuationEvidence {
+    pub vertex: u8,
+    pub opponent: u8,
+    pub posterior: f32,
+    pub maritime_trade_required_posterior: f32,
+    pub award_loss_posterior: f32,
+    pub maximum_road_loss: u8,
+    pub approach_edges: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RoadCutContinuationAssessment {
+    pub posterior: f32,
+    pub award_loss_posterior: f32,
+    pub continuations: Vec<RoadCutContinuationEvidence>,
+}
+
 fn main_phase_for(state: &GameState, player: u8) -> GameState {
     let mut result = state.clone();
     result.current_player = player;
@@ -44,12 +62,260 @@ fn main_phase_for(state: &GameState, player: u8) -> GameState {
     result
 }
 
+fn future_main_phase_for(state: &GameState, player: u8) -> GameState {
+    let mut result = main_phase_for(state, player);
+    // The continuation starts on a future ordinary main phase. Do not leak
+    // actor-owned transient Road Building or trade counters into the opponent.
+    result.free_roads = 0;
+    result.domestic_trade_used = false;
+    result.domestic_trade_count = 0;
+    result
+}
+
 fn can_afford(state: &GameState, player: u8, cost: &[u8; 5]) -> bool {
     state.players[player as usize]
         .resources
         .iter()
         .zip(cost)
         .all(|(have, need)| have >= need)
+}
+
+/// Enumerate only maritime conversions that monotonically reduce the deficit
+/// for one concrete build cost. Each trade must leave all already-required
+/// cards intact, so the search is finite and does not speculate about domestic
+/// trade acceptance or future production.
+fn maritime_preparations_for_cost(
+    state: &GameState,
+    player: u8,
+    cost: &[u8; 5],
+) -> Vec<(GameState, u8)> {
+    let start = future_main_phase_for(state, player);
+    let mut frontier = vec![(start.clone(), 0_u8)];
+    let mut seen = vec![start.state_hash()];
+    let mut prepared = Vec::new();
+
+    while let Some((current, trades)) = frontier.pop() {
+        if can_afford(&current, player, cost) {
+            prepared.push((current, trades));
+            continue;
+        }
+
+        for action in current.legal_actions() {
+            let Action::MaritimeTrade {
+                give,
+                receive,
+                ratio,
+            } = action
+            else {
+                continue;
+            };
+            let give_index = give.index();
+            let receive_index = receive.index();
+            let resources = &current.players[player as usize].resources;
+            if resources[receive_index] >= cost[receive_index]
+                || resources[give_index].saturating_sub(ratio) < cost[give_index]
+            {
+                continue;
+            }
+
+            let mut next = current.clone();
+            if next
+                .apply(&Action::MaritimeTrade {
+                    give,
+                    receive,
+                    ratio,
+                })
+                .is_err()
+            {
+                continue;
+            }
+            let hash = next.state_hash();
+            if seen.contains(&hash) {
+                continue;
+            }
+            seen.push(hash);
+            frontier.push((next, trades.saturating_add(1)));
+        }
+    }
+
+    prepared
+}
+
+#[derive(Clone, Copy)]
+struct RoadCutPath {
+    edge: u8,
+    maritime_trades: u8,
+    road_loss: u8,
+    award_loss: bool,
+}
+
+fn road_cut_paths_in_world(
+    post_root: &GameState,
+    protected: u8,
+    vertex: u8,
+    opponent: u8,
+) -> Vec<RoadCutPath> {
+    let baseline_length = post_root.longest_road_length(protected);
+    let baseline_holder = post_root.longest_road_holder;
+    let road_preparations = maritime_preparations_for_cost(post_root, opponent, &ROAD_COST);
+    let mut paths = Vec::new();
+
+    for &edge in &post_root.board.vertices[vertex as usize].adjacent_edges {
+        for (road_ready, road_trades) in &road_preparations {
+            let road_action = Action::BuildRoad { edge };
+            if !road_ready.legal_actions().contains(&road_action) {
+                continue;
+            }
+            let mut after_road = road_ready.clone();
+            if after_road.apply(&road_action).is_err() {
+                continue;
+            }
+
+            for (settlement_ready, settlement_trades) in
+                maritime_preparations_for_cost(&after_road, opponent, &SETTLEMENT_COST)
+            {
+                let settlement_action = Action::BuildSettlement { vertex };
+                if !settlement_ready.legal_actions().contains(&settlement_action) {
+                    continue;
+                }
+                let mut after_settlement = settlement_ready;
+                if after_settlement.apply(&settlement_action).is_err() {
+                    continue;
+                }
+
+                let road_loss = baseline_length
+                    .saturating_sub(after_settlement.longest_road_length(protected));
+                let award_loss = baseline_holder == Some(protected)
+                    && after_settlement.longest_road_holder != Some(protected);
+                if road_loss > 0 || award_loss {
+                    paths.push(RoadCutPath {
+                        edge,
+                        maritime_trades: road_trades.saturating_add(settlement_trades),
+                        road_loss,
+                        award_loss,
+                    });
+                }
+            }
+        }
+    }
+
+    paths
+}
+
+/// Posterior evidence that a road root exposes a concrete opponent
+/// road -> settlement continuation at one of the supplied structural cut
+/// vertices. The sequence is proved with the authoritative action generator and
+/// `GameState::apply()`, including legal maritime bank/port conversion.
+pub fn belief_road_cut_continuation_assessment<'a>(
+    worlds: impl IntoIterator<Item = (&'a GameState, f32)>,
+    protected: u8,
+    root_action: &Action,
+    exposed_vertices: &[u8],
+) -> RoadCutContinuationAssessment {
+    if !matches!(root_action, Action::BuildRoad { .. }) || exposed_vertices.is_empty() {
+        return RoadCutContinuationAssessment::default();
+    }
+
+    let mut result = RoadCutContinuationAssessment::default();
+    let mut compatible_weight = 0.0_f32;
+    let mut any_weight = 0.0_f32;
+    let mut any_award_weight = 0.0_f32;
+
+    for (state, raw_weight) in worlds {
+        let weight = raw_weight.max(0.0);
+        if weight <= f32::EPSILON {
+            continue;
+        }
+        let mut post_root = state.clone();
+        if post_root.apply(root_action).is_err() {
+            continue;
+        }
+        compatible_weight += weight;
+        if post_root.winner() == Some(protected) {
+            continue;
+        }
+
+        let mut world_has_continuation = false;
+        let mut world_has_award_loss = false;
+        for &vertex in exposed_vertices {
+            for opponent in 0..post_root.board.num_players {
+                if opponent == protected {
+                    continue;
+                }
+                let paths = road_cut_paths_in_world(&post_root, protected, vertex, opponent);
+                if paths.is_empty() {
+                    continue;
+                }
+
+                world_has_continuation = true;
+                let group_award_loss = paths.iter().any(|path| path.award_loss);
+                world_has_award_loss |= group_award_loss;
+                let minimum_trades = paths
+                    .iter()
+                    .map(|path| path.maritime_trades)
+                    .min()
+                    .unwrap_or(0);
+                let maximum_road_loss = paths
+                    .iter()
+                    .map(|path| path.road_loss)
+                    .max()
+                    .unwrap_or(0);
+                let mut approach_edges = paths.iter().map(|path| path.edge).collect::<Vec<_>>();
+                approach_edges.sort_unstable();
+                approach_edges.dedup();
+
+                let evidence = if let Some(existing) = result
+                    .continuations
+                    .iter_mut()
+                    .find(|existing| existing.vertex == vertex && existing.opponent == opponent)
+                {
+                    existing
+                } else {
+                    result.continuations.push(RoadCutContinuationEvidence {
+                        vertex,
+                        opponent,
+                        ..Default::default()
+                    });
+                    result.continuations.last_mut().unwrap()
+                };
+                evidence.posterior += weight;
+                if minimum_trades > 0 {
+                    evidence.maritime_trade_required_posterior += weight;
+                }
+                if group_award_loss {
+                    evidence.award_loss_posterior += weight;
+                }
+                evidence.maximum_road_loss =
+                    evidence.maximum_road_loss.max(maximum_road_loss);
+                evidence.approach_edges.extend(approach_edges);
+                evidence.approach_edges.sort_unstable();
+                evidence.approach_edges.dedup();
+            }
+        }
+        if world_has_continuation {
+            any_weight += weight;
+        }
+        if world_has_award_loss {
+            any_award_weight += weight;
+        }
+    }
+
+    if compatible_weight <= f32::EPSILON {
+        return RoadCutContinuationAssessment::default();
+    }
+    result.posterior = (any_weight / compatible_weight).clamp(0.0, 1.0);
+    result.award_loss_posterior = (any_award_weight / compatible_weight).clamp(0.0, 1.0);
+    for evidence in &mut result.continuations {
+        evidence.posterior = (evidence.posterior / compatible_weight).clamp(0.0, 1.0);
+        evidence.maritime_trade_required_posterior =
+            (evidence.maritime_trade_required_posterior / compatible_weight).clamp(0.0, 1.0);
+        evidence.award_loss_posterior =
+            (evidence.award_loss_posterior / compatible_weight).clamp(0.0, 1.0);
+    }
+    result
+        .continuations
+        .sort_by_key(|evidence| (evidence.vertex, evidence.opponent));
+    result
 }
 
 fn settlement_sites(state: &GameState, player: u8) -> Vec<u8> {

@@ -146,7 +146,12 @@ export interface DeepSearchRetainedRoot {
   plannerDecisiveCompletionMass?: number;
   plannerResponseWindows?: number;
   finalRank?: number;
+  finalEvaluationHorizon?: number;
+  initialTerminalOutcome?: number;
+  initialTerminalRate?: number;
+  initialVictoryMargin?: number;
   terminalOutcome?: number;
+  terminalRate?: number;
   terminalLowerBound?: number;
   terminalUpperBound?: number;
   victoryMargin?: number;
@@ -178,9 +183,45 @@ export type DeepSearchDomesticTradeThreat =
   | "contested-settlement"
   | "material-build";
 
+export interface DeepSearchIntroducedCriticalVertex {
+  vertexId: string;
+  roadLoss: number;
+  additionalRoadLoss: number;
+  awardLoss: boolean;
+  awardLossIntroduced: boolean;
+  awardVpExposure: number;
+  expansionLoss: number;
+  additionalExpansionLoss: number;
+}
+
+export interface DeepSearchIntroducedRoadFragility {
+  criticalVertices: DeepSearchIntroducedCriticalVertex[];
+  maximumAdditionalRoadLoss: number;
+  awardVpExposure: number;
+  maximumAdditionalExpansionLoss: number;
+}
+
+export interface DeepSearchRoadCutContinuationEvidence {
+  vertexId: string;
+  opponent: string;
+  posterior: number;
+  maritimeTradeRequiredPosterior: number;
+  awardLossPosterior: number;
+  maximumRoadLoss: number;
+  approachEdgeIds: string[];
+}
+
+export interface DeepSearchRoadCutContinuationAssessment {
+  posterior: number;
+  awardLossPosterior: number;
+  continuations: DeepSearchRoadCutContinuationEvidence[];
+}
+
 export interface DeepSearchRootCausalEvidence {
   action: DeepSearchAction;
   promotionReason?: DeepSearchRootPromotionReason;
+  introducedRoadFragility?: DeepSearchIntroducedRoadFragility;
+  roadCutContinuation?: DeepSearchRoadCutContinuationAssessment;
   admittedByPromotion: boolean;
   closeoutGain: number;
   responseWindows?: number;
@@ -192,6 +233,18 @@ export interface DeepSearchRootCausalEvidence {
   tradeHardVeto: boolean;
 }
 
+export interface DeepSearchHorizonEscalation {
+  reason: "fragile-award-low-terminal-completion";
+  provisionalWinner: DeepSearchAction;
+  initialHorizon: number;
+  unresolvedCutMass: number;
+  roots: DeepSearchAction[];
+  attemptedHorizons: number[];
+  completedHorizon?: number;
+  finalWinner?: DeepSearchAction;
+  deadlineLimited: boolean;
+}
+
 export interface DeepSearchRootProvenance {
   rankedRootCount: number;
   rankedRoots: DeepSearchRankedRoot[];
@@ -199,6 +252,7 @@ export interface DeepSearchRootProvenance {
   prunedRootCount: number;
   prunedRoots: DeepSearchPrunedRoot[];
   rootEvidence?: DeepSearchRootCausalEvidence[];
+  horizonEscalation?: DeepSearchHorizonEscalation;
   tradeHardVetoThreshold?: number;
   searchWinner?: DeepSearchAction;
   exactFamilyReplacement?: DeepSearchActionReplacement;
@@ -427,7 +481,9 @@ export const explainDeepSearchDecision = (
       `The surviving root won the native GPU comparison after ${search.rollouts.toLocaleString()} rollout samples across ${search.rustSearchParticleCount.toLocaleString()} searched belief worlds`,
     );
     evidence.push(
-      "GPU roots are ordered by terminal outcome, then victory margin, then faster completion, with strategic prior as the final tie-break",
+      search.rootProvenance.horizonEscalation
+        ? "Escalated roots are rerun at one common deeper horizon; statistically separated terminal outcomes remain primary, while overlapping terminal bands defer to victory margin and then faster completion"
+        : "GPU roots are ordered by terminal outcome, then victory margin, then faster completion, with strategic prior as the final tie-break",
     );
   } else if (search.authority === "weighted-policy") {
     summary = `The weighted policy chose to ${chosenLabel}`;
@@ -478,6 +534,18 @@ export const explainDeepSearchDecision = (
   const retained = search.rootProvenance.retainedRoots.find((candidate) =>
     sameDeepSearchAction(candidate.action, chosen),
   );
+  const horizonEscalation = search.rootProvenance.horizonEscalation;
+  if (horizonEscalation) {
+    const escalatedRoots = horizonEscalation.roots
+      .map(describeDeepSearchAction)
+      .join(", ");
+    reasons.push(
+      `Selective horizon arbitration reran ${escalatedRoots} because ${describeDeepSearchAction(horizonEscalation.provisionalWinner)} exposed an award-losing road cut with ${percentWeight(horizonEscalation.unresolvedCutMass)} unresolved continuation mass`,
+    );
+    evidence.push(
+      `Adaptive horizons ${horizonEscalation.attemptedHorizons.join(" → ")}; deepest completed ${horizonEscalation.completedHorizon ?? "none"}; deeper winner ${horizonEscalation.finalWinner ? describeDeepSearchAction(horizonEscalation.finalWinner) : "unresolved"}${horizonEscalation.deadlineLimited ? "; decision deadline limited further escalation" : ""}`,
+    );
+  }
   if (retained?.finalRank !== undefined) {
     const gpuRunnerUp = search.rootProvenance.retainedRoots
       .filter(
@@ -487,13 +555,13 @@ export const explainDeepSearchDecision = (
       )
       .sort((left, right) => (left.finalRank ?? Infinity) - (right.finalRank ?? Infinity))[0];
     const runnerComparison = gpuRunnerUp
-      ? `; runner-up ${describeDeepSearchAction(gpuRunnerUp.action)} had terminal score ${fixedScore(gpuRunnerUp.terminalOutcome)} and victory margin ${fixedScore(gpuRunnerUp.victoryMargin)}`
+      ? `; runner-up ${describeDeepSearchAction(gpuRunnerUp.action)} at horizon ${gpuRunnerUp.finalEvaluationHorizon ?? "unknown"} had terminal score ${fixedScore(gpuRunnerUp.terminalOutcome)}, ${percentWeight(gpuRunnerUp.terminalRate)} terminal completion, and victory margin ${fixedScore(gpuRunnerUp.victoryMargin)}`
       : "";
     reasons.push(
-      `Its final GPU comparator rank was #${retained.finalRank}, with terminal score ${fixedScore(retained.terminalOutcome)} and victory margin ${fixedScore(retained.victoryMargin)}${runnerComparison}`,
+      `Its final GPU comparator rank was #${retained.finalRank} at horizon ${retained.finalEvaluationHorizon ?? "unknown"}, with terminal score ${fixedScore(retained.terminalOutcome)}, ${percentWeight(retained.terminalRate)} terminal completion, and victory margin ${fixedScore(retained.victoryMargin)}${runnerComparison}`,
     );
     evidence.push(
-      `GPU confidence bands: terminal ${fixedScore(retained.terminalLowerBound)}..${fixedScore(retained.terminalUpperBound)}, victory margin ${fixedScore(retained.victoryMarginLowerBound)}..${fixedScore(retained.victoryMarginUpperBound)}, mean completion turn ${fixedScore(retained.meanTurn)}`,
+      `GPU confidence bands: terminal ${fixedScore(retained.terminalLowerBound)}..${fixedScore(retained.terminalUpperBound)}, terminal completion ${percentWeight(retained.terminalRate)}, victory margin ${fixedScore(retained.victoryMarginLowerBound)}..${fixedScore(retained.victoryMarginUpperBound)}, mean completion turn ${fixedScore(retained.meanTurn)}`,
     );
   }
   if (ranked?.rank) {

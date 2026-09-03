@@ -19,12 +19,16 @@ use crate::policy::{
     order_scored_with_state_quotas, rank_with_class_quotas, truncate_root_preserving_end_turn,
 };
 use crate::root_impact::{
-    RootPromotionReason, apply_closeout_root_impacts, compute_spatial_root_impacts,
+    IntroducedRoadFragility, RootPromotionReason, RootStrategicImpact, apply_closeout_root_impacts,
+    compute_spatial_root_impacts,
 };
 use crate::shared::{
     admit_promoted_roots, coalesce_identical_particles, select_experimental_strategic_particles,
 };
-use crate::threats::{forced_loss_weight, posterior_immediate_threat_weight};
+use crate::threats::{
+    RoadCutContinuationAssessment, belief_road_cut_continuation_assessment, forced_loss_weight,
+    posterior_immediate_threat_weight,
+};
 use crate::trade_safety::{
     DomesticTradeThreat, HARD_VETO_POSTERIOR, belief_domestic_trade_assessment,
     belief_domestic_trade_threat,
@@ -100,6 +104,11 @@ pub struct PrunedRootDiagnostic {
 pub struct RootCausalEvidence {
     pub action: Action,
     pub promotion_reason: Option<RootPromotionReason>,
+    /// Structural road vulnerability introduced or worsened by this root.
+    pub introduced_road_fragility: IntroducedRoadFragility,
+    /// Belief-weighted, legally proved opponent road -> settlement exploitation
+    /// of the introduced cut vertices. Diagnostic/escalation evidence only.
+    pub road_cut_continuation: RoadCutContinuationAssessment,
     /// True only when adding measured promotion reasons changed this root from
     /// outside to inside the shared admission result.
     pub admitted_by_promotion: bool,
@@ -145,6 +154,35 @@ impl Default for BeliefSearchProvenance {
             safety_replacement: None,
         }
     }
+}
+
+fn road_cut_continuation_for_root(
+    particles: &[BeliefParticle],
+    actor: u8,
+    action: &Action,
+    impact: Option<&RootStrategicImpact>,
+) -> RoadCutContinuationAssessment {
+    let exposed_vertices = impact
+        .map(|impact| {
+            impact
+                .introduced_road_fragility
+                .critical_vertices
+                .iter()
+                .map(|cut| cut.vertex)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if exposed_vertices.is_empty() {
+        return RoadCutContinuationAssessment::default();
+    }
+    belief_road_cut_continuation_assessment(
+        particles
+            .iter()
+            .map(|particle| (&particle.state, particle.weight)),
+        actor,
+        action,
+        &exposed_vertices,
+    )
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1377,9 +1415,15 @@ fn belief_search(
             } else {
                 Default::default()
             };
+            let road_cut_continuation =
+                road_cut_continuation_for_root(posterior, observer, &candidate.action, impact);
             RootCausalEvidence {
                 action: candidate.action.clone(),
                 promotion_reason: impact.and_then(|impact| impact.promotion),
+                introduced_road_fragility: impact
+                    .map(|impact| impact.introduced_road_fragility.clone())
+                    .unwrap_or_default(),
+                road_cut_continuation,
                 admitted_by_promotion: impact.is_some_and(|impact| {
                     impact.promotion.is_some()
                         && retained
@@ -3161,9 +3205,15 @@ fn cuda_belief_search_with_batch(
             } else {
                 Default::default()
             };
+            let road_cut_continuation =
+                road_cut_continuation_for_root(posterior, observer, &candidate.action, impact);
             RootCausalEvidence {
                 action: candidate.action.clone(),
                 promotion_reason: impact.and_then(|impact| impact.promotion),
+                introduced_road_fragility: impact
+                    .map(|impact| impact.introduced_road_fragility.clone())
+                    .unwrap_or_default(),
+                road_cut_continuation,
                 admitted_by_promotion: impact.is_some_and(|impact| {
                     impact.promotion.is_some()
                         && retained

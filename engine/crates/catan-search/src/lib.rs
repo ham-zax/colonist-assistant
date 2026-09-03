@@ -71,8 +71,9 @@ pub use resilience::{
     evaluate_edge_cut, evaluate_vertex_cut,
 };
 pub use root_impact::{
-    RoadImpactDelta, RootImpactReport, RootPromotionReason, RootStrategicImpact,
-    apply_closeout_root_impacts, compute_spatial_root_impacts,
+    IntroducedCriticalVertex, IntroducedRoadFragility, RoadImpactDelta, RootImpactReport,
+    RootPromotionReason, RootStrategicImpact, apply_closeout_root_impacts,
+    compute_spatial_root_impacts,
 };
 pub use shared::{
     EXPERIMENTAL_STRATEGIC_PARTICLE_TARGET, STRATEGIC_ROOT_WIDTH, admit_promoted_roots,
@@ -83,9 +84,10 @@ pub use tactical::{
     TacticalResult, solve_belief_current_turn, solve_belief_current_turn_timed, solve_current_turn,
 };
 pub use threats::{
-    OpponentThreat, OpponentThreatKind, action_blocks_threat, detect_opponent_threats,
-    force_threat_blocking_actions, forced_loss_weight, posterior_expected_tactical_threat_weight,
-    posterior_immediate_threat_weight,
+    OpponentThreat, OpponentThreatKind, RoadCutContinuationAssessment,
+    RoadCutContinuationEvidence, action_blocks_threat, belief_road_cut_continuation_assessment,
+    detect_opponent_threats, force_threat_blocking_actions, forced_loss_weight,
+    posterior_expected_tactical_threat_weight, posterior_immediate_threat_weight,
 };
 pub use trade_model::{
     TRADE_ACCEPTANCE_FEATURES, learned_trade_acceptance_probability, learned_trade_model_version,

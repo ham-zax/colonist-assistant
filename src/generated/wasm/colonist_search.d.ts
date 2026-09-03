@@ -84,7 +84,12 @@ export interface WasmRetainedRoot {
   plannerDecisiveCompletionMass?: number;
   plannerResponseWindows?: number;
   finalRank?: number;
+  finalEvaluationHorizon?: number;
+  initialTerminalOutcome?: number;
+  initialTerminalRate?: number;
+  initialVictoryMargin?: number;
   terminalOutcome?: number;
+  terminalRate?: number;
   terminalLowerBound?: number;
   terminalUpperBound?: number;
   victoryMargin?: number;
@@ -116,9 +121,45 @@ export type WasmDomesticTradeThreat =
   | "contested-settlement"
   | "material-build";
 
+export interface WasmIntroducedCriticalVertex {
+  vertex: number;
+  roadLoss: number;
+  additionalRoadLoss: number;
+  awardLoss: boolean;
+  awardLossIntroduced: boolean;
+  awardVpExposure: number;
+  expansionLoss: number;
+  additionalExpansionLoss: number;
+}
+
+export interface WasmIntroducedRoadFragility {
+  criticalVertices: WasmIntroducedCriticalVertex[];
+  maximumAdditionalRoadLoss: number;
+  awardVpExposure: number;
+  maximumAdditionalExpansionLoss: number;
+}
+
+export interface WasmRoadCutContinuationEvidence {
+  vertex: number;
+  opponent: number;
+  posterior: number;
+  maritimeTradeRequiredPosterior: number;
+  awardLossPosterior: number;
+  maximumRoadLoss: number;
+  approachEdges: number[];
+}
+
+export interface WasmRoadCutContinuationAssessment {
+  posterior: number;
+  awardLossPosterior: number;
+  continuations: WasmRoadCutContinuationEvidence[];
+}
+
 export interface WasmRootCausalEvidence {
   action: WasmAction;
   promotionReason?: WasmRootPromotionReason;
+  introducedRoadFragility?: WasmIntroducedRoadFragility;
+  roadCutContinuation?: WasmRoadCutContinuationAssessment;
   admittedByPromotion: boolean;
   closeoutGain: number;
   responseWindows?: number;
@@ -130,6 +171,18 @@ export interface WasmRootCausalEvidence {
   tradeHardVeto: boolean;
 }
 
+export interface WasmHorizonEscalation {
+  reason: "fragile-award-low-terminal-completion";
+  provisionalWinner: WasmAction;
+  initialHorizon: number;
+  unresolvedCutMass: number;
+  roots: WasmAction[];
+  attemptedHorizons: number[];
+  completedHorizon?: number;
+  finalWinner?: WasmAction;
+  deadlineLimited: boolean;
+}
+
 export interface WasmRootProvenance {
   rankedRootCount: number;
   rankedRoots: WasmRankedRoot[];
@@ -137,6 +190,7 @@ export interface WasmRootProvenance {
   prunedRootCount: number;
   prunedRoots: WasmPrunedRoot[];
   rootEvidence: WasmRootCausalEvidence[];
+  horizonEscalation?: WasmHorizonEscalation;
   tradeHardVetoThreshold: number;
   searchWinner?: WasmAction;
   exactFamilyReplacement?: WasmActionReplacement;

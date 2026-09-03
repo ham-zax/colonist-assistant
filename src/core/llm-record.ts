@@ -910,7 +910,12 @@ const contracts = (): CompactRecordContracts => ({
     "allocatedNodes",
     "reason",
     "finalRank",
+    "finalEvaluationHorizon",
+    "initialTerminalOutcome",
+    "initialTerminalRate",
+    "initialVictoryMargin",
     "terminalOutcome",
+    "terminalRate",
     "terminalLcb",
     "terminalUcb",
     "victoryMargin",
@@ -928,6 +933,22 @@ const contracts = (): CompactRecordContracts => ({
     "tradeHardVetoPosterior",
     "tradeHardVeto",
     "tradeVetoThreshold",
+    "introducedFragility",
+    "maximumAdditionalRoadLoss",
+    "awardVpExposure",
+    "maximumAdditionalExpansionLoss",
+    "roadCutContinuationPosterior",
+    "roadCutAwardLossPosterior",
+    "roadCutContinuations",
+    "horizonEscalationReason",
+    "horizonProvisionalWinner",
+    "horizonInitialHorizon",
+    "horizonUnresolvedCutMass",
+    "horizonEscalationRoots",
+    "horizonAttemptedHorizons",
+    "horizonCompletedHorizon",
+    "horizonFinalWinner",
+    "horizonDeadlineLimited",
   ],
   replacementColumns: ["decision", "kind", "from", "to"],
   beliefColumns: [
@@ -1754,108 +1775,106 @@ export class CompactGameBuilder {
       ]);
     });
 
+    const appendRoot = (cells: Record<string, CompactCell>): void => {
+      record.roots.push(
+        record.contracts.rootColumns.map((column) => cells[column] ?? null),
+      );
+    };
     const provenance = trace.rootProvenance;
+    const horizonEscalation = provenance?.horizonEscalation;
+    const horizonEscalationRoots =
+      horizonEscalation?.roots.map((root) => actionLabel(root, alias)) ?? [];
+    const horizonEscalationRootSet = new Set(horizonEscalationRoots);
     provenance?.rankedRoots
       .slice(0, MAX_ROOTS_PER_BUCKET)
       .forEach((root) => {
-        record.roots.push([
-          id,
-          "ranked",
-          root.rank,
-          actionLabel(root.action, alias),
-          compactNumber(root.prior),
-          compactNumber(root.plannerValue),
-          compactNumber(root.plannerCompletionMass),
-          null,
-          NA,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          compactNumber(root.plannerDecisiveCompletionMass),
-          compactNumber(root.plannerResponseWindows),
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-        ]);
+        appendRoot({
+          decision: id,
+          bucket: "ranked",
+          rank: root.rank,
+          action: actionLabel(root.action, alias),
+          prior: compactNumber(root.prior),
+          plannerValue: compactNumber(root.plannerValue),
+          completionMass: compactNumber(root.plannerCompletionMass),
+          allocatedNodes: null,
+          reason: NA,
+          decisiveCompletionMass: compactNumber(
+            root.plannerDecisiveCompletionMass,
+          ),
+          responseWindows: compactNumber(root.plannerResponseWindows),
+        });
       });
     provenance?.retainedRoots
       .slice(0, MAX_ROOTS_PER_BUCKET)
       .forEach((root) => {
-        record.roots.push([
-          id,
-          "retained",
-          root.preTruncationRank ?? null,
-          actionLabel(root.action, alias),
-          compactNumber(root.prior),
-          compactNumber(root.plannerValue),
-          compactNumber(root.plannerCompletionMass),
-          root.allocatedNodes,
-          NA,
-          root.finalRank ?? null,
-          compactNumber(root.terminalOutcome),
-          compactNumber(root.terminalLowerBound),
-          compactNumber(root.terminalUpperBound),
-          compactNumber(root.victoryMargin),
-          compactNumber(root.victoryMarginLowerBound),
-          compactNumber(root.victoryMarginUpperBound),
-          compactNumber(root.meanTurn),
-          compactNumber(root.plannerDecisiveCompletionMass),
-          compactNumber(root.plannerResponseWindows),
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-        ]);
+        const rootAction = actionLabel(root.action, alias);
+        const escalated = horizonEscalationRootSet.has(rootAction);
+        appendRoot({
+          decision: id,
+          bucket: "retained",
+          rank: root.preTruncationRank ?? null,
+          action: rootAction,
+          prior: compactNumber(root.prior),
+          plannerValue: compactNumber(root.plannerValue),
+          completionMass: compactNumber(root.plannerCompletionMass),
+          allocatedNodes: root.allocatedNodes,
+          reason: NA,
+          finalRank: root.finalRank ?? null,
+          finalEvaluationHorizon: root.finalEvaluationHorizon ?? null,
+          initialTerminalOutcome: compactNumber(root.initialTerminalOutcome),
+          initialTerminalRate: compactNumber(root.initialTerminalRate),
+          initialVictoryMargin: compactNumber(root.initialVictoryMargin),
+          terminalOutcome: compactNumber(root.terminalOutcome),
+          terminalRate: compactNumber(root.terminalRate),
+          terminalLcb: compactNumber(root.terminalLowerBound),
+          terminalUcb: compactNumber(root.terminalUpperBound),
+          victoryMargin: compactNumber(root.victoryMargin),
+          marginLcb: compactNumber(root.victoryMarginLowerBound),
+          marginUcb: compactNumber(root.victoryMarginUpperBound),
+          meanTurn: compactNumber(root.meanTurn),
+          decisiveCompletionMass: compactNumber(
+            root.plannerDecisiveCompletionMass,
+          ),
+          responseWindows: compactNumber(root.plannerResponseWindows),
+          horizonEscalationReason: escalated
+            ? (horizonEscalation?.reason ?? null)
+            : null,
+          horizonProvisionalWinner:
+            escalated && horizonEscalation?.provisionalWinner
+              ? actionLabel(horizonEscalation.provisionalWinner, alias)
+              : null,
+          horizonInitialHorizon: escalated
+            ? (horizonEscalation?.initialHorizon ?? null)
+            : null,
+          horizonUnresolvedCutMass: escalated
+            ? compactNumber(horizonEscalation?.unresolvedCutMass)
+            : null,
+          horizonEscalationRoots: escalated ? horizonEscalationRoots : null,
+          horizonAttemptedHorizons: escalated
+            ? (horizonEscalation?.attemptedHorizons ?? null)
+            : null,
+          horizonCompletedHorizon: escalated
+            ? (horizonEscalation?.completedHorizon ?? null)
+            : null,
+          horizonFinalWinner:
+            escalated && horizonEscalation?.finalWinner
+              ? actionLabel(horizonEscalation.finalWinner, alias)
+              : null,
+          horizonDeadlineLimited: escalated
+            ? (horizonEscalation?.deadlineLimited ?? null)
+            : null,
+        });
       });
     provenance?.prunedRoots
       .slice(0, MAX_ROOTS_PER_BUCKET)
       .forEach((root) => {
-        record.roots.push([
-          id,
-          "pruned",
-          root.preTruncationRank ?? null,
-          actionLabel(root.action, alias),
-          null,
-          null,
-          null,
-          null,
-          root.reason,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-        ]);
+        appendRoot({
+          decision: id,
+          bucket: "pruned",
+          rank: root.preTruncationRank ?? null,
+          action: actionLabel(root.action, alias),
+          reason: root.reason,
+        });
       });
     const exactReplacementForEvidence =
       trace.authorityTrace?.exactFamilyReplacement ??
@@ -1888,6 +1907,8 @@ export class CompactGameBuilder {
           : evidence.admittedByPromotion ||
               evidence.promotionReason != null ||
               evidence.tradeHardVeto ||
+              (evidence.introducedRoadFragility?.criticalVertices.length ?? 0) > 0 ||
+              (evidence.roadCutContinuation?.posterior ?? 0) > 0 ||
               (evidence.closeoutGain ?? 0) > 0
             ? 1
             : retainedEvidenceActions.has(evidenceAction)
@@ -1902,36 +1923,57 @@ export class CompactGameBuilder {
       )
       .slice(0, MAX_ROOTS_PER_BUCKET)
       .forEach(({ evidence }) => {
-        record.roots.push([
-          id,
-          "evidence",
-          null,
-          actionLabel(evidence.action, alias),
-          null,
-          null,
-          null,
-          null,
-          NA,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          compactNumber(evidence.decisiveCompletionMass),
-          compactNumber(evidence.responseWindows),
-          evidence.promotionReason ?? NA,
-          evidence.admittedByPromotion,
-          compactNumber(evidence.closeoutGain),
-          evidence.tradeThreat ?? NA,
-          compactNumber(evidence.tradeRiskPosterior),
-          compactNumber(evidence.dirtyMonopolyPosterior),
-          compactNumber(evidence.tradeHardVetoPosterior),
-          evidence.tradeHardVeto,
-          compactNumber(provenance?.tradeHardVetoThreshold),
-        ]);
+        const introducedFragility =
+          evidence.introducedRoadFragility?.criticalVertices
+            .map(
+              (cut) =>
+                `${cut.vertexId}:road=${cut.roadLoss}/+${cut.additionalRoadLoss}:award=${cut.awardVpExposure}${cut.awardLossIntroduced ? "+new" : ""}:exp=${compactNumber(cut.expansionLoss)}/+${compactNumber(cut.additionalExpansionLoss)}`,
+            )
+            .join("|") || NA;
+        const roadCutContinuations =
+          evidence.roadCutContinuation?.continuations
+            .map(
+              (continuation) =>
+                `${continuation.opponent}>${continuation.vertexId}[${continuation.approachEdgeIds.join("+")}]:p=${compactNumber(continuation.posterior)}:trade=${compactNumber(continuation.maritimeTradeRequiredPosterior)}:award=${compactNumber(continuation.awardLossPosterior)}:loss=${continuation.maximumRoadLoss}`,
+            )
+            .join("|") || NA;
+        appendRoot({
+          decision: id,
+          bucket: "evidence",
+          rank: null,
+          action: actionLabel(evidence.action, alias),
+          reason: NA,
+          decisiveCompletionMass: compactNumber(evidence.decisiveCompletionMass),
+          responseWindows: compactNumber(evidence.responseWindows),
+          promotionReason: evidence.promotionReason ?? NA,
+          admittedByPromotion: evidence.admittedByPromotion,
+          closeoutGain: compactNumber(evidence.closeoutGain),
+          tradeThreat: evidence.tradeThreat ?? NA,
+          tradeRiskPosterior: compactNumber(evidence.tradeRiskPosterior),
+          dirtyMonopolyPosterior: compactNumber(
+            evidence.dirtyMonopolyPosterior,
+          ),
+          tradeHardVetoPosterior: compactNumber(
+            evidence.tradeHardVetoPosterior,
+          ),
+          tradeHardVeto: evidence.tradeHardVeto,
+          tradeVetoThreshold: compactNumber(provenance?.tradeHardVetoThreshold),
+          introducedFragility,
+          maximumAdditionalRoadLoss:
+            evidence.introducedRoadFragility?.maximumAdditionalRoadLoss ?? null,
+          awardVpExposure:
+            evidence.introducedRoadFragility?.awardVpExposure ?? null,
+          maximumAdditionalExpansionLoss: compactNumber(
+            evidence.introducedRoadFragility?.maximumAdditionalExpansionLoss,
+          ),
+          roadCutContinuationPosterior: compactNumber(
+            evidence.roadCutContinuation?.posterior,
+          ),
+          roadCutAwardLossPosterior: compactNumber(
+            evidence.roadCutContinuation?.awardLossPosterior,
+          ),
+          roadCutContinuations,
+        });
       });
     if (provenance?.searchWinner) {
       record.replacements.push([
@@ -1991,7 +2033,7 @@ export const formatCompactGameRecord = (record: CompactGameRecord): string => {
     `@time=${JSON.stringify({ frames: "dtMs since previous frame; first since start", decisions: "dtMs since start", events: "dtMs since start" })}`,
     `@actionKeys=${JSON.stringify({ t: "targetId", t2: "secondTargetId", r: "resource", r2: "otherResource", q: "ratio", b: "build", ctl: "control", card: "development card", v: "verdict", accept: "boolean", mode: "trade mode", ba: "board action", oi: "offer index", tid: "trade id", ai: "accepted-player index", c: "confidence", p: "player alias", fp: "follow-up player alias", pt: "screen point x,y", cards: "resource vector", recv: "receive resource vector", give: "give resource vector", get: "receive resource vector", cg: "counter give resource vector", cr: "counter receive resource vector", eg: "existing give resource vector", er: "existing receive resource vector", to: "recipient aliases", fr: "follow-up resource sequence" })}`,
     `@eventArgs=${JSON.stringify({ discover: "[P]", gain: "[P,R,reason]", spend: "[P,R,reason]", transfer: "[from,to,R,reason]", trade: "[P,acceptor,giveR,getR,bank]", "trade-offered": "[P,recipients,giveR,getR]", "trade-accepted": "[P,creator,giveR,getR]", "trade-rejected": "[P,creator,giveR,getR]", "trade-countered": "[P,creator,giveR,getR,counterGiveR,counterGetR]", "trade-embargoed": "[P,creator]", "trade-embargo-cleared": "[P,creator]", "trade-expired": "[P,recipients,giveR,getR]", "unknown-transfer": "[from,to,count]", "unknown-discard": "[P,count]", monopoly: "[P,resource,amount]", "buy-dev": "[P]", "play-dev": "[P,card]", roll: "[P,dice]" })}`,
-    `@diagnostics=${JSON.stringify({ searchStages: "particlePrep/rootScoring/exactFamilies/threatSafety/onePly/deepWaves are actual elapsed ms inside the bounded CPU belief search; omitted for opening/GPU paths where these stages do not apply", effectiveEffort: "backend-resolved search effort after native profiling and engine-side clamping", decisionRationale: "plain-language summary, causal reasons, and auditable evidence derived from the final authority, chosen root, runner-up data, exact comparator, provenance, and deadline state", searchResult: "stable per-analysis identity inside this recording; reusedFrom points at the first decision row that owns reused search work", exactCandidates: "source=exact exposes decisionScore, lowerScore, and the authoritative comparatorScore", gpuRoots: "retained GPU roots expose final comparator rank, terminal-outcome and victory-margin confidence bands, and mean completion turn", executionDiagnostic: "failure-only trade identity/DOM evidence with assistant-owned badge text removed; ctl entries expose candidate controls and disabled/active evidence", unmatchedSamples: "bounded deduplicated unparsed log forms classified as harmless/redundant or integrity-relevant; @unmatchedRelevant alone gates benchmark integrity" })}`,
+    `@diagnostics=${JSON.stringify({ searchStages: "particlePrep/rootScoring/exactFamilies/threatSafety/onePly/deepWaves are actual elapsed ms inside the bounded CPU belief search; omitted for opening/GPU paths where these stages do not apply", effectiveEffort: "backend-resolved search effort after native profiling and engine-side clamping", decisionRationale: "plain-language summary, causal reasons, and auditable evidence derived from the final authority, chosen root, runner-up data, exact comparator, provenance, and deadline state", searchResult: "stable per-analysis identity inside this recording; reusedFrom points at the first decision row that owns reused search work", exactCandidates: "source=exact exposes decisionScore, lowerScore, and the authoritative comparatorScore", gpuRoots: "retained GPU roots expose per-root final evaluation horizon, shallow evidence when re-evaluated, terminal outcome, terminal completion rate, victory-margin confidence bands, and adaptive-horizon escalation provenance", executionDiagnostic: "failure-only trade identity/DOM evidence with assistant-owned badge text removed; ctl entries expose candidate controls and disabled/active evidence", unmatchedSamples: "bounded deduplicated unparsed log forms classified as harmless/redundant or integrity-relevant; @unmatchedRelevant alone gates benchmark integrity" })}`,
     `@beliefWorlds=${JSON.stringify("handRefs follow the player order declared by each @beliefs row")}`,
     `@aliases=${JSON.stringify(record.aliases)}`,
     `@assistant=${JSON.stringify(record.assistant)}`,

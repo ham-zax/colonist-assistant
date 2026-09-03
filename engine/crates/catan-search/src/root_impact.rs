@@ -25,6 +25,26 @@ pub struct RoadImpactDelta {
     pub expansion_portfolio_delta: f32,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct IntroducedCriticalVertex {
+    pub vertex: u8,
+    pub road_loss: u8,
+    pub additional_road_loss: u8,
+    pub award_loss: bool,
+    pub award_loss_introduced: bool,
+    pub award_vp_exposure: u8,
+    pub expansion_loss: f32,
+    pub additional_expansion_loss: f32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct IntroducedRoadFragility {
+    pub critical_vertices: Vec<IntroducedCriticalVertex>,
+    pub maximum_additional_road_loss: u8,
+    pub award_vp_exposure: u8,
+    pub maximum_additional_expansion_loss: f32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RootPromotionReason {
     RoadAwardProtection,
@@ -37,6 +57,9 @@ pub enum RootPromotionReason {
 pub struct RootStrategicImpact {
     pub action: Action,
     pub road_delta: RoadImpactDelta,
+    /// Structural vulnerability introduced or worsened by this root. This is
+    /// causal evidence only; it does not alter utility or promotion semantics.
+    pub introduced_road_fragility: IntroducedRoadFragility,
     /// Normalized reduction in opponent response windows among materially
     /// comparable planner endpoints. Diagnostic/coverage evidence only.
     pub closeout_gain: f32,
@@ -49,6 +72,54 @@ pub struct RootStrategicImpact {
 pub struct RootImpactReport {
     pub baseline_road: RoadResilience,
     pub actions: Vec<RootStrategicImpact>,
+}
+
+fn compare_introduced_road_fragility(
+    before: &RoadResilience,
+    after: &RoadResilience,
+) -> IntroducedRoadFragility {
+    let mut result = IntroducedRoadFragility::default();
+    for after_cut in &after.critical_vertices {
+        let before_cut = before
+            .critical_vertices
+            .iter()
+            .find(|cut| cut.vertex == after_cut.vertex);
+        let before_road_loss = before_cut.map_or(0, |cut| cut.road_loss);
+        let before_award_loss = before_cut.is_some_and(|cut| cut.award_loss);
+        let before_expansion_loss = before_cut.map_or(0.0, |cut| cut.expansion_loss);
+        let additional_road_loss = after_cut.road_loss.saturating_sub(before_road_loss);
+        let award_loss_introduced = after_cut.award_loss && !before_award_loss;
+        let additional_expansion_loss =
+            (after_cut.expansion_loss - before_expansion_loss).max(0.0);
+
+        if additional_road_loss == 0
+            && !award_loss_introduced
+            && additional_expansion_loss <= f32::EPSILON
+        {
+            continue;
+        }
+
+        result.maximum_additional_road_loss = result
+            .maximum_additional_road_loss
+            .max(additional_road_loss);
+        if after_cut.award_loss {
+            result.award_vp_exposure = result.award_vp_exposure.max(2);
+        }
+        result.maximum_additional_expansion_loss = result
+            .maximum_additional_expansion_loss
+            .max(additional_expansion_loss);
+        result.critical_vertices.push(IntroducedCriticalVertex {
+            vertex: after_cut.vertex,
+            road_loss: after_cut.road_loss,
+            additional_road_loss,
+            award_loss: after_cut.award_loss,
+            award_loss_introduced,
+            award_vp_exposure: if after_cut.award_loss { 2 } else { 0 },
+            expansion_loss: after_cut.expansion_loss,
+            additional_expansion_loss,
+        });
+    }
+    result
 }
 
 /// Computes the public-board road resilience impact for each candidate action.
@@ -71,6 +142,7 @@ pub fn compute_spatial_root_impacts(
 
     for action in actions {
         let mut road_delta = RoadImpactDelta::default();
+        let mut introduced_road_fragility = IntroducedRoadFragility::default();
         let mut promotion = None;
 
         match action {
@@ -142,18 +214,21 @@ pub fn compute_spatial_root_impacts(
                     promotion = Some(RootPromotionReason::RoadAwardProtection);
                 }
 
-                // 2. Check if building this road establishes a bypass for an existing cut
-                if baseline_road.maximum_longest_road_loss > 0 {
-                    let after_res = analyze_road_resilience(&probe, actor);
-                    if after_res.maximum_longest_road_loss < baseline_road.maximum_longest_road_loss
-                    {
-                        road_delta.longest_road_loss_prevented = (baseline_road
-                            .maximum_longest_road_loss
-                            - after_res.maximum_longest_road_loss)
-                            as i8;
-                        if promotion.is_none() {
-                            promotion = Some(RootPromotionReason::RoadAwardProtection);
-                        }
+                // 2. Compare the full post-road resilience shape. Aggregate maxima
+                // are insufficient because a new cut can be hidden by an equally
+                // severe pre-existing vulnerability elsewhere in the network.
+                let after_res = analyze_road_resilience(&probe, actor);
+                introduced_road_fragility =
+                    compare_introduced_road_fragility(&baseline_road, &after_res);
+
+                // Existing bypass protection remains coverage-only behavior.
+                if after_res.maximum_longest_road_loss < baseline_road.maximum_longest_road_loss {
+                    road_delta.longest_road_loss_prevented = (baseline_road
+                        .maximum_longest_road_loss
+                        - after_res.maximum_longest_road_loss)
+                        as i8;
+                    if promotion.is_none() {
+                        promotion = Some(RootPromotionReason::RoadAwardProtection);
                     }
                 }
 
@@ -201,6 +276,7 @@ pub fn compute_spatial_root_impacts(
         impacts.push(RootStrategicImpact {
             action: action.clone(),
             road_delta,
+            introduced_road_fragility,
             closeout_gain: 0.0,
             response_windows: None,
             decisive_completion_mass: 0.0,

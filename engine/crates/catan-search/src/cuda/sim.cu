@@ -139,6 +139,8 @@ static const uint32_t ROAD_COST[5] = {1u, 1u, 0u, 0u, 0u};
 static const uint32_t SETTLEMENT_COST[5] = {1u, 1u, 1u, 1u, 0u};
 static const uint32_t CITY_COST[5] = {0u, 0u, 0u, 2u, 3u};
 static const uint32_t DEVELOPMENT_COST[5] = {0u, 0u, 1u, 1u, 1u};
+static const uint32_t ROAD_CUT_POLICY_ROAD_LOSS_WEIGHT = 180u;
+static const uint32_t ROAD_CUT_POLICY_AWARD_LOSS_WEIGHT = 540u;
 static const uint32_t DOMESTIC_PLAN_COSTS[6][5] = {
     {1u, 1u, 0u, 0u, 0u},
     {1u, 1u, 1u, 1u, 0u},
@@ -440,14 +442,16 @@ static inline __device__ void edge_mark(
     }
 }
 
-static inline __device__ uint32_t longest_road_from(
+static inline __device__ uint32_t longest_road_from_with_blocking_vertex(
     const uint32_t *states,
     const uint32_t *topology,
     uint32_t stride,
     uint32_t lane,
     uint32_t player,
     uint32_t root_edge,
-    uint32_t root_through
+    uint32_t root_through,
+    uint32_t blocking_vertex,
+    uint32_t blocking_player
 ) {
     uint32_t edge_stack[15];
     uint32_t through_stack[15];
@@ -467,7 +471,9 @@ static inline __device__ uint32_t longest_road_from(
         const uint32_t b = topo_edge_vertex(topology, edge, 1u);
         const uint32_t next_vertex = a == through_stack[depth] ? b : a;
         const uint32_t building = state_get(states, stride, STATE_BUILDINGS + next_vertex, lane);
-        const uint32_t owner = building_player(building);
+        const uint32_t owner = next_vertex == blocking_vertex
+            ? blocking_player
+            : building_player(building);
         if (owner != 0xffffffffu && owner != player) {
             edge_mark(&used_low, &used_high, edge, 0);
             --depth;
@@ -507,6 +513,28 @@ static inline __device__ uint32_t longest_road_from(
     return best;
 }
 
+static inline __device__ uint32_t longest_road_from(
+    const uint32_t *states,
+    const uint32_t *topology,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t player,
+    uint32_t root_edge,
+    uint32_t root_through
+) {
+    return longest_road_from_with_blocking_vertex(
+        states,
+        topology,
+        stride,
+        lane,
+        player,
+        root_edge,
+        root_through,
+        0xffffffffu,
+        0xffffffffu
+    );
+}
+
 static inline __device__ uint32_t longest_road_length(
     const uint32_t *states,
     const uint32_t *topology,
@@ -523,6 +551,50 @@ static inline __device__ uint32_t longest_road_length(
         const uint32_t b = topo_edge_vertex(topology, edge, 1u);
         const uint32_t from_a = longest_road_from(states, topology, stride, lane, player, edge, a);
         const uint32_t from_b = longest_road_from(states, topology, stride, lane, player, edge, b);
+        const uint32_t length = from_a > from_b ? from_a : from_b;
+        best = length > best ? length : best;
+    }
+    return best;
+}
+
+static inline __device__ uint32_t longest_road_length_with_blocking_vertex(
+    const uint32_t *states,
+    const uint32_t *topology,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t player,
+    uint32_t blocking_vertex,
+    uint32_t blocking_player
+) {
+    uint32_t best = 0u;
+    for (uint32_t edge = 0u; edge < EDGE_COUNT; ++edge) {
+        if (state_get(states, stride, STATE_ROADS + edge, lane) != player + 1u) {
+            continue;
+        }
+        const uint32_t a = topo_edge_vertex(topology, edge, 0u);
+        const uint32_t b = topo_edge_vertex(topology, edge, 1u);
+        const uint32_t from_a = longest_road_from_with_blocking_vertex(
+            states,
+            topology,
+            stride,
+            lane,
+            player,
+            edge,
+            a,
+            blocking_vertex,
+            blocking_player
+        );
+        const uint32_t from_b = longest_road_from_with_blocking_vertex(
+            states,
+            topology,
+            stride,
+            lane,
+            player,
+            edge,
+            b,
+            blocking_vertex,
+            blocking_player
+        );
         const uint32_t length = from_a > from_b ? from_a : from_b;
         best = length > best ? length : best;
     }
@@ -1921,6 +1993,124 @@ static inline __device__ uint32_t vertex_policy_score(
     return score;
 }
 
+static inline __device__ int road_newly_enables_settlement_vertex(
+    const uint32_t *states,
+    const uint32_t *topology,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t edge,
+    uint32_t vertex
+) {
+    if (vertex >= VERTEX_COUNT || state_get(states, stride, STATE_BUILDINGS + vertex, lane) != 0u) {
+        return 0;
+    }
+    const uint32_t adjacent_vertices = topo_vertex_vertex_count(topology, vertex);
+    for (uint32_t slot = 0u; slot < adjacent_vertices; ++slot) {
+        const uint32_t neighbor = topo_vertex_vertex(topology, vertex, slot);
+        if (state_get(states, stride, STATE_BUILDINGS + neighbor, lane) != 0u) {
+            return 0;
+        }
+    }
+    const uint32_t current = state_get(states, stride, STATE_CURRENT_PLAYER, lane);
+    const uint32_t adjacent_edges = topo_vertex_edge_count(topology, vertex);
+    int candidate_is_adjacent = 0;
+    for (uint32_t slot = 0u; slot < adjacent_edges; ++slot) {
+        const uint32_t adjacent = topo_vertex_edge(topology, vertex, slot);
+        if (adjacent == edge) {
+            candidate_is_adjacent = 1;
+            continue;
+        }
+        if (state_get(states, stride, STATE_ROADS + adjacent, lane) == current + 1u) {
+            return 0;
+        }
+    }
+    return candidate_is_adjacent;
+}
+
+static inline __device__ uint32_t road_cut_settlement_policy_bonus(
+    const uint32_t *states,
+    const uint32_t *topology,
+    uint32_t stride,
+    uint32_t lane,
+    uint32_t edge
+) {
+    const uint32_t current = state_get(states, stride, STATE_CURRENT_PLAYER, lane);
+    if (player_get(states, stride, lane, current, PLAYER_SETTLEMENTS_LEFT) == 0u) {
+        return 0u;
+    }
+    int can_continue_directly = 1;
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        const uint32_t held = player_get(
+            states, stride, lane, current, PLAYER_RESOURCES + resource
+        );
+        if (held < ROAD_COST[resource] + SETTLEMENT_COST[resource]) {
+            can_continue_directly = 0;
+            break;
+        }
+    }
+
+    const uint32_t players = state_get(states, stride, STATE_NUM_PLAYERS, lane);
+    const uint32_t old_holder = state_get(states, stride, STATE_LONGEST_HOLDER, lane);
+    uint32_t best_bonus = 0u;
+    for (uint32_t endpoint = 0u; endpoint < 2u; ++endpoint) {
+        const uint32_t vertex = topo_edge_vertex(topology, edge, endpoint);
+        if (!road_newly_enables_settlement_vertex(
+            states, topology, stride, lane, edge, vertex
+        )) {
+            continue;
+        }
+        for (uint32_t opponent = 0u; opponent < players; ++opponent) {
+            if (opponent == current) {
+                continue;
+            }
+            const uint32_t before = longest_road_length(
+                states, topology, stride, lane, opponent
+            );
+            const uint32_t after = longest_road_length_with_blocking_vertex(
+                states, topology, stride, lane, opponent, vertex, current
+            );
+            const uint32_t road_loss = before > after ? before - after : 0u;
+            if (road_loss == 0u) {
+                continue;
+            }
+
+            int removes_award = 0;
+            if (old_holder == opponent + 1u) {
+                if (after < 5u) {
+                    removes_award = 1;
+                } else {
+                    uint32_t best_other = 0u;
+                    for (uint32_t player = 0u; player < players; ++player) {
+                        if (player == opponent) {
+                            continue;
+                        }
+                        const uint32_t other_length = player == current
+                            ? longest_road_length(states, topology, stride, lane, player)
+                            : longest_road_length_with_blocking_vertex(
+                                states, topology, stride, lane, player, vertex, current
+                            );
+                        best_other = other_length > best_other ? other_length : best_other;
+                    }
+                    removes_award = best_other > after;
+                }
+            }
+            if (road_loss < 2u && !removes_award) {
+                continue;
+            }
+
+            uint32_t bonus = road_loss * ROAD_CUT_POLICY_ROAD_LOSS_WEIGHT;
+            if (removes_award) {
+                bonus += ROAD_CUT_POLICY_AWARD_LOSS_WEIGHT;
+            }
+            if (can_continue_directly) {
+                bonus += bonus / 2u;
+            }
+            best_bonus = bonus > best_bonus ? bonus : best_bonus;
+        }
+    }
+    return best_bonus;
+}
+
 static inline __device__ uint32_t road_policy_score(
     const uint32_t *states,
     const uint32_t *topology,
@@ -1945,7 +2135,7 @@ static inline __device__ uint32_t road_policy_score(
             best = score > best ? score : best;
         }
     }
-    return best;
+    return best + road_cut_settlement_policy_bonus(states, topology, stride, lane, edge);
 }
 
 static inline __device__ uint32_t profile_scaled_weight(

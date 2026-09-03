@@ -12,9 +12,10 @@ use colonist_catan_core::{
 use colonist_catan_search::{
     ActionStats, BeliefParticle, BeliefSearchProvenance, BeliefSearchStageTimings,
     CooperativeDeadline, DomesticTradeThreat, ENGINE_REVISION, ExactActionFamily, ExactActionValue,
-    ExactDecisionResult, HARD_VETO_POSTERIOR, Mcts, RootPromotionReason, RootPruneReason,
-    SearchConfig, SearchMode, SearchReport, SearchStatistics, TacticalResult, action_prior,
-    evaluate, exact_action_comparator_score, exact_family_for_action, learned_model_version,
+    ExactDecisionResult, HARD_VETO_POSTERIOR, IntroducedRoadFragility, Mcts,
+    RoadCutContinuationAssessment, RootPromotionReason, RootPruneReason, SearchConfig, SearchMode,
+    SearchReport, SearchStatistics, TacticalResult, action_prior, evaluate,
+    exact_action_comparator_score, exact_family_for_action, learned_model_version,
     learned_trade_model_version, safer_end_turn_alternative,
     search_weighted_belief_maxn_iterative_timed_excluding,
     search_weighted_belief_paranoid_iterative_timed_excluding, solve_belief_current_turn,
@@ -378,7 +379,17 @@ struct RetainedRootOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     final_rank: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    final_evaluation_horizon: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    initial_terminal_outcome: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    initial_terminal_rate: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    initial_victory_margin: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     terminal_outcome: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal_rate: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     terminal_lower_bound: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -403,9 +414,101 @@ struct PrunedRootOutput {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct IntroducedCriticalVertexOutput {
+    vertex: u8,
+    road_loss: u8,
+    additional_road_loss: u8,
+    award_loss: bool,
+    award_loss_introduced: bool,
+    award_vp_exposure: u8,
+    expansion_loss: f32,
+    additional_expansion_loss: f32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IntroducedRoadFragilityOutput {
+    critical_vertices: Vec<IntroducedCriticalVertexOutput>,
+    maximum_additional_road_loss: u8,
+    award_vp_exposure: u8,
+    maximum_additional_expansion_loss: f32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RoadCutContinuationEvidenceOutput {
+    vertex: u8,
+    opponent: u8,
+    posterior: f32,
+    maritime_trade_required_posterior: f32,
+    award_loss_posterior: f32,
+    maximum_road_loss: u8,
+    approach_edges: Vec<u8>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RoadCutContinuationAssessmentOutput {
+    posterior: f32,
+    award_loss_posterior: f32,
+    continuations: Vec<RoadCutContinuationEvidenceOutput>,
+}
+
+fn introduced_road_fragility_output(
+    value: &IntroducedRoadFragility,
+) -> IntroducedRoadFragilityOutput {
+    IntroducedRoadFragilityOutput {
+        critical_vertices: value
+            .critical_vertices
+            .iter()
+            .map(|cut| IntroducedCriticalVertexOutput {
+                vertex: cut.vertex,
+                road_loss: cut.road_loss,
+                additional_road_loss: cut.additional_road_loss,
+                award_loss: cut.award_loss,
+                award_loss_introduced: cut.award_loss_introduced,
+                award_vp_exposure: cut.award_vp_exposure,
+                expansion_loss: cut.expansion_loss,
+                additional_expansion_loss: cut.additional_expansion_loss,
+            })
+            .collect(),
+        maximum_additional_road_loss: value.maximum_additional_road_loss,
+        award_vp_exposure: value.award_vp_exposure,
+        maximum_additional_expansion_loss: value.maximum_additional_expansion_loss,
+    }
+}
+
+fn road_cut_continuation_output(
+    value: &RoadCutContinuationAssessment,
+) -> RoadCutContinuationAssessmentOutput {
+    RoadCutContinuationAssessmentOutput {
+        posterior: value.posterior,
+        award_loss_posterior: value.award_loss_posterior,
+        continuations: value
+            .continuations
+            .iter()
+            .map(|continuation| RoadCutContinuationEvidenceOutput {
+                vertex: continuation.vertex,
+                opponent: continuation.opponent,
+                posterior: continuation.posterior,
+                maritime_trade_required_posterior: continuation.maritime_trade_required_posterior,
+                award_loss_posterior: continuation.award_loss_posterior,
+                maximum_road_loss: continuation.maximum_road_loss,
+                approach_edges: continuation.approach_edges.clone(),
+            })
+            .collect(),
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RootCausalEvidenceOutput {
     action: ActionOutput,
     promotion_reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    introduced_road_fragility: Option<IntroducedRoadFragilityOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    road_cut_continuation: Option<RoadCutContinuationAssessmentOutput>,
     admitted_by_promotion: bool,
     closeout_gain: f32,
     response_windows: Option<f32>,
@@ -419,6 +522,20 @@ struct RootCausalEvidenceOutput {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct HorizonEscalationOutput {
+    reason: &'static str,
+    provisional_winner: ActionOutput,
+    initial_horizon: u16,
+    unresolved_cut_mass: f32,
+    roots: Vec<ActionOutput>,
+    attempted_horizons: Vec<u16>,
+    completed_horizon: Option<u16>,
+    final_winner: Option<ActionOutput>,
+    deadline_limited: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RootProvenanceOutput {
     ranked_root_count: usize,
     ranked_roots: Vec<RankedRootOutput>,
@@ -426,6 +543,8 @@ struct RootProvenanceOutput {
     pruned_root_count: usize,
     pruned_roots: Vec<PrunedRootOutput>,
     root_evidence: Vec<RootCausalEvidenceOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    horizon_escalation: Option<HorizonEscalationOutput>,
     trade_hard_veto_threshold: f32,
     search_winner: Option<ActionOutput>,
     exact_family_replacement: Option<ActionReplacementOutput>,
@@ -441,6 +560,7 @@ impl Default for RootProvenanceOutput {
             pruned_root_count: 0,
             pruned_roots: Vec::new(),
             root_evidence: Vec::new(),
+            horizon_escalation: None,
             trade_hard_veto_threshold: HARD_VETO_POSTERIOR,
             search_winner: None,
             exact_family_replacement: None,
@@ -951,7 +1071,12 @@ fn root_provenance_output(provenance: BeliefSearchProvenance) -> RootProvenanceO
                 planner_decisive_completion_mass: candidate.planner_decisive_completion_mass,
                 planner_response_windows: candidate.planner_response_windows,
                 final_rank: None,
+                final_evaluation_horizon: None,
+                initial_terminal_outcome: None,
+                initial_terminal_rate: None,
+                initial_victory_margin: None,
                 terminal_outcome: None,
+                terminal_rate: None,
                 terminal_lower_bound: None,
                 terminal_upper_bound: None,
                 victory_margin: None,
@@ -973,20 +1098,32 @@ fn root_provenance_output(provenance: BeliefSearchProvenance) -> RootProvenanceO
         root_evidence: provenance
             .root_evidence
             .into_iter()
-            .map(|evidence| RootCausalEvidenceOutput {
-                action: action(evidence.action),
-                promotion_reason: evidence.promotion_reason.map(root_promotion_reason),
-                admitted_by_promotion: evidence.admitted_by_promotion,
-                closeout_gain: evidence.closeout_gain,
-                response_windows: evidence.response_windows,
-                decisive_completion_mass: evidence.decisive_completion_mass,
-                trade_threat: evidence.trade_threat.map(domestic_trade_threat_label),
-                trade_risk_posterior: evidence.trade_risk_posterior,
-                dirty_monopoly_posterior: evidence.dirty_monopoly_posterior,
-                trade_hard_veto_posterior: evidence.trade_hard_veto_posterior,
-                trade_hard_veto: evidence.trade_hard_veto,
+            .map(|evidence| {
+                let has_introduced_fragility = !evidence
+                    .introduced_road_fragility
+                    .critical_vertices
+                    .is_empty();
+                RootCausalEvidenceOutput {
+                    action: action(evidence.action),
+                    promotion_reason: evidence.promotion_reason.map(root_promotion_reason),
+                    introduced_road_fragility: has_introduced_fragility.then(|| {
+                        introduced_road_fragility_output(&evidence.introduced_road_fragility)
+                    }),
+                    road_cut_continuation: has_introduced_fragility
+                        .then(|| road_cut_continuation_output(&evidence.road_cut_continuation)),
+                    admitted_by_promotion: evidence.admitted_by_promotion,
+                    closeout_gain: evidence.closeout_gain,
+                    response_windows: evidence.response_windows,
+                    decisive_completion_mass: evidence.decisive_completion_mass,
+                    trade_threat: evidence.trade_threat.map(domestic_trade_threat_label),
+                    trade_risk_posterior: evidence.trade_risk_posterior,
+                    dirty_monopoly_posterior: evidence.dirty_monopoly_posterior,
+                    trade_hard_veto_posterior: evidence.trade_hard_veto_posterior,
+                    trade_hard_veto: evidence.trade_hard_veto,
+                }
             })
             .collect(),
+        horizon_escalation: None,
         trade_hard_veto_threshold: provenance.trade_hard_veto_threshold,
         search_winner: provenance.search_winner.map(action),
         exact_family_replacement: provenance.exact_family_replacement.map(replacement_output),

@@ -666,8 +666,23 @@ const mapRootProvenance = (
       ...(typeof candidate.finalRank === "number"
         ? { finalRank: candidate.finalRank }
         : {}),
+      ...(typeof candidate.finalEvaluationHorizon === "number"
+        ? { finalEvaluationHorizon: candidate.finalEvaluationHorizon }
+        : {}),
+      ...(typeof candidate.initialTerminalOutcome === "number"
+        ? { initialTerminalOutcome: candidate.initialTerminalOutcome }
+        : {}),
+      ...(typeof candidate.initialTerminalRate === "number"
+        ? { initialTerminalRate: candidate.initialTerminalRate }
+        : {}),
+      ...(typeof candidate.initialVictoryMargin === "number"
+        ? { initialVictoryMargin: candidate.initialVictoryMargin }
+        : {}),
       ...(typeof candidate.terminalOutcome === "number"
         ? { terminalOutcome: candidate.terminalOutcome }
+        : {}),
+      ...(typeof candidate.terminalRate === "number"
+        ? { terminalRate: candidate.terminalRate }
         : {}),
       ...(typeof candidate.terminalLowerBound === "number"
         ? { terminalLowerBound: candidate.terminalLowerBound }
@@ -701,6 +716,54 @@ const mapRootProvenance = (
       ...(evidence.promotionReason
         ? { promotionReason: evidence.promotionReason }
         : {}),
+      ...(evidence.introducedRoadFragility
+        ? {
+            introducedRoadFragility: {
+              criticalVertices:
+                evidence.introducedRoadFragility.criticalVertices.map((cut) => ({
+                  vertexId:
+                    board.vertices[cut.vertex]?.id ?? `vertex:${cut.vertex}`,
+                  roadLoss: cut.roadLoss,
+                  additionalRoadLoss: cut.additionalRoadLoss,
+                  awardLoss: cut.awardLoss,
+                  awardLossIntroduced: cut.awardLossIntroduced,
+                  awardVpExposure: cut.awardVpExposure,
+                  expansionLoss: cut.expansionLoss,
+                  additionalExpansionLoss: cut.additionalExpansionLoss,
+                })),
+              maximumAdditionalRoadLoss:
+                evidence.introducedRoadFragility.maximumAdditionalRoadLoss,
+              awardVpExposure: evidence.introducedRoadFragility.awardVpExposure,
+              maximumAdditionalExpansionLoss:
+                evidence.introducedRoadFragility.maximumAdditionalExpansionLoss,
+            },
+          }
+        : {}),
+      ...(evidence.roadCutContinuation
+        ? {
+            roadCutContinuation: {
+              posterior: evidence.roadCutContinuation.posterior,
+              awardLossPosterior: evidence.roadCutContinuation.awardLossPosterior,
+              continuations: evidence.roadCutContinuation.continuations.map(
+                (continuation) => ({
+                  vertexId:
+                    board.vertices[continuation.vertex]?.id ??
+                    `vertex:${continuation.vertex}`,
+                  opponent:
+                    players[continuation.opponent] ?? `P${continuation.opponent}`,
+                  posterior: continuation.posterior,
+                  maritimeTradeRequiredPosterior:
+                    continuation.maritimeTradeRequiredPosterior,
+                  awardLossPosterior: continuation.awardLossPosterior,
+                  maximumRoadLoss: continuation.maximumRoadLoss,
+                  approachEdgeIds: continuation.approachEdges.map(
+                    (edge) => board.edges[edge]?.id ?? `edge:${edge}`,
+                  ),
+                }),
+              ),
+            },
+          }
+        : {}),
       admittedByPromotion: evidence.admittedByPromotion,
       closeoutGain: evidence.closeoutGain,
       ...(typeof evidence.responseWindows === "number"
@@ -713,6 +776,37 @@ const mapRootProvenance = (
       tradeHardVetoPosterior: evidence.tradeHardVetoPosterior,
       tradeHardVeto: evidence.tradeHardVeto,
     })),
+    ...(provenance.horizonEscalation
+      ? {
+          horizonEscalation: {
+            reason: provenance.horizonEscalation.reason,
+            provisionalWinner: mapAction(
+              provenance.horizonEscalation.provisionalWinner,
+              players,
+              board,
+            ),
+            initialHorizon: provenance.horizonEscalation.initialHorizon,
+            unresolvedCutMass: provenance.horizonEscalation.unresolvedCutMass,
+            roots: provenance.horizonEscalation.roots.map((root) =>
+              mapAction(root, players, board),
+            ),
+            attemptedHorizons: provenance.horizonEscalation.attemptedHorizons,
+            ...(typeof provenance.horizonEscalation.completedHorizon === "number"
+              ? { completedHorizon: provenance.horizonEscalation.completedHorizon }
+              : {}),
+            ...(provenance.horizonEscalation.finalWinner
+              ? {
+                  finalWinner: mapAction(
+                    provenance.horizonEscalation.finalWinner,
+                    players,
+                    board,
+                  ),
+                }
+              : {}),
+            deadlineLimited: provenance.horizonEscalation.deadlineLimited,
+          },
+        }
+      : {}),
     tradeHardVetoThreshold: provenance.tradeHardVetoThreshold,
     ...(provenance.searchWinner
       ? { searchWinner: mapAction(provenance.searchWinner, players, board) }

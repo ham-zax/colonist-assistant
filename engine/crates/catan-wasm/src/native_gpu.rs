@@ -2,25 +2,34 @@ use colonist_catan_core::{Action, GameState};
 use colonist_catan_search::{
     ActionStats, BeliefParticle, CudaSimEngine, CudaSimError, CudaSimRootActionStats,
     DEVELOPMENT_EXACT_FAMILIES, ExactActionFamily, ExactDecisionResult, HARD_VETO_POSTERIOR,
-    SearchReport, SearchStatistics, admit_promoted_roots, apply_closeout_root_impacts,
-    belief_domestic_trade_assessment, belief_root_closeout_plans, compute_spatial_root_impacts,
-    exact_family_for_action, forced_loss_weight, posterior_immediate_threat_weight,
-    safer_end_turn_alternative, shared_root_candidates, solve_belief_current_turn_timed,
-    solve_exact_belief_excluding_controlled,
+    IntroducedRoadFragility, RoadCutContinuationAssessment, SearchReport, SearchStatistics,
+    admit_promoted_roots, apply_closeout_root_impacts, belief_domestic_trade_assessment,
+    belief_road_cut_continuation_assessment, belief_root_closeout_plans,
+    compute_spatial_root_impacts, exact_family_for_action, forced_loss_weight,
+    posterior_immediate_threat_weight, safer_end_turn_alternative, shared_root_candidates,
+    solve_belief_current_turn_timed, solve_exact_belief_excluding_controlled,
 };
 use serde::Serialize;
 use serde_json::Value;
 
 use super::{
     ActionReplacementOutput, AuthorityTraceOutput, DecisionAuthority, DecisionClock,
-    PrunedRootOutput, RankedRootOutput, Request, ResponseDiagnostics, RetainedRootOutput,
-    RootCausalEvidenceOutput, RootProvenanceOutput, action, basic_response_diagnostics,
-    domestic_trade_threat_label, effective_particle_count, exact_family_label,
-    exact_mandatory_report_controlled, game_states, response, root_exclusion_actions,
-    root_promotion_reason, weighted_policy_report_for_actions_controlled,
+    HorizonEscalationOutput, PrunedRootOutput, RankedRootOutput, Request, ResponseDiagnostics,
+    RetainedRootOutput, RootCausalEvidenceOutput, RootProvenanceOutput, action,
+    basic_response_diagnostics, domestic_trade_threat_label, effective_particle_count,
+    exact_family_label, exact_mandatory_report_controlled, game_states,
+    introduced_road_fragility_output, response, road_cut_continuation_output,
+    root_exclusion_actions, root_promotion_reason, weighted_policy_report_for_actions_controlled,
 };
 
 const GPU_ALGORITHM: &str = "gpu-root-rollout";
+const HORIZON_ESCALATION_MIN_UNRESOLVED_CUT_MASS: f32 = 0.20;
+const HORIZON_ESCALATION_MIN_STEPS: usize = 192;
+const HORIZON_ESCALATION_MAX_STEPS: usize = 768;
+const HORIZON_ESCALATION_MAX_STAGES: usize = 3;
+const HORIZON_ESCALATION_MIN_REMAINING_MS: u32 = 40;
+const HORIZON_ESCALATION_MIN_SAMPLES_PER_ROOT: usize = 16;
+const HORIZON_ESCALATION_MAX_SAMPLES_PER_ROOT: usize = 32;
 pub const NATIVE_GPU_PROTOCOL_VERSION: u32 = 6;
 pub const NATIVE_GPU_STATE_SCHEMA_VERSION: u32 = 2;
 
@@ -35,6 +44,13 @@ pub struct NativeGpuDeviceIdentity {
 
 pub struct NativeGpuSearchEngine {
     cuda: CudaSimEngine,
+}
+
+#[derive(Clone)]
+struct RootFragilityAssessment {
+    action: Action,
+    introduced_road_fragility: IntroducedRoadFragility,
+    road_cut_continuation: RoadCutContinuationAssessment,
 }
 
 #[derive(Clone)]
@@ -53,6 +69,7 @@ struct AggregatedRoot {
     samples: u32,
     errors: u32,
     terminal_outcome: f32,
+    terminal_rate: f32,
     terminal_variance: f32,
     victory_margin: f32,
     victory_margin_variance: f32,
@@ -236,7 +253,10 @@ fn aggregate_root(
     let valid = samples.valid_samples();
     let valid_f32 = valid.max(1) as f32;
     let legal_terminal = samples.terminal_sum as f32 / valid_f32;
-    let legal_terminal_second = samples.terminal_square_sum as f32 / valid_f32;
+    // Terminal outcomes are {-1, 0, +1}, so their second moment is exactly
+    // the fraction of valid rollouts that actually reached a terminal state.
+    let legal_terminal_rate = samples.terminal_square_sum as f32 / valid_f32;
+    let legal_terminal_second = legal_terminal_rate;
     let legal_turn = samples.turn_sum as f32 / valid_f32;
     let legal_margin = samples.margin_sum as f32 / valid_f32;
     let legal_margin_second = samples.margin_square_sum as f32 / valid_f32;
@@ -246,6 +266,7 @@ fn aggregate_root(
     let legal_opponent_vp_second = samples.opponent_vp_square_sum as f32 / valid_f32;
 
     let mut terminal_outcome = candidate.legal_weight * legal_terminal;
+    let mut terminal_rate = candidate.legal_weight * legal_terminal_rate;
     let mut terminal_second = candidate.legal_weight * legal_terminal_second;
     let mut victory_margin = candidate.legal_weight * legal_margin;
     let mut victory_margin_second = candidate.legal_weight * legal_margin_second;
@@ -268,6 +289,7 @@ fn aggregate_root(
         let (terminal, margin, turn, own_vp, best_opponent_vp) =
             baseline_rollout_metrics(&particle.state, actor);
         terminal_outcome += terminal * weight;
+        terminal_rate += terminal.abs() * weight;
         terminal_second += terminal * terminal * weight;
         victory_margin += margin * weight;
         victory_margin_second += margin * margin * weight;
@@ -286,6 +308,7 @@ fn aggregate_root(
         samples: samples.samples,
         errors: samples.errors,
         terminal_outcome,
+        terminal_rate,
         terminal_variance: variance(terminal_outcome, terminal_second),
         victory_margin,
         victory_margin_variance: variance(victory_margin, victory_margin_second),
@@ -303,6 +326,81 @@ fn compare_roots(left: &AggregatedRoot, right: &AggregatedRoot) -> std::cmp::Ord
         .then_with(|| left.victory_margin.total_cmp(&right.victory_margin))
         .then_with(|| right.mean_turn.total_cmp(&left.mean_turn))
         .then_with(|| left.prior.total_cmp(&right.prior))
+}
+
+fn compare_escalated_point_estimates(
+    left: &AggregatedRoot,
+    right: &AggregatedRoot,
+) -> std::cmp::Ordering {
+    left.victory_margin
+        .total_cmp(&right.victory_margin)
+        .then_with(|| left.terminal_outcome.total_cmp(&right.terminal_outcome))
+        .then_with(|| right.mean_turn.total_cmp(&left.mean_turn))
+        .then_with(|| left.prior.total_cmp(&right.prior))
+}
+
+fn escalated_root_order(indices: &[usize], roots: &[AggregatedRoot]) -> Vec<usize> {
+    if indices.len() <= 1 {
+        return indices.to_vec();
+    }
+
+    let best_terminal_lower = indices
+        .iter()
+        .map(|index| {
+            let root = &roots[*index];
+            root.terminal_outcome - confidence_width(root.terminal_variance, root.samples)
+        })
+        .max_by(f32::total_cmp)
+        .expect("non-empty escalation set has a terminal lower bound");
+    let is_terminal_contender = |index: usize| {
+        let root = &roots[index];
+        root.terminal_outcome + confidence_width(root.terminal_variance, root.samples) + 1e-6
+            >= best_terminal_lower
+    };
+    let best_margin_lower = indices
+        .iter()
+        .copied()
+        .filter(|index| is_terminal_contender(*index))
+        .map(|index| {
+            let root = &roots[index];
+            root.victory_margin - confidence_width(root.victory_margin_variance, root.samples)
+        })
+        .max_by(f32::total_cmp)
+        .expect("terminal contender set is non-empty");
+    let is_margin_contender = |index: usize| {
+        if !is_terminal_contender(index) {
+            return false;
+        }
+        let root = &roots[index];
+        root.victory_margin + confidence_width(root.victory_margin_variance, root.samples) + 1e-6
+            >= best_margin_lower
+    };
+    let tier = |index: usize| {
+        if is_margin_contender(index) {
+            2u8
+        } else if is_terminal_contender(index) {
+            1u8
+        } else {
+            0u8
+        }
+    };
+
+    let mut order = indices.to_vec();
+    order.sort_by(|left, right| {
+        let left_tier = tier(*left);
+        let right_tier = tier(*right);
+        left_tier
+            .cmp(&right_tier)
+            .then_with(|| {
+                if left_tier == 0 {
+                    compare_roots(&roots[*left], &roots[*right])
+                } else {
+                    compare_escalated_point_estimates(&roots[*left], &roots[*right])
+                }
+            })
+            .reverse()
+    });
+    order
 }
 
 fn compare_surviving_roots(
@@ -377,6 +475,82 @@ fn racing_contenders(active: &[usize], roots: &[AggregatedRoot]) -> Vec<usize> {
                 .then_with(|| right_root.prior.total_cmp(&left_root.prior))
         });
         contenders.truncate(contenders.len().div_ceil(2).max(2));
+    }
+    contenders
+}
+
+fn horizon_escalation_schedule(initial_horizon: usize) -> Vec<usize> {
+    let mut horizons = Vec::with_capacity(HORIZON_ESCALATION_MAX_STAGES);
+    let mut next = initial_horizon
+        .saturating_mul(2)
+        .max(HORIZON_ESCALATION_MIN_STEPS)
+        .min(HORIZON_ESCALATION_MAX_STEPS);
+    while horizons.len() < HORIZON_ESCALATION_MAX_STAGES {
+        if horizons.last().copied() == Some(next) {
+            break;
+        }
+        horizons.push(next);
+        if next >= HORIZON_ESCALATION_MAX_STEPS {
+            break;
+        }
+        next = next.saturating_mul(2).min(HORIZON_ESCALATION_MAX_STEPS);
+    }
+    horizons
+}
+
+fn horizon_escalation_trigger(
+    winner: &AggregatedRoot,
+    evidence: &RootFragilityAssessment,
+) -> Option<f32> {
+    if evidence.introduced_road_fragility.award_vp_exposure == 0
+        || evidence.road_cut_continuation.award_loss_posterior <= f32::EPSILON
+    {
+        return None;
+    }
+    let unresolved_cut_mass = evidence.road_cut_continuation.award_loss_posterior
+        * (1.0 - winner.terminal_rate.clamp(0.0, 1.0));
+    (unresolved_cut_mass + 1e-6 >= HORIZON_ESCALATION_MIN_UNRESOLVED_CUT_MASS)
+        .then_some(unresolved_cut_mass)
+}
+
+fn horizon_escalation_contenders(
+    provisional_winner: usize,
+    shallow_racers: &[usize],
+    retained: &[RankedGpuRoot],
+    evidence: &RootFragilityAssessment,
+) -> Vec<usize> {
+    let mut contenders = Vec::with_capacity(shallow_racers.len() + 4);
+    contenders.push(provisional_winner);
+    for index in shallow_racers.iter().copied() {
+        if !contenders.contains(&index) {
+            contenders.push(index);
+        }
+    }
+
+    let exposed_vertices = evidence
+        .introduced_road_fragility
+        .critical_vertices
+        .iter()
+        .filter(|cut| cut.award_loss || cut.additional_road_loss > 0)
+        .map(|cut| cut.vertex)
+        .collect::<Vec<_>>();
+    let approach_edges = evidence
+        .road_cut_continuation
+        .continuations
+        .iter()
+        .filter(|continuation| continuation.posterior > f32::EPSILON)
+        .flat_map(|continuation| continuation.approach_edges.iter().copied())
+        .collect::<Vec<_>>();
+
+    for (index, candidate) in retained.iter().enumerate() {
+        let causal_protector = match &candidate.action {
+            Action::BuildRoad { edge } => approach_edges.contains(edge),
+            Action::BuildSettlement { vertex } => exposed_vertices.contains(vertex),
+            _ => false,
+        };
+        if causal_protector && !contenders.contains(&index) {
+            contenders.push(index);
+        }
     }
     contenders
 }
@@ -755,6 +929,39 @@ impl NativeGpuSearchEngine {
                 )
             })
             .collect::<Vec<_>>();
+        let fragility_assessments = ranked
+            .iter()
+            .map(|candidate| {
+                let introduced_road_fragility = spatial_impact_report
+                    .as_ref()
+                    .and_then(|report| {
+                        report
+                            .actions
+                            .iter()
+                            .find(|impact| impact.action == candidate.action)
+                    })
+                    .map(|impact| impact.introduced_road_fragility.clone())
+                    .unwrap_or_default();
+                let exposed_vertices = introduced_road_fragility
+                    .critical_vertices
+                    .iter()
+                    .map(|cut| cut.vertex)
+                    .collect::<Vec<_>>();
+                let road_cut_continuation = belief_road_cut_continuation_assessment(
+                    particles
+                        .iter()
+                        .map(|particle| (&particle.state, particle.weight)),
+                    actor,
+                    &candidate.action,
+                    &exposed_vertices,
+                );
+                RootFragilityAssessment {
+                    action: candidate.action.clone(),
+                    introduced_road_fragility,
+                    road_cut_continuation,
+                }
+            })
+            .collect::<Vec<_>>();
         let root_evidence = ranked
             .iter()
             .map(|candidate| {
@@ -768,11 +975,24 @@ impl NativeGpuSearchEngine {
                     .iter()
                     .find(|(action, _)| action == &candidate.action)
                     .map_or_else(Default::default, |(_, assessment)| *assessment);
+                let fragility = fragility_assessments
+                    .iter()
+                    .find(|assessment| assessment.action == candidate.action)
+                    .expect("every ranked root has a fragility assessment");
+                let has_introduced_fragility = !fragility
+                    .introduced_road_fragility
+                    .critical_vertices
+                    .is_empty();
                 RootCausalEvidenceOutput {
                     action: action(candidate.action.clone()),
                     promotion_reason: impact
                         .and_then(|impact| impact.promotion)
                         .map(root_promotion_reason),
+                    introduced_road_fragility: has_introduced_fragility.then(|| {
+                        introduced_road_fragility_output(&fragility.introduced_road_fragility)
+                    }),
+                    road_cut_continuation: has_introduced_fragility
+                        .then(|| road_cut_continuation_output(&fragility.road_cut_continuation)),
                     admitted_by_promotion: impact.is_some_and(|impact| {
                         impact.promotion.is_some()
                             && admitted
@@ -979,7 +1199,7 @@ impl NativeGpuSearchEngine {
             phase = phase.wrapping_add(1);
         }
 
-        let aggregated = retained
+        let shallow_aggregated = retained
             .iter()
             .enumerate()
             .map(|(index, candidate)| {
@@ -993,28 +1213,37 @@ impl NativeGpuSearchEngine {
                 )
             })
             .collect::<Vec<_>>();
-        if aggregated.iter().all(|candidate| candidate.samples == 0) {
+        if shallow_aggregated
+            .iter()
+            .all(|candidate| candidate.samples == 0)
+        {
             return Err("GPU native decision deadline expired before any rollout completed".into());
         }
-        let mut final_root_order = active
+        let mut shallow_final_root_order = active
             .iter()
             .copied()
             .filter(|index| {
-                let candidate = &aggregated[*index];
+                let candidate = &shallow_aggregated[*index];
                 candidate.errors == 0 && candidate.samples > 0
             })
             .collect::<Vec<_>>();
-        let pairwise_unresolved = final_root_order.iter().enumerate().all(|(position, left)| {
-            final_root_order[position + 1..]
+        let pairwise_unresolved =
+            shallow_final_root_order
                 .iter()
-                .all(|right| racing_contenders(&[*left, *right], &aggregated).len() == 2)
-        });
+                .enumerate()
+                .all(|(position, left)| {
+                    shallow_final_root_order[position + 1..]
+                        .iter()
+                        .all(|right| {
+                            racing_contenders(&[*left, *right], &shallow_aggregated).len() == 2
+                        })
+                });
         // Priors only stabilize a wholly ordinary survivor set after every final pair has been
         // checked by the racer's own confidence rule. Mandatory blockers, promotion-only
         // admissions, exact families, and EndTurn keep rollout-first final arbitration.
         let prefer_prior_for_survivors = pairwise_unresolved
-            && final_root_order.iter().all(|index| {
-                let candidate = &aggregated[*index];
+            && shallow_final_root_order.iter().all(|index| {
+                let candidate = &shallow_aggregated[*index];
                 candidate.action != Action::EndTurn
                     && exact_family_for_action(&candidate.action).is_none()
                     && !admitted_by_promotion.contains(&candidate.action)
@@ -1022,22 +1251,207 @@ impl NativeGpuSearchEngine {
                         .iter()
                         .any(|(action, _)| action == &candidate.action)
             });
-        let chosen_root = final_root_order
+        let shallow_chosen_index = shallow_final_root_order
             .iter()
-            .map(|index| &aggregated[*index])
-            .max_by(|left, right| compare_surviving_roots(left, right, prefer_prior_for_survivors))
-            .cloned()
+            .copied()
+            .max_by(|left, right| {
+                compare_surviving_roots(
+                    &shallow_aggregated[*left],
+                    &shallow_aggregated[*right],
+                    prefer_prior_for_survivors,
+                )
+            })
             .ok_or_else(|| {
                 "GPU native search had no error-free surviving root candidate".to_string()
             })?;
-        final_root_order.sort_by(|left, right| {
+        shallow_final_root_order.sort_by(|left, right| {
             compare_surviving_roots(
-                &aggregated[*left],
-                &aggregated[*right],
+                &shallow_aggregated[*left],
+                &shallow_aggregated[*right],
                 prefer_prior_for_survivors,
             )
             .reverse()
         });
+
+        let mut aggregated = shallow_aggregated.clone();
+        let mut final_root_order = shallow_final_root_order.clone();
+        let mut chosen_root = shallow_aggregated[shallow_chosen_index].clone();
+        let mut final_evaluation_horizons = vec![rollout_steps as u16; retained.len()];
+        let mut horizon_escalation = None;
+        let mut total_rollout_nodes = moments
+            .iter()
+            .map(|moment| moment.samples as usize * rollout_steps)
+            .sum::<usize>();
+        let mut total_executed_rollouts = moments.iter().map(|moment| moment.samples).sum::<u32>();
+
+        if let Some(fragility) = fragility_assessments
+            .iter()
+            .find(|assessment| assessment.action == chosen_root.action)
+            && let Some(unresolved_cut_mass) = horizon_escalation_trigger(&chosen_root, fragility)
+        {
+            let escalation_indices = horizon_escalation_contenders(
+                shallow_chosen_index,
+                &shallow_final_root_order,
+                &retained,
+                fragility,
+            );
+            let escalation_samples_per_root =
+                (rollout_budget / escalation_indices.len().max(1) / 4).clamp(
+                    HORIZON_ESCALATION_MIN_SAMPLES_PER_ROOT,
+                    HORIZON_ESCALATION_MAX_SAMPLES_PER_ROOT,
+                );
+            let mut attempted_horizons = Vec::new();
+            let mut completed_horizon = None;
+            let mut deepest_stage = None::<Vec<(usize, AggregatedRoot)>>;
+            let mut deadline_limited = false;
+
+            for (stage, horizon) in horizon_escalation_schedule(rollout_steps)
+                .into_iter()
+                .enumerate()
+            {
+                if should_cancel() {
+                    return Err("GPU native search cancelled".into());
+                }
+                if decision_clock.remaining_ms() < HORIZON_ESCALATION_MIN_REMAINING_MS {
+                    deadline_limited = true;
+                    break;
+                }
+                attempted_horizons.push(horizon as u16);
+                let mut stage_moments = vec![RootSampleMoments::default(); root_actions.len()];
+                let mut root_rows = vec![Vec::<Action>::new(); particles.len()];
+                for root_index in escalation_indices.iter().copied() {
+                    let eligible = legal_by_particle
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, legal)| {
+                            legal
+                                .iter()
+                                .any(|action| action == &root_actions[root_index])
+                        })
+                        .map(|(particle_index, _)| (particle_index, weights[particle_index]))
+                        .collect::<Vec<_>>();
+                    let sampling_seed = base_seed
+                        ^ 0x243f_6a88_85a3_08d3
+                        ^ (root_index as u64 + 1).wrapping_mul(0x1319_8a2e_0370_7344)
+                        ^ (horizon as u64).wrapping_mul(0xa409_3822_299f_31d0)
+                        ^ stage as u64;
+                    for (particle_index, count) in allocate_systematic_counts(
+                        escalation_samples_per_root,
+                        &eligible,
+                        sampling_seed,
+                    ) {
+                        root_rows[particle_index]
+                            .extend(std::iter::repeat_n(root_actions[root_index].clone(), count));
+                    }
+                }
+                let stage_rollouts = root_rows.iter().map(Vec::len).sum::<usize>();
+                if stage_rollouts == 0 {
+                    break;
+                }
+                let stage_seed = base_seed
+                    ^ 0x082e_fa98_ec4e_6c89
+                    ^ (horizon as u64).wrapping_mul(0x4528_21e6_38d0_1377)
+                    ^ stage as u64;
+                let searched = match self.cuda.search_root_actions_controlled(
+                    &root_rows,
+                    1,
+                    horizon,
+                    stage_seed,
+                    || should_cancel() || decision_clock.remaining_ms() == 0,
+                ) {
+                    Ok(searched) => searched,
+                    Err(CudaSimError::Cancelled) if should_cancel() => {
+                        return Err("GPU native search cancelled".into());
+                    }
+                    Err(CudaSimError::Cancelled) if decision_clock.remaining_ms() == 0 => {
+                        deadline_limited = true;
+                        break;
+                    }
+                    Err(error) => return Err(error.to_string()),
+                };
+                for row in &searched.rows {
+                    for stat in row {
+                        if let Some(root_index) = root_actions
+                            .iter()
+                            .position(|candidate| candidate == &stat.action)
+                        {
+                            stage_moments[root_index].add(stat);
+                        }
+                    }
+                }
+                let stage_aggregated = escalation_indices
+                    .iter()
+                    .copied()
+                    .filter_map(|root_index| {
+                        let aggregate = aggregate_root(
+                            &retained[root_index],
+                            &stage_moments[root_index],
+                            &particles,
+                            &legal_by_particle,
+                            &weights,
+                            actor,
+                        );
+                        (aggregate.samples > 0 && aggregate.errors == 0)
+                            .then_some((root_index, aggregate))
+                    })
+                    .collect::<Vec<_>>();
+                if stage_aggregated.len() != escalation_indices.len() {
+                    deadline_limited = decision_clock.remaining_ms() == 0;
+                    break;
+                }
+                total_executed_rollouts = total_executed_rollouts.saturating_add(
+                    stage_aggregated
+                        .iter()
+                        .map(|(_, aggregate)| aggregate.samples)
+                        .sum::<u32>(),
+                );
+                total_rollout_nodes = total_rollout_nodes.saturating_add(
+                    stage_aggregated
+                        .iter()
+                        .map(|(_, aggregate)| aggregate.samples as usize * horizon)
+                        .sum::<usize>(),
+                );
+                completed_horizon = Some(horizon as u16);
+                deepest_stage = Some(stage_aggregated);
+            }
+
+            let mut final_winner = None;
+            if let Some(stage_aggregated) = deepest_stage {
+                for (index, aggregate) in stage_aggregated {
+                    aggregated[index] = aggregate;
+                    final_evaluation_horizons[index] =
+                        completed_horizon.unwrap_or(rollout_steps as u16);
+                }
+                final_root_order = escalation_indices
+                    .iter()
+                    .copied()
+                    .filter(|index| {
+                        let candidate = &aggregated[*index];
+                        candidate.errors == 0 && candidate.samples > 0
+                    })
+                    .collect::<Vec<_>>();
+                final_root_order = escalated_root_order(&final_root_order, &aggregated);
+                if let Some(winner_index) = final_root_order.first().copied() {
+                    chosen_root = aggregated[winner_index].clone();
+                    final_winner = Some(action(chosen_root.action.clone()));
+                }
+            }
+
+            horizon_escalation = Some(HorizonEscalationOutput {
+                reason: "fragile-award-low-terminal-completion",
+                provisional_winner: action(shallow_aggregated[shallow_chosen_index].action.clone()),
+                initial_horizon: rollout_steps as u16,
+                unresolved_cut_mass,
+                roots: escalation_indices
+                    .iter()
+                    .map(|index| action(retained[*index].action.clone()))
+                    .collect(),
+                attempted_horizons,
+                completed_horizon,
+                final_winner,
+                deadline_limited,
+            });
+        }
 
         let player_count = particles[0].state.board.num_players as usize;
         let root_values = |candidate: &AggregatedRoot| {
@@ -1171,10 +1585,7 @@ impl NativeGpuSearchEngine {
             .find(|candidate| Some(&candidate.action) == chosen.as_ref())
             .map(|candidate| candidate.value)
             .unwrap_or_else(|| root_values(&chosen_root));
-        let total_rollouts = aggregated
-            .iter()
-            .map(|candidate| candidate.samples)
-            .sum::<u32>();
+        let total_rollouts = total_executed_rollouts;
         let mut root_provenance = RootProvenanceOutput {
             ranked_root_count,
             ranked_roots: ranked
@@ -1218,7 +1629,18 @@ impl NativeGpuSearchEngine {
                             .iter()
                             .position(|candidate_index| *candidate_index == index)
                             .map(|rank| rank + 1),
+                        final_evaluation_horizon: Some(final_evaluation_horizons[index]),
+                        initial_terminal_outcome: (final_evaluation_horizons[index]
+                            != rollout_steps as u16)
+                            .then_some(shallow_aggregated[index].terminal_outcome),
+                        initial_terminal_rate: (final_evaluation_horizons[index]
+                            != rollout_steps as u16)
+                            .then_some(shallow_aggregated[index].terminal_rate),
+                        initial_victory_margin: (final_evaluation_horizons[index]
+                            != rollout_steps as u16)
+                            .then_some(shallow_aggregated[index].victory_margin),
                         terminal_outcome: Some(aggregate.terminal_outcome),
+                        terminal_rate: Some(aggregate.terminal_rate),
                         terminal_lower_bound: Some(aggregate.terminal_outcome - terminal_width),
                         terminal_upper_bound: Some(aggregate.terminal_outcome + terminal_width),
                         victory_margin: Some(aggregate.victory_margin),
@@ -1231,6 +1653,7 @@ impl NativeGpuSearchEngine {
             pruned_root_count: pruned_roots.len(),
             pruned_roots,
             root_evidence,
+            horizon_escalation,
             trade_hard_veto_threshold: HARD_VETO_POSTERIOR,
             search_winner: Some(action(chosen_root.action.clone())),
             exact_family_replacement: None,
@@ -1259,7 +1682,7 @@ impl NativeGpuSearchEngine {
             exact,
             statistics: SearchStatistics {
                 iterations: total_rollouts,
-                nodes: total_rollouts as usize * rollout_steps,
+                nodes: total_rollout_nodes,
                 deepest_decision_depth: 0,
                 rollouts: total_rollouts,
                 effective_particle_count: effective_particle_count(&particles),
@@ -1276,3 +1699,7 @@ impl NativeGpuSearchEngine {
         .map_err(|error| error.to_string())
     }
 }
+
+#[cfg(test)]
+#[path = "native_gpu_d95_tests.rs"]
+mod d95_tests;
