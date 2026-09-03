@@ -305,6 +305,12 @@ fn compare_roots(left: &AggregatedRoot, right: &AggregatedRoot) -> std::cmp::Ord
         .then_with(|| left.prior.total_cmp(&right.prior))
 }
 
+fn compare_surviving_roots(left: &AggregatedRoot, right: &AggregatedRoot) -> std::cmp::Ordering {
+    left.prior
+        .total_cmp(&right.prior)
+        .then_with(|| compare_roots(left, right))
+}
+
 fn racing_contenders(active: &[usize], roots: &[AggregatedRoot]) -> Vec<usize> {
     if active.len() <= 1 {
         return active.to_vec();
@@ -978,7 +984,7 @@ impl NativeGpuSearchEngine {
             .iter()
             .filter_map(|index| aggregated.get(*index))
             .filter(|candidate| candidate.errors == 0 && candidate.samples > 0)
-            .max_by(|left, right| compare_roots(left, right))
+            .max_by(|left, right| compare_surviving_roots(left, right))
             .cloned()
             .ok_or_else(|| {
                 "GPU native search had no error-free surviving root candidate".to_string()
@@ -992,7 +998,7 @@ impl NativeGpuSearchEngine {
             })
             .collect::<Vec<_>>();
         final_root_order.sort_by(|left, right| {
-            compare_roots(&aggregated[*left], &aggregated[*right]).reverse()
+            compare_surviving_roots(&aggregated[*left], &aggregated[*right]).reverse()
         });
 
         let player_count = particles[0].state.board.num_players as usize;
