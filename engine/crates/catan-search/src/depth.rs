@@ -1876,8 +1876,14 @@ pub fn diagnose_decisive_continuation(
         let before = next.clone();
         let actor = before.actor();
         let previous_player = before.current_player;
+        let opponent_trade_response = actor != root
+            && previous_player == root
+            && matches!(before.phase, Phase::TradeResponses);
         next.apply(&action)
             .map_err(|error| format!("diagnostic continuation failed: {action:?}: {error:?}"))?;
+        if opponent_trade_response {
+            response_windows = response_windows.saturating_add(1);
+        }
         if previous_player != root && next.current_player != previous_player {
             response_windows = response_windows.saturating_add(1);
         }
@@ -1887,7 +1893,7 @@ pub fn diagnose_decisive_continuation(
                 decisive_action: action,
                 response_windows,
                 endpoint_strategic_value: strategic_utility(&next, root),
-                same_turn: response_windows == 0 && before.turn == origin_turn,
+                same_turn: before.turn == origin_turn && before.current_player == root,
                 transitions: transition.saturating_add(1),
             });
         }
