@@ -1,0 +1,1 @@
+(self.webpackChunkkatan=self.webpackChunkkatan||[]).push([[36,179,417,560,655,798],{22179:()=>{}}]);
