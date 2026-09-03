@@ -1,0 +1,10 @@
+{
+  "evaluatedAt": "2026-09-03T22:02:32Z",
+  "targetPath": "rootStoreState.gameSettings.diceSetting",
+  "status": "NOT_ACCESSIBLE_IN_LOBBY_STATE",
+  "managerModuleId": "82391",
+  "isManagerModuleInCache": false,
+  "rootStoreStateExistsOnWindow": false,
+  "gameControllerExistsOnWindow": false,
+  "explanation": "GameManager (module 82391) and the Redux store (rootStoreState) are instantiated only upon joining or starting an active game room. On the lobby/landing page (https://colonist.io/), no game is active, so rootStoreState and gameController do not exist in runtime memory. The path rootStoreState.gameSettings.diceSetting cannot be observed in this passive landing state without initiating or joining a game."
+}

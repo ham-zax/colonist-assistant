@@ -1,0 +1,14 @@
+{
+  "evaluatedAt": "2026-09-03T22:02:32Z",
+  "pageUrl": "https://colonist.io/",
+  "pageTitle": "Colonist: Play Settlers of Catan Alternative - Free Online Game",
+  "localStorage_versionno": "319",
+  "window_versionNumber": 320,
+  "window_isProduction": true,
+  "window_assetPath": "https://cdn.colonist.io/dist/",
+  "window_socketServerWSS": "wss://socket.svr.colonist.io/",
+  "window_socketDebugActive": false,
+  "hasWebpackChunkkatan": true,
+  "webpackChunksCount": 8,
+  "activeGameObserved": false
+}

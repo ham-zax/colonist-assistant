@@ -1,0 +1,8 @@
+{
+  "status": "NOT OBSERVED IN LIVE PROTOCOL",
+  "evaluatedAt": "2026-09-03T22:02:45Z",
+  "pageUrl": "https://colonist.io/",
+  "inspectedSurface": "browser-devtools list_network_requests on page 4",
+  "observedWebSocketFrames": 0,
+  "explanation": "The dedicated Windows Chrome profile is parked on the public landing/lobby page (https://colonist.io/). Under the strict read-only constraint of Mission D2, no games were joined, no rooms were created, and no synthetic WebSocket frames were injected. Consequently, live gameplay socket traffic (dice rolls, bank distributions, placement turns, trade negotiation frames) was NOT OBSERVED IN LIVE PROTOCOL in this session. All protocol representations documented in D2 are derived from shipped client Zod message schemas and controller dispatchers in shared.ccdc4f7deecb3aab570e.js and ui-game.72c86c9aeaa13ccd9a14.js, and are strictly labeled as SHIPPED CLIENT STATIC rather than LIVE PROTOCOL."
+}

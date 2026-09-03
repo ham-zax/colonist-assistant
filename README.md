@@ -138,6 +138,13 @@ reference runner, see [docs/BENCHMARK_TOOL.md](docs/BENCHMARK_TOOL.md).
 The current Strategist architecture and model gates are documented in
 [docs/STRATEGIC_ENGINE_V3.md](docs/STRATEGIC_ENGINE_V3.md).
 
+For Colonist rule/client compatibility evidence, see
+[docs/COLONIST_BASE_GAME_RULE_FIDELITY.md](docs/COLONIST_BASE_GAME_RULE_FIDELITY.md).
+The reproducible client-bundle mapping workflow is in
+[docs/COLONIST_CLIENT_MAPPING_GUIDE.md](docs/COLONIST_CLIENT_MAPPING_GUIDE.md),
+and the future 5–8 player migration surface is recorded in
+[docs/COLONIST_5_8_PLAYER_SUPPORT.md](docs/COLONIST_5_8_PLAYER_SUPPORT.md).
+
 ## Scope
 
 The simulator targets standard base-game Catan for 2–4 players. Other Colonist
