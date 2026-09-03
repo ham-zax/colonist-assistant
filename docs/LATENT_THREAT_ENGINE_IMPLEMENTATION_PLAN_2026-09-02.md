@@ -933,11 +933,12 @@ For a wave that passes tactical screening:
 
 - P3: 100 matched blocks = 300 candidate-seat games;
 - P4: 100 matched blocks = 400 candidate-seat games;
-- run once with player trades enabled;
-- run once with root player trades disabled/embargo stress where the benchmark contract supports it;
+- run the current promotion gate with ordinary player trades enabled;
 - use the same board/game/search seed family for baseline and candidate.
 
-This yields 1,400 seat-rotated validation games across P3/P4 and trade modes before optional hostile-policy stress.
+For the current product scope, root/candidate-seat domestic-trade disablement is a deferred robustness stress rather than a promotion gate. Preserve existing embargo evidence and tooling for later work under `docs/DEFERRED_CANDIDATE_SEAT_EMBARGO_STRESS_2026-09-03.md`; do not tune current production strategy to that artificial mode.
+
+The current gating whole-game validation therefore contains 700 seat-rotated P3/P4 games with ordinary trades enabled. A future reopened embargo track would add its own separately predeclared evidence rather than extending the current promotion sample adaptively.
 
 **Primary outcomes:**
 
@@ -959,7 +960,7 @@ This yields 1,400 seat-rotated validation games across P3/P4 and trade modes bef
 - YOP/RB/Knight conversion rate;
 - one-turn closeout rate;
 - explicitly defined terminal dead-end-road rate;
-- port/maritime usage under trade denial;
+- port/maritime usage under trade denial when the deferred embargo stress track is active;
 - discard exposure.
 
 **Promotion rule:**
