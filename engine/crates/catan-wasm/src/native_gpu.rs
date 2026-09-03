@@ -305,7 +305,14 @@ fn compare_roots(left: &AggregatedRoot, right: &AggregatedRoot) -> std::cmp::Ord
         .then_with(|| left.prior.total_cmp(&right.prior))
 }
 
-fn compare_surviving_roots(left: &AggregatedRoot, right: &AggregatedRoot) -> std::cmp::Ordering {
+fn compare_surviving_roots(
+    left: &AggregatedRoot,
+    right: &AggregatedRoot,
+    prefer_prior: bool,
+) -> std::cmp::Ordering {
+    if !prefer_prior {
+        return compare_roots(left, right);
+    }
     left.prior
         .total_cmp(&right.prior)
         .then_with(|| compare_roots(left, right))
@@ -725,6 +732,15 @@ impl NativeGpuSearchEngine {
             &promoted_spatial_actions,
             root_cap,
         );
+        let admitted_by_promotion = admitted
+            .iter()
+            .filter(|(action, _)| {
+                !admitted_without_promotions
+                    .iter()
+                    .any(|(ordinary, _)| ordinary == action)
+            })
+            .map(|(action, _)| action.clone())
+            .collect::<Vec<_>>();
         let trade_assessments = admitted
             .iter()
             .map(|(candidate_action, _)| {
@@ -980,11 +996,26 @@ impl NativeGpuSearchEngine {
         if aggregated.iter().all(|candidate| candidate.samples == 0) {
             return Err("GPU native decision deadline expired before any rollout completed".into());
         }
+        // Priors only stabilize a wholly ordinary unresolved survivor set. Mandatory blockers,
+        // promotion-only admissions, exact families, and EndTurn have admission/evidence
+        // semantics that deliberately cannot make the shallow policy prior authoritative.
+        let prefer_prior_for_survivors = active
+            .iter()
+            .filter_map(|index| aggregated.get(*index))
+            .filter(|candidate| candidate.errors == 0 && candidate.samples > 0)
+            .all(|candidate| {
+                candidate.action != Action::EndTurn
+                    && exact_family_for_action(&candidate.action).is_none()
+                    && !admitted_by_promotion.contains(&candidate.action)
+                    && !verified_blockers
+                        .iter()
+                        .any(|(action, _)| action == &candidate.action)
+            });
         let chosen_root = active
             .iter()
             .filter_map(|index| aggregated.get(*index))
             .filter(|candidate| candidate.errors == 0 && candidate.samples > 0)
-            .max_by(|left, right| compare_surviving_roots(left, right))
+            .max_by(|left, right| compare_surviving_roots(left, right, prefer_prior_for_survivors))
             .cloned()
             .ok_or_else(|| {
                 "GPU native search had no error-free surviving root candidate".to_string()
@@ -998,7 +1029,12 @@ impl NativeGpuSearchEngine {
             })
             .collect::<Vec<_>>();
         final_root_order.sort_by(|left, right| {
-            compare_surviving_roots(&aggregated[*left], &aggregated[*right]).reverse()
+            compare_surviving_roots(
+                &aggregated[*left],
+                &aggregated[*right],
+                prefer_prior_for_survivors,
+            )
+            .reverse()
         });
 
         let player_count = particles[0].state.board.num_players as usize;
