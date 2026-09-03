@@ -191,6 +191,8 @@ struct Config {
     takeover_engine: Option<Engine>,
     takeover_native_gpu_host: Option<String>,
     takeover_native_gpu_revision: Option<String>,
+    takeover_forced_root: Option<Action>,
+    takeover_continuation_stream: Option<u64>,
     takeover_root_only: bool,
     takeover_random_followup: bool,
     takeover_target_seat: Option<u8>,
@@ -243,6 +245,8 @@ impl Default for Config {
             takeover_engine: None,
             takeover_native_gpu_host: None,
             takeover_native_gpu_revision: None,
+            takeover_forced_root: None,
+            takeover_continuation_stream: None,
             takeover_root_only: false,
             takeover_random_followup: false,
             takeover_target_seat: None,
@@ -308,6 +312,31 @@ fn parse_config() -> Config {
             }
             "--takeover-native-gpu-revision" => {
                 config.takeover_native_gpu_revision = value.map(str::to_string);
+            }
+            "--takeover-forced-root" => {
+                let encoded = value.unwrap_or_else(|| {
+                    eprintln!("--takeover-forced-root requires a native action JSON value");
+                    std::process::exit(2);
+                });
+                let encoded: Value = serde_json::from_str(encoded).unwrap_or_else(|error| {
+                    eprintln!("invalid --takeover-forced-root JSON: {error}");
+                    std::process::exit(2);
+                });
+                config.takeover_forced_root =
+                    Some(native_gpu_action(&encoded).unwrap_or_else(|error| {
+                        eprintln!("invalid --takeover-forced-root action: {error}");
+                        std::process::exit(2);
+                    }));
+            }
+            "--takeover-continuation-stream" => {
+                config.takeover_continuation_stream = Some(
+                    value
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or_else(|| {
+                            eprintln!("--takeover-continuation-stream requires a u64 value");
+                            std::process::exit(2);
+                        }),
+                );
             }
             "--takeover-root-only" => {
                 config.takeover_root_only = true;
@@ -435,6 +464,7 @@ fn parse_config() -> Config {
                      [--takeover-input challenges.jsonl] [--takeover-output outcomes.jsonl] \\
                      [--takeover-engine control|random|weighted|maxn|alphabeta|uct|puct] \\
                      [--takeover-native-gpu-host PATH] [--takeover-native-gpu-revision SHA] \\
+                     [--takeover-forced-root ACTION_JSON] [--takeover-continuation-stream N] \\
                      [--takeover-root-only] [--takeover-random-followup] \\
                      [--expert-output samples.jsonl] [--trade-output trades.jsonl] \\
                      [--trajectory-output trajectory.jsonl] \\
@@ -482,6 +512,26 @@ fn parse_config() -> Config {
     }
     if config.takeover_native_gpu_host.is_some() && config.takeover_engine.is_some() {
         eprintln!("--takeover-native-gpu-host and --takeover-engine are mutually exclusive");
+        std::process::exit(2);
+    }
+    if config.takeover_forced_root.is_some() && config.takeover_input.is_none() {
+        eprintln!("--takeover-forced-root requires --takeover-input/--takeover-output");
+        std::process::exit(2);
+    }
+    if config.takeover_forced_root.is_some()
+        && (config.takeover_native_gpu_host.is_some() || config.takeover_engine.is_some())
+    {
+        eprintln!(
+            "--takeover-forced-root is mutually exclusive with --takeover-native-gpu-host and --takeover-engine"
+        );
+        std::process::exit(2);
+    }
+    if config.takeover_forced_root.is_some() && !config.takeover_random_followup {
+        eprintln!("--takeover-forced-root requires --takeover-random-followup");
+        std::process::exit(2);
+    }
+    if config.takeover_continuation_stream.is_some() && config.takeover_forced_root.is_none() {
+        eprintln!("--takeover-continuation-stream requires --takeover-forced-root");
         std::process::exit(2);
     }
     if config.takeover_native_gpu_revision.is_some() != config.takeover_native_gpu_host.is_some() {
@@ -2631,6 +2681,17 @@ fn play_game(
     )
 }
 
+fn takeover_continuation_rng_state(base: u64, stream: u64, lane: u64) -> u64 {
+    if stream == 0 {
+        return base;
+    }
+    let mut mixer = SplitMix64::new(
+        base ^ stream.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            ^ lane.wrapping_mul(0xd1b5_4a32_d192_ed03),
+    );
+    mixer.next_u64()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn play_game_from_state(
     board_seed: u64,
@@ -2713,9 +2774,38 @@ fn play_game_from_state(
             let first_root_pending = takeover_target && metrics.first_decisions[actor].is_none();
             let choice = if first_root_pending && legal_actions.len() == 1 {
                 // Forced protocol steps are not strategic roots. Execute them
-                // directly so native-GPU takeover never falls through to CPU
-                // MaxN before the first real fork.
+                // directly so takeover evidence reaches the first real fork.
                 EngineChoice::simple(legal_actions[0].clone())
+            } else if first_root_pending
+                && let Some(forced_root) = config.takeover_forced_root.as_ref()
+            {
+                assert!(
+                    legal_actions.contains(forced_root),
+                    "forced takeover root {forced_root:?} is illegal at state {:016x}",
+                    state.state_hash()
+                );
+                if let Some(stream) = config.takeover_continuation_stream {
+                    chance_rng = SplitMix64::from_state(takeover_continuation_rng_state(
+                        chance_rng.state(),
+                        stream,
+                        0,
+                    ));
+                    for (seat, rng) in policy_rngs.iter_mut().enumerate() {
+                        *rng = SplitMix64::from_state(takeover_continuation_rng_state(
+                            rng.state(),
+                            stream,
+                            seat as u64 + 1,
+                        ));
+                    }
+                }
+                metrics.first_decisions[actor] = Some(RootDecisionTrace {
+                    action: format!("{forced_root:?}"),
+                    selected_value: None,
+                    best_value: None,
+                    regret: None,
+                    provenance: None,
+                });
+                EngineChoice::simple(forced_root.clone())
             } else if first_root_pending && config.takeover_native_gpu_host.is_some() {
                 let decision = native_gpu
                     .as_deref_mut()
@@ -3184,6 +3274,8 @@ struct TakeoverOutcome {
     source_turn: u16,
     source_engine: String,
     arm: String,
+    forced_root: Option<String>,
+    continuation_stream: Option<u64>,
     engine_revision: &'static str,
     build_git_sha: &'static str,
     build_dirty: bool,
@@ -3329,7 +3421,9 @@ fn run_takeover_mode(config: &Config) {
         assert_eq!(engines.len(), snapshot.players as usize);
         let target = snapshot.target_seat as usize;
         let source_engine = engines[target].as_str().to_string();
-        let arm = if config.takeover_native_gpu_host.is_some() {
+        let arm = if config.takeover_forced_root.is_some() {
+            "forced-root".to_string()
+        } else if config.takeover_native_gpu_host.is_some() {
             "native-gpu".to_string()
         } else if let Some(engine) = config.takeover_engine {
             engines[target] = engine;
@@ -3363,7 +3457,7 @@ fn run_takeover_mode(config: &Config) {
         let victory_point_margin =
             i16::from(result.points[target]) - i16::from(best_opponent_victory_points);
         let outcome = TakeoverOutcome {
-            schema_version: 3,
+            schema_version: 4,
             kind: "colonist-native-takeover-outcome",
             snapshot_id: snapshot.snapshot_id,
             state_hash: snapshot.state_hash,
@@ -3378,20 +3472,27 @@ fn run_takeover_mode(config: &Config) {
             source_turn: snapshot.turn,
             source_engine,
             arm,
+            forced_root: config
+                .takeover_forced_root
+                .as_ref()
+                .map(|action| format!("{action:?}")),
+            continuation_stream: config.takeover_continuation_stream,
             engine_revision: ENGINE_REVISION,
             build_git_sha: replay_config.build_git_sha,
             build_dirty: replay_config.build_dirty,
             search_profile: ArenaSearchProfileSnapshot::capture(&replay_config),
-            decision_backend: if config.takeover_native_gpu_host.is_some() {
+            decision_backend: if config.takeover_forced_root.is_some() {
+                "forced-root"
+            } else if config.takeover_native_gpu_host.is_some() {
                 "native-gpu"
             } else {
                 "arena"
             },
             decision_revision: config.takeover_native_gpu_revision.clone(),
             native_gpu_identity: native_gpu.as_ref().map(|client| client.identity().clone()),
-            continuation_mode: if config.takeover_native_gpu_host.is_some()
-                && config.takeover_random_followup
-            {
+            continuation_mode: if config.takeover_forced_root.is_some() {
+                "forced-root-then-random"
+            } else if config.takeover_native_gpu_host.is_some() && config.takeover_random_followup {
                 "native-gpu-first-root-then-random"
             } else if config.takeover_random_followup {
                 "first-root-then-random"

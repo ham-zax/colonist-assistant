@@ -354,27 +354,10 @@ function disagreementProvenance(baselineRoot, candidateRoot, baseline, candidate
   return { category: "unavailable", detail: null };
 }
 
-function compareContinuationOutcome(baseline, candidate) {
-  if (candidate.targetWin !== baseline.targetWin) {
-    return candidate.targetWin ? 1 : -1;
-  }
-  if (candidate.finalRank !== baseline.finalRank) {
-    return candidate.finalRank < baseline.finalRank ? 1 : -1;
-  }
-  if (candidate.victoryPointMargin !== baseline.victoryPointMargin) {
-    return candidate.victoryPointMargin > baseline.victoryPointMargin ? 1 : -1;
-  }
-  if (candidate.finalVictoryPoints !== baseline.finalVictoryPoints) {
-    return candidate.finalVictoryPoints > baseline.finalVictoryPoints ? 1 : -1;
-  }
-  return 0;
-}
-
 function pairClassification(baselineRoot, candidateRoot, baseline, candidate) {
   if (baselineRoot === candidateRoot) return "concordant";
-  const comparison = compareContinuationOutcome(baseline, candidate);
-  if (comparison > 0) return "candidate-rescue";
-  if (comparison < 0) return "candidate-regression";
+  if (candidate.targetWin && !baseline.targetWin) return "candidate-rescue";
+  if (baseline.targetWin && !candidate.targetWin) return "candidate-regression";
   return "outcome-neutral-disagreement";
 }
 
@@ -421,38 +404,17 @@ function pairedBlockMeans(pairs, selector) {
   return [...grouped.entries()].map(([id, values]) => ({ id, value: mean(values) }));
 }
 
-function actionFamily(action) {
-  if (!action) return "none";
-  return String(action).split(/[ {]/u, 1)[0];
-}
-
 function selectFrozenCorpus(snapshots, pairs, maximum, minimumTurn) {
   const byId = new Map(pairs.map((pair) => [pair.snapshotId, pair]));
   const eligible = snapshots
-    .map((snapshot) => {
-      const pair = byId.get(snapshot.snapshotId);
-      const baselineLabels = mechanismLabels(pair.baseline);
-      const candidateLabels = mechanismLabels(pair.candidate);
-      const labels = [...new Set([...baselineLabels, ...candidateLabels])].sort();
-      const disagreement = !pair.rootChoiceConcordance;
-      const baselineFamily = actionFamily(pair.baselineRoot);
-      const candidateFamily = actionFamily(pair.candidateRoot);
-      const tradeOnlyDisagreement =
-        disagreement && baselineFamily === "OfferTrade" && candidateFamily === "OfferTrade";
-      const tier = labels.length > 0 ? 3 : disagreement && !tradeOnlyDisagreement ? 2 : disagreement ? 1 : 0;
-      return {
-        snapshot,
-        pair,
-        disagreement,
-        labels,
-        eligible: tier > 0,
-        tier,
-        baselineFamily,
-        candidateFamily,
-        score: tier * 10_000 + labels.length * 1_000 + snapshot.turn,
-      };
-    })
-    .filter((entry) => entry.eligible && entry.snapshot.turn >= minimumTurn);
+    .map((snapshot) => ({
+      snapshot,
+      pair: byId.get(snapshot.snapshotId),
+    }))
+    .filter(
+      (entry) =>
+        !entry.pair.rootChoiceConcordance && entry.snapshot.turn >= minimumTurn,
+    );
 
   const bySourceGame = new Map();
   for (const entry of eligible) {
@@ -464,7 +426,7 @@ function selectFrozenCorpus(snapshots, pairs, maximum, minimumTurn) {
   for (const values of bySourceGame.values()) {
     values.sort(
       (left, right) =>
-        right.score - left.score ||
+        right.snapshot.turn - left.snapshot.turn ||
         left.snapshot.sourceRotation - right.snapshot.sourceRotation ||
         left.snapshot.targetSeat - right.snapshot.targetSeat ||
         String(left.snapshot.snapshotId).localeCompare(String(right.snapshot.snapshotId)),
@@ -481,7 +443,7 @@ function selectFrozenCorpus(snapshots, pairs, maximum, minimumTurn) {
   for (const values of byPlayers.values()) {
     values.sort(
       (left, right) =>
-        right.score - left.score ||
+        right.snapshot.turn - left.snapshot.turn ||
         String(left.pair.sourceBlockId).localeCompare(String(right.pair.sourceBlockId)),
     );
   }
@@ -645,6 +607,10 @@ for (const pair of disagreements) {
     (provenanceBreakdown[pair.provenance.category] ?? 0) + 1;
 }
 
+const winBlocks = pairedBlockMeans(
+  pairs,
+  (pair) => Number(pair.candidate.targetWin) - Number(pair.baseline.targetWin),
+);
 const marginBlocks = pairedBlockMeans(pairs, (pair) => pair.deltas.victoryPointMargin);
 const vpBlocks = pairedBlockMeans(pairs, (pair) => pair.deltas.targetVictoryPoints);
 const rankBlocks = pairedBlockMeans(pairs, (pair) => pair.deltas.finalRank);
@@ -663,6 +629,12 @@ const failures = {
   baselineNativeGpuDeadlines: sum(pairs.map((pair) => Number(Boolean(pair.baseline.deadlineReached)))),
   candidateNativeGpuDeadlines: sum(pairs.map((pair) => Number(Boolean(pair.candidate.deadlineReached)))),
 };
+const outcomeStrata = {
+  bothWin: pairs.filter((pair) => pair.baseline.targetWin && pair.candidate.targetWin).length,
+  bothLoss: pairs.filter((pair) => !pair.baseline.targetWin && !pair.candidate.targetWin).length,
+  baselineOnlyWin: classificationCounts["candidate-regression"],
+  candidateOnlyWin: classificationCounts["candidate-rescue"],
+};
 const regressions = pairs.filter((pair) => pair.classification === "candidate-regression");
 const netRescues = classificationCounts["candidate-rescue"] - classificationCounts["candidate-regression"];
 const regressionsCausallyAttributed = regressions.every(
@@ -670,8 +642,13 @@ const regressionsCausallyAttributed = regressions.every(
 );
 
 const summary = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   kind: "wave4-matched-takeover-evidence",
+  classificationContract: {
+    rescue: "baseline root arm loses and candidate root arm wins",
+    regression: "baseline root arm wins and candidate root arm loses",
+    neutral: "root disagreement without a win flip; rank, VP margin, and VP deltas remain separate paired metrics",
+  },
   inputs: options,
   revisions: {
     baselineBuilds: [...new Set(pairs.map((pair) => pair.baseline.buildGitSha))],
@@ -702,13 +679,18 @@ const summary = {
     concordantOutcomeDivergences: concordantOutcomeDivergences.length,
   },
   classifications: classificationCounts,
+  outcomeStrata,
   netRescues,
   pairedDeltas: {
+    meanWinDelta: mean(
+      pairs.map((pair) => Number(pair.candidate.targetWin) - Number(pair.baseline.targetWin)),
+    ),
     meanTargetVictoryPoints: mean(pairs.map((pair) => pair.deltas.targetVictoryPoints)),
     meanVictoryPointMargin: mean(pairs.map((pair) => pair.deltas.victoryPointMargin)),
     meanFinalRank: mean(pairs.map((pair) => pair.deltas.finalRank)),
     meanRankImprovement: mean(pairs.map((pair) => pair.deltas.rankImprovement)),
     blockBootstrap95Ci: {
+      winDelta: bootstrapInterval(winBlocks.map((entry) => entry.value), 0x5157494e),
       targetVictoryPoints: bootstrapInterval(vpBlocks.map((entry) => entry.value), 0x51425650),
       victoryPointMargin: bootstrapInterval(marginBlocks.map((entry) => entry.value), 0x514d4152),
       finalRank: bootstrapInterval(rankBlocks.map((entry) => entry.value), 0x5152414e),
@@ -756,7 +738,7 @@ if (options.selectOutput) {
   );
   selectedCount = selected.length;
   if (selected.length === 0) {
-    throw new Error("No disagreement/mechanism snapshots were eligible for the frozen corpus.");
+    throw new Error("No root-disagreement snapshots were eligible for the frozen corpus.");
   }
   await mkdir(dirname(options.selectOutput), { recursive: true });
   await Promise.all([
@@ -768,7 +750,7 @@ if (options.selectOutput) {
       options.selectManifest,
       `${JSON.stringify(
         {
-          schemaVersion: 1,
+          schemaVersion: 2,
           kind: "wave4-matched-takeover-frozen-corpus",
           sourceCorpus: options.corpus,
           screeningBaseline: options.baseline,
@@ -779,23 +761,20 @@ if (options.selectOutput) {
           sourceGames: new Set(selected.map((entry) => entry.pair.sourceGameId)).size,
           sourceBlocks: new Set(selected.map((entry) => entry.pair.sourceBlockId)).size,
           selectionRule: {
-            eligible: "baseline/candidate first nontrivial target-root disagreement OR targeted Task 9 mechanism event in either arm",
+            eligible: "baseline/candidate first nontrivial target-root disagreement only; post-fork continuation outcomes and mechanism counters are not consulted",
             sourceGameCap: 1,
             sourceBlockCap: 1,
             playerCountRoundRobin: true,
             minimumTurn: options.selectMinTurn,
-            priority: "mechanism event, then non-trade root disagreement, then trade-only root disagreement; later turn breaks ties",
+            priority: "later source turn within each source game/player-count bucket, then stable source metadata tie-breaks",
           },
           records: selected.map((entry) => ({
             snapshotId: entry.snapshot.snapshotId,
             sourceGameId: entry.pair.sourceGameId,
             sourceBlockId: entry.pair.sourceBlockId,
-            rootDisagreement: entry.disagreement,
-            mechanismLabels: entry.labels,
+            rootDisagreement: true,
             baselineRoot: entry.pair.baselineRoot,
             candidateRoot: entry.pair.candidateRoot,
-            baselineRootFamily: entry.baselineFamily,
-            candidateRootFamily: entry.candidateFamily,
           })),
         },
         null,
