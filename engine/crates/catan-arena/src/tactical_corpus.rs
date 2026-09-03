@@ -263,8 +263,10 @@ pub struct TacticalPosteriorSensitivityProbe {
     #[serde(default)]
     pub setup_action: Option<TacticalActionSpec>,
     pub candidate_roots: Vec<TacticalActionSpec>,
-    pub expected_zero_root: TacticalActionSpec,
-    pub expected_full_root: TacticalActionSpec,
+    #[serde(default)]
+    pub expected_zero_root: Option<TacticalActionSpec>,
+    #[serde(default)]
+    pub expected_full_root: Option<TacticalActionSpec>,
     #[serde(default)]
     pub require_switch: bool,
     #[serde(default = "default_true")]
@@ -280,6 +282,14 @@ pub struct TacticalPosteriorSensitivityProbe {
 pub struct TacticalCloseoutProbe {
     pub same_turn_root: TacticalActionSpec,
     pub delayed_root: TacticalActionSpec,
+    #[serde(default)]
+    pub expected_same_turn_endpoint: Option<TacticalActionSpec>,
+    #[serde(default)]
+    pub expected_delayed_endpoint: Option<TacticalActionSpec>,
+    #[serde(default)]
+    pub require_same_endpoint: bool,
+    #[serde(default)]
+    pub require_delayed_stronger: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -958,7 +968,7 @@ mod tests {
     fn test_checked_in_corpus_passes_mechanical_g0() {
         let path = default_corpus_path();
         let corpus = load_tactical_corpus(&path).expect("failed to load checked-in tactical corpus");
-        assert_eq!(corpus.scenarios.len(), 25);
+        assert_eq!(corpus.scenarios.len(), 26);
         for scenario in &corpus.scenarios {
             let res = verify_mechanical_consequence(scenario);
             assert!(res.is_ok(), "scenario {} failed G0: {:?}", scenario.id, res.err());

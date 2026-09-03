@@ -98,9 +98,9 @@ pub use trade_safety::{
 pub const ENGINE_REVISION: &str = "deep-maxn-v10";
 pub use depth::{
     BeliefDepthConfig, BeliefDepthResult, BeliefSearchProvenance, BeliefSearchStageTimings,
-    DepthActionValue,
-    DepthBeliefError, DepthSearchResult, PrunedRootDiagnostic, RankedRootDiagnostic,
-    RetainedRootDiagnostic, RootCausalEvidence, RootPruneReason, belief_root_closeout_plans,
+    DecisiveContinuationDiagnostic, DepthActionValue, DepthBeliefError, DepthSearchResult,
+    PrunedRootDiagnostic, RankedRootDiagnostic, RetainedRootDiagnostic, RootCausalEvidence,
+    RootPruneReason, belief_root_closeout_plans, diagnose_decisive_continuation,
     search_belief_maxn, search_belief_maxn_bounded, search_belief_paranoid,
     search_belief_paranoid_bounded, search_maxn,
     search_maxn_bounded, search_maxn_bounded_timed, search_paranoid, search_paranoid_bounded,

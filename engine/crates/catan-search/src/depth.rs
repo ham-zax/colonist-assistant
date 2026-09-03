@@ -5,7 +5,7 @@ use std::rc::Rc;
 use colonist_catan_core::{Action, GameState, NodeKind, Phase};
 
 use crate::deadline::CooperativeDeadline;
-use crate::eval::evaluate;
+use crate::eval::{evaluate, strategic_utility};
 use crate::exact::{
     DEVELOPMENT_EXACT_FAMILIES, ExactActionFamily, ExactDecisionResult, exact_family_for_action,
     solve_exact_belief_excluding_controlled,
@@ -1781,6 +1781,122 @@ fn belief_search(
 
 pub fn search_maxn(state: &GameState, depth: u8, branch_cap: usize) -> DepthSearchResult {
     search_maxn_bounded(state, depth, branch_cap, DEFAULT_DEPTH_NODE_BUDGET)
+}
+
+#[derive(Clone, Debug)]
+pub struct DecisiveContinuationDiagnostic {
+    pub root_action: Action,
+    pub decisive_action: Action,
+    pub response_windows: u8,
+    pub endpoint_strategic_value: f32,
+    pub same_turn: bool,
+    pub transitions: u8,
+}
+
+fn materially_decisive_for_root(
+    before: &GameState,
+    after: &GameState,
+    action: &Action,
+    root: u8,
+) -> bool {
+    after.winner() == Some(root)
+        || matches!(
+            action,
+            Action::BuildSettlement { .. } | Action::BuildCity { .. }
+        )
+        || (before.longest_road_holder != Some(root) && after.longest_road_holder == Some(root))
+        || (before.largest_army_holder != Some(root) && after.largest_army_holder == Some(root))
+}
+
+/// Traces one bounded, diagnostic-only principal continuation after a supplied root action.
+///
+/// Decision actions come from the existing bounded MaxN search. Chance nodes use their
+/// highest-probability legal outcome only to make the otherwise expected-value search path
+/// nameable. The result is never consumed by root scoring, admission, promotion, or search.
+pub fn diagnose_decisive_continuation(
+    state: &GameState,
+    root_action: &Action,
+    maximum_transitions: u8,
+    search_depth: u8,
+    branch_cap: usize,
+    maximum_nodes_per_decision: u32,
+) -> Result<DecisiveContinuationDiagnostic, String> {
+    let root = state.actor();
+    let origin_turn = state.turn;
+    if !state.legal_actions().contains(root_action) {
+        return Err(format!("diagnostic root is not legal: {root_action:?}"));
+    }
+
+    let mut next = state.clone();
+    next.apply(root_action)
+        .map_err(|error| format!("diagnostic root failed: {root_action:?}: {error:?}"))?;
+    if materially_decisive_for_root(state, &next, root_action, root) {
+        return Ok(DecisiveContinuationDiagnostic {
+            root_action: root_action.clone(),
+            decisive_action: root_action.clone(),
+            response_windows: 0,
+            endpoint_strategic_value: strategic_utility(&next, root),
+            same_turn: true,
+            transitions: 1,
+        });
+    }
+
+    let mut response_windows = 0u8;
+    for transition in 1..maximum_transitions.max(1) {
+        if next.is_terminal() {
+            return Err("diagnostic continuation terminated before a root decisive action".into());
+        }
+        let action = match next.node_kind() {
+            NodeKind::Terminal => {
+                return Err(
+                    "diagnostic continuation reached terminal node without root completion".into(),
+                );
+            }
+            NodeKind::Chance => next
+                .legal_actions()
+                .into_iter()
+                .max_by_key(|action| next.chance_weight(action))
+                .ok_or_else(|| "diagnostic chance node has no legal outcome".to_string())?,
+            NodeKind::Decision { .. } => {
+                let search = search_maxn_bounded(
+                    &next,
+                    search_depth,
+                    branch_cap,
+                    maximum_nodes_per_decision,
+                );
+                search.chosen.ok_or_else(|| {
+                    format!(
+                        "diagnostic MaxN returned no action in phase {:?} for actor {}",
+                        next.phase,
+                        next.actor()
+                    )
+                })?
+            }
+        };
+        let before = next.clone();
+        let actor = before.actor();
+        let previous_player = before.current_player;
+        next.apply(&action)
+            .map_err(|error| format!("diagnostic continuation failed: {action:?}: {error:?}"))?;
+        if previous_player != root && next.current_player != previous_player {
+            response_windows = response_windows.saturating_add(1);
+        }
+        if actor == root && materially_decisive_for_root(&before, &next, &action, root) {
+            return Ok(DecisiveContinuationDiagnostic {
+                root_action: root_action.clone(),
+                decisive_action: action,
+                response_windows,
+                endpoint_strategic_value: strategic_utility(&next, root),
+                same_turn: response_windows == 0 && before.turn == origin_turn,
+                transitions: transition.saturating_add(1),
+            });
+        }
+    }
+
+    Err(format!(
+        "diagnostic continuation found no root decisive action within {} transitions",
+        maximum_transitions.max(1)
+    ))
 }
 
 fn public_opening_result(

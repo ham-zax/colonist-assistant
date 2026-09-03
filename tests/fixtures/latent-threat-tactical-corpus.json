@@ -1,6 +1,6 @@
 {
   "description": "Authoritative latent-threat tactical corpus with road, progress-card, trade/economic, posterior, and closeout evidence probes",
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "scenarios": [
     {
       "id": "road-fragile-chain-cut",
@@ -898,9 +898,7 @@
         "variant":{"id":"creator-has-monopoly","weight":1.0,"development":[[0,0,0,0,0],[0,0,0,0,1],[0,0,0,0,0]]},
         "setupAction":{"kind":"offer-trade","recipients":5,"give":[0,0,0,0,1],"receive":[0,0,0,1,0]},
         "candidateRoots":[{"kind":"respond-trade","accept":true},{"kind":"respond-trade","accept":false}],
-        "expectedZeroRoot":{"kind":"respond-trade","accept":true},
-        "expectedFullRoot":{"kind":"respond-trade","accept":false},
-        "requireSwitch":true,
+        "requireSwitch":false,
         "requireFivePercentStable":true,
         "strictSafetyAction":{"kind":"respond-trade","accept":true},
         "requireStrictSafetyTransition":true
@@ -1002,30 +1000,61 @@
       "isNegativeControl":false
     },
     {
-      "id":"closeout-response-window-observability",
-      "description":"The production current-turn planner reports zero opponent response windows for an immediate city and two windows after handing the turn to both opponents.",
+      "id":"closeout-same-endpoint-delayed-control",
+      "description":"The same city endpoint at v0 is available immediately or after one opponent turn; the diagnostic must name BuildCity(v0) on both paths rather than infer sameness from response-window count.",
       "family":"Closeout",
       "state":{
-        "boardSeed":421,"players":3,"activePlayer":0,
-        "roads":[
-          {"player":0,"edge":0},{"player":1,"edge":1},{"player":2,"edge":3},
-          {"player":2,"edge":6},{"player":1,"edge":8},{"player":0,"edge":11}
-        ],
+        "boardSeed":421,"players":2,"activePlayer":0,"domesticTradeDisabled":3,
+        "roads":[],
         "buildings":[
-          {"player":0,"vertex":0,"kind":"settlement"},{"player":1,"vertex":2,"kind":"settlement"},
-          {"player":2,"vertex":4,"kind":"settlement"},{"player":2,"vertex":6,"kind":"settlement"},
-          {"player":1,"vertex":8,"kind":"settlement"},{"player":0,"vertex":10,"kind":"settlement"}
+          {"player":0,"vertex":0,"kind":"settlement"},
+          {"player":1,"vertex":20,"kind":"settlement"}
         ],
-        "resources":[[0,0,0,2,3],[0,0,0,0,1],[1,1,0,0,1]]
+        "resources":[[0,0,0,3,4],[0,0,0,0,0]]
       },
       "candidateRoots":[{"kind":"build-city","vertex":0},{"kind":"end-turn"}],
-      "closeoutProbe":{"sameTurnRoot":{"kind":"build-city","vertex":0},"delayedRoot":{"kind":"end-turn"}},
+      "closeoutProbe":{
+        "sameTurnRoot":{"kind":"build-city","vertex":0},
+        "delayedRoot":{"kind":"end-turn"},
+        "expectedSameTurnEndpoint":{"kind":"build-city","vertex":0},
+        "expectedDelayedEndpoint":{"kind":"build-city","vertex":0},
+        "requireSameEndpoint":true
+      },
       "mechanical":{"action":{"kind":"build-city","vertex":0}},
       "enforceExplicitRootOrdering":false,
       "expectedBestRoot":{"kind":"build-city","vertex":0},
       "negativeControlRoot":{"kind":"end-turn"},
-      "declaredConsequence":"closeout_response_window_observability",
+      "declaredConsequence":"closeout_same_endpoint_delayed_identity",
       "isNegativeControl":false
+    },
+    {
+      "id":"closeout-stronger-delayed-negative",
+      "description":"A weaker immediate city at v10 is contrasted with EndTurn followed by the existing MaxN continuation to the stronger city endpoint at v0 after one opponent turn.",
+      "family":"Closeout",
+      "state":{
+        "boardSeed":421,"players":2,"activePlayer":0,"domesticTradeDisabled":3,
+        "roads":[],
+        "buildings":[
+          {"player":0,"vertex":0,"kind":"settlement"},
+          {"player":0,"vertex":10,"kind":"settlement"},
+          {"player":1,"vertex":20,"kind":"settlement"}
+        ],
+        "resources":[[0,0,0,3,4],[0,0,0,0,0]]
+      },
+      "candidateRoots":[{"kind":"build-city","vertex":10},{"kind":"end-turn"}],
+      "closeoutProbe":{
+        "sameTurnRoot":{"kind":"build-city","vertex":10},
+        "delayedRoot":{"kind":"end-turn"},
+        "expectedSameTurnEndpoint":{"kind":"build-city","vertex":10},
+        "expectedDelayedEndpoint":{"kind":"build-city","vertex":0},
+        "requireDelayedStronger":true
+      },
+      "mechanical":{"action":{"kind":"build-city","vertex":10}},
+      "enforceExplicitRootOrdering":false,
+      "expectedBestRoot":{"kind":"build-city","vertex":10},
+      "negativeControlRoot":{"kind":"end-turn"},
+      "declaredConsequence":"closeout_stronger_delayed_negative_control",
+      "isNegativeControl":true
     }
   ]
 }

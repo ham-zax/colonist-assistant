@@ -6,10 +6,10 @@ use colonist_catan_arena::tactical_corpus::{
 };
 use colonist_catan_core::{Action, GameState, Phase, SETTLEMENT_COST};
 use colonist_catan_search::{
-    CudaSimEngine, CudaSimRootActionStats, HARD_VETO_POSTERIOR,
+    CudaSimEngine, CudaSimRootActionStats, DecisiveContinuationDiagnostic, HARD_VETO_POSTERIOR,
     TurnPlanConfig, apply_closeout_root_impacts, belief_domestic_trade_assessment,
-    compute_spatial_root_impacts, plan_current_turn, posterior_expected_tactical_threat_weight,
-    posterior_immediate_threat_weight,
+    compute_spatial_root_impacts, diagnose_decisive_continuation, plan_current_turn,
+    posterior_expected_tactical_threat_weight, posterior_immediate_threat_weight,
 };
 use serde::Serialize;
 
@@ -162,8 +162,8 @@ struct PosteriorSensitivityReport {
     observation_hash: u64,
     variant_observation_hash: u64,
     observation_fixed: bool,
-    expected_zero_root: String,
-    expected_full_root: String,
+    expected_zero_root: Option<String>,
+    expected_full_root: Option<String>,
     contract_passed: bool,
     errors: Vec<String>,
     points: Vec<PosteriorGridPointReport>,
@@ -179,6 +179,12 @@ struct CloseoutRootReport {
     response_windows: Option<f32>,
     closeout_gain: f32,
     promotion: Option<String>,
+    decisive_endpoint: Option<String>,
+    diagnostic_response_windows: Option<u8>,
+    endpoint_strategic_value: Option<f32>,
+    completion_timing: Option<&'static str>,
+    diagnostic_transitions: Option<u8>,
+    diagnostic_error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -186,6 +192,10 @@ struct CloseoutRootReport {
 struct CloseoutProbeReport {
     same_turn: Option<CloseoutRootReport>,
     delayed: Option<CloseoutRootReport>,
+    expected_same_turn_endpoint: Option<String>,
+    expected_delayed_endpoint: Option<String>,
+    same_endpoint_matched: bool,
+    delayed_stronger: bool,
     contract_passed: bool,
 }
 
@@ -240,6 +250,10 @@ const OBSERVATION_SAFETY_SEED_XOR: u64 = 0x3c3c_c3c3;
 const POSTERIOR_SEED_XOR: u64 = 0xc3c3_3c3c;
 const POSTERIOR_GRID: [f32; 9] = [0.0, 0.05, 0.15, 0.30, 0.50, 0.75, 0.95, 0.995, 1.0];
 const CLOSEOUT_PLANNER_NODES: u32 = 4_000;
+const CLOSEOUT_DIAGNOSTIC_TRANSITIONS: u8 = 64;
+const CLOSEOUT_DIAGNOSTIC_DEPTH: u8 = 3;
+const CLOSEOUT_DIAGNOSTIC_BRANCH_CAP: usize = 12;
+const CLOSEOUT_DIAGNOSTIC_NODES: u32 = 2_000;
 
 fn same_action_kind(left: &Action, right: &Action) -> bool {
     std::mem::discriminant(left) == std::mem::discriminant(right)
@@ -499,13 +513,23 @@ fn run_posterior_sensitivity_probe(
         }
     }
 
-    let expected_zero_root = format!("{:?}", probe.expected_zero_root.to_action());
-    let expected_full_root = format!("{:?}", probe.expected_full_root.to_action());
+    let expected_zero_root = probe
+        .expected_zero_root
+        .as_ref()
+        .map(|spec| format!("{:?}", spec.to_action()));
+    let expected_full_root = probe
+        .expected_full_root
+        .as_ref()
+        .map(|spec| format!("{:?}", spec.to_action()));
     let zero_root = points.first().map(|point| point.selected_root.as_str());
     let five_root = points.get(1).map(|point| point.selected_root.as_str());
     let full_root = points.last().map(|point| point.selected_root.as_str());
-    let endpoints_ok = zero_root == Some(expected_zero_root.as_str())
-        && full_root == Some(expected_full_root.as_str());
+    let endpoints_ok = expected_zero_root
+        .as_deref()
+        .is_none_or(|expected| zero_root == Some(expected))
+        && expected_full_root
+            .as_deref()
+            .is_none_or(|expected| full_root == Some(expected));
     let switch_ok = !probe.require_switch || zero_root != full_root;
     let tiny_probability_ok = !probe.require_five_percent_stable || zero_root == five_root;
     let strict_transition_ok = if probe.require_strict_safety_transition {
@@ -544,7 +568,10 @@ fn run_posterior_sensitivity_probe(
     })
 }
 
-fn run_closeout_probe(scenario: &TacticalScenario, state: &GameState) -> Option<CloseoutProbeReport> {
+fn run_closeout_probe(
+    scenario: &TacticalScenario,
+    state: &GameState,
+) -> Option<CloseoutProbeReport> {
     let probe = scenario.closeout_probe.as_ref()?;
     let same_turn_action = probe.same_turn_root.to_action();
     let delayed_action = probe.delayed_root.to_action();
@@ -560,31 +587,119 @@ fn run_closeout_probe(scenario: &TacticalScenario, state: &GameState) -> Option<
     let mut impacts = compute_spatial_root_impacts(state, state.actor(), &roots);
     apply_closeout_root_impacts(&mut impacts, &plans);
 
-    let report_for = |action: &Action| {
-        let plan = plans.iter().find(|plan| &plan.first_action == action)?;
-        let impact = impacts.actions.iter().find(|impact| &impact.action == action)?;
-        Some(CloseoutRootReport {
-            action: format!("{action:?}"),
-            value: plan.value,
-            completion_mass: plan.completion_mass,
-            decisive_completion_mass: plan.decisive_completion_mass,
-            response_windows: plan.response_windows,
-            closeout_gain: impact.closeout_gain,
-            promotion: impact.promotion.map(|promotion| format!("{promotion:?}")),
-        })
-    };
-    let same_turn = report_for(&same_turn_action);
-    let delayed = report_for(&delayed_action);
+    let same_diagnostic = diagnose_decisive_continuation(
+        state,
+        &same_turn_action,
+        CLOSEOUT_DIAGNOSTIC_TRANSITIONS,
+        CLOSEOUT_DIAGNOSTIC_DEPTH,
+        CLOSEOUT_DIAGNOSTIC_BRANCH_CAP,
+        CLOSEOUT_DIAGNOSTIC_NODES,
+    );
+    let delayed_diagnostic = diagnose_decisive_continuation(
+        state,
+        &delayed_action,
+        CLOSEOUT_DIAGNOSTIC_TRANSITIONS,
+        CLOSEOUT_DIAGNOSTIC_DEPTH,
+        CLOSEOUT_DIAGNOSTIC_BRANCH_CAP,
+        CLOSEOUT_DIAGNOSTIC_NODES,
+    );
+
+    let report_for =
+        |action: &Action, diagnostic: &Result<DecisiveContinuationDiagnostic, String>| {
+            let plan = plans.iter().find(|plan| &plan.first_action == action)?;
+            let impact = impacts
+                .actions
+                .iter()
+                .find(|impact| &impact.action == action)?;
+            let resolved = diagnostic.as_ref().ok();
+            Some(CloseoutRootReport {
+                action: format!("{action:?}"),
+                value: plan.value,
+                completion_mass: plan.completion_mass,
+                decisive_completion_mass: plan.decisive_completion_mass,
+                response_windows: plan.response_windows,
+                closeout_gain: impact.closeout_gain,
+                promotion: impact.promotion.map(|promotion| format!("{promotion:?}")),
+                decisive_endpoint: resolved.map(|entry| format!("{:?}", entry.decisive_action)),
+                diagnostic_response_windows: resolved.map(|entry| entry.response_windows),
+                endpoint_strategic_value: resolved.map(|entry| entry.endpoint_strategic_value),
+                completion_timing: resolved.map(|entry| {
+                    if entry.same_turn {
+                        "sameTurn"
+                    } else {
+                        "delayed"
+                    }
+                }),
+                diagnostic_transitions: resolved.map(|entry| entry.transitions),
+                diagnostic_error: diagnostic.as_ref().err().cloned(),
+            })
+        };
+    let same_turn = report_for(&same_turn_action, &same_diagnostic);
+    let delayed = report_for(&delayed_action, &delayed_diagnostic);
+    let expected_same_turn_endpoint = probe
+        .expected_same_turn_endpoint
+        .as_ref()
+        .map(|spec| format!("{:?}", spec.to_action()));
+    let expected_delayed_endpoint = probe
+        .expected_delayed_endpoint
+        .as_ref()
+        .map(|spec| format!("{:?}", spec.to_action()));
     let response_contract = same_turn.as_ref().is_some_and(|root| {
         root.decisive_completion_mass > f32::EPSILON
             && root.response_windows.is_some_and(|windows| windows <= 1e-6)
-    }) && delayed
+            && root.completion_timing == Some("sameTurn")
+            && root.diagnostic_response_windows == Some(0)
+    }) && delayed.as_ref().is_some_and(|root| {
+        root.response_windows.is_some_and(|windows| windows >= 1.0)
+            && root.completion_timing == Some("delayed")
+            && root
+                .diagnostic_response_windows
+                .is_some_and(|windows| windows >= 1)
+    });
+    let expected_endpoints_ok = expected_same_turn_endpoint
+        .as_deref()
+        .is_none_or(|expected| {
+            same_turn
+                .as_ref()
+                .and_then(|root| root.decisive_endpoint.as_deref())
+                == Some(expected)
+        })
+        && expected_delayed_endpoint.as_deref().is_none_or(|expected| {
+            delayed
+                .as_ref()
+                .and_then(|root| root.decisive_endpoint.as_deref())
+                == Some(expected)
+        });
+    let same_endpoint_matched = same_turn
         .as_ref()
-        .is_some_and(|root| root.response_windows.is_some_and(|windows| windows >= 1.0));
+        .and_then(|root| root.decisive_endpoint.as_deref())
+        .zip(
+            delayed
+                .as_ref()
+                .and_then(|root| root.decisive_endpoint.as_deref()),
+        )
+        .is_some_and(|(same, later)| same == later);
+    let delayed_stronger = same_turn
+        .as_ref()
+        .and_then(|root| root.endpoint_strategic_value)
+        .zip(
+            delayed
+                .as_ref()
+                .and_then(|root| root.endpoint_strategic_value),
+        )
+        .is_some_and(|(same, later)| later > same + 1e-6);
+    let contract_passed = response_contract
+        && expected_endpoints_ok
+        && (!probe.require_same_endpoint || same_endpoint_matched)
+        && (!probe.require_delayed_stronger || delayed_stronger);
     Some(CloseoutProbeReport {
         same_turn,
         delayed,
-        contract_passed: response_contract,
+        expected_same_turn_endpoint,
+        expected_delayed_endpoint,
+        same_endpoint_matched,
+        delayed_stronger,
+        contract_passed,
     })
 }
 
