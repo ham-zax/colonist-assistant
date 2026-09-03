@@ -3,8 +3,8 @@ use std::time::Instant;
 
 use colonist_catan_core::GameState;
 use colonist_catan_search::{
-    CudaSimAgentSearchConfig, CudaSimArenaConfig, CudaSimArenaResult, CudaSimEngine,
-    CudaSimPolicyProfile, cuda_sim_board_seed,
+    CudaSimAgentSearchConfig, CudaSimArenaConfig, CudaSimArenaGameSummary, CudaSimArenaResult,
+    CudaSimEngine, CudaSimPolicyProfile, cuda_sim_board_seed,
 };
 use serde::Serialize;
 
@@ -113,6 +113,38 @@ struct ConfigReport {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct CandidateSeatOutcome {
+    seat: u8,
+    terminal: bool,
+    truncated: bool,
+    outcome: &'static str,
+    winner: Option<u8>,
+    candidate_victory_points: u8,
+    best_opponent_victory_points: u8,
+    candidate_margin: i16,
+    turn: u32,
+    actions: u32,
+    truncation_seat: Option<u8>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MatchedBlockResult {
+    block_id: usize,
+    seed: u64,
+    candidate_seat_outcomes: Vec<CandidateSeatOutcome>,
+    candidate_wins: u64,
+    mean_candidate_victory_points: f64,
+    mean_best_opponent_victory_points: f64,
+    mean_candidate_margin: f64,
+    total_truncations: u64,
+    candidate_seat_truncations: u64,
+    opponent_seat_truncations: u64,
+    unattributed_truncations: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct PlayerResult {
     players: u8,
     blocks: usize,
@@ -140,6 +172,7 @@ struct PlayerResult {
     complete_games_per_second: f64,
     actions_per_second: f64,
     root_proposals_per_second: f64,
+    matched_blocks: Vec<MatchedBlockResult>,
 }
 
 #[derive(Debug, Serialize)]
@@ -151,7 +184,7 @@ struct Output {
     results: Vec<PlayerResult>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 struct Accumulator {
     games: u64,
     terminal_games: u64,
@@ -166,6 +199,98 @@ struct Accumulator {
     candidate_decisions: u64,
     root_proposals: u64,
     elapsed_seconds: f64,
+    matched_blocks: Vec<MatchedBlockResult>,
+}
+
+fn matched_block_result(
+    players: u8,
+    block_id: usize,
+    board_seed: u64,
+    games: &[CudaSimArenaGameSummary],
+) -> MatchedBlockResult {
+    let mut candidate_wins = 0u64;
+    let mut candidate_vp = 0u64;
+    let mut best_opponent_vp = 0u64;
+    let mut total_truncations = 0u64;
+    let mut candidate_seat_truncations = 0u64;
+    let mut opponent_seat_truncations = 0u64;
+    let mut unattributed_truncations = 0u64;
+    let mut outcomes = Vec::with_capacity(games.len());
+
+    for (candidate, game) in games.iter().enumerate() {
+        let candidate = candidate as u8;
+        let candidate_points = game.game.victory_points[candidate as usize];
+        let opponent_points = game
+            .game
+            .victory_points
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(player, _)| *player < players as usize && *player != candidate as usize)
+            .map(|(_, vp)| vp)
+            .max()
+            .unwrap_or(0);
+        let candidate_win = game.game.terminal && game.game.winner == Some(candidate);
+        candidate_wins = candidate_wins.saturating_add(u64::from(candidate_win));
+        candidate_vp = candidate_vp.saturating_add(u64::from(candidate_points));
+        best_opponent_vp = best_opponent_vp.saturating_add(u64::from(opponent_points));
+
+        let truncation_seat = if game.truncated && game.game.turn > 0 {
+            Some(((game.game.turn - 1) % u32::from(players)) as u8)
+        } else {
+            None
+        };
+        if game.truncated {
+            total_truncations = total_truncations.saturating_add(1);
+            match truncation_seat {
+                Some(seat) if seat == candidate => {
+                    candidate_seat_truncations = candidate_seat_truncations.saturating_add(1);
+                }
+                Some(_) => {
+                    opponent_seat_truncations = opponent_seat_truncations.saturating_add(1);
+                }
+                None => {
+                    unattributed_truncations = unattributed_truncations.saturating_add(1);
+                }
+            }
+        }
+        outcomes.push(CandidateSeatOutcome {
+            seat: candidate,
+            terminal: game.game.terminal,
+            truncated: game.truncated,
+            outcome: if game.truncated {
+                "truncated"
+            } else if candidate_win {
+                "win"
+            } else {
+                "loss"
+            },
+            winner: game.game.winner,
+            candidate_victory_points: candidate_points,
+            best_opponent_victory_points: opponent_points,
+            candidate_margin: i16::from(candidate_points) - i16::from(opponent_points),
+            turn: game.game.turn,
+            actions: game.actions,
+            truncation_seat,
+        });
+    }
+
+    let games = games.len().max(1) as f64;
+    let mean_candidate_victory_points = candidate_vp as f64 / games;
+    let mean_best_opponent_victory_points = best_opponent_vp as f64 / games;
+    MatchedBlockResult {
+        block_id,
+        seed: cuda_sim_board_seed(board_seed, block_id as u64),
+        candidate_seat_outcomes: outcomes,
+        candidate_wins,
+        mean_candidate_victory_points,
+        mean_best_opponent_victory_points,
+        mean_candidate_margin: mean_candidate_victory_points - mean_best_opponent_victory_points,
+        total_truncations,
+        candidate_seat_truncations,
+        opponent_seat_truncations,
+        unattributed_truncations,
+    }
 }
 
 impl Accumulator {
@@ -173,6 +298,7 @@ impl Accumulator {
         &mut self,
         players: u8,
         game_offset: usize,
+        board_seed: u64,
         result: &CudaSimArenaResult,
         candidate_decisions: u64,
         root_proposals: u64,
@@ -185,6 +311,17 @@ impl Accumulator {
         self.candidate_decisions = self.candidate_decisions.saturating_add(candidate_decisions);
         self.root_proposals = self.root_proposals.saturating_add(root_proposals);
         self.elapsed_seconds += elapsed_seconds;
+        assert_eq!(game_offset % players as usize, 0);
+        assert_eq!(result.games.len() % players as usize, 0);
+        let first_block = game_offset / players as usize;
+        for (local_block, games) in result.games.chunks_exact(players as usize).enumerate() {
+            self.matched_blocks.push(matched_block_result(
+                players,
+                first_block + local_block,
+                board_seed,
+                games,
+            ));
+        }
         for (local, game) in result.games.iter().enumerate() {
             let global = game_offset + local;
             let candidate = global % players as usize;
@@ -249,6 +386,7 @@ impl Accumulator {
             complete_games_per_second: self.terminal_games as f64 / elapsed,
             actions_per_second: self.total_actions as f64 / elapsed,
             root_proposals_per_second: self.root_proposals as f64 / elapsed,
+            matched_blocks: self.matched_blocks,
         }
     }
 }
@@ -480,6 +618,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             accumulator.absorb(
                 players,
                 game_offset,
+                config.board_seed,
                 &searched.arena,
                 searched.candidate_decisions,
                 searched.root_actions_evaluated,

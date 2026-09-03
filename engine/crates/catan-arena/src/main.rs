@@ -14,10 +14,11 @@ use colonist_catan_core::{
     Action, Building, GameState, NodeKind, Phase, PlayerState, SplitMix64, TradeOffer,
 };
 use colonist_catan_search::{
-    BeliefDepthConfig, BeliefParticle, DepthActionValue, ENGINE_REVISION, Mcts, SearchConfig,
-    SearchMode, SearchReport, action_prior, choose_rollout_action, encode_action,
-    encode_heterogeneous_graph, evaluate, expansion_option_value, pool_heterogeneous_graph,
-    production_pips, search_maxn_bounded_timed, search_paranoid_bounded_timed,
+    BeliefDepthConfig, BeliefParticle, DepthActionValue, ENGINE_REVISION, Mcts,
+    RootPromotionReason, SearchConfig, SearchMode, SearchReport, action_prior,
+    choose_rollout_action, compute_spatial_root_impacts, encode_action, encode_heterogeneous_graph,
+    evaluate, expansion_option_value, pool_heterogeneous_graph, production_pips,
+    search_maxn_bounded_timed, search_paranoid_bounded_timed,
     search_weighted_belief_maxn_with_config, search_weighted_belief_paranoid_with_config,
     strategic_utility, trade_acceptance_features,
 };
@@ -1154,6 +1155,46 @@ fn run_mcts_search(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProgressMechanism {
+    Knight = 0,
+    RoadBuilding = 1,
+    YearOfPlenty = 2,
+    Monopoly = 3,
+}
+
+impl ProgressMechanism {
+    fn from_action(action: &Action) -> Option<Self> {
+        match action {
+            Action::PlayKnight { .. } => Some(Self::Knight),
+            Action::PlayRoadBuilding { .. } => Some(Self::RoadBuilding),
+            Action::PlayYearOfPlenty { .. } => Some(Self::YearOfPlenty),
+            Action::PlayMonopoly { .. } => Some(Self::Monopoly),
+            _ => None,
+        }
+    }
+
+    const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+fn expansion_portfolios(state: &GameState) -> [f32; 4] {
+    let mut values = [0.0; 4];
+    for player in 0..state.board.num_players {
+        values[player as usize] = expansion_option_value(state, player).portfolio_value;
+    }
+    values
+}
+
+fn longest_road_lengths(state: &GameState) -> [u8; 4] {
+    let mut lengths = [0; 4];
+    for player in 0..state.board.num_players {
+        lengths[player as usize] = state.longest_road_length(player);
+    }
+    lengths
+}
+
 #[derive(Clone, Debug, Default)]
 struct GameMetrics {
     roads: [u32; 4],
@@ -1161,6 +1202,16 @@ struct GameMetrics {
     cities: [u32; 4],
     development_bought: [u32; 4],
     dead_roads: [u32; 4],
+    road_cuts: [u32; 4],
+    award_transfers: [u32; 4],
+    expansion_denial_events: [u32; 4],
+    expansion_portfolio_denied: [f32; 4],
+    expansion_protection_events: [u32; 4],
+    progress_card_plays: [[u32; 4]; 4],
+    progress_card_conversions: [[u32; 4]; 4],
+    monopoly_cards_transferred: [u32; 4],
+    dirty_monopoly_sequences: [u32; 4],
+    one_turn_closeouts: [u32; 4],
     maritime_trades: [u32; 4],
     offers: [u32; 4],
     accepts: [u32; 4],
@@ -1367,6 +1418,16 @@ struct CandidateMetrics {
     cities: u64,
     development_bought: u64,
     dead_roads: u64,
+    road_cuts: u64,
+    award_transfers: u64,
+    expansion_denial_events: u64,
+    expansion_portfolio_denied: f64,
+    expansion_protection_events: u64,
+    progress_card_plays: [u64; 4],
+    progress_card_conversions: [u64; 4],
+    monopoly_cards_transferred: u64,
+    dirty_monopoly_sequences: u64,
+    one_turn_closeouts: u64,
     maritime_trades: u64,
     offers: u64,
     accepts: u64,
@@ -1629,8 +1690,10 @@ fn compact_engine_metrics(metrics: &[CandidateMetrics; 6]) -> String {
         let metric = &metrics[engine as usize];
         let seats = metric.seats.max(1) as f64;
         let searches = metric.search_decisions.max(1) as f64;
+        let progress_plays = metric.progress_card_plays.iter().sum::<u64>();
+        let progress_conversions = metric.progress_card_conversions.iter().sum::<u64>();
         format!(
-            "\"{}\":{{\"seatSamples\":{},\"meanRank\":{:.6},\"meanVictoryPoints\":{:.6},\"searchSamples\":{},\"meanSearchNodes\":{:.3},\"meanSearchDepth\":{:.3},\"meanPosteriorParticles\":{:.3},\"meanStrategicParticles\":{:.3},\"searchDeadlineShare\":{:.6},\"meanRootActions\":{:.3}}}",
+            "\"{}\":{{\"seatSamples\":{},\"meanRank\":{:.6},\"meanVictoryPoints\":{:.6},\"searchSamples\":{},\"meanSearchNodes\":{:.3},\"meanSearchDepth\":{:.3},\"meanPosteriorParticles\":{:.3},\"meanStrategicParticles\":{:.3},\"searchDeadlineShare\":{:.6},\"meanRootActions\":{:.3},\"roadCutsPerSeat\":{:.6},\"awardTransfersPerSeat\":{:.6},\"expansionDenialEventsPerSeat\":{:.6},\"meanExpansionPortfolioValueDenied\":{:.6},\"expansionProtectionEventsPerSeat\":{:.6},\"progressCardConversionRate\":{:.6},\"monopolyCardsTransferredPerSeat\":{:.6},\"dirtyMonopolySequencesPerSeat\":{:.6},\"oneTurnCloseoutsPerSeat\":{:.6}}}",
             engine.as_str(),
             metric.seats,
             metric.ranks / seats,
@@ -1642,6 +1705,15 @@ fn compact_engine_metrics(metrics: &[CandidateMetrics; 6]) -> String {
             metric.strategic_particles as f64 / searches,
             metric.search_deadlines as f64 / searches,
             metric.search_action_values as f64 / searches,
+            metric.road_cuts as f64 / seats,
+            metric.award_transfers as f64 / seats,
+            metric.expansion_denial_events as f64 / seats,
+            metric.expansion_portfolio_denied / seats,
+            metric.expansion_protection_events as f64 / seats,
+            progress_conversions as f64 / progress_plays.max(1) as f64,
+            metric.monopoly_cards_transferred as f64 / seats,
+            metric.dirty_monopoly_sequences as f64 / seats,
+            metric.one_turn_closeouts as f64 / seats,
         )
     })
     .collect::<Vec<_>>()
@@ -1714,6 +1786,10 @@ fn play_game_from_state(
     state.player_trades_enabled = config.player_trades_enabled;
     let mut actions = 0u32;
     let mut metrics = GameMetrics::default();
+    let mut pending_progress = [None; 4];
+    let mut progress_converted = [false; 4];
+    let mut traded_out_resources = [[0u32; 5]; 4];
+    let mut dirty_monopoly_pending = [false; 4];
     let mut calibration = Vec::<(u8, f32)>::new();
     let mut expert_samples = Vec::<ExpertSample>::new();
     let mut trade_samples = Vec::<TradeSample>::new();
@@ -1883,6 +1959,55 @@ fn play_game_from_state(
             choice.action
         };
         let actor = state.actor() as usize;
+        let turn_owner = state.current_player as usize;
+        let spatial_action = matches!(
+            action,
+            Action::BuildRoad { .. }
+                | Action::BuildSettlement { .. }
+                | Action::PlayRoadBuilding { .. }
+        );
+        let road_lengths_before = spatial_action.then(|| longest_road_lengths(&state));
+        let expansion_before = spatial_action.then(|| expansion_portfolios(&state));
+        let expansion_protection =
+            matches!(
+                action,
+                Action::BuildRoad { .. } | Action::BuildSettlement { .. }
+            ) && compute_spatial_root_impacts(&state, actor as u8, std::slice::from_ref(&action))
+                .actions
+                .first()
+                .is_some_and(|impact| {
+                    impact.promotion == Some(RootPromotionReason::CriticalExpansionProtection)
+                });
+        let longest_road_holder_before = state.longest_road_holder;
+        let largest_army_holder_before = state.largest_army_holder;
+        let progress_mechanism = ProgressMechanism::from_action(&action);
+        let monopoly_transfer = if let Action::PlayMonopoly { resource } = &action {
+            (0..state.board.num_players as usize)
+                .filter(|player| *player != turn_owner)
+                .map(|player| u32::from(state.players[player].resources[resource.index()]))
+                .sum::<u32>()
+        } else {
+            0
+        };
+        let dirty_monopoly_reclaim = if let Action::PlayMonopoly { resource } = &action {
+            actor == turn_owner && traded_out_resources[turn_owner][resource.index()] > 0
+        } else {
+            false
+        };
+        let confirmed_trade_flow = if let Action::ConfirmTrade { partner } = &action {
+            state.trade.and_then(|trade| {
+                let turn_owner = state.current_player;
+                if turn_owner == trade.creator {
+                    Some((turn_owner as usize, trade.give, trade.receive))
+                } else if turn_owner == *partner {
+                    Some((turn_owner as usize, trade.receive, trade.give))
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
         match &action {
             Action::PlaceRoad { .. } | Action::BuildRoad { .. } => {
                 metrics.roads[actor] += 1;
@@ -1941,6 +2066,98 @@ fn play_game_from_state(
         });
         if let (Some(player), Some(before)) = (trade_actor, trade_before) {
             metrics.trade_value_sum[player as usize] += strategic_utility(&state, player) - before;
+        }
+        if let Some((player, outgoing, incoming)) = confirmed_trade_flow {
+            for resource in 0..5 {
+                traded_out_resources[player][resource] = traded_out_resources[player][resource]
+                    .saturating_sub(u32::from(incoming[resource]))
+                    .saturating_add(u32::from(outgoing[resource]));
+            }
+        }
+
+        let actor_award_acquired = (longest_road_holder_before != Some(turn_owner as u8)
+            && state.longest_road_holder == Some(turn_owner as u8))
+            || (largest_army_holder_before != Some(turn_owner as u8)
+                && state.largest_army_holder == Some(turn_owner as u8));
+        let mut award_transfer_count = 0u32;
+        for (before, after) in [
+            (longest_road_holder_before, state.longest_road_holder),
+            (largest_army_holder_before, state.largest_army_holder),
+        ] {
+            if let (Some(before), Some(after)) = (before, after)
+                && before != after
+            {
+                award_transfer_count += 1;
+            }
+        }
+        metrics.award_transfers[actor] += award_transfer_count;
+
+        if let Some(before) = road_lengths_before {
+            let after = longest_road_lengths(&state);
+            if (0..state.board.num_players as usize)
+                .filter(|player| *player != actor)
+                .any(|player| after[player] < before[player])
+            {
+                metrics.road_cuts[actor] += 1;
+            }
+        }
+        if let Some(before) = expansion_before {
+            let after = expansion_portfolios(&state);
+            let denied = (0..state.board.num_players as usize)
+                .filter(|player| *player != actor)
+                .map(|player| (before[player] - after[player]).max(0.0))
+                .fold(0.0, f32::max);
+            if denied > f32::EPSILON {
+                metrics.expansion_denial_events[actor] += 1;
+                metrics.expansion_portfolio_denied[actor] += denied;
+            }
+        }
+        if expansion_protection {
+            metrics.expansion_protection_events[actor] += 1;
+        }
+
+        if let Some(mechanism) = progress_mechanism {
+            metrics.progress_card_plays[turn_owner][mechanism.index()] += 1;
+            pending_progress[turn_owner] = Some(mechanism);
+            progress_converted[turn_owner] = false;
+            if mechanism == ProgressMechanism::Monopoly
+                && dirty_monopoly_reclaim
+                && monopoly_transfer > 0
+            {
+                dirty_monopoly_pending[turn_owner] = true;
+            }
+        }
+        if monopoly_transfer > 0 {
+            metrics.monopoly_cards_transferred[turn_owner] += monopoly_transfer;
+        }
+
+        let material_progress_conversion = matches!(
+            action,
+            Action::BuildRoad { .. }
+                | Action::BuildSettlement { .. }
+                | Action::BuildCity { .. }
+                | Action::PlayRoadBuilding { .. }
+        ) || actor_award_acquired
+            || state.winner() == Some(turn_owner as u8);
+        if material_progress_conversion
+            && let Some(mechanism) = pending_progress[turn_owner]
+            && !progress_converted[turn_owner]
+        {
+            metrics.progress_card_conversions[turn_owner][mechanism.index()] += 1;
+            progress_converted[turn_owner] = true;
+            if mechanism == ProgressMechanism::Monopoly && dirty_monopoly_pending[turn_owner] {
+                metrics.dirty_monopoly_sequences[turn_owner] += 1;
+                dirty_monopoly_pending[turn_owner] = false;
+            }
+        }
+        if state.winner() == Some(turn_owner as u8) {
+            metrics.one_turn_closeouts[turn_owner] += 1;
+        }
+        if matches!(action, Action::EndTurn) {
+            pending_progress[turn_owner] = None;
+            progress_converted[turn_owner] = false;
+            traded_out_resources[turn_owner] = [0; 5];
+            dirty_monopoly_pending[turn_owner] = false;
         }
         actions += 1;
         if config.validate {
@@ -2480,6 +2697,25 @@ fn main() {
             candidate_metrics.cities += metrics.cities[player] as u64;
             candidate_metrics.development_bought += metrics.development_bought[player] as u64;
             candidate_metrics.dead_roads += metrics.dead_roads[player] as u64;
+            candidate_metrics.road_cuts += metrics.road_cuts[player] as u64;
+            candidate_metrics.award_transfers += metrics.award_transfers[player] as u64;
+            candidate_metrics.expansion_denial_events +=
+                metrics.expansion_denial_events[player] as u64;
+            candidate_metrics.expansion_portfolio_denied +=
+                metrics.expansion_portfolio_denied[player] as f64;
+            candidate_metrics.expansion_protection_events +=
+                metrics.expansion_protection_events[player] as u64;
+            for mechanism in 0..4 {
+                candidate_metrics.progress_card_plays[mechanism] +=
+                    metrics.progress_card_plays[player][mechanism] as u64;
+                candidate_metrics.progress_card_conversions[mechanism] +=
+                    metrics.progress_card_conversions[player][mechanism] as u64;
+            }
+            candidate_metrics.monopoly_cards_transferred +=
+                metrics.monopoly_cards_transferred[player] as u64;
+            candidate_metrics.dirty_monopoly_sequences +=
+                metrics.dirty_monopoly_sequences[player] as u64;
+            candidate_metrics.one_turn_closeouts += metrics.one_turn_closeouts[player] as u64;
             candidate_metrics.maritime_trades += metrics.maritime_trades[player] as u64;
             candidate_metrics.offers += metrics.offers[player] as u64;
             candidate_metrics.accepts += metrics.accepts[player] as u64;
@@ -2589,6 +2825,17 @@ fn main() {
                 "\"meanCities\":{:.6},",
                 "\"meanDevelopmentCardsBought\":{:.6},",
                 "\"meanDeadRoads\":{:.6},",
+                "\"meanRoadCuts\":{:.6},",
+                "\"meanAwardTransfers\":{:.6},",
+                "\"meanExpansionDenialEvents\":{:.6},",
+                "\"meanExpansionPortfolioValueDenied\":{:.6},",
+                "\"meanExpansionProtectionEvents\":{:.6},",
+                "\"progressCardPlays\":{{\"knight\":{},\"roadBuilding\":{},\"yearOfPlenty\":{},\"monopoly\":{}}},",
+                "\"progressCardConversions\":{{\"knight\":{},\"roadBuilding\":{},\"yearOfPlenty\":{},\"monopoly\":{}}},",
+                "\"progressCardConversionRates\":{{\"knight\":{:.6},\"roadBuilding\":{:.6},\"yearOfPlenty\":{:.6},\"monopoly\":{:.6}}},",
+                "\"meanMonopolyCardsTransferred\":{:.6},",
+                "\"meanDirtyMonopolySequences\":{:.6},",
+                "\"meanOneTurnCloseouts\":{:.6},",
                 "\"meanMaritimeTrades\":{:.6},",
                 "\"meanDomesticOffers\":{:.6},",
                 "\"tradeAcceptanceRate\":{:.6},",
@@ -2674,6 +2921,40 @@ fn main() {
             candidate_metrics.cities as f64 / candidate_metrics.seats.max(1) as f64,
             candidate_metrics.development_bought as f64 / candidate_metrics.seats.max(1) as f64,
             candidate_metrics.dead_roads as f64 / candidate_metrics.seats.max(1) as f64,
+            candidate_metrics.road_cuts as f64 / candidate_metrics.seats.max(1) as f64,
+            candidate_metrics.award_transfers as f64 / candidate_metrics.seats.max(1) as f64,
+            candidate_metrics.expansion_denial_events as f64
+                / candidate_metrics.seats.max(1) as f64,
+            candidate_metrics.expansion_portfolio_denied / candidate_metrics.seats.max(1) as f64,
+            candidate_metrics.expansion_protection_events as f64
+                / candidate_metrics.seats.max(1) as f64,
+            candidate_metrics.progress_card_plays[ProgressMechanism::Knight.index()],
+            candidate_metrics.progress_card_plays[ProgressMechanism::RoadBuilding.index()],
+            candidate_metrics.progress_card_plays[ProgressMechanism::YearOfPlenty.index()],
+            candidate_metrics.progress_card_plays[ProgressMechanism::Monopoly.index()],
+            candidate_metrics.progress_card_conversions[ProgressMechanism::Knight.index()],
+            candidate_metrics.progress_card_conversions[ProgressMechanism::RoadBuilding.index()],
+            candidate_metrics.progress_card_conversions[ProgressMechanism::YearOfPlenty.index()],
+            candidate_metrics.progress_card_conversions[ProgressMechanism::Monopoly.index()],
+            candidate_metrics.progress_card_conversions[ProgressMechanism::Knight.index()] as f64
+                / candidate_metrics.progress_card_plays[ProgressMechanism::Knight.index()].max(1)
+                    as f64,
+            candidate_metrics.progress_card_conversions[ProgressMechanism::RoadBuilding.index()]
+                as f64
+                / candidate_metrics.progress_card_plays[ProgressMechanism::RoadBuilding.index()]
+                    .max(1) as f64,
+            candidate_metrics.progress_card_conversions[ProgressMechanism::YearOfPlenty.index()]
+                as f64
+                / candidate_metrics.progress_card_plays[ProgressMechanism::YearOfPlenty.index()]
+                    .max(1) as f64,
+            candidate_metrics.progress_card_conversions[ProgressMechanism::Monopoly.index()] as f64
+                / candidate_metrics.progress_card_plays[ProgressMechanism::Monopoly.index()].max(1)
+                    as f64,
+            candidate_metrics.monopoly_cards_transferred as f64
+                / candidate_metrics.seats.max(1) as f64,
+            candidate_metrics.dirty_monopoly_sequences as f64
+                / candidate_metrics.seats.max(1) as f64,
+            candidate_metrics.one_turn_closeouts as f64 / candidate_metrics.seats.max(1) as f64,
             candidate_metrics.maritime_trades as f64 / candidate_metrics.seats.max(1) as f64,
             candidate_metrics.offers as f64 / candidate_metrics.seats.max(1) as f64,
             candidate_metrics.accepts as f64 / candidate_metrics.offers.max(1) as f64,
