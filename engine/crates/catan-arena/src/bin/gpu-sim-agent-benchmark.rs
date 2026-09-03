@@ -21,6 +21,7 @@ struct Config {
     max_actions: u32,
     chunk_blocks: usize,
     player_trades_enabled: bool,
+    candidate_seat_trades_disabled: bool,
     max_truncation_rate: f64,
     candidate_profile: CudaSimPolicyProfile,
     baseline_profile: CudaSimPolicyProfile,
@@ -39,6 +40,7 @@ impl Default for Config {
             max_actions: 20_000,
             chunk_blocks: 32,
             player_trades_enabled: true,
+            candidate_seat_trades_disabled: false,
             max_truncation_rate: 0.01,
             candidate_profile: NEUTRAL_PROFILE,
             baseline_profile: NEUTRAL_PROFILE,
@@ -99,6 +101,7 @@ struct ConfigReport {
     max_actions: u32,
     chunk_blocks: usize,
     player_trades_enabled: bool,
+    trade_stress_mode: &'static str,
     max_truncation_rate: f64,
     candidate_agent: &'static str,
     baseline_agent: &'static str,
@@ -468,8 +471,18 @@ fn parse_args() -> Result<Option<Config>, String> {
             "--chunk-blocks" => {
                 config.chunk_blocks = parse_value(flag, &next_value(&args, &mut index, flag)?)?
             }
-            "--player-trades" => config.player_trades_enabled = true,
-            "--no-player-trades" => config.player_trades_enabled = false,
+            "--player-trades" => {
+                config.player_trades_enabled = true;
+                config.candidate_seat_trades_disabled = false;
+            }
+            "--no-player-trades" => {
+                config.player_trades_enabled = false;
+                config.candidate_seat_trades_disabled = false;
+            }
+            "--candidate-seat-no-player-trades" => {
+                config.player_trades_enabled = true;
+                config.candidate_seat_trades_disabled = true;
+            }
             "--max-truncation-rate" => {
                 config.max_truncation_rate =
                     parse_value(flag, &next_value(&args, &mut index, flag)?)?
@@ -531,8 +544,10 @@ fn print_help() {
          \x20 --root-samples N              GPU root proposals per candidate decision (default: 4)\n\
          \x20 --rollouts-per-action N       GPU rollouts per sampled root (default: 16)\n\
          \x20 --rollout-steps N             Weighted continuation steps per rollout (default: 32)\n\
-         \x20 --player-trades               Enable domestic trades (default)\n\
-         \x20 --no-player-trades            Disable domestic trades\n\
+         \x20 --player-trades               Enable domestic trades for every seat (default)\n\
+         \x20 --no-player-trades            Disable domestic trades globally\n\
+         \x20 --candidate-seat-no-player-trades\n\
+         \x20                               Disable domestic trades only for the rotated candidate seat\n\
          \x20 --max-truncation-rate R       Refuse output above this rate (default: 0.01)\n\
          \x20 --candidate-profile a,b,c,d,e Candidate policy profile\n\
          \x20 --baseline-profile a,b,c,d,e  Weighted-opponent policy profile\n\
@@ -546,14 +561,18 @@ fn paired_state_chunk(
     blocks: usize,
     board_seed: u64,
     player_trades_enabled: bool,
+    candidate_seat_trades_disabled: bool,
 ) -> Vec<GameState> {
     let mut states = Vec::with_capacity(blocks * players as usize);
     for local_block in 0..blocks {
         let global_block = block_offset + local_block;
         let seed = cuda_sim_board_seed(board_seed, global_block as u64);
-        for _seat in 0..players {
+        for seat in 0..players {
             let mut state = GameState::standard(seed, players);
             state.player_trades_enabled = player_trades_enabled;
+            if candidate_seat_trades_disabled {
+                state.domestic_trade_disabled |= 1 << seat;
+            }
             states.push(state);
         }
     }
@@ -599,6 +618,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 chunk_blocks,
                 config.board_seed,
                 config.player_trades_enabled,
+                config.candidate_seat_trades_disabled,
             );
             let game_offset = block_offset
                 .checked_mul(players as usize)
@@ -660,6 +680,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_actions: config.max_actions,
             chunk_blocks: config.chunk_blocks,
             player_trades_enabled: config.player_trades_enabled,
+            trade_stress_mode: if !config.player_trades_enabled {
+                "global_disabled"
+            } else if config.candidate_seat_trades_disabled {
+                "candidate_seat_disabled"
+            } else {
+                "enabled"
+            },
             max_truncation_rate: config.max_truncation_rate,
             candidate_agent: "gpu-root-rollout-search",
             baseline_agent: "gpu-weighted",
