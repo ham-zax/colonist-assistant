@@ -2,10 +2,10 @@ use colonist_catan_core::{Action, GameState};
 use colonist_catan_search::{
     ActionStats, BeliefParticle, CudaSimEngine, CudaSimError, CudaSimRootActionStats,
     DEVELOPMENT_EXACT_FAMILIES, ExactActionFamily, ExactDecisionResult, HARD_VETO_POSTERIOR,
-    SearchReport, SearchStatistics, admit_promoted_roots, belief_domestic_trade_assessment,
-    belief_domestic_trade_threat, compute_spatial_root_impacts, exact_family_for_action,
-    forced_loss_weight, posterior_immediate_threat_weight, safer_end_turn_alternative,
-    shared_root_candidates, solve_belief_current_turn_timed,
+    SearchReport, SearchStatistics, admit_promoted_roots, apply_closeout_root_impacts,
+    belief_domestic_trade_assessment, belief_root_closeout_plans, compute_spatial_root_impacts,
+    exact_family_for_action, forced_loss_weight, posterior_immediate_threat_weight,
+    safer_end_turn_alternative, shared_root_candidates, solve_belief_current_turn_timed,
     solve_exact_belief_excluding_controlled,
 };
 use serde::Serialize;
@@ -690,9 +690,13 @@ impl NativeGpuSearchEngine {
         let ranked_tuples: Vec<(Action, f32)> =
             ranked.iter().map(|r| (r.action.clone(), r.prior)).collect();
         let root_actions_list: Vec<Action> = ranked.iter().map(|r| r.action.clone()).collect();
-        let spatial_impact_report = particles
-            .first()
-            .map(|first| compute_spatial_root_impacts(&first.state, actor, &root_actions_list));
+        let planner_nodes = (effort.cpu.nodes_per_depth_wave / 12).clamp(300, 4_000);
+        let closeout_plans = belief_root_closeout_plans(&particles, actor, planner_nodes);
+        let spatial_impact_report = particles.first().map(|first| {
+            let mut report = compute_spatial_root_impacts(&first.state, actor, &root_actions_list);
+            apply_closeout_root_impacts(&mut report, &closeout_plans);
+            report
+        });
         let promoted_spatial_actions: Vec<Action> = spatial_impact_report
             .as_ref()
             .map(|report| {
@@ -712,6 +716,20 @@ impl NativeGpuSearchEngine {
             &promoted_spatial_actions,
             root_cap,
         );
+        let trade_assessments = admitted
+            .iter()
+            .map(|(candidate_action, _)| {
+                (
+                    candidate_action.clone(),
+                    belief_domestic_trade_assessment(
+                        particles
+                            .iter()
+                            .map(|particle| (&particle.state, particle.weight)),
+                        candidate_action,
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
         let root_evidence = ranked
             .iter()
             .map(|candidate| {
@@ -721,12 +739,10 @@ impl NativeGpuSearchEngine {
                         .iter()
                         .find(|impact| impact.action == candidate.action)
                 });
-                let trade = belief_domestic_trade_assessment(
-                    particles
-                        .iter()
-                        .map(|particle| (&particle.state, particle.weight)),
-                    &candidate.action,
-                );
+                let trade = trade_assessments
+                    .iter()
+                    .find(|(action, _)| action == &candidate.action)
+                    .map_or_else(Default::default, |(_, assessment)| *assessment);
                 RootCausalEvidenceOutput {
                     action: action(candidate.action.clone()),
                     promotion_reason: impact
@@ -741,9 +757,10 @@ impl NativeGpuSearchEngine {
                                 .iter()
                                 .any(|(action, _)| action == &candidate.action)
                     }),
-                    closeout_gain: 0.0,
-                    response_windows: None,
-                    decisive_completion_mass: 0.0,
+                    closeout_gain: impact.map_or(0.0, |impact| impact.closeout_gain),
+                    response_windows: impact.and_then(|impact| impact.response_windows),
+                    decisive_completion_mass: impact
+                        .map_or(0.0, |impact| impact.decisive_completion_mass),
                     trade_threat: trade.threat.map(domestic_trade_threat_label),
                     trade_risk_posterior: trade.posterior,
                     dirty_monopoly_posterior: trade.dirty_monopoly_posterior,
@@ -777,13 +794,10 @@ impl NativeGpuSearchEngine {
         let safe = pre_trade_retained
             .iter()
             .filter(|candidate| {
-                belief_domestic_trade_threat(
-                    particles
-                        .iter()
-                        .map(|particle| (&particle.state, particle.weight)),
-                    &candidate.action,
-                )
-                .is_none()
+                trade_assessments
+                    .iter()
+                    .find(|(action, _)| action == &candidate.action)
+                    .is_none_or(|(_, assessment)| !assessment.hard_veto)
             })
             .cloned()
             .collect::<Vec<_>>();

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use colonist_catan_core::{Action, GameState, Phase, Resource};
 
@@ -49,19 +49,66 @@ enum ProgressOrigin {
     Monopoly(Resource),
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct TacticalThreats {
-    keys: HashSet<ThreatKey>,
-    monopoly_paths: Vec<(ThreatKey, Resource)>,
+    keys: HashMap<ThreatKey, f32>,
+    non_monopoly_paths: HashMap<ThreatKey, f32>,
+    monopoly_paths: HashMap<(ThreatKey, Resource), f32>,
 }
 
 impl TacticalThreats {
-    fn insert(&mut self, key: ThreatKey, origin: Option<ProgressOrigin>) {
-        self.keys.insert(key);
-        if let Some(ProgressOrigin::Monopoly(resource)) = origin
-            && !self.monopoly_paths.contains(&(key, resource))
-        {
-            self.monopoly_paths.push((key, resource));
+    fn insert(&mut self, key: ThreatKey, origin: Option<ProgressOrigin>, probability: f32) {
+        let probability = probability.clamp(0.0, 1.0);
+        if probability <= f32::EPSILON {
+            return;
+        }
+        Self::insert_max(&mut self.keys, key, probability);
+        match origin {
+            Some(ProgressOrigin::Monopoly(resource)) => {
+                Self::insert_max(&mut self.monopoly_paths, (key, resource), probability);
+            }
+            _ => Self::insert_max(&mut self.non_monopoly_paths, key, probability),
+        }
+    }
+
+    fn insert_max<K: Eq + std::hash::Hash + Copy>(
+        values: &mut HashMap<K, f32>,
+        key: K,
+        probability: f32,
+    ) {
+        values
+            .entry(key)
+            .and_modify(|existing| *existing = (*existing).max(probability))
+            .or_insert(probability);
+    }
+
+    fn merge_max(&mut self, other: &Self) {
+        for (&key, &probability) in &other.keys {
+            Self::insert_max(&mut self.keys, key, probability);
+        }
+        for (&key, &probability) in &other.non_monopoly_paths {
+            Self::insert_max(&mut self.non_monopoly_paths, key, probability);
+        }
+        for (&key, &probability) in &other.monopoly_paths {
+            Self::insert_max(&mut self.monopoly_paths, key, probability);
+        }
+    }
+
+    fn add_weighted(&mut self, other: &Self, weight: f32) {
+        if weight <= f32::EPSILON {
+            return;
+        }
+        for (&key, &probability) in &other.keys {
+            let entry = self.keys.entry(key).or_default();
+            *entry = (*entry + probability * weight).clamp(0.0, 1.0);
+        }
+        for (&key, &probability) in &other.non_monopoly_paths {
+            let entry = self.non_monopoly_paths.entry(key).or_default();
+            *entry = (*entry + probability * weight).clamp(0.0, 1.0);
+        }
+        for (&key, &probability) in &other.monopoly_paths {
+            let entry = self.monopoly_paths.entry(key).or_default();
+            *entry = (*entry + probability * weight).clamp(0.0, 1.0);
         }
     }
 }
@@ -217,10 +264,11 @@ fn record_threats(
     protected: u8,
     attacker: u8,
     origin: Option<ProgressOrigin>,
+    probability: f32,
     result: &mut TacticalThreats,
 ) {
     if next.winner() == Some(attacker) {
-        result.insert(ThreatKey::ImmediateWin, origin);
+        result.insert(ThreatKey::ImmediateWin, origin, probability);
     }
     let attacker_gained_award = (baseline.longest_road_holder != Some(attacker)
         && next.longest_road_holder == Some(attacker))
@@ -231,18 +279,18 @@ fn record_threats(
         || (baseline.largest_army_holder == Some(protected)
             && next.largest_army_holder != Some(protected));
     if attacker_gained_award || protected_lost_award {
-        result.insert(ThreatKey::AwardSwing, origin);
+        result.insert(ThreatKey::AwardSwing, origin, probability);
     }
     match action {
         Action::BuildSettlement { vertex } => {
             if contested_settlement(baseline, *vertex, protected, attacker) {
-                result.insert(ThreatKey::ContestedSettlement(*vertex), origin);
+                result.insert(ThreatKey::ContestedSettlement(*vertex), origin, probability);
             } else {
-                result.insert(ThreatKey::SettlementBuild(*vertex), origin);
+                result.insert(ThreatKey::SettlementBuild(*vertex), origin, probability);
             }
         }
         Action::BuildCity { vertex } => {
-            result.insert(ThreatKey::CityBuild(*vertex), origin);
+            result.insert(ThreatKey::CityBuild(*vertex), origin, probability);
         }
         _ => {}
     }
@@ -254,6 +302,74 @@ fn reachable_tactical_threats(
     protected: u8,
     attacker: u8,
 ) -> TacticalThreats {
+    fn chance_tail(
+        state: &GameState,
+        public_baseline: &GameState,
+        protected: u8,
+        attacker: u8,
+        depth: u8,
+        origin: Option<ProgressOrigin>,
+        seen: &mut HashSet<(u64, u8, Option<ProgressOrigin>)>,
+    ) -> TacticalThreats {
+        let actions = state.legal_actions();
+        let total_weight = actions
+            .iter()
+            .map(|action| state.chance_weight(action) as u32)
+            .sum::<u32>();
+        if total_weight == 0 {
+            return TacticalThreats::default();
+        }
+
+        let mut threats = TacticalThreats::default();
+        for action in actions {
+            let weight = state.chance_weight(&action) as u32;
+            if weight == 0 {
+                continue;
+            }
+            let mut next = state.clone();
+            if next.apply(&action).is_err() {
+                continue;
+            }
+            let mut branch = TacticalThreats::default();
+            record_threats(
+                public_baseline,
+                &next,
+                &action,
+                protected,
+                attacker,
+                origin,
+                1.0,
+                &mut branch,
+            );
+            if !next.is_terminal() {
+                let continuation = match next.phase {
+                    Phase::Main => visit(
+                        &next,
+                        public_baseline,
+                        protected,
+                        attacker,
+                        depth,
+                        origin,
+                        seen,
+                    ),
+                    Phase::DevelopmentChance | Phase::ResolveSteal { .. } => chance_tail(
+                        &next,
+                        public_baseline,
+                        protected,
+                        attacker,
+                        depth,
+                        origin,
+                        seen,
+                    ),
+                    _ => TacticalThreats::default(),
+                };
+                branch.merge_max(&continuation);
+            }
+            threats.add_weighted(&branch, weight as f32 / total_weight as f32);
+        }
+        threats
+    }
+
     fn visit(
         state: &GameState,
         public_baseline: &GameState,
@@ -261,16 +377,20 @@ fn reachable_tactical_threats(
         attacker: u8,
         depth: u8,
         origin: Option<ProgressOrigin>,
-        threats: &mut TacticalThreats,
         seen: &mut HashSet<(u64, u8, Option<ProgressOrigin>)>,
-    ) {
+    ) -> TacticalThreats {
         if depth >= TACTICAL_ACTION_DEPTH
             || state.phase != Phase::Main
             || state.current_player != attacker
-            || !seen.insert((state.state_hash(), depth, origin))
         {
-            return;
+            return TacticalThreats::default();
         }
+        let seen_key = (state.state_hash(), depth, origin);
+        if !seen.insert(seen_key) {
+            return TacticalThreats::default();
+        }
+
+        let mut threats = TacticalThreats::default();
         for action in state.legal_actions() {
             let action_origin = progress_origin(&action);
             if !is_build(&action) && action_origin.is_none() {
@@ -281,6 +401,7 @@ fn reachable_tactical_threats(
                 continue;
             }
             let path_origin = origin.or(action_origin);
+            let mut branch = TacticalThreats::default();
             record_threats(
                 public_baseline,
                 &next,
@@ -288,24 +409,39 @@ fn reachable_tactical_threats(
                 protected,
                 attacker,
                 path_origin,
-                threats,
+                1.0,
+                &mut branch,
             );
             if !next.is_terminal() {
-                visit(
-                    &next,
-                    public_baseline,
-                    protected,
-                    attacker,
-                    depth + 1,
-                    path_origin,
-                    threats,
-                    seen,
-                );
+                let continuation = match next.phase {
+                    Phase::Main => visit(
+                        &next,
+                        public_baseline,
+                        protected,
+                        attacker,
+                        depth + 1,
+                        path_origin,
+                        seen,
+                    ),
+                    Phase::DevelopmentChance | Phase::ResolveSteal { .. } => chance_tail(
+                        &next,
+                        public_baseline,
+                        protected,
+                        attacker,
+                        depth + 1,
+                        path_origin,
+                        seen,
+                    ),
+                    _ => TacticalThreats::default(),
+                };
+                branch.merge_max(&continuation);
             }
+            threats.merge_max(&branch);
         }
+        seen.remove(&seen_key);
+        threats
     }
 
-    let mut threats = TacticalThreats::default();
     visit(
         root,
         public_baseline,
@@ -313,10 +449,8 @@ fn reachable_tactical_threats(
         attacker,
         0,
         None,
-        &mut threats,
         &mut HashSet::new(),
-    );
-    threats
+    )
 }
 
 fn reclaimable_resource(state: &GameState, attacker: u8, resource: Resource) -> u16 {
@@ -329,23 +463,46 @@ fn reclaimable_resource(state: &GameState, attacker: u8, resource: Resource) -> 
         .sum()
 }
 
-fn strongest(threats: &HashSet<ThreatKey>, dirty_monopoly: bool) -> Option<DomesticTradeThreat> {
-    if dirty_monopoly {
+fn probability_delta<K: Eq + std::hash::Hash>(
+    after: &HashMap<K, f32>,
+    before: &HashMap<K, f32>,
+    key: &K,
+) -> f32 {
+    (after.get(key).copied().unwrap_or(0.0) - before.get(key).copied().unwrap_or(0.0)).max(0.0)
+}
+
+fn hard_threat_key(key: ThreatKey) -> bool {
+    matches!(
+        key,
+        ThreatKey::ImmediateWin | ThreatKey::AwardSwing | ThreatKey::ContestedSettlement(_)
+    )
+}
+
+fn strongest(
+    threats: &HashMap<ThreatKey, f32>,
+    dirty_monopoly_probability: f32,
+) -> Option<DomesticTradeThreat> {
+    if dirty_monopoly_probability > f32::EPSILON {
         Some(DomesticTradeThreat::DirtyMonopoly)
-    } else if threats.contains(&ThreatKey::ImmediateWin) {
-        Some(DomesticTradeThreat::ImmediateWin)
-    } else if threats.contains(&ThreatKey::AwardSwing) {
-        Some(DomesticTradeThreat::AwardSwing)
     } else if threats
-        .iter()
-        .any(|threat| matches!(threat, ThreatKey::ContestedSettlement(_)))
+        .get(&ThreatKey::ImmediateWin)
+        .copied()
+        .unwrap_or(0.0)
+        > f32::EPSILON
     {
+        Some(DomesticTradeThreat::ImmediateWin)
+    } else if threats.get(&ThreatKey::AwardSwing).copied().unwrap_or(0.0) > f32::EPSILON {
+        Some(DomesticTradeThreat::AwardSwing)
+    } else if threats.iter().any(|(threat, probability)| {
+        *probability > f32::EPSILON && matches!(threat, ThreatKey::ContestedSettlement(_))
+    }) {
         Some(DomesticTradeThreat::ContestedSettlement)
-    } else if threats.iter().any(|threat| {
-        matches!(
-            threat,
-            ThreatKey::SettlementBuild(_) | ThreatKey::CityBuild(_)
-        )
+    } else if threats.iter().any(|(threat, probability)| {
+        *probability > f32::EPSILON
+            && matches!(
+                threat,
+                ThreatKey::SettlementBuild(_) | ThreatKey::CityBuild(_)
+            )
     }) {
         Some(DomesticTradeThreat::MaterialBuild)
     } else {
@@ -353,17 +510,64 @@ fn strongest(threats: &HashSet<ThreatKey>, dirty_monopoly: bool) -> Option<Domes
     }
 }
 
-/// Assess one fully specified hidden world. The candidate is advanced through
-/// the real response/confirmation protocol with `GameState::apply()`. Only the
-/// actual post-resolution `current_player` receives a same-turn tactical probe.
-pub fn domestic_trade_threat(state: &GameState, action: &Action) -> Option<DomesticTradeThreat> {
+fn threat_probability(
+    threats: &HashMap<ThreatKey, f32>,
+    threat: DomesticTradeThreat,
+    dirty_monopoly_probability: f32,
+) -> f32 {
+    match threat {
+        DomesticTradeThreat::DirtyMonopoly => dirty_monopoly_probability,
+        DomesticTradeThreat::ImmediateWin => threats
+            .get(&ThreatKey::ImmediateWin)
+            .copied()
+            .unwrap_or(0.0),
+        DomesticTradeThreat::AwardSwing => {
+            threats.get(&ThreatKey::AwardSwing).copied().unwrap_or(0.0)
+        }
+        DomesticTradeThreat::ContestedSettlement => threats
+            .iter()
+            .filter_map(|(key, probability)| {
+                matches!(key, ThreatKey::ContestedSettlement(_)).then_some(*probability)
+            })
+            .fold(0.0_f32, f32::max),
+        DomesticTradeThreat::MaterialBuild => threats
+            .iter()
+            .filter_map(|(key, probability)| {
+                matches!(key, ThreatKey::SettlementBuild(_) | ThreatKey::CityBuild(_))
+                    .then_some(*probability)
+            })
+            .fold(0.0_f32, f32::max),
+    }
+}
+
+#[derive(Clone)]
+struct MonopolyChoiceEvidence {
+    attacker: u8,
+    observation: u64,
+    hard_probabilities: [f32; 5],
+}
+
+#[derive(Default)]
+struct WorldTradeEvidence {
+    threat: Option<DomesticTradeThreat>,
+    threat_probability: f32,
+    dirty_monopoly_probability: f32,
+    non_monopoly_hard_probability: f32,
+    monopoly_choice: Option<MonopolyChoiceEvidence>,
+}
+
+fn domestic_trade_evidence(state: &GameState, action: &Action) -> WorldTradeEvidence {
     if !is_trade_candidate(action) {
-        return None;
+        return WorldTradeEvidence::default();
     }
     let protected = state.actor();
-    let before = resolve_without_exchange(state)?;
-    let mut newly_enabled = HashSet::new();
-    let mut dirty_monopoly = false;
+    let Some(before) = resolve_without_exchange(state) else {
+        return WorldTradeEvidence::default();
+    };
+    let mut newly_enabled = HashMap::<ThreatKey, f32>::new();
+    let mut newly_enabled_non_monopoly = HashMap::<ThreatKey, f32>::new();
+    let mut dirty_monopoly_probability = 0.0_f32;
+    let mut monopoly_contexts = Vec::<MonopolyChoiceEvidence>::new();
 
     for after in resolved_exchange_states(state, action, protected) {
         if after.phase != Phase::Main
@@ -375,29 +579,117 @@ pub fn domestic_trade_threat(state: &GameState, action: &Action) -> Option<Domes
         let attacker = after.current_player;
         let before_threats = reachable_tactical_threats(&before, &before, protected, attacker);
         let after_threats = reachable_tactical_threats(&after, &before, protected, attacker);
-        let new_keys = after_threats
-            .keys
-            .difference(&before_threats.keys)
-            .copied()
-            .collect::<Vec<_>>();
-        for key in &new_keys {
-            newly_enabled.insert(*key);
-            for (monopoly_key, resource) in &after_threats.monopoly_paths {
-                if monopoly_key == key
-                    && reclaimable_resource(&after, attacker, *resource)
-                        > reclaimable_resource(&before, attacker, *resource)
+
+        for (&key, &probability) in &after_threats.keys {
+            let delta = probability_delta(&after_threats.keys, &before_threats.keys, &key);
+            if delta > f32::EPSILON {
+                TacticalThreats::insert_max(&mut newly_enabled, key, delta);
+            }
+            debug_assert!(probability >= delta);
+        }
+        for &key in after_threats.non_monopoly_paths.keys() {
+            let delta = probability_delta(
+                &after_threats.non_monopoly_paths,
+                &before_threats.non_monopoly_paths,
+                &key,
+            );
+            if delta > f32::EPSILON {
+                TacticalThreats::insert_max(&mut newly_enabled_non_monopoly, key, delta);
+            }
+        }
+
+        let mut hard_probabilities = [0.0_f32; 5];
+        for (&(key, resource), _) in &after_threats.monopoly_paths {
+            let delta = probability_delta(
+                &after_threats.monopoly_paths,
+                &before_threats.monopoly_paths,
+                &(key, resource),
+            );
+            if delta <= f32::EPSILON {
+                continue;
+            }
+            let dirty = reclaimable_resource(&after, attacker, resource)
+                > reclaimable_resource(&before, attacker, resource);
+            if dirty {
+                dirty_monopoly_probability = dirty_monopoly_probability.max(delta);
+            }
+            if dirty || hard_threat_key(key) {
+                hard_probabilities[resource.index()] =
+                    hard_probabilities[resource.index()].max(delta);
+            }
+        }
+        if hard_probabilities
+            .iter()
+            .any(|probability| *probability > f32::EPSILON)
+        {
+            let observation = after.observation_hash(attacker);
+            if let Some(existing) = monopoly_contexts
+                .iter_mut()
+                .find(|context| context.attacker == attacker && context.observation == observation)
+            {
+                for (existing, probability) in existing
+                    .hard_probabilities
+                    .iter_mut()
+                    .zip(hard_probabilities)
                 {
-                    dirty_monopoly = true;
+                    *existing = (*existing).max(probability);
                 }
+            } else {
+                monopoly_contexts.push(MonopolyChoiceEvidence {
+                    attacker,
+                    observation,
+                    hard_probabilities,
+                });
             }
         }
     }
 
-    strongest(&newly_enabled, dirty_monopoly)
+    let threat = strongest(&newly_enabled, dirty_monopoly_probability);
+    let threat_probability = threat.map_or(0.0, |threat| {
+        threat_probability(&newly_enabled, threat, dirty_monopoly_probability)
+    });
+    let non_monopoly_hard_probability = newly_enabled_non_monopoly
+        .iter()
+        .filter_map(|(key, probability)| hard_threat_key(*key).then_some(*probability))
+        .fold(0.0_f32, f32::max);
+    let monopoly_choice = monopoly_contexts.into_iter().max_by(|left, right| {
+        let left_probability = left
+            .hard_probabilities
+            .iter()
+            .copied()
+            .fold(0.0_f32, f32::max);
+        let right_probability = right
+            .hard_probabilities
+            .iter()
+            .copied()
+            .fold(0.0_f32, f32::max);
+        left_probability
+            .total_cmp(&right_probability)
+            .then_with(|| left.attacker.cmp(&right.attacker))
+            .then_with(|| left.observation.cmp(&right.observation))
+    });
+
+    WorldTradeEvidence {
+        threat,
+        threat_probability,
+        dirty_monopoly_probability,
+        non_monopoly_hard_probability,
+        monopoly_choice,
+    }
+}
+
+/// Assess one fully specified hidden world. The candidate is advanced through
+/// the real response/confirmation protocol with `GameState::apply()`. Only the
+/// actual post-resolution `current_player` receives a same-turn tactical probe.
+pub fn domestic_trade_threat(state: &GameState, action: &Action) -> Option<DomesticTradeThreat> {
+    domestic_trade_evidence(state, action).threat
 }
 
 /// Aggregate the safety evidence over a weighted hidden-state belief without
 /// collapsing sub-threshold malicious-trade risk into a categorical veto.
+/// Monopoly-dependent hard evidence is aggregated by the acting opponent's
+/// observation and resource choice, so indistinguishable worlds cannot choose
+/// a different Monopoly resource merely because their hidden state differs.
 pub fn belief_domestic_trade_assessment<'a>(
     worlds: impl IntoIterator<Item = (&'a GameState, f32)>,
     action: &Action,
@@ -413,16 +705,58 @@ pub fn belief_domestic_trade_assessment<'a>(
     if total <= f32::EPSILON {
         return DomesticTradeAssessment::default();
     }
+
+    struct ObservationHardMass {
+        attacker: u8,
+        observation: u64,
+        choice_mass: [f32; 5],
+    }
+
     let mut mass = [0.0_f32; 5];
+    let mut dirty_monopoly_posterior = 0.0_f32;
+    let mut non_monopoly_only_hard_mass = 0.0_f32;
+    let mut observation_hard_mass = Vec::<ObservationHardMass>::new();
     for (state, weight) in worlds {
         let weight = weight.max(0.0) / total;
-        match domestic_trade_threat(state, action) {
-            Some(DomesticTradeThreat::DirtyMonopoly) => mass[0] += weight,
-            Some(DomesticTradeThreat::ImmediateWin) => mass[1] += weight,
-            Some(DomesticTradeThreat::AwardSwing) => mass[2] += weight,
-            Some(DomesticTradeThreat::ContestedSettlement) => mass[3] += weight,
-            Some(DomesticTradeThreat::MaterialBuild) => mass[4] += weight,
-            None => {}
+        if weight <= f32::EPSILON {
+            continue;
+        }
+        let evidence = domestic_trade_evidence(state, action);
+        if let Some(threat) = evidence.threat {
+            let index = match threat {
+                DomesticTradeThreat::DirtyMonopoly => 0,
+                DomesticTradeThreat::ImmediateWin => 1,
+                DomesticTradeThreat::AwardSwing => 2,
+                DomesticTradeThreat::ContestedSettlement => 3,
+                DomesticTradeThreat::MaterialBuild => 4,
+            };
+            mass[index] += weight * evidence.threat_probability;
+        }
+        dirty_monopoly_posterior += weight * evidence.dirty_monopoly_probability;
+
+        if let Some(choice) = evidence.monopoly_choice {
+            let group = if let Some(group) = observation_hard_mass.iter_mut().find(|group| {
+                group.attacker == choice.attacker && group.observation == choice.observation
+            }) {
+                group
+            } else {
+                observation_hard_mass.push(ObservationHardMass {
+                    attacker: choice.attacker,
+                    observation: choice.observation,
+                    choice_mass: [0.0; 5],
+                });
+                observation_hard_mass.last_mut().unwrap()
+            };
+            for (resource_mass, monopoly_probability) in
+                group.choice_mass.iter_mut().zip(choice.hard_probabilities)
+            {
+                *resource_mass += weight
+                    * evidence
+                        .non_monopoly_hard_probability
+                        .max(monopoly_probability);
+            }
+        } else {
+            non_monopoly_only_hard_mass += weight * evidence.non_monopoly_hard_probability;
         }
     }
     let posterior = mass.iter().sum::<f32>().clamp(0.0, 1.0);
@@ -438,11 +772,16 @@ pub fn belief_domestic_trade_assessment<'a>(
             3 => DomesticTradeThreat::ContestedSettlement,
             _ => DomesticTradeThreat::MaterialBuild,
         });
-    let hard_veto_posterior = mass[..4].iter().sum::<f32>().clamp(0.0, 1.0);
+    let hard_veto_posterior = (non_monopoly_only_hard_mass
+        + observation_hard_mass
+            .iter()
+            .map(|group| group.choice_mass.iter().copied().fold(0.0_f32, f32::max))
+            .sum::<f32>())
+    .clamp(0.0, 1.0);
     DomesticTradeAssessment {
         threat,
         posterior,
-        dirty_monopoly_posterior: mass[0].clamp(0.0, 1.0),
+        dirty_monopoly_posterior: dirty_monopoly_posterior.clamp(0.0, 1.0),
         hard_veto_posterior,
         hard_veto: hard_veto_posterior + 1e-6 >= HARD_VETO_POSTERIOR,
     }

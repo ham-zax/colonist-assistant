@@ -485,6 +485,35 @@ fn normalize_belief_root_priors_with_diagnostics(
         .collect()
 }
 
+fn closeout_plans_from_ranked_diagnostics(
+    ranked_diagnostics: &[RankedRootDiagnostic],
+) -> Vec<TurnPlan> {
+    ranked_diagnostics
+        .iter()
+        .filter_map(|candidate| {
+            Some(TurnPlan {
+                first_action: candidate.action.clone(),
+                actions: Vec::new(),
+                value: candidate.planner_value?,
+                nodes: 0,
+                completion_mass: candidate.planner_completion_mass?,
+                decisive_completion_mass: candidate.planner_decisive_completion_mass.unwrap_or(0.0),
+                response_windows: candidate.planner_response_windows,
+            })
+        })
+        .collect()
+}
+
+pub fn belief_root_closeout_plans(
+    particles: &[BeliefParticle],
+    actor: u8,
+    planner_nodes: u32,
+) -> Vec<TurnPlan> {
+    let ranked_diagnostics =
+        normalize_belief_root_priors_with_diagnostics(particles, actor, planner_nodes);
+    closeout_plans_from_ranked_diagnostics(&ranked_diagnostics)
+}
+
 #[cfg(test)]
 fn normalize_belief_root_priors(
     particles: &[BeliefParticle],
@@ -1296,20 +1325,7 @@ fn belief_search(
         Vec::new()
     };
     let root_actions_list: Vec<Action> = root_scored.iter().map(|(a, _)| a.clone()).collect();
-    let closeout_plans = ranked_diagnostics
-        .iter()
-        .filter_map(|candidate| {
-            Some(TurnPlan {
-                first_action: candidate.action.clone(),
-                actions: Vec::new(),
-                value: candidate.planner_value?,
-                nodes: 0,
-                completion_mass: candidate.planner_completion_mass?,
-                decisive_completion_mass: candidate.planner_decisive_completion_mass.unwrap_or(0.0),
-                response_windows: candidate.planner_response_windows,
-            })
-        })
-        .collect::<Vec<_>>();
+    let closeout_plans = closeout_plans_from_ranked_diagnostics(&ranked_diagnostics);
     let spatial_impact_report = particles.first().map(|first| {
         let mut report = compute_spatial_root_impacts(&first.state, observer, &root_actions_list);
         apply_closeout_root_impacts(&mut report, &closeout_plans);
@@ -1343,12 +1359,19 @@ fn belief_search(
                     .iter()
                     .find(|impact| impact.action == candidate.action)
             });
-            let trade = belief_domestic_trade_assessment(
-                particles
-                    .iter()
-                    .map(|particle| (&particle.state, particle.weight)),
-                &candidate.action,
-            );
+            let trade = if retained
+                .iter()
+                .any(|(action, _)| action == &candidate.action)
+            {
+                belief_domestic_trade_assessment(
+                    particles
+                        .iter()
+                        .map(|particle| (&particle.state, particle.weight)),
+                    &candidate.action,
+                )
+            } else {
+                Default::default()
+            };
             RootCausalEvidence {
                 action: candidate.action.clone(),
                 promotion_reason: impact.and_then(|impact| impact.promotion),
@@ -1417,13 +1440,10 @@ fn belief_search(
     let safe_root_actions = root_actions
         .iter()
         .filter(|(action, _)| {
-            belief_domestic_trade_threat(
-                particles
-                    .iter()
-                    .map(|particle| (&particle.state, particle.weight)),
-                action,
-            )
-            .is_none()
+            root_evidence
+                .iter()
+                .find(|evidence| evidence.action == *action)
+                .is_none_or(|evidence| !evidence.trade_hard_veto)
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -2920,20 +2940,7 @@ fn cuda_belief_search_with_batch(
         Vec::new()
     };
     let root_actions_list: Vec<Action> = root_scored.iter().map(|(a, _)| a.clone()).collect();
-    let closeout_plans = ranked_diagnostics
-        .iter()
-        .filter_map(|candidate| {
-            Some(TurnPlan {
-                first_action: candidate.action.clone(),
-                actions: Vec::new(),
-                value: candidate.planner_value?,
-                nodes: 0,
-                completion_mass: candidate.planner_completion_mass?,
-                decisive_completion_mass: candidate.planner_decisive_completion_mass.unwrap_or(0.0),
-                response_windows: candidate.planner_response_windows,
-            })
-        })
-        .collect::<Vec<_>>();
+    let closeout_plans = closeout_plans_from_ranked_diagnostics(&ranked_diagnostics);
     let spatial_impact_report = particles.first().map(|first| {
         let mut report = compute_spatial_root_impacts(&first.state, observer, &root_actions_list);
         apply_closeout_root_impacts(&mut report, &closeout_plans);
@@ -2967,12 +2974,19 @@ fn cuda_belief_search_with_batch(
                     .iter()
                     .find(|impact| impact.action == candidate.action)
             });
-            let trade = belief_domestic_trade_assessment(
-                particles
-                    .iter()
-                    .map(|particle| (&particle.state, particle.weight)),
-                &candidate.action,
-            );
+            let trade = if retained
+                .iter()
+                .any(|(action, _)| action == &candidate.action)
+            {
+                belief_domestic_trade_assessment(
+                    particles
+                        .iter()
+                        .map(|particle| (&particle.state, particle.weight)),
+                    &candidate.action,
+                )
+            } else {
+                Default::default()
+            };
             RootCausalEvidence {
                 action: candidate.action.clone(),
                 promotion_reason: impact.and_then(|impact| impact.promotion),
@@ -3063,13 +3077,10 @@ fn cuda_belief_search_with_batch(
     let safe_root_actions = root_actions
         .iter()
         .filter(|(action, _)| {
-            belief_domestic_trade_threat(
-                particles
-                    .iter()
-                    .map(|particle| (&particle.state, particle.weight)),
-                action,
-            )
-            .is_none()
+            root_evidence
+                .iter()
+                .find(|evidence| evidence.action == *action)
+                .is_none_or(|evidence| !evidence.trade_hard_veto)
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -3228,8 +3239,8 @@ fn cuda_belief_search_with_batch(
                 let root_apply = next.clone_from_and_apply(&particle.state, action);
                 apply_nanos =
                     apply_nanos.saturating_add(
-                    apply_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-                );
+                        apply_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                    );
                 if root_apply.is_err() {
                     cuda_release_state(states, next);
                     batch.emit(&particle.state, lane_id, 1.0)?;

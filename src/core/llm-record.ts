@@ -1788,9 +1788,51 @@ export class CompactGameBuilder {
           null,
         ]);
       });
-    provenance?.rootEvidence
-      ?.slice(0, MAX_ROOTS_PER_BUCKET)
-      .forEach((evidence) => {
+    const exactReplacementForEvidence =
+      trace.authorityTrace?.exactFamilyReplacement ??
+      provenance?.exactFamilyReplacement;
+    const safetyReplacementForEvidence =
+      trace.authorityTrace?.safetyReplacement ?? provenance?.safetyReplacement;
+    const decisiveEvidenceActions = new Set(
+      [
+        trace.finalAction,
+        trace.deepChosenAction,
+        provenance?.searchWinner,
+        exactReplacementForEvidence?.from,
+        exactReplacementForEvidence?.to,
+        safetyReplacementForEvidence?.from,
+        safetyReplacementForEvidence?.to,
+      ]
+        .filter((action): action is NonNullable<typeof action> => action != null)
+        .map((action) => actionLabel(action, alias)),
+    );
+    const retainedEvidenceActions = new Set(
+      (provenance?.retainedRoots ?? []).map((root) =>
+        actionLabel(root.action, alias),
+      ),
+    );
+    (provenance?.rootEvidence ?? [])
+      .map((evidence, index) => {
+        const evidenceAction = actionLabel(evidence.action, alias);
+        const priority = decisiveEvidenceActions.has(evidenceAction)
+          ? 0
+          : evidence.admittedByPromotion ||
+              evidence.promotionReason != null ||
+              evidence.tradeHardVeto ||
+              (evidence.closeoutGain ?? 0) > 0
+            ? 1
+            : retainedEvidenceActions.has(evidenceAction)
+              ? 2
+              : 3;
+        return { evidence, index, priority };
+      })
+      .sort((left, right) =>
+        left.priority === right.priority
+          ? left.index - right.index
+          : left.priority - right.priority,
+      )
+      .slice(0, MAX_ROOTS_PER_BUCKET)
+      .forEach(({ evidence }) => {
         record.roots.push([
           id,
           "evidence",
@@ -1819,7 +1861,7 @@ export class CompactGameBuilder {
           compactNumber(evidence.dirtyMonopolyPosterior),
           compactNumber(evidence.tradeHardVetoPosterior),
           evidence.tradeHardVeto,
-          compactNumber(provenance.tradeHardVetoThreshold),
+          compactNumber(provenance?.tradeHardVetoThreshold),
         ]);
       });
     if (provenance?.searchWinner) {
