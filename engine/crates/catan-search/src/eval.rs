@@ -2,7 +2,8 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 use colonist_catan_core::{
-    Building, CITY_COST, DEVELOPMENT_COST, GameState, ROAD_COST, ResourceHand, SETTLEMENT_COST,
+    Building, CITY_COST, DEVELOPMENT_COST, GameState, Port, ROAD_COST, ResourceHand,
+    SETTLEMENT_COST,
 };
 
 const PIPS: [f32; 13] = [
@@ -12,6 +13,9 @@ const PIPS: [f32; 13] = [
 /// build race, production, and ports below.
 const BASE_RESOURCE_WEIGHTS: [f32; 5] = [0.98, 0.98, 0.73, 1.22, 1.10];
 const BUILD_COSTS: [ResourceHand; 4] = [ROAD_COST, SETTLEMENT_COST, CITY_COST, DEVELOPMENT_COST];
+// Preserve the former 0.7 ceiling for a fully utilized new 2:1 port while
+// pricing only the production that can actually use an improved trade ratio.
+const PORT_VALUE_PER_RATIO_STEP: f32 = 0.35;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ExpansionOption {
@@ -629,6 +633,7 @@ fn expansion_option_value_with_routes_and_weights(
         owned_arrivals = expansion_arrival_scores(state, observer, exact_rival_hands);
         &owned_arrivals
     };
+    let production = production_pips(state, player);
     let mut best = ExpansionOption::default();
     let mut top = [0.0_f32; 3];
     let mut option_count = 0u8;
@@ -644,7 +649,8 @@ fn expansion_option_value_with_routes_and_weights(
             continue;
         }
         let survival = expansion_site_survival(state, player, vertex, route_maps, arrival_scores);
-        let site = vertex_value_with_weights(state, vertex as u8, resource_weights, player);
+        let site =
+            vertex_value_with_weights(state, vertex as u8, resource_weights, player, &production);
         let road_cost = distance as f32 * 1.45;
         let value = survival * (site + 5.4) / (1.0 + road_cost * 0.34);
         option_count = option_count.saturating_add(1);
@@ -1170,28 +1176,77 @@ pub fn evaluate_profiled(state: &GameState) -> ([f32; 4], EvaluateProfile) {
 
 pub(crate) fn vertex_value(state: &GameState, vertex: u8, player: u8) -> f32 {
     let weights = dynamic_resource_weights(state, player);
-    vertex_value_with_weights(state, vertex, &weights, player)
+    let production = production_pips(state, player);
+    vertex_value_with_weights(state, vertex, &weights, player, &production)
 }
 
-fn vertex_value_with_weights(state: &GameState, vertex: u8, weights: &[f32; 5], player: u8) -> f32 {
+fn prospective_port_option_value(
+    state: &GameState,
+    vertex: u8,
+    player: u8,
+    current_production: &[f32; 5],
+    site_production: &[f32; 5],
+) -> f32 {
+    let Some(port) = state.board.vertices[vertex as usize].port else {
+        return 0.0;
+    };
+    let before = state.trade_ratios(player);
+    let mut after = before;
+    match port {
+        Port::Generic => {
+            for ratio in &mut after {
+                *ratio = (*ratio).min(3);
+            }
+        }
+        Port::Resource(resource) => {
+            after[resource.index()] = after[resource.index()].min(2);
+        }
+    }
+    let prospective_production: [f32; 5] =
+        std::array::from_fn(|resource| current_production[resource] + site_production[resource]);
+    let total_production = prospective_production.iter().sum::<f32>();
+    if total_production <= f32::EPSILON {
+        return 0.0;
+    }
+    before
+        .iter()
+        .zip(after)
+        .enumerate()
+        .map(|(resource, (before, after))| {
+            before.saturating_sub(after) as f32 * prospective_production[resource]
+                / total_production
+        })
+        .sum::<f32>()
+        * PORT_VALUE_PER_RATIO_STEP
+}
+
+fn vertex_value_with_weights(
+    state: &GameState,
+    vertex: u8,
+    weights: &[f32; 5],
+    player: u8,
+    current_production: &[f32; 5],
+) -> f32 {
     let mut value: f32 = 0.0;
     let mut numbers = 0u16;
     let mut resources = 0u8;
+    let mut site_production = [0.0_f32; 5];
     for hex in &state.board.vertices[vertex as usize].adjacent_hexes {
         let tile = &state.board.hexes[*hex as usize];
         let Some(resource) = tile.resource else {
             continue;
         };
         let robber_factor = if *hex == state.robber_hex { 0.30 } else { 1.0 };
-        value += PIPS[tile.number as usize] * weights[resource.index()] * robber_factor;
+        let pips = PIPS[tile.number as usize] * robber_factor;
+        value += pips * weights[resource.index()];
+        site_production[resource.index()] += pips;
         numbers |= 1 << tile.number;
         resources |= 1 << resource.index();
     }
     value += numbers.count_ones() as f32 * 0.16;
     value += resources.count_ones() as f32 * 0.22;
-    if state.board.vertices[vertex as usize].port.is_some() {
-        value += state.trade_ratios(player).iter().all(|ratio| *ratio == 4) as u8 as f32 * 0.7;
-    }
+    value +=
+        prospective_port_option_value(state, vertex, player, current_production, &site_production);
     value
 }
 
@@ -1373,12 +1428,14 @@ pub(crate) fn road_frontier_value(state: &GameState, edge: u8, actor: u8) -> f32
 
 #[cfg(test)]
 mod tests {
-    use colonist_catan_core::{GameState, Phase, Resource, SETTLEMENT_COST};
+    use std::sync::Arc;
+
+    use colonist_catan_core::{Building, GameState, Phase, Port, Resource, SETTLEMENT_COST};
 
     use super::{
         all_route_maps, expansion_arrival_scores, expansion_site_survival, expected_discard_loss,
         marginal_development_value, production_pips, public_strategic_utility, road_frontier_value,
-        robber_denial, rolls_before_next_spend,
+        robber_denial, rolls_before_next_spend, vertex_value,
     };
 
     fn after_setup(seed: u64, players: u8) -> GameState {
@@ -1462,6 +1519,71 @@ mod tests {
         let queued = marginal_development_value(&empty, 0);
 
         assert!(first > queued);
+    }
+
+    #[test]
+    fn future_port_value_requires_incremental_production_fit() {
+        let mut state = GameState::standard(61, 4);
+        state.buildings.fill(None);
+        state.roads.fill(None);
+        state.phase = Phase::Main;
+        state.current_player = 0;
+        let (anchor, candidate) = state
+            .board
+            .vertices
+            .iter()
+            .enumerate()
+            .find_map(|(anchor, start)| {
+                let anchor_productive = start
+                    .adjacent_hexes
+                    .iter()
+                    .any(|hex| state.board.hexes[*hex as usize].resource.is_some());
+                if !anchor_productive {
+                    return None;
+                }
+                state
+                    .board
+                    .vertices
+                    .iter()
+                    .enumerate()
+                    .find(|(candidate, target)| {
+                        *candidate != anchor
+                            && !start.adjacent_vertices.contains(&(*candidate as u8))
+                            && target
+                                .adjacent_hexes
+                                .iter()
+                                .any(|hex| state.board.hexes[*hex as usize].resource.is_some())
+                    })
+                    .map(|(candidate, _)| (anchor, candidate))
+            })
+            .expect("standard board has separated productive vertices");
+        let board = Arc::make_mut(&mut state.board);
+        for vertex in &mut board.vertices {
+            vertex.port = None;
+        }
+        for tile in &mut board.hexes {
+            if tile.resource.is_some() {
+                tile.resource = Some(Resource::Lumber);
+            }
+        }
+        state.buildings[anchor] = Some(Building::Settlement(0));
+
+        let plain = vertex_value(&state, candidate as u8, 0);
+        let mut mismatched = state.clone();
+        Arc::make_mut(&mut mismatched.board).vertices[candidate].port =
+            Some(Port::Resource(Resource::Ore));
+        let mismatched = vertex_value(&mismatched, candidate as u8, 0);
+        let mut generic = state.clone();
+        Arc::make_mut(&mut generic.board).vertices[candidate].port = Some(Port::Generic);
+        let generic = vertex_value(&generic, candidate as u8, 0);
+        let mut matched = state.clone();
+        Arc::make_mut(&mut matched.board).vertices[candidate].port =
+            Some(Port::Resource(Resource::Lumber));
+        let matched = vertex_value(&matched, candidate as u8, 0);
+
+        assert!((mismatched - plain).abs() < 1e-5);
+        assert!(generic > plain);
+        assert!(matched > generic);
     }
 
     #[test]
