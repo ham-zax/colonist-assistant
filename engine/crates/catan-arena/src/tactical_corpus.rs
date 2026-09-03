@@ -30,6 +30,16 @@ pub struct TacticalActionSpec {
     pub hex: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub victim: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ratio: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipients: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub give: Option<ResourceHand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receive: Option<ResourceHand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accept: Option<bool>,
 }
 
 fn resource(index: u8) -> Resource {
@@ -75,6 +85,22 @@ impl TacticalActionSpec {
                 hex: self.hex.expect("hex required for play-knight"),
                 victim: self.victim,
             },
+            "maritime-trade" => Action::MaritimeTrade {
+                give: resource(self.resource.expect("resource required for maritime-trade")),
+                receive: resource(
+                    self.second_resource
+                        .expect("secondResource required for maritime-trade"),
+                ),
+                ratio: self.ratio.expect("ratio required for maritime-trade"),
+            },
+            "offer-trade" => Action::OfferTrade {
+                recipients: self.recipients.expect("recipients required for offer-trade"),
+                give: self.give.expect("give required for offer-trade"),
+                receive: self.receive.expect("receive required for offer-trade"),
+            },
+            "respond-trade" => Action::RespondTrade {
+                accept: self.accept.expect("accept required for respond-trade"),
+            },
             "end-turn" => Action::EndTurn,
             "roll" => Action::Roll,
             other => panic!("unsupported tactical action spec kind: {other}"),
@@ -91,6 +117,11 @@ impl TacticalActionSpec {
             second_resource: None,
             hex: None,
             victim: None,
+            ratio: None,
+            recipients: None,
+            give: None,
+            receive: None,
+            accept: None,
         };
         match action {
             Action::BuildSettlement { vertex } => {
@@ -185,6 +216,8 @@ pub struct TacticalStateSpec {
     pub robber_hex: Option<u8>,
     #[serde(default)]
     pub largest_army_holder: Option<u8>,
+    #[serde(default)]
+    pub domestic_trade_disabled: u8,
 }
 
 const fn default_victory_target() -> u8 {
@@ -220,6 +253,33 @@ pub struct TacticalThreatProbe {
 pub struct TacticalObservationSafetyProbe {
     pub actor: u8,
     pub variant: TacticalHiddenVariant,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TacticalPosteriorSensitivityProbe {
+    pub actor: u8,
+    pub variant: TacticalHiddenVariant,
+    #[serde(default)]
+    pub setup_action: Option<TacticalActionSpec>,
+    pub candidate_roots: Vec<TacticalActionSpec>,
+    pub expected_zero_root: TacticalActionSpec,
+    pub expected_full_root: TacticalActionSpec,
+    #[serde(default)]
+    pub require_switch: bool,
+    #[serde(default = "default_true")]
+    pub require_five_percent_stable: bool,
+    #[serde(default)]
+    pub strict_safety_action: Option<TacticalActionSpec>,
+    #[serde(default)]
+    pub require_strict_safety_transition: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TacticalCloseoutProbe {
+    pub same_turn_root: TacticalActionSpec,
+    pub delayed_root: TacticalActionSpec,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -281,6 +341,10 @@ pub struct TacticalScenario {
     pub threat_probe: Option<TacticalThreatProbe>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observation_safety_probe: Option<TacticalObservationSafetyProbe>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub posterior_sensitivity_probe: Option<TacticalPosteriorSensitivityProbe>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closeout_probe: Option<TacticalCloseoutProbe>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mechanical: Option<TacticalMechanicalExpectations>,
     #[serde(default = "default_true")]
@@ -475,6 +539,7 @@ pub fn build_state(spec: &TacticalStateSpec) -> Result<GameState, String> {
     state.bank_is_public = spec.bank_is_public;
     state.domestic_trade_used = false;
     state.domestic_trade_count = 0;
+    state.domestic_trade_disabled = spec.domestic_trade_disabled;
     state.trade = None;
     state.last_rejected_trade = None;
     state.trade_negotiation_round = 0;
@@ -893,7 +958,7 @@ mod tests {
     fn test_checked_in_corpus_passes_mechanical_g0() {
         let path = default_corpus_path();
         let corpus = load_tactical_corpus(&path).expect("failed to load checked-in tactical corpus");
-        assert_eq!(corpus.scenarios.len(), 19);
+        assert_eq!(corpus.scenarios.len(), 25);
         for scenario in &corpus.scenarios {
             let res = verify_mechanical_consequence(scenario);
             assert!(res.is_ok(), "scenario {} failed G0: {:?}", scenario.id, res.err());

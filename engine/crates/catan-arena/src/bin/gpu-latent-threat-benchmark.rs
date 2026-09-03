@@ -6,7 +6,10 @@ use colonist_catan_arena::tactical_corpus::{
 };
 use colonist_catan_core::{Action, GameState, Phase, SETTLEMENT_COST};
 use colonist_catan_search::{
-    posterior_expected_tactical_threat_weight, posterior_immediate_threat_weight, CudaSimEngine,
+    CudaSimEngine, CudaSimRootActionStats, HARD_VETO_POSTERIOR,
+    TurnPlanConfig, apply_closeout_root_impacts, belief_domestic_trade_assessment,
+    compute_spatial_root_impacts, plan_current_turn, posterior_expected_tactical_threat_weight,
+    posterior_immediate_threat_weight,
 };
 use serde::Serialize;
 
@@ -77,6 +80,7 @@ struct ActionReport {
     net_terminal_outcome: f32,
     mean_victory_margin: f32,
     variance: f32,
+    mean_turn: f32,
 }
 
 #[derive(Debug, Serialize)]
@@ -113,6 +117,78 @@ struct ObservationSafetyReport {
     errors: usize,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PosteriorRootReport {
+    action: String,
+    net_terminal_outcome: f32,
+    mean_victory_margin: f32,
+    variance: f32,
+    mean_turn: f32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StrictSafetyReport {
+    action: String,
+    threat: Option<String>,
+    posterior: f32,
+    dirty_monopoly_posterior: f32,
+    hard_veto_posterior: f32,
+    hard_veto_threshold: f32,
+    hard_veto: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PosteriorGridPointReport {
+    posterior_mass: f32,
+    base_world_weight: f32,
+    variant_world_weight: f32,
+    immediate_threat_weight: f32,
+    expected_tactical_threat_weight: f32,
+    selected_root: String,
+    roots: Vec<PosteriorRootReport>,
+    strict_safety: Option<StrictSafetyReport>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PosteriorSensitivityReport {
+    actor: u8,
+    base_world: &'static str,
+    variant_id: String,
+    setup_action: Option<String>,
+    observation_hash: u64,
+    variant_observation_hash: u64,
+    observation_fixed: bool,
+    expected_zero_root: String,
+    expected_full_root: String,
+    contract_passed: bool,
+    errors: Vec<String>,
+    points: Vec<PosteriorGridPointReport>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloseoutRootReport {
+    action: String,
+    value: f32,
+    completion_mass: f32,
+    decisive_completion_mass: f32,
+    response_windows: Option<f32>,
+    closeout_gain: f32,
+    promotion: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloseoutProbeReport {
+    same_turn: Option<CloseoutRootReport>,
+    delayed: Option<CloseoutRootReport>,
+    contract_passed: bool,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ScenarioReport {
@@ -128,6 +204,8 @@ struct ScenarioReport {
     proposal_probe: Option<ProposalProbeReport>,
     threat_probe: Option<ThreatProbeReport>,
     observation_safety: Option<ObservationSafetyReport>,
+    posterior_sensitivity: Option<PosteriorSensitivityReport>,
+    closeout_probe: Option<CloseoutProbeReport>,
     actions: Vec<ActionReport>,
 }
 
@@ -135,6 +213,7 @@ struct ScenarioReport {
 #[serde(rename_all = "camelCase")]
 struct BenchmarkSummary {
     benchmark: &'static str,
+    corpus_schema_version: u32,
     device_name: String,
     rollouts_per_action: usize,
     rollout_steps: usize,
@@ -144,6 +223,8 @@ struct BenchmarkSummary {
     proposal_seed_xor: u64,
     proposal_probe_seed_xor: u64,
     observation_safety_seed_xor: u64,
+    posterior_seed_xor: u64,
+    posterior_grid: [f32; 9],
     comparison_ordering: &'static str,
     total_scenarios: usize,
     passed_scenarios: usize,
@@ -156,6 +237,9 @@ const SCENARIO_SEED_STRIDE: u64 = 1009;
 const PROPOSAL_SEED_XOR: u64 = 0xa5a5_5a5a;
 const PROPOSAL_PROBE_SEED_XOR: u64 = 0x5a5a_a5a5;
 const OBSERVATION_SAFETY_SEED_XOR: u64 = 0x3c3c_c3c3;
+const POSTERIOR_SEED_XOR: u64 = 0xc3c3_3c3c;
+const POSTERIOR_GRID: [f32; 9] = [0.0, 0.05, 0.15, 0.30, 0.50, 0.75, 0.95, 0.995, 1.0];
+const CLOSEOUT_PLANNER_NODES: u32 = 4_000;
 
 fn same_action_kind(left: &Action, right: &Action) -> bool {
     std::mem::discriminant(left) == std::mem::discriminant(right)
@@ -226,6 +310,282 @@ fn sample_proposals(
     engine
         .download_generated_actions()
         .map_err(|error| format!("proposal download failed: {error:?}"))
+}
+
+fn mixture_variance(
+    base_mean: f32,
+    base_variance: f32,
+    variant_mean: f32,
+    variant_variance: f32,
+    variant_weight: f32,
+) -> f32 {
+    let base_weight = 1.0 - variant_weight;
+    let mean = base_weight * base_mean + variant_weight * variant_mean;
+    (base_weight * (base_variance + base_mean.powi(2))
+        + variant_weight * (variant_variance + variant_mean.powi(2))
+        - mean.powi(2))
+    .max(0.0)
+}
+
+fn posterior_root_report(
+    base: &CudaSimRootActionStats,
+    variant: &CudaSimRootActionStats,
+    variant_weight: f32,
+) -> PosteriorRootReport {
+    let base_weight = 1.0 - variant_weight;
+    let base_margin = base.mean_victory_margin();
+    let variant_margin = variant.mean_victory_margin();
+    PosteriorRootReport {
+        action: format!("{:?}", base.action),
+        net_terminal_outcome: base_weight * base.net_terminal_outcome()
+            + variant_weight * variant.net_terminal_outcome(),
+        mean_victory_margin: base_weight * base_margin + variant_weight * variant_margin,
+        variance: mixture_variance(
+            base_margin,
+            base.victory_margin_variance(),
+            variant_margin,
+            variant.victory_margin_variance(),
+            variant_weight,
+        ),
+        mean_turn: base_weight * base.mean_turn + variant_weight * variant.mean_turn,
+    }
+}
+
+fn best_posterior_root(roots: &[PosteriorRootReport]) -> Option<&PosteriorRootReport> {
+    roots.iter().max_by(|left, right| {
+        left.net_terminal_outcome
+            .total_cmp(&right.net_terminal_outcome)
+            .then_with(|| left.mean_victory_margin.total_cmp(&right.mean_victory_margin))
+            .then_with(|| right.mean_turn.total_cmp(&left.mean_turn))
+    })
+}
+
+fn run_posterior_sensitivity_probe(
+    engine: &mut CudaSimEngine,
+    scenario: &TacticalScenario,
+    state: &GameState,
+    rollouts_per_action: usize,
+    rollout_steps: usize,
+    scenario_seed: u64,
+) -> Option<PosteriorSensitivityReport> {
+    let probe = scenario.posterior_sensitivity_probe.as_ref()?;
+    let mut errors = Vec::new();
+    let mut base_world = state.clone();
+    let mut variant_world = match apply_hidden_variant(state, &probe.variant) {
+        Ok(world) => world,
+        Err(error) => {
+            errors.push(error);
+            state.clone()
+        }
+    };
+
+    let setup_action = probe.setup_action.as_ref().map(|spec| spec.to_action());
+    if let Some(action) = &setup_action {
+        if !base_world.legal_actions().contains(action) {
+            errors.push(format!("base setup action is not legal: {action:?}"));
+        } else if let Err(error) = base_world.apply(action) {
+            errors.push(format!("base setup action {action:?} failed: {error:?}"));
+        }
+        if !variant_world.legal_actions().contains(action) {
+            errors.push(format!("variant setup action is not legal: {action:?}"));
+        } else if let Err(error) = variant_world.apply(action) {
+            errors.push(format!("variant setup action {action:?} failed: {error:?}"));
+        }
+    }
+
+    let observation_hash = base_world.observation_hash(probe.actor);
+    let variant_observation_hash = variant_world.observation_hash(probe.actor);
+    let observation_fixed = observation_hash == variant_observation_hash;
+    if !observation_fixed {
+        errors.push("posterior worlds do not share one public observation".into());
+    }
+
+    let candidate_roots = probe
+        .candidate_roots
+        .iter()
+        .map(|spec| spec.to_action())
+        .collect::<Vec<_>>();
+    if candidate_roots.is_empty() {
+        errors.push("posterior probe has no candidate roots".into());
+    }
+    for action in &candidate_roots {
+        if !base_world.legal_actions().contains(action) {
+            errors.push(format!("base posterior root is not legal: {action:?}"));
+        }
+        if !variant_world.legal_actions().contains(action) {
+            errors.push(format!("variant posterior root is not legal: {action:?}"));
+        }
+    }
+
+    let mut points = Vec::new();
+    if errors.is_empty() {
+        if let Err(error) = engine.upload_states(&[base_world.clone(), variant_world.clone()]) {
+            errors.push(format!("posterior world upload failed: {error:?}"));
+        } else {
+            let rows = vec![candidate_roots.clone(), candidate_roots.clone()];
+            match engine.search_root_actions(
+                &rows,
+                rollouts_per_action,
+                rollout_steps,
+                scenario_seed ^ POSTERIOR_SEED_XOR,
+            ) {
+                Ok(search) => {
+                    if search.rows.len() != 2
+                        || search.rows[0].len() != candidate_roots.len()
+                        || search.rows[1].len() != candidate_roots.len()
+                    {
+                        errors.push("posterior root search returned an unexpected row shape".into());
+                    } else if search.rows.iter().flatten().any(|stats| stats.errors > 0) {
+                        errors.push("posterior root search reported rollout errors".into());
+                    } else {
+                        for &posterior_mass in &POSTERIOR_GRID {
+                            let base_weight = 1.0 - posterior_mass;
+                            let roots = search.rows[0]
+                                .iter()
+                                .zip(&search.rows[1])
+                                .map(|(base, variant)| {
+                                    if base.action != variant.action {
+                                        errors.push(format!(
+                                            "posterior row action mismatch: {:?} vs {:?}",
+                                            base.action, variant.action
+                                        ));
+                                    }
+                                    posterior_root_report(base, variant, posterior_mass)
+                                })
+                                .collect::<Vec<_>>();
+                            let selected_root = best_posterior_root(&roots)
+                                .map(|root| root.action.clone())
+                                .unwrap_or_else(|| "None".into());
+                            let immediate_threat_weight = posterior_immediate_threat_weight(
+                                [(&base_world, base_weight), (&variant_world, posterior_mass)],
+                                probe.actor,
+                            );
+                            let expected_tactical_threat_weight =
+                                posterior_expected_tactical_threat_weight(
+                                    [(&base_world, base_weight), (&variant_world, posterior_mass)],
+                                    probe.actor,
+                                );
+                            let strict_safety = probe.strict_safety_action.as_ref().map(|spec| {
+                                let action = spec.to_action();
+                                let assessment = belief_domestic_trade_assessment(
+                                    [(&base_world, base_weight), (&variant_world, posterior_mass)],
+                                    &action,
+                                );
+                                StrictSafetyReport {
+                                    action: format!("{action:?}"),
+                                    threat: assessment.threat.map(|threat| format!("{threat:?}")),
+                                    posterior: assessment.posterior,
+                                    dirty_monopoly_posterior: assessment.dirty_monopoly_posterior,
+                                    hard_veto_posterior: assessment.hard_veto_posterior,
+                                    hard_veto_threshold: HARD_VETO_POSTERIOR,
+                                    hard_veto: assessment.hard_veto,
+                                }
+                            });
+                            points.push(PosteriorGridPointReport {
+                                posterior_mass,
+                                base_world_weight: base_weight,
+                                variant_world_weight: posterior_mass,
+                                immediate_threat_weight,
+                                expected_tactical_threat_weight,
+                                selected_root,
+                                roots,
+                                strict_safety,
+                            });
+                        }
+                    }
+                }
+                Err(error) => errors.push(format!("posterior root search failed: {error:?}")),
+            }
+        }
+    }
+
+    let expected_zero_root = format!("{:?}", probe.expected_zero_root.to_action());
+    let expected_full_root = format!("{:?}", probe.expected_full_root.to_action());
+    let zero_root = points.first().map(|point| point.selected_root.as_str());
+    let five_root = points.get(1).map(|point| point.selected_root.as_str());
+    let full_root = points.last().map(|point| point.selected_root.as_str());
+    let endpoints_ok = zero_root == Some(expected_zero_root.as_str())
+        && full_root == Some(expected_full_root.as_str());
+    let switch_ok = !probe.require_switch || zero_root != full_root;
+    let tiny_probability_ok = !probe.require_five_percent_stable || zero_root == five_root;
+    let strict_transition_ok = if probe.require_strict_safety_transition {
+        let at = |mass: f32| {
+            points
+                .iter()
+                .find(|point| (point.posterior_mass - mass).abs() < 1e-6)
+                .and_then(|point| point.strict_safety.as_ref())
+        };
+        at(0.95).is_some_and(|safety| !safety.hard_veto)
+            && at(0.995).is_some_and(|safety| safety.hard_veto)
+            && at(1.0).is_some_and(|safety| safety.hard_veto)
+    } else {
+        true
+    };
+    let contract_passed = errors.is_empty()
+        && observation_fixed
+        && endpoints_ok
+        && switch_ok
+        && tiny_probability_ok
+        && strict_transition_ok;
+
+    Some(PosteriorSensitivityReport {
+        actor: probe.actor,
+        base_world: "scenarioState",
+        variant_id: probe.variant.id.clone(),
+        setup_action: setup_action.map(|action| format!("{action:?}")),
+        observation_hash,
+        variant_observation_hash,
+        observation_fixed,
+        expected_zero_root,
+        expected_full_root,
+        contract_passed,
+        errors,
+        points,
+    })
+}
+
+fn run_closeout_probe(scenario: &TacticalScenario, state: &GameState) -> Option<CloseoutProbeReport> {
+    let probe = scenario.closeout_probe.as_ref()?;
+    let same_turn_action = probe.same_turn_root.to_action();
+    let delayed_action = probe.delayed_root.to_action();
+    let plans = plan_current_turn(
+        state,
+        TurnPlanConfig {
+            maximum_nodes: CLOSEOUT_PLANNER_NODES,
+            root_cap: 64,
+            ..TurnPlanConfig::default()
+        },
+    );
+    let roots = vec![same_turn_action.clone(), delayed_action.clone()];
+    let mut impacts = compute_spatial_root_impacts(state, state.actor(), &roots);
+    apply_closeout_root_impacts(&mut impacts, &plans);
+
+    let report_for = |action: &Action| {
+        let plan = plans.iter().find(|plan| &plan.first_action == action)?;
+        let impact = impacts.actions.iter().find(|impact| &impact.action == action)?;
+        Some(CloseoutRootReport {
+            action: format!("{action:?}"),
+            value: plan.value,
+            completion_mass: plan.completion_mass,
+            decisive_completion_mass: plan.decisive_completion_mass,
+            response_windows: plan.response_windows,
+            closeout_gain: impact.closeout_gain,
+            promotion: impact.promotion.map(|promotion| format!("{promotion:?}")),
+        })
+    };
+    let same_turn = report_for(&same_turn_action);
+    let delayed = report_for(&delayed_action);
+    let response_contract = same_turn.as_ref().is_some_and(|root| {
+        root.decisive_completion_mass > f32::EPSILON
+            && root.response_windows.is_some_and(|windows| windows <= 1e-6)
+    }) && delayed
+        .as_ref()
+        .is_some_and(|root| root.response_windows.is_some_and(|windows| windows >= 1.0));
+    Some(CloseoutProbeReport {
+        same_turn,
+        delayed,
+        contract_passed: response_contract,
+    })
 }
 
 fn main() {
@@ -423,6 +783,16 @@ fn main() {
             }
         });
 
+        let posterior_sensitivity_report = run_posterior_sensitivity_probe(
+            &mut engine,
+            scenario,
+            &state,
+            args.rollouts_per_action,
+            args.rollout_steps,
+            scenario_seed,
+        );
+        let closeout_probe_report = run_closeout_probe(scenario, &state);
+
         // 2. Explicit-Root Tactical Search:
         if let Err(e) = engine.upload_states(&[state]) {
             eprintln!("Failed to set states for scenario {}: {e:?}", scenario.id);
@@ -481,6 +851,7 @@ fn main() {
                     net_terminal_outcome: stat.net_terminal_outcome(),
                     mean_victory_margin: stat.mean_victory_margin(),
                     variance: stat.victory_margin_variance(),
+                    mean_turn: stat.mean_turn,
                 }
             })
             .collect();
@@ -494,6 +865,12 @@ fn main() {
         let observation_safety_ok = observation_safety_report
             .as_ref()
             .is_none_or(|probe| probe.contract_passed);
+        let posterior_sensitivity_ok = posterior_sensitivity_report
+            .as_ref()
+            .is_none_or(|probe| probe.contract_passed);
+        let closeout_probe_ok = closeout_probe_report
+            .as_ref()
+            .is_none_or(|probe| probe.contract_passed);
 
         // Check only the scenario's declared mechanical/ordering contract.
         // `best_actions()` uses the benchmark's required explicit-root ordering:
@@ -503,6 +880,8 @@ fn main() {
             || !proposal_probe_ok
             || !threat_probe_ok
             || !observation_safety_ok
+            || !posterior_sensitivity_ok
+            || !closeout_probe_ok
             || any_errors
         {
             false
@@ -544,12 +923,15 @@ fn main() {
             proposal_probe: proposal_probe_report,
             threat_probe: threat_probe_report,
             observation_safety: observation_safety_report,
+            posterior_sensitivity: posterior_sensitivity_report,
+            closeout_probe: closeout_probe_report,
             actions: action_reports,
         });
     }
 
     let summary = BenchmarkSummary {
         benchmark: "gpu-latent-threat-benchmark",
+        corpus_schema_version: corpus.schema_version,
         device_name,
         rollouts_per_action: args.rollouts_per_action,
         rollout_steps: args.rollout_steps,
@@ -559,6 +941,8 @@ fn main() {
         proposal_seed_xor: PROPOSAL_SEED_XOR,
         proposal_probe_seed_xor: PROPOSAL_PROBE_SEED_XOR,
         observation_safety_seed_xor: OBSERVATION_SAFETY_SEED_XOR,
+        posterior_seed_xor: POSTERIOR_SEED_XOR,
+        posterior_grid: POSTERIOR_GRID,
         comparison_ordering: "net terminal outcome > mean VP margin > shorter mean game length",
         total_scenarios: corpus.scenarios.len(),
         passed_scenarios: passed_count,

@@ -1,6 +1,6 @@
 {
-  "description": "Authoritative latent-threat tactical corpus with road and hidden progress-card positive/negative controls",
-  "schemaVersion": 2,
+  "description": "Authoritative latent-threat tactical corpus with road, progress-card, trade/economic, posterior, and closeout evidence probes",
+  "schemaVersion": 3,
   "scenarios": [
     {
       "id": "road-fragile-chain-cut",
@@ -878,6 +878,154 @@
       "expectedBestRoot":{"kind":"buy-development"},
       "declaredConsequence":"development_vp_draw_negative",
       "isNegativeControl":true
+    },
+    {
+      "id":"trade-dirty-monopoly-posterior",
+      "description":"A one-Ore-for-one-Grain domestic trade is acceptable in the observation-matched safe world, becomes rollout-inferior only at material hidden Monopoly mass, and reaches the existing strict hard-veto only near certainty.",
+      "family":"TradeEconomic",
+      "state":{
+        "boardSeed":401,"players":3,"activePlayer":1,"victoryTarget":2,"bankIsPublic":false,
+        "roads":[],"buildings":[{"player":1,"vertex":0,"kind":"settlement"}],
+        "resources":[[0,0,0,1,0],[0,0,0,1,2],[0,0,0,0,1]],
+        "development":[[0,0,0,0,0],[0,0,1,0,0],[0,0,0,0,0]]
+      },
+      "candidateRoots":[
+        {"kind":"offer-trade","recipients":5,"give":[0,0,0,0,1],"receive":[0,0,0,1,0]},
+        {"kind":"end-turn"}
+      ],
+      "posteriorSensitivityProbe":{
+        "actor":0,
+        "variant":{"id":"creator-has-monopoly","weight":1.0,"development":[[0,0,0,0,0],[0,0,0,0,1],[0,0,0,0,0]]},
+        "setupAction":{"kind":"offer-trade","recipients":5,"give":[0,0,0,0,1],"receive":[0,0,0,1,0]},
+        "candidateRoots":[{"kind":"respond-trade","accept":true},{"kind":"respond-trade","accept":false}],
+        "expectedZeroRoot":{"kind":"respond-trade","accept":true},
+        "expectedFullRoot":{"kind":"respond-trade","accept":false},
+        "requireSwitch":true,
+        "requireFivePercentStable":true,
+        "strictSafetyAction":{"kind":"respond-trade","accept":true},
+        "requireStrictSafetyTransition":true
+      },
+      "mechanical":{"action":{"kind":"offer-trade","recipients":5,"give":[0,0,0,0,1],"receive":[0,0,0,1,0]}},
+      "enforceExplicitRootOrdering":false,
+      "expectedBestRoot":{"kind":"end-turn"},
+      "declaredConsequence":"domestic_trade_dirty_monopoly_posterior",
+      "isNegativeControl":false
+    },
+    {
+      "id":"trade-root-seat-disabled-control",
+      "description":"The same root-seat domestic offer is forbidden when that seat is explicitly disabled from player trading.",
+      "family":"TradeEconomic",
+      "state":{
+        "boardSeed":401,"players":3,"activePlayer":1,"victoryTarget":2,"bankIsPublic":false,"domesticTradeDisabled":2,
+        "roads":[],"buildings":[{"player":1,"vertex":0,"kind":"settlement"}],
+        "resources":[[0,0,0,1,0],[0,0,0,1,2],[0,0,0,0,1]],
+        "development":[[0,0,0,0,0],[0,0,1,0,0],[0,0,0,0,0]]
+      },
+      "candidateRoots":[{"kind":"end-turn"}],
+      "mechanical":{
+        "forbiddenAction":{"kind":"offer-trade","recipients":5,"give":[0,0,0,0,1],"receive":[0,0,0,1,0]},
+        "action":{"kind":"end-turn"}
+      },
+      "enforceExplicitRootOrdering":false,
+      "expectedBestRoot":{"kind":"end-turn"},
+      "declaredConsequence":"root_seat_domestic_trade_disabled",
+      "isNegativeControl":true
+    },
+    {
+      "id":"trade-port-viable-city-conversion",
+      "description":"An owned 2:1 Lumber port converts the exact stockpile into the missing Ore for an immediate city continuation.",
+      "family":"TradeEconomic",
+      "state":{
+        "boardSeed":910300003,"players":3,"activePlayer":0,
+        "roads":[],"buildings":[{"player":0,"vertex":36,"kind":"settlement"}],
+        "resources":[[2,0,0,2,2],[0,0,0,0,0],[0,0,0,0,0]]
+      },
+      "candidateRoots":[{"kind":"maritime-trade","resource":0,"secondResource":4,"ratio":2},{"kind":"end-turn"}],
+      "mechanical":{
+        "action":{"kind":"maritime-trade","resource":0,"secondResource":4,"ratio":2},
+        "followUp":{"kind":"build-city","vertex":36}
+      },
+      "enforceExplicitRootOrdering":false,
+      "expectedBestRoot":{"kind":"maritime-trade","resource":0,"secondResource":4,"ratio":2},
+      "declaredConsequence":"viable_port_city_conversion",
+      "isNegativeControl":false
+    },
+    {
+      "id":"trade-expensive-port-detour-control",
+      "description":"Without an owned port the otherwise identical city conversion requires the full 4:1 bank detour.",
+      "family":"TradeEconomic",
+      "state":{
+        "boardSeed":910300003,"players":3,"activePlayer":0,
+        "roads":[],"buildings":[{"player":0,"vertex":0,"kind":"settlement"}],
+        "resources":[[4,0,0,2,2],[0,0,0,0,0],[0,0,0,0,0]]
+      },
+      "candidateRoots":[{"kind":"maritime-trade","resource":0,"secondResource":4,"ratio":4},{"kind":"end-turn"}],
+      "mechanical":{
+        "action":{"kind":"maritime-trade","resource":0,"secondResource":4,"ratio":4},
+        "followUp":{"kind":"build-city","vertex":0}
+      },
+      "enforceExplicitRootOrdering":false,
+      "expectedBestRoot":{"kind":"maritime-trade","resource":0,"secondResource":4,"ratio":4},
+      "declaredConsequence":"expensive_bank_trade_detour",
+      "isNegativeControl":true
+    },
+    {
+      "id":"trade-port-stockpile-monopoly-risk",
+      "description":"A 2:1 Lumber-port stockpile has real conversion value but also funds a hidden Monopoly settlement closeout if left concentrated.",
+      "family":"TradeEconomic",
+      "state":{
+        "boardSeed":910300003,"players":3,"activePlayer":0,"bankIsPublic":false,
+        "roads":[{"player":1,"edge":0},{"player":1,"edge":1}],
+        "buildings":[
+          {"player":0,"vertex":36,"kind":"settlement"},
+          {"player":1,"vertex":10,"kind":"city"},{"player":1,"vertex":29,"kind":"city"},{"player":1,"vertex":43,"kind":"city"},
+          {"player":1,"vertex":0,"kind":"settlement"},{"player":1,"vertex":52,"kind":"settlement"},{"player":1,"vertex":27,"kind":"settlement"}
+        ],
+        "resources":[[2,0,0,0,0],[0,1,1,1,0],[0,0,0,0,0]],
+        "development":[[0,0,0,0,0],[0,0,1,0,0],[0,0,0,0,0]]
+      },
+      "candidateRoots":[{"kind":"maritime-trade","resource":0,"secondResource":4,"ratio":2},{"kind":"end-turn"}],
+      "posteriorSensitivityProbe":{
+        "actor":0,
+        "variant":{"id":"opponent-has-monopoly","weight":1.0,"development":[[0,0,0,0,0],[0,0,0,0,1],[0,0,0,0,0]]},
+        "candidateRoots":[{"kind":"maritime-trade","resource":0,"secondResource":4,"ratio":2},{"kind":"end-turn"}],
+        "expectedZeroRoot":{"kind":"maritime-trade","resource":0,"secondResource":4,"ratio":2},
+        "expectedFullRoot":{"kind":"maritime-trade","resource":0,"secondResource":4,"ratio":2},
+        "requireSwitch":false,
+        "requireFivePercentStable":true
+      },
+      "mechanical":{"action":{"kind":"maritime-trade","resource":0,"secondResource":4,"ratio":2}},
+      "enforceExplicitRootOrdering":false,
+      "expectedBestRoot":{"kind":"maritime-trade","resource":0,"secondResource":4,"ratio":2},
+      "negativeControlRoot":{"kind":"end-turn"},
+      "declaredConsequence":"port_stockpile_monopoly_risk",
+      "isNegativeControl":false
+    },
+    {
+      "id":"closeout-response-window-observability",
+      "description":"The production current-turn planner reports zero opponent response windows for an immediate city and two windows after handing the turn to both opponents.",
+      "family":"Closeout",
+      "state":{
+        "boardSeed":421,"players":3,"activePlayer":0,
+        "roads":[
+          {"player":0,"edge":0},{"player":1,"edge":1},{"player":2,"edge":3},
+          {"player":2,"edge":6},{"player":1,"edge":8},{"player":0,"edge":11}
+        ],
+        "buildings":[
+          {"player":0,"vertex":0,"kind":"settlement"},{"player":1,"vertex":2,"kind":"settlement"},
+          {"player":2,"vertex":4,"kind":"settlement"},{"player":2,"vertex":6,"kind":"settlement"},
+          {"player":1,"vertex":8,"kind":"settlement"},{"player":0,"vertex":10,"kind":"settlement"}
+        ],
+        "resources":[[0,0,0,2,3],[0,0,0,0,1],[1,1,0,0,1]]
+      },
+      "candidateRoots":[{"kind":"build-city","vertex":0},{"kind":"end-turn"}],
+      "closeoutProbe":{"sameTurnRoot":{"kind":"build-city","vertex":0},"delayedRoot":{"kind":"end-turn"}},
+      "mechanical":{"action":{"kind":"build-city","vertex":0}},
+      "enforceExplicitRootOrdering":false,
+      "expectedBestRoot":{"kind":"build-city","vertex":0},
+      "negativeControlRoot":{"kind":"end-turn"},
+      "declaredConsequence":"closeout_response_window_observability",
+      "isNegativeControl":false
     }
   ]
 }
