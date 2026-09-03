@@ -44,30 +44,32 @@ enum ThreatKey {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum ProgressOrigin {
-    Other,
+enum ProgressChoice {
+    BuyDevelopment,
+    Knight { hex: u8, victim: Option<u8> },
+    RoadBuilding { first: u8, second: Option<u8> },
+    YearOfPlenty { first: Resource, second: Resource },
     Monopoly(Resource),
 }
 
 #[derive(Clone, Default)]
 struct TacticalThreats {
     keys: HashMap<ThreatKey, f32>,
-    non_monopoly_paths: HashMap<ThreatKey, f32>,
-    monopoly_paths: HashMap<(ThreatKey, Resource), f32>,
+    non_progress_paths: HashMap<ThreatKey, f32>,
+    progress_paths: HashMap<(ThreatKey, ProgressChoice), f32>,
 }
 
 impl TacticalThreats {
-    fn insert(&mut self, key: ThreatKey, origin: Option<ProgressOrigin>, probability: f32) {
+    fn insert(&mut self, key: ThreatKey, origin: Option<ProgressChoice>, probability: f32) {
         let probability = probability.clamp(0.0, 1.0);
         if probability <= f32::EPSILON {
             return;
         }
         Self::insert_max(&mut self.keys, key, probability);
-        match origin {
-            Some(ProgressOrigin::Monopoly(resource)) => {
-                Self::insert_max(&mut self.monopoly_paths, (key, resource), probability);
-            }
-            _ => Self::insert_max(&mut self.non_monopoly_paths, key, probability),
+        if let Some(choice) = origin {
+            Self::insert_max(&mut self.progress_paths, (key, choice), probability);
+        } else {
+            Self::insert_max(&mut self.non_progress_paths, key, probability);
         }
     }
 
@@ -86,11 +88,11 @@ impl TacticalThreats {
         for (&key, &probability) in &other.keys {
             Self::insert_max(&mut self.keys, key, probability);
         }
-        for (&key, &probability) in &other.non_monopoly_paths {
-            Self::insert_max(&mut self.non_monopoly_paths, key, probability);
+        for (&key, &probability) in &other.non_progress_paths {
+            Self::insert_max(&mut self.non_progress_paths, key, probability);
         }
-        for (&key, &probability) in &other.monopoly_paths {
-            Self::insert_max(&mut self.monopoly_paths, key, probability);
+        for (&key, &probability) in &other.progress_paths {
+            Self::insert_max(&mut self.progress_paths, key, probability);
         }
     }
 
@@ -102,12 +104,12 @@ impl TacticalThreats {
             let entry = self.keys.entry(key).or_default();
             *entry = (*entry + probability * weight).clamp(0.0, 1.0);
         }
-        for (&key, &probability) in &other.non_monopoly_paths {
-            let entry = self.non_monopoly_paths.entry(key).or_default();
+        for (&key, &probability) in &other.non_progress_paths {
+            let entry = self.non_progress_paths.entry(key).or_default();
             *entry = (*entry + probability * weight).clamp(0.0, 1.0);
         }
-        for (&key, &probability) in &other.monopoly_paths {
-            let entry = self.monopoly_paths.entry(key).or_default();
+        for (&key, &probability) in &other.progress_paths {
+            let entry = self.progress_paths.entry(key).or_default();
             *entry = (*entry + probability * weight).clamp(0.0, 1.0);
         }
     }
@@ -228,11 +230,24 @@ fn is_build(action: &Action) -> bool {
     )
 }
 
-fn progress_origin(action: &Action) -> Option<ProgressOrigin> {
+fn progress_origin(action: &Action) -> Option<ProgressChoice> {
     progress_threat_kind(action)?;
     Some(match action {
-        Action::PlayMonopoly { resource } => ProgressOrigin::Monopoly(*resource),
-        _ => ProgressOrigin::Other,
+        Action::BuyDevelopment => ProgressChoice::BuyDevelopment,
+        Action::PlayKnight { hex, victim } => ProgressChoice::Knight {
+            hex: *hex,
+            victim: *victim,
+        },
+        Action::PlayRoadBuilding { first, second } => ProgressChoice::RoadBuilding {
+            first: *first,
+            second: *second,
+        },
+        Action::PlayYearOfPlenty { first, second } => ProgressChoice::YearOfPlenty {
+            first: *first,
+            second: *second,
+        },
+        Action::PlayMonopoly { resource } => ProgressChoice::Monopoly(*resource),
+        _ => return None,
     })
 }
 
@@ -263,7 +278,7 @@ fn record_threats(
     action: &Action,
     protected: u8,
     attacker: u8,
-    origin: Option<ProgressOrigin>,
+    origin: Option<ProgressChoice>,
     probability: f32,
     result: &mut TacticalThreats,
 ) {
@@ -308,8 +323,8 @@ fn reachable_tactical_threats(
         protected: u8,
         attacker: u8,
         depth: u8,
-        origin: Option<ProgressOrigin>,
-        seen: &mut HashSet<(u64, u8, Option<ProgressOrigin>)>,
+        origin: Option<ProgressChoice>,
+        seen: &mut HashSet<(u64, u8, Option<ProgressChoice>)>,
     ) -> TacticalThreats {
         let actions = state.legal_actions();
         let total_weight = actions
@@ -376,8 +391,8 @@ fn reachable_tactical_threats(
         protected: u8,
         attacker: u8,
         depth: u8,
-        origin: Option<ProgressOrigin>,
-        seen: &mut HashSet<(u64, u8, Option<ProgressOrigin>)>,
+        origin: Option<ProgressChoice>,
+        seen: &mut HashSet<(u64, u8, Option<ProgressChoice>)>,
     ) -> TacticalThreats {
         if depth >= TACTICAL_ACTION_DEPTH
             || state.phase != Phase::Main
@@ -540,11 +555,17 @@ fn threat_probability(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum HardPolicyChoice {
+    NonProgress,
+    Progress(ProgressChoice),
+}
+
 #[derive(Clone)]
-struct MonopolyChoiceEvidence {
+struct HardChoiceEvidence {
     attacker: u8,
     observation: u64,
-    hard_probabilities: [f32; 5],
+    hard_probabilities: HashMap<HardPolicyChoice, f32>,
 }
 
 #[derive(Default)]
@@ -552,8 +573,7 @@ struct WorldTradeEvidence {
     threat: Option<DomesticTradeThreat>,
     threat_probability: f32,
     dirty_monopoly_probability: f32,
-    non_monopoly_hard_probability: f32,
-    monopoly_choice: Option<MonopolyChoiceEvidence>,
+    hard_choice: Option<HardChoiceEvidence>,
 }
 
 fn domestic_trade_evidence(state: &GameState, action: &Action) -> WorldTradeEvidence {
@@ -565,9 +585,8 @@ fn domestic_trade_evidence(state: &GameState, action: &Action) -> WorldTradeEvid
         return WorldTradeEvidence::default();
     };
     let mut newly_enabled = HashMap::<ThreatKey, f32>::new();
-    let mut newly_enabled_non_monopoly = HashMap::<ThreatKey, f32>::new();
     let mut dirty_monopoly_probability = 0.0_f32;
-    let mut monopoly_contexts = Vec::<MonopolyChoiceEvidence>::new();
+    let mut hard_contexts = Vec::<HardChoiceEvidence>::new();
 
     for after in resolved_exchange_states(state, action, protected) {
         if after.phase != Phase::Main
@@ -587,55 +606,64 @@ fn domestic_trade_evidence(state: &GameState, action: &Action) -> WorldTradeEvid
             }
             debug_assert!(probability >= delta);
         }
-        for &key in after_threats.non_monopoly_paths.keys() {
+
+        let mut hard_probabilities = HashMap::<HardPolicyChoice, f32>::new();
+        for &key in after_threats.non_progress_paths.keys() {
             let delta = probability_delta(
-                &after_threats.non_monopoly_paths,
-                &before_threats.non_monopoly_paths,
+                &after_threats.non_progress_paths,
+                &before_threats.non_progress_paths,
                 &key,
             );
-            if delta > f32::EPSILON {
-                TacticalThreats::insert_max(&mut newly_enabled_non_monopoly, key, delta);
+            if delta > f32::EPSILON && hard_threat_key(key) {
+                TacticalThreats::insert_max(
+                    &mut hard_probabilities,
+                    HardPolicyChoice::NonProgress,
+                    delta,
+                );
             }
         }
-
-        let mut hard_probabilities = [0.0_f32; 5];
-        for (&(key, resource), _) in &after_threats.monopoly_paths {
+        for (&(key, choice), _) in &after_threats.progress_paths {
             let delta = probability_delta(
-                &after_threats.monopoly_paths,
-                &before_threats.monopoly_paths,
-                &(key, resource),
+                &after_threats.progress_paths,
+                &before_threats.progress_paths,
+                &(key, choice),
             );
             if delta <= f32::EPSILON {
                 continue;
             }
-            let dirty = reclaimable_resource(&after, attacker, resource)
-                > reclaimable_resource(&before, attacker, resource);
+            let dirty = match choice {
+                ProgressChoice::Monopoly(resource) => {
+                    reclaimable_resource(&after, attacker, resource)
+                        > reclaimable_resource(&before, attacker, resource)
+                }
+                _ => false,
+            };
             if dirty {
                 dirty_monopoly_probability = dirty_monopoly_probability.max(delta);
             }
             if dirty || hard_threat_key(key) {
-                hard_probabilities[resource.index()] =
-                    hard_probabilities[resource.index()].max(delta);
+                TacticalThreats::insert_max(
+                    &mut hard_probabilities,
+                    HardPolicyChoice::Progress(choice),
+                    delta,
+                );
             }
         }
-        if hard_probabilities
-            .iter()
-            .any(|probability| *probability > f32::EPSILON)
-        {
+        if !hard_probabilities.is_empty() {
             let observation = after.observation_hash(attacker);
-            if let Some(existing) = monopoly_contexts
+            if let Some(existing) = hard_contexts
                 .iter_mut()
                 .find(|context| context.attacker == attacker && context.observation == observation)
             {
-                for (existing, probability) in existing
-                    .hard_probabilities
-                    .iter_mut()
-                    .zip(hard_probabilities)
-                {
-                    *existing = (*existing).max(probability);
+                for (&choice, &probability) in &hard_probabilities {
+                    TacticalThreats::insert_max(
+                        &mut existing.hard_probabilities,
+                        choice,
+                        probability,
+                    );
                 }
             } else {
-                monopoly_contexts.push(MonopolyChoiceEvidence {
+                hard_contexts.push(HardChoiceEvidence {
                     attacker,
                     observation,
                     hard_probabilities,
@@ -648,19 +676,15 @@ fn domestic_trade_evidence(state: &GameState, action: &Action) -> WorldTradeEvid
     let threat_probability = threat.map_or(0.0, |threat| {
         threat_probability(&newly_enabled, threat, dirty_monopoly_probability)
     });
-    let non_monopoly_hard_probability = newly_enabled_non_monopoly
-        .iter()
-        .filter_map(|(key, probability)| hard_threat_key(*key).then_some(*probability))
-        .fold(0.0_f32, f32::max);
-    let monopoly_choice = monopoly_contexts.into_iter().max_by(|left, right| {
+    let hard_choice = hard_contexts.into_iter().max_by(|left, right| {
         let left_probability = left
             .hard_probabilities
-            .iter()
+            .values()
             .copied()
             .fold(0.0_f32, f32::max);
         let right_probability = right
             .hard_probabilities
-            .iter()
+            .values()
             .copied()
             .fold(0.0_f32, f32::max);
         left_probability
@@ -673,8 +697,7 @@ fn domestic_trade_evidence(state: &GameState, action: &Action) -> WorldTradeEvid
         threat,
         threat_probability,
         dirty_monopoly_probability,
-        non_monopoly_hard_probability,
-        monopoly_choice,
+        hard_choice,
     }
 }
 
@@ -687,9 +710,9 @@ pub fn domestic_trade_threat(state: &GameState, action: &Action) -> Option<Domes
 
 /// Aggregate the safety evidence over a weighted hidden-state belief without
 /// collapsing sub-threshold malicious-trade risk into a categorical veto.
-/// Monopoly-dependent hard evidence is aggregated by the acting opponent's
-/// observation and resource choice, so indistinguishable worlds cannot choose
-/// a different Monopoly resource merely because their hidden state differs.
+/// Hard evidence is aggregated by the acting opponent's observation and the
+/// concrete progress-card policy choice, so indistinguishable worlds cannot
+/// select different hidden-state-dependent Knight, YOP, or Monopoly actions.
 pub fn belief_domestic_trade_assessment<'a>(
     worlds: impl IntoIterator<Item = (&'a GameState, f32)>,
     action: &Action,
@@ -709,12 +732,11 @@ pub fn belief_domestic_trade_assessment<'a>(
     struct ObservationHardMass {
         attacker: u8,
         observation: u64,
-        choice_mass: [f32; 5],
+        choice_mass: HashMap<HardPolicyChoice, f32>,
     }
 
     let mut mass = [0.0_f32; 5];
     let mut dirty_monopoly_posterior = 0.0_f32;
-    let mut non_monopoly_only_hard_mass = 0.0_f32;
     let mut observation_hard_mass = Vec::<ObservationHardMass>::new();
     for (state, weight) in worlds {
         let weight = weight.max(0.0) / total;
@@ -734,7 +756,7 @@ pub fn belief_domestic_trade_assessment<'a>(
         }
         dirty_monopoly_posterior += weight * evidence.dirty_monopoly_probability;
 
-        if let Some(choice) = evidence.monopoly_choice {
+        if let Some(choice) = evidence.hard_choice {
             let group = if let Some(group) = observation_hard_mass.iter_mut().find(|group| {
                 group.attacker == choice.attacker && group.observation == choice.observation
             }) {
@@ -743,20 +765,13 @@ pub fn belief_domestic_trade_assessment<'a>(
                 observation_hard_mass.push(ObservationHardMass {
                     attacker: choice.attacker,
                     observation: choice.observation,
-                    choice_mass: [0.0; 5],
+                    choice_mass: HashMap::new(),
                 });
                 observation_hard_mass.last_mut().unwrap()
             };
-            for (resource_mass, monopoly_probability) in
-                group.choice_mass.iter_mut().zip(choice.hard_probabilities)
-            {
-                *resource_mass += weight
-                    * evidence
-                        .non_monopoly_hard_probability
-                        .max(monopoly_probability);
+            for (policy_choice, probability) in choice.hard_probabilities {
+                *group.choice_mass.entry(policy_choice).or_default() += weight * probability;
             }
-        } else {
-            non_monopoly_only_hard_mass += weight * evidence.non_monopoly_hard_probability;
         }
     }
     let posterior = mass.iter().sum::<f32>().clamp(0.0, 1.0);
@@ -772,12 +787,11 @@ pub fn belief_domestic_trade_assessment<'a>(
             3 => DomesticTradeThreat::ContestedSettlement,
             _ => DomesticTradeThreat::MaterialBuild,
         });
-    let hard_veto_posterior = (non_monopoly_only_hard_mass
-        + observation_hard_mass
-            .iter()
-            .map(|group| group.choice_mass.iter().copied().fold(0.0_f32, f32::max))
-            .sum::<f32>())
-    .clamp(0.0, 1.0);
+    let hard_veto_posterior = observation_hard_mass
+        .iter()
+        .map(|group| group.choice_mass.values().copied().fold(0.0_f32, f32::max))
+        .sum::<f32>()
+        .clamp(0.0, 1.0);
     DomesticTradeAssessment {
         threat,
         posterior,

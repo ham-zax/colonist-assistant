@@ -691,7 +691,10 @@ impl NativeGpuSearchEngine {
             ranked.iter().map(|r| (r.action.clone(), r.prior)).collect();
         let root_actions_list: Vec<Action> = ranked.iter().map(|r| r.action.clone()).collect();
         let planner_nodes = (effort.cpu.nodes_per_depth_wave / 12).clamp(300, 4_000);
-        let closeout_plans = belief_root_closeout_plans(&particles, actor, planner_nodes);
+        let closeout_plans = belief_root_closeout_plans(&particles, actor, planner_nodes)
+            .into_iter()
+            .filter(|plan| root_actions_list.contains(&plan.first_action))
+            .collect::<Vec<_>>();
         let spatial_impact_report = particles.first().map(|first| {
             let mut report = compute_spatial_root_impacts(&first.state, actor, &root_actions_list);
             apply_closeout_root_impacts(&mut report, &closeout_plans);
