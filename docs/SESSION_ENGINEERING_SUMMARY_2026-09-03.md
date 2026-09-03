@@ -106,3 +106,19 @@ Small compile, syntax, serialization, and feature-contract checks are allowed wh
 3. Run development-only policy/value training on the existing PUCT corpus using CUDA, recording checkpoints and metrics outside Git.
 4. Use a fresh independent GPU-generated state corpus before making any promotion claim or tuning decision based on final evidence.
 5. Do not begin Task 14 or Task 16 as a side effect of the training work.
+
+## Extension build and background training launch
+
+After the session record was created, the packaged WASM artifact was synchronized with the current strategic schema and committed as `16b841fc8b3e3ee452a3e5e7a4d55f2f8e07f073`. The unpacked Chrome extension was then rebuilt cleanly into `dist/` as:
+
+`0.9.1 · main@16b841fc8b3e · 2026-09-03T13:55:37.885Z`
+
+The live extension still has both learned-head promotion flags disabled.
+
+A development-only CUDA training corpus was assembled from existing schema-2 PUCT teacher artifacts without generating new gameplay. It contains 731 deduplicated samples across 40 `boardSeed:chanceSeed` groups, state width 247, action width 52, and has SHA-256:
+
+`56ea77ceb271f8fd2e57c36da394a3530b870bbd67aaa349f3b7469247259b5a`
+
+The corpus and training outputs live under `/tmp/wave7-gpu-training/` and are not Git artifacts. They combine prior development data, so results from this sweep remain model-development evidence, not a fresh promotion holdout.
+
+The background sweep uses `scripts/benchmark-gpu-zoom.py --device cuda`, the exact 48-feature baseline, a 50% grouped validation split (20 of 40 groups), and several bounded hidden-width/epoch configurations. CPU math libraries are capped to one thread. The launcher waits for low observed GPU utilization before starting each configuration so an already-running native GPU companion has opportunities to serve live play between training runs.
