@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "strategicFeatureSchemaVersion": 2,
+  "kind": "colonist-task15-gpu-policy-only-5fold-summary",
+  "evidenceStatus": "valid-policy-only-feature-screen",
+  "benchmarkCommit": "ecadf07e0fcf2eca4db0103a0b370d70504b8bdd",
+  "benchmarkScriptSha256": "bb45a23c54161dd9f00b28016ea84a7b0675ae98c44a94f448180fb7fe56eee9",
+  "expertCorpusSha256": "555a2b45539a078c90c06840ef9c3e0d5798627da67ef2ac48e45c87e44e4e92",
+  "folds": 5,
+  "samples": 77,
+  "policyGroups": 65,
+  "boardChanceGroups": 24,
+  "device": "cuda",
+  "gpu": "NVIDIA GeForce RTX 3070 Ti",
+  "teacherEngine": "native-gpu-teacher",
+  "policyTargetSemantics": "native-final-choice-one-hot",
+  "valueTeacherAvailable": false,
+  "actionFeatures": 52,
+  "baselineActionFeatures": 48,
+  "candidate": {
+    "policyCrossEntropy": 2.4273587446946365,
+    "policyTeacherTop1Agreement": 0.13846153846153847,
+    "policyCrossEntropyGainVsUniform": 0.002416844501731852
+  },
+  "baseline": {
+    "policyCrossEntropy": 2.427020058265099,
+    "policyTeacherTop1Agreement": 0.16923076923076924,
+    "policyCrossEntropyGainVsUniform": 0.0027555309312692344
+  },
+  "uniform": {
+    "policyCrossEntropy": 2.4297755891963684
+  },
+  "improvementVs48FeatureBaseline": {
+    "policyCrossEntropy": -0.0003386864295373826,
+    "policyTeacherTop1Agreement": -0.03076923076923077
+  },
+  "foldsPassingMatchedAblation": 2,
+  "featureAblationSupported": false,
+  "featureCandidateAccepted": false,
+  "reason": "The 52-feature candidate is worse than the matched 48-feature baseline on pooled held-out policy cross-entropy and final-choice top-1 agreement; only 2 of 5 grouped folds pass the matched policy-only ablation.",
+  "checkpointEvidenceAvailable": false,
+  "checkpointBlocker": "Native-GPU final-decision records are policy-only and do not provide compatible strategic value targets for checkpoint training.",
+  "matchedArenaRequired": true,
+  "matchedArenaSatisfied": false,
+  "promotionQualified": false,
+  "perFold": [
+    {
+      "fold": 0,
+      "validationStateGroups": 5,
+      "policyValidationGroups": 13,
+      "policyCrossEntropy": 2.3405610598050632,
+      "baselinePolicyCrossEntropy": 2.3405645810640774,
+      "policyCrossEntropyImprovement": 3.5212590141497913e-06,
+      "policyTeacherTop1Agreement": 0.38461538461538464,
+      "baselinePolicyTeacherTop1Agreement": 0.38461538461538464,
+      "policyTeacherTop1AgreementImprovement": 0.0,
+      "matchedAblationPassed": true
+    },
+    {
+      "fold": 1,
+      "validationStateGroups": 5,
+      "policyValidationGroups": 15,
+      "policyCrossEntropy": 2.364629872639974,
+      "baselinePolicyCrossEntropy": 2.3642595926920573,
+      "policyCrossEntropyImprovement": -0.00037027994791660745,
+      "policyTeacherTop1Agreement": 0.13333333333333333,
+      "baselinePolicyTeacherTop1Agreement": 0.13333333333333333,
+      "policyTeacherTop1AgreementImprovement": 0.0,
+      "matchedAblationPassed": false
+    },
+    {
+      "fold": 2,
+      "validationStateGroups": 5,
+      "policyValidationGroups": 14,
+      "policyCrossEntropy": 2.479396275111607,
+      "baselinePolicyCrossEntropy": 2.4787191663469588,
+      "policyCrossEntropyImprovement": -0.0006771087646484375,
+      "policyTeacherTop1Agreement": 0.07142857142857142,
+      "baselinePolicyTeacherTop1Agreement": 0.14285714285714285,
+      "policyTeacherTop1AgreementImprovement": -0.07142857142857142,
+      "matchedAblationPassed": false
+    },
+    {
+      "fold": 3,
+      "validationStateGroups": 5,
+      "policyValidationGroups": 13,
+      "policyCrossEntropy": 2.4882771418644833,
+      "baselinePolicyCrossEntropy": 2.488284184382512,
+      "policyCrossEntropyImprovement": 7.042518028743672e-06,
+      "policyTeacherTop1Agreement": 0.0,
+      "baselinePolicyTeacherTop1Agreement": 0.0,
+      "policyTeacherTop1AgreementImprovement": 0.0,
+      "matchedAblationPassed": true
+    },
+    {
+      "fold": 4,
+      "validationStateGroups": 4,
+      "policyValidationGroups": 10,
+      "policyCrossEntropy": 2.4822425842285156,
+      "baselinePolicyCrossEntropy": 2.48153076171875,
+      "policyCrossEntropyImprovement": -0.0007118225097655362,
+      "policyTeacherTop1Agreement": 0.1,
+      "baselinePolicyTeacherTop1Agreement": 0.2,
+      "policyTeacherTop1AgreementImprovement": -0.1,
+      "matchedAblationPassed": false
+    }
+  ]
+}

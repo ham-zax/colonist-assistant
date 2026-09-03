@@ -2,13 +2,17 @@ use colonist_catan_core::{Action, Building, GameState, Port};
 
 use crate::eval::production_pips;
 use crate::policy::{ActionClass, action_class};
+use crate::root_impact::compute_spatial_root_impacts;
 
 pub const HEX_FEATURES: usize = 10;
 pub const VERTEX_FEATURES: usize = 15;
 pub const EDGE_FEATURES: usize = 9;
 pub const PLAYER_FEATURES: usize = 39;
 pub const GLOBAL_FEATURES: usize = 23;
-pub const ACTION_FEATURES: usize = 48;
+pub const STRATEGIC_FEATURE_SCHEMA_VERSION: u8 = 2;
+pub const BASE_ACTION_FEATURES: usize = 48;
+pub const ROOT_IMPACT_FEATURES: usize = 4;
+pub const ACTION_FEATURES: usize = BASE_ACTION_FEATURES + ROOT_IMPACT_FEATURES;
 pub const STATE_FEATURES: usize = GLOBAL_FEATURES
     + PLAYER_FEATURES * 4
     + HEX_FEATURES * 2
@@ -248,7 +252,7 @@ fn class_index(class: ActionClass) -> usize {
     }
 }
 
-pub fn encode_action(state: &GameState, action: &Action) -> [f32; ACTION_FEATURES] {
+fn encode_action_base(state: &GameState, action: &Action) -> [f32; ACTION_FEATURES] {
     let mut row = [0.0; ACTION_FEATURES];
     row[class_index(action_class(action))] = 1.0;
     let pip_value = |number: u8| match number {
@@ -428,6 +432,45 @@ pub fn encode_action(state: &GameState, action: &Action) -> [f32; ACTION_FEATURE
     row
 }
 
+/// Encodes candidate actions with authoritative root-level road consequences.
+/// Spatial impacts are computed once for the action batch so the learned prior
+/// consumes the existing structural owner instead of reconstructing topology.
+pub fn encode_actions(state: &GameState, actions: &[Action]) -> Vec<[f32; ACTION_FEATURES]> {
+    let mut encoded = actions
+        .iter()
+        .map(|action| encode_action_base(state, action))
+        .collect::<Vec<_>>();
+    let needs_spatial = actions.iter().any(|action| {
+        matches!(
+            action,
+            Action::PlaceSettlement { .. }
+                | Action::BuildSettlement { .. }
+                | Action::PlaceRoad { .. }
+                | Action::BuildRoad { .. }
+        )
+    });
+    if !needs_spatial {
+        return encoded;
+    }
+
+    let report = compute_spatial_root_impacts(state, state.actor(), actions);
+    for (row, impact) in encoded.iter_mut().zip(report.actions.iter()) {
+        row[BASE_ACTION_FEATURES] =
+            (impact.road_delta.longest_road_loss_prevented.max(0) as f32 / 15.0).clamp(0.0, 1.0);
+        row[BASE_ACTION_FEATURES + 1] =
+            (impact.road_delta.longest_road_loss_inflicted.max(0) as f32 / 15.0).clamp(0.0, 1.0);
+        row[BASE_ACTION_FEATURES + 2] =
+            (impact.road_delta.award_vp_swing as f32 / 2.0).clamp(-1.0, 1.0);
+        row[BASE_ACTION_FEATURES + 3] =
+            (impact.road_delta.expansion_portfolio_delta / 30.0).clamp(0.0, 1.0);
+    }
+    encoded
+}
+
+pub fn encode_action(state: &GameState, action: &Action) -> [f32; ACTION_FEATURES] {
+    encode_actions(state, std::slice::from_ref(action))[0]
+}
+
 fn pool_rows<const WIDTH: usize>(rows: &[[f32; WIDTH]], output: &mut Vec<f32>) {
     let mut mean = [0.0; WIDTH];
     let mut maximum = [f32::NEG_INFINITY; WIDTH];
@@ -481,7 +524,60 @@ pub fn pool_heterogeneous_graph(
 mod tests {
     use colonist_catan_core::{Action, GameState, Phase};
 
-    use super::{encode_action, encode_heterogeneous_graph, pool_heterogeneous_graph};
+    use super::{
+        ACTION_FEATURES, BASE_ACTION_FEATURES, encode_action, encode_actions,
+        encode_heterogeneous_graph, pool_heterogeneous_graph,
+    };
+    use crate::root_impact::compute_spatial_root_impacts;
+
+    fn install_road_chain(state: &mut GameState, owner: u8, length: usize) -> Vec<u8> {
+        assert!(length > 0);
+        let mut edges = vec![0u8];
+        state.roads[0] = Some(owner);
+        let mut vertex = state.board.edges[0].vertices[1];
+        while edges.len() < length {
+            let previous = *edges.last().unwrap();
+            let next = *state.board.vertices[vertex as usize]
+                .adjacent_edges
+                .iter()
+                .find(|&&edge| edge != previous && !edges.contains(&edge))
+                .expect("standard board provides a continuation edge");
+            state.roads[next as usize] = Some(owner);
+            let [left, right] = state.board.edges[next as usize].vertices;
+            vertex = if left == vertex { right } else { left };
+            edges.push(next);
+        }
+        edges
+    }
+
+    #[test]
+    fn strategic_action_tail_matches_authoritative_root_impact() {
+        let mut state = GameState::standard(1, 3);
+        let chain = install_road_chain(&mut state, 1, 5);
+        state.update_longest_road();
+        let shared = state.board.edges[chain[1] as usize]
+            .vertices
+            .into_iter()
+            .find(|vertex| state.board.edges[chain[2] as usize].vertices.contains(vertex))
+            .expect("adjacent chain edges share a vertex");
+        let action = Action::PlaceSettlement { vertex: shared };
+        let actions = vec![action.clone(), Action::Roll];
+
+        let source = compute_spatial_root_impacts(&state, state.actor(), &actions);
+        let encoded = encode_actions(&state, &actions);
+        let impact = &source.actions[0].road_delta;
+        let expected = [
+            (impact.longest_road_loss_prevented.max(0) as f32 / 15.0).clamp(0.0, 1.0),
+            (impact.longest_road_loss_inflicted.max(0) as f32 / 15.0).clamp(0.0, 1.0),
+            (impact.award_vp_swing as f32 / 2.0).clamp(-1.0, 1.0),
+            (impact.expansion_portfolio_delta / 30.0).clamp(0.0, 1.0),
+        ];
+
+        assert_eq!(encoded[0][BASE_ACTION_FEATURES..], expected);
+        assert_eq!(encoded[0].len(), ACTION_FEATURES);
+        assert!(encoded[0].iter().all(|value| value.is_finite()));
+        assert!(encoded[1][BASE_ACTION_FEATURES..].iter().all(|value| *value == 0.0));
+    }
 
     #[test]
     fn parameterized_actions_encode_the_target_board_quality_not_only_its_id() {

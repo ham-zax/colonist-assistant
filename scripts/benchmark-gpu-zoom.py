@@ -15,6 +15,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import math
@@ -60,7 +61,15 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("inputs", nargs="+", type=Path)
     parser.add_argument("--output", type=Path, default=Path("benchmark-results/gpu-zoom.json"))
     parser.add_argument("--checkpoint", type=Path)
-    parser.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
+    parser.add_argument(
+        "--device",
+        choices=["auto", "cuda", "cpu"],
+        default="cuda",
+        help=(
+            "Execution device (default: cuda). 'auto' may fall back to CPU and "
+            "must be requested explicitly."
+        ),
+    )
     parser.add_argument("--hidden", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--policy-epochs", type=int, default=4)
@@ -68,6 +77,14 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--policy-batch-groups", type=int, default=512)
     parser.add_argument("--learning-rate", type=float, default=0.004)
     parser.add_argument("--validation-fraction", type=float, default=0.15)
+    parser.add_argument("--validation-folds", type=int, default=1)
+    parser.add_argument("--validation-fold-index", type=int, default=0)
+    parser.add_argument(
+        "--baseline-action-features",
+        type=int,
+        default=0,
+        help="Zero action features at and after this index for the matched Task 15 ablation.",
+    )
     parser.add_argument("--max-samples", type=int, default=0)
     parser.add_argument("--seed", type=int, default=20260728)
     parser.add_argument("--inference-repeats", type=int, default=100)
@@ -89,13 +106,40 @@ def sync(device: torch.device) -> None:
         torch.cuda.synchronize(device)
 
 
-def terminal_records(paths: Iterable[Path]) -> list[dict]:
-    return [
-        record
-        for record in trainer.records(paths)
-        if bool(record.get("terminal", sum(record.get("outcome", [])) > 0))
-        and abs(sum(record.get("outcome", [])) - 1.0) < 1e-5
-    ]
+def teacher_records(paths: Iterable[Path]) -> list[dict]:
+    data = trainer.records(paths)
+    if sorted({int(record.get("schemaVersion", 1)) for record in data}) != [2]:
+        raise SystemExit("GPU zoom requires Task 15 strategic feature schema 2")
+    teacher_engines = sorted({str(record.get("engine", "")) for record in data})
+    if len(teacher_engines) != 1 or teacher_engines[0] not in {
+        "puct-teacher",
+        "native-gpu-teacher",
+    }:
+        raise SystemExit(
+            "GPU zoom requires a uniform single-teacher corpus "
+            "('puct-teacher' or 'native-gpu-teacher'); "
+            f"got {teacher_engines}. Refusing to mix incompatible policy semantics."
+        )
+    if teacher_engines[0] == "puct-teacher":
+        return [record for record in data if trainer.has_usable_teacher_value(record)]
+    return [record for record in data if trainer.has_usable_policy_teacher(record)]
+
+
+def held_out_groups(
+    values: Iterable[str], validation_fraction: float, fold_count: int, fold_index: int
+) -> set[str]:
+    if fold_count <= 1:
+        return trainer.validation_groups(values, validation_fraction)
+    unique = sorted(set(values))
+    if fold_count > len(unique):
+        raise SystemExit("--validation-folds cannot exceed independent board/chance groups")
+    if not 0 <= fold_index < fold_count:
+        raise SystemExit("--validation-fold-index must be within --validation-folds")
+    ranked = sorted(
+        unique,
+        key=lambda value: hashlib.sha256(value.encode("utf-8")).digest(),
+    )
+    return set(ranked[fold_index::fold_count])
 
 
 def initialize_linear(layer: nn.Linear, weight_std: float) -> None:
@@ -150,13 +194,15 @@ def segment_log_softmax(
 
 
 def policy_batch(
-    groups: list[tuple[np.ndarray, np.ndarray, str]], indices: np.ndarray, device: torch.device
+    groups: list[tuple[np.ndarray, np.ndarray, str, np.ndarray]],
+    indices: np.ndarray,
+    device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     features = []
     targets = []
     ids = []
     for local, source_index in enumerate(indices):
-        group_features, group_target, _ = groups[int(source_index)]
+        group_features, group_target, _, _ = groups[int(source_index)]
         features.append(group_features)
         targets.append(group_target)
         ids.append(np.full(len(group_target), local, dtype=np.int64))
@@ -191,9 +237,10 @@ def train_value(
             indices = shuffled[start : start + args.batch_size]
             batch_x = torch.from_numpy(x[indices]).to(device, non_blocking=True)
             batch_players = torch.from_numpy(players[indices]).to(device, non_blocking=True)
-            winners = torch.from_numpy(y[indices].argmax(axis=1)).to(device, non_blocking=True)
+            targets = torch.from_numpy(y[indices]).to(device, non_blocking=True)
             logits = mask_value_logits(model(batch_x), batch_players)
-            loss = nn.functional.cross_entropy(logits, winners)
+            log_probabilities = nn.functional.log_softmax(logits, dim=1)
+            loss = -(targets * log_probabilities).sum(dim=1).mean()
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_value_(model.parameters(), 1.5)
@@ -205,7 +252,7 @@ def train_value(
 
 def train_policy(
     model: PolicyNet,
-    groups: list[tuple[np.ndarray, np.ndarray, str]],
+    groups: list[tuple[np.ndarray, np.ndarray, str, np.ndarray]],
     train_indices: np.ndarray,
     args: argparse.Namespace,
     device: torch.device,
@@ -246,20 +293,24 @@ def value_metrics(
     players: np.ndarray,
     indices: np.ndarray,
     device: torch.device,
+    temperature: float | None = None,
 ) -> dict:
     with torch.inference_mode():
         batch_x = torch.from_numpy(x[indices]).to(device)
         batch_players = torch.from_numpy(players[indices]).to(device)
         logits = mask_value_logits(model(batch_x), batch_players)
         targets = torch.from_numpy(y[indices]).to(device)
-        candidates = torch.linspace(0.65, 2.5, 75, device=device)
-        losses = []
-        for temperature in candidates:
-            probabilities = torch.softmax(logits / temperature, dim=1)
-            losses.append(-(targets * probabilities.clamp_min(1e-8).log()).sum(dim=1).mean())
-        losses_tensor = torch.stack(losses)
-        best_index = int(losses_tensor.argmin().item())
-        temperature = float(candidates[best_index].item())
+        if temperature is None:
+            candidates = torch.linspace(0.65, 2.5, 75, device=device)
+            losses = []
+            for candidate_temperature in candidates:
+                probabilities = torch.softmax(logits / candidate_temperature, dim=1)
+                losses.append(
+                    -(targets * probabilities.clamp_min(1e-8).log()).sum(dim=1).mean()
+                )
+            losses_tensor = torch.stack(losses)
+            best_index = int(losses_tensor.argmin().item())
+            temperature = float(candidates[best_index].item())
         probabilities = torch.softmax(logits / temperature, dim=1)
         brier = ((probabilities - targets) ** 2).sum(dim=1).mean()
         log_loss = -(targets * probabilities.clamp_min(1e-8).log()).sum(dim=1).mean()
@@ -283,14 +334,18 @@ def value_metrics(
 
 def policy_metrics(
     model: PolicyNet,
-    groups: list[tuple[np.ndarray, np.ndarray, str]],
+    groups: list[tuple[np.ndarray, np.ndarray, str, np.ndarray]],
     indices: np.ndarray,
     batch_groups: int,
     device: torch.device,
+    teacher_engine: str,
 ) -> dict:
     weighted_loss = 0.0
     uniform_loss = 0.0
     seen = 0
+    action_regrets = []
+    expected_regrets = []
+    top1_matches = []
     with torch.inference_mode():
         for start in range(0, len(indices), batch_groups):
             batch = indices[start : start + batch_groups]
@@ -303,23 +358,50 @@ def policy_metrics(
             weighted_loss += float(group_losses.sum().item())
             uniform_loss += sum(math.log(max(1, len(groups[int(index)][1]))) for index in batch)
             seen += group_count
+        for index in indices:
+            features, target, _, teacher_values = groups[int(index)]
+            logits = model(torch.from_numpy(features).to(device))
+            probabilities = torch.softmax(logits, dim=0)
+            selected = int(logits.argmax().item())
+            if teacher_engine == "native-gpu-teacher":
+                # Native GPU policy labels are one-hot on the final authoritative
+                # decision. Its per-action value field is mean candidate VP, while
+                # final root selection uses terminal outcome, victory margin,
+                # tie-breaks, and possible exact/safety replacement. VP therefore
+                # cannot define a compatible scalar regret or value-head target.
+                top1_matches.append(selected == int(target.argmax()))
+                continue
+            teacher = torch.from_numpy(teacher_values).to(device)
+            teacher_best = teacher.max()
+            action_regrets.append(float((teacher_best - teacher[selected]).clamp_min(0).item()))
+            expected_regrets.append(
+                float((teacher_best - torch.dot(probabilities, teacher)).clamp_min(0).item())
+            )
+            top1_matches.append(selected == int(teacher.argmax().item()))
     return {
         "policyCrossEntropy": weighted_loss / max(1, seen),
         "uniformPolicyCrossEntropy": uniform_loss / max(1, seen),
+        "policyMeanActionRegret": float(np.mean(action_regrets)) if action_regrets else None,
+        "policyMeanExpectedActionRegret": (
+            float(np.mean(expected_regrets)) if expected_regrets else None
+        ),
+        "policyTeacherTop1Agreement": float(np.mean(top1_matches)) if top1_matches else None,
     }
 
 
 def inference_throughput(
-    value_model: ValueNet,
+    value_model: ValueNet | None,
     policy_model: PolicyNet,
     x: np.ndarray,
-    groups: list[tuple[np.ndarray, np.ndarray, str]],
+    groups: list[tuple[np.ndarray, np.ndarray, str, np.ndarray]],
     args: argparse.Namespace,
     device: torch.device,
 ) -> dict:
     value_count = min(max(len(x), args.batch_size), 65_536)
-    value_source = np.resize(x, (value_count, x.shape[1])).astype(np.float32, copy=False)
-    value_tensor = torch.from_numpy(value_source).to(device)
+    value_tensor = None
+    if value_model is not None:
+        value_source = np.resize(x, (value_count, x.shape[1])).astype(np.float32, copy=False)
+        value_tensor = torch.from_numpy(value_source).to(device)
     policy_source = np.concatenate([group[0] for group in groups[: min(len(groups), 2048)]])
     if len(policy_source) < args.batch_size:
         policy_source = np.resize(
@@ -329,25 +411,32 @@ def inference_throughput(
     policy_tensor = torch.from_numpy(policy_source).to(device)
 
     warmup = min(10, args.inference_repeats)
+    value_seconds = None
     with torch.inference_mode():
         for _ in range(warmup):
-            value_model(value_tensor)
+            if value_model is not None and value_tensor is not None:
+                value_model(value_tensor)
             policy_model(policy_tensor)
         sync(device)
-        started = time.perf_counter()
-        for _ in range(args.inference_repeats):
-            value_model(value_tensor)
-        sync(device)
-        value_seconds = time.perf_counter() - started
+        if value_model is not None and value_tensor is not None:
+            started = time.perf_counter()
+            for _ in range(args.inference_repeats):
+                value_model(value_tensor)
+            sync(device)
+            value_seconds = time.perf_counter() - started
         started = time.perf_counter()
         for _ in range(args.inference_repeats):
             policy_model(policy_tensor)
         sync(device)
         policy_seconds = time.perf_counter() - started
     return {
-        "valuePositionsPerSecond": value_count * args.inference_repeats / max(value_seconds, 1e-9),
+        "valuePositionsPerSecond": (
+            value_count * args.inference_repeats / max(value_seconds, 1e-9)
+            if value_seconds is not None
+            else None
+        ),
         "policyActionsPerSecond": len(policy_tensor) * args.inference_repeats / max(policy_seconds, 1e-9),
-        "valueBatch": value_count,
+        "valueBatch": value_count if value_model is not None else None,
         "policyBatch": len(policy_tensor),
     }
 
@@ -356,6 +445,13 @@ def main() -> None:
     args = arguments()
     if args.hidden < 1 or args.batch_size < 1 or args.policy_batch_groups < 1:
         raise SystemExit("hidden and batch sizes must be positive")
+    baseline_requested = args.baseline_action_features > 0
+    if baseline_requested and not trainer.is_task15_baseline(0, args.baseline_action_features):
+        raise SystemExit(
+            "Task 15 GPU feature comparison requires the exact old representation: "
+            "--baseline-action-features 48. Omit the option for a candidate-only "
+            "screen."
+        )
     device = choose_device(args.device)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -363,47 +459,83 @@ def main() -> None:
         torch.cuda.manual_seed_all(args.seed)
         torch.cuda.reset_peak_memory_stats(device)
 
-    data = terminal_records(args.inputs)
+    data = teacher_records(args.inputs)
     if args.max_samples > 0:
         data = data[: args.max_samples]
     if len(data) < 50:
-        raise SystemExit("Need at least 50 terminal expert samples")
+        raise SystemExit("Need at least 50 expert teacher samples")
+    teacher_engine = str(data[0]["engine"])
+    value_teacher_available = teacher_engine == "puct-teacher"
+    if args.checkpoint and not value_teacher_available:
+        raise SystemExit(
+            "--checkpoint requires puct-teacher value semantics; native-gpu-teacher "
+            "records are policy-only screening evidence"
+        )
 
     x = np.asarray([record["stateFeatures"] for record in data], dtype=np.float32)
-    y = np.asarray([trainer.relative_outcome(record) for record in data], dtype=np.float32)
-    players = np.asarray([record["players"] for record in data], dtype=np.int64)
+    y = (
+        np.asarray(
+            [trainer.relative_teacher_value(record) for record in data], dtype=np.float32
+        )
+        if value_teacher_available
+        else None
+    )
+    players = (
+        np.asarray([record["players"] for record in data], dtype=np.int64)
+        if value_teacher_available
+        else None
+    )
     state_groups = [
         f'{record.get("boardSeed", "unknown")}:{record.get("chanceSeed", "unknown")}'
         for record in data
     ]
-    held_out_groups = trainer.validation_groups(state_groups, args.validation_fraction)
-    held_out = np.asarray([group in held_out_groups for group in state_groups], dtype=bool)
+    held_out_group_keys = held_out_groups(
+        state_groups,
+        args.validation_fraction,
+        args.validation_folds,
+        args.validation_fold_index,
+    )
+    held_out = np.asarray([group in held_out_group_keys for group in state_groups], dtype=bool)
     train_indices = np.flatnonzero(~held_out)
     validation_indices = np.flatnonzero(held_out)
 
     groups = trainer.policy_groups(data)
     if not groups:
         raise SystemExit("Expert data contains no searched action groups")
-    group_validation = np.asarray([group[2] in held_out_groups for group in groups], dtype=bool)
+    group_validation = np.asarray(
+        [group[2] in held_out_group_keys for group in groups], dtype=bool
+    )
     policy_train = np.flatnonzero(~group_validation)
     policy_validation = np.flatnonzero(group_validation)
     if not len(policy_train) or not len(policy_validation):
         raise SystemExit("Grouped policy split must contain training and validation games")
 
-    value_model = ValueNet(x.shape[1], args.hidden).to(device)
+    action_widths = sorted({group[0].shape[1] - x.shape[1] for group in groups})
+    if len(action_widths) != 1 or not trainer.is_task15_action_width(action_widths[0]):
+        raise SystemExit(
+            "GPU zoom requires exactly 52 Task 15 action features, "
+            f"got {action_widths}"
+        )
+    action_width = action_widths[0]
+    if args.baseline_action_features < 0 or args.baseline_action_features > action_width:
+        raise SystemExit("--baseline-action-features must be within the action feature width")
+    value_model = ValueNet(x.shape[1], args.hidden).to(device) if value_teacher_available else None
     policy_model = PolicyNet(groups[0][0].shape[1], args.hidden).to(device)
     rng = np.random.default_rng(args.seed)
 
-    value_seconds, value_examples = train_value(
-        value_model,
-        x,
-        y,
-        players,
-        train_indices,
-        args,
-        device,
-        rng,
-    )
+    value_seconds = None
+    value_examples = 0
+    if value_model is not None and y is not None and players is not None:
+        value_seconds, value_examples = train_value(
+            value_model,
+            x,
+            y,
+            players,
+            train_indices,
+            args,
+            device,
+            rng,
+        )
     policy_seconds, policy_groups_seen, policy_actions_seen = train_policy(
         policy_model,
         groups,
@@ -412,7 +544,34 @@ def main() -> None:
         device,
         rng,
     )
-    metrics = value_metrics(value_model, x, y, players, validation_indices, device)
+    training_metrics = {}
+    if value_model is not None and y is not None and players is not None:
+        training_metrics.update(
+            value_metrics(value_model, x, y, players, train_indices, device)
+        )
+    training_metrics.update(
+        policy_metrics(
+            policy_model,
+            groups,
+            policy_train,
+            args.policy_batch_groups,
+            device,
+            teacher_engine,
+        )
+    )
+    metrics = {}
+    if value_model is not None and y is not None and players is not None:
+        metrics.update(
+            value_metrics(
+                value_model,
+                x,
+                y,
+                players,
+                validation_indices,
+                device,
+                temperature=training_metrics["temperature"],
+            )
+        )
     metrics.update(
         policy_metrics(
             policy_model,
@@ -420,16 +579,164 @@ def main() -> None:
             policy_validation,
             args.policy_batch_groups,
             device,
+            teacher_engine,
         )
     )
     metrics["throughput"] = {
-        "valueTrainingExamplesPerSecond": value_examples / max(value_seconds, 1e-9),
+        "valueTrainingExamplesPerSecond": (
+            value_examples / max(value_seconds, 1e-9) if value_seconds is not None else None
+        ),
         "policyTrainingGroupsPerSecond": policy_groups_seen / max(policy_seconds, 1e-9),
         "policyTrainingActionsPerSecond": policy_actions_seen / max(policy_seconds, 1e-9),
         "valueTrainingSeconds": value_seconds,
         "policyTrainingSeconds": policy_seconds,
         **inference_throughput(value_model, policy_model, x, groups, args, device),
     }
+
+    baseline_metrics = None
+    baseline_training_metrics = None
+    feature_comparison = None
+    if args.baseline_action_features > 0:
+        baseline_groups = trainer.policy_groups(
+            data, zero_action_tail_from=args.baseline_action_features
+        )
+        torch.manual_seed(args.seed)
+        if device.type == "cuda":
+            torch.cuda.manual_seed_all(args.seed)
+        baseline_value_model = (
+            ValueNet(x.shape[1], args.hidden).to(device) if value_teacher_available else None
+        )
+        baseline_policy_model = PolicyNet(
+            baseline_groups[0][0].shape[1], args.hidden
+        ).to(device)
+        baseline_rng = np.random.default_rng(args.seed)
+        if baseline_value_model is not None and y is not None and players is not None:
+            train_value(
+                baseline_value_model,
+                x,
+                y,
+                players,
+                train_indices,
+                args,
+                device,
+                baseline_rng,
+            )
+        train_policy(
+            baseline_policy_model,
+            baseline_groups,
+            policy_train,
+            args,
+            device,
+            baseline_rng,
+        )
+        baseline_training_metrics = {}
+        if baseline_value_model is not None and y is not None and players is not None:
+            baseline_training_metrics.update(
+                value_metrics(
+                    baseline_value_model, x, y, players, train_indices, device
+                )
+            )
+        baseline_training_metrics.update(
+            policy_metrics(
+                baseline_policy_model,
+                baseline_groups,
+                policy_train,
+                args.policy_batch_groups,
+                device,
+                teacher_engine,
+            )
+        )
+        baseline_metrics = {}
+        if baseline_value_model is not None and y is not None and players is not None:
+            baseline_metrics.update(
+                value_metrics(
+                    baseline_value_model,
+                    x,
+                    y,
+                    players,
+                    validation_indices,
+                    device,
+                    temperature=baseline_training_metrics["temperature"],
+                )
+            )
+        baseline_metrics.update(
+            policy_metrics(
+                baseline_policy_model,
+                baseline_groups,
+                policy_validation,
+                args.policy_batch_groups,
+                device,
+                teacher_engine,
+            )
+        )
+        tolerance = 1e-6
+        policy_cross_entropy_improvement = (
+            baseline_metrics["policyCrossEntropy"] - metrics["policyCrossEntropy"]
+        )
+        top1_improvement = (
+            metrics["policyTeacherTop1Agreement"]
+            - baseline_metrics["policyTeacherTop1Agreement"]
+        )
+        feature_comparison = {
+            "policyCrossEntropyImprovement": policy_cross_entropy_improvement,
+            "policyTeacherTop1AgreementImprovement": top1_improvement,
+            "policyCrossEntropyPassed": policy_cross_entropy_improvement >= -tolerance,
+            "teacherTop1AgreementPassed": top1_improvement >= -tolerance,
+            "valueLogLossImprovement": None,
+            "valueBrierImprovement": None,
+            "policyActionRegretImprovement": None,
+            "policyExpectedRegretImprovement": None,
+            "valueLogLossPassed": None,
+            "valueBrierPassed": None,
+            "actionRegretPassed": None,
+            "expectedRegretPassed": None,
+        }
+        if value_teacher_available:
+            action_regret_improvement = (
+                baseline_metrics["policyMeanActionRegret"]
+                - metrics["policyMeanActionRegret"]
+            )
+            expected_regret_improvement = (
+                baseline_metrics["policyMeanExpectedActionRegret"]
+                - metrics["policyMeanExpectedActionRegret"]
+            )
+            value_log_loss_improvement = (
+                baseline_metrics["valueLogLoss"] - metrics["valueLogLoss"]
+            )
+            value_brier_improvement = baseline_metrics["valueBrier"] - metrics["valueBrier"]
+            feature_comparison.update(
+                {
+                    "valueLogLossImprovement": value_log_loss_improvement,
+                    "valueBrierImprovement": value_brier_improvement,
+                    "policyActionRegretImprovement": action_regret_improvement,
+                    "policyExpectedRegretImprovement": expected_regret_improvement,
+                    "valueLogLossPassed": value_log_loss_improvement >= -tolerance,
+                    "valueBrierPassed": value_brier_improvement >= -tolerance,
+                    "actionRegretPassed": action_regret_improvement >= -tolerance,
+                    "expectedRegretPassed": expected_regret_improvement >= -tolerance,
+                }
+            )
+            feature_comparison["accepted"] = all(
+                feature_comparison[key]
+                for key in (
+                    "policyCrossEntropyPassed",
+                    "valueLogLossPassed",
+                    "valueBrierPassed",
+                    "actionRegretPassed",
+                    "expectedRegretPassed",
+                )
+            )
+        else:
+            # Native-GPU screening has a final-choice policy teacher only. The
+            # closest valid decision-quality metrics are held-out policy
+            # cross-entropy and final chosen-action agreement.
+            feature_comparison["accepted"] = bool(
+                feature_comparison["policyCrossEntropyPassed"]
+                and feature_comparison["teacherTop1AgreementPassed"]
+            )
+
+    training_group_keys = sorted(set(state_groups) - held_out_group_keys)
+    validation_group_keys = sorted(held_out_group_keys)
     result = {
         "schemaVersion": 1,
         "kind": "colonist-gpu-zoom-benchmark",
@@ -443,14 +750,48 @@ def main() -> None:
         "policyGroups": len(groups),
         "policyActions": int(sum(len(group[1]) for group in groups)),
         "stateFeatures": int(x.shape[1]),
-        "actionFeatures": int(groups[0][0].shape[1] - x.shape[1]),
+        "actionFeatures": int(action_width),
+        "baselineActionFeatures": (
+            args.baseline_action_features if args.baseline_action_features > 0 else None
+        ),
+        "baselineEvaluated": bool(
+            trainer.is_task15_baseline(0, args.baseline_action_features)
+            and baseline_metrics is not None
+        ),
+        "featureAblationPassed": bool(
+            trainer.is_task15_baseline(0, args.baseline_action_features)
+            and feature_comparison is not None
+            and feature_comparison.get("accepted") is True
+        ),
+        "teacherEngines": [teacher_engine],
+        "valueTeacherAvailable": value_teacher_available,
+        "valueTargetSemantics": (
+            "normalized-strategic-relative" if value_teacher_available else None
+        ),
+        "policyTargetSemantics": (
+            "puct-visit-share"
+            if teacher_engine == "puct-teacher"
+            else "native-final-choice-one-hot"
+        ),
+        "trainingStateGroups": len(training_group_keys),
+        "validationStateGroups": len(validation_group_keys),
+        "policyTrainingGroups": len(policy_train),
+        "policyValidationGroups": len(policy_validation),
+        "validationFolds": args.validation_folds,
+        "validationFoldIndex": args.validation_fold_index,
+        "trainingGroupKeys": training_group_keys,
+        "validationGroupKeys": validation_group_keys,
         "hidden": args.hidden,
-        "epochs": args.epochs,
+        "epochs": args.epochs if value_teacher_available else 0,
         "policyEpochs": args.policy_epochs,
         "batchSize": args.batch_size,
         "policyBatchGroups": args.policy_batch_groups,
         "seed": args.seed,
+        "trainingMetrics": training_metrics,
         "metrics": metrics,
+        "baselineTrainingMetrics": baseline_training_metrics,
+        "baselineHeldOutMetrics": baseline_metrics,
+        "featureComparison": feature_comparison,
         "peakGpuMemoryMiB": (
             torch.cuda.max_memory_allocated(device) / (1024 * 1024)
             if device.type == "cuda"
@@ -461,6 +802,7 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     if args.checkpoint:
+        assert value_model is not None
         args.checkpoint.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
             {

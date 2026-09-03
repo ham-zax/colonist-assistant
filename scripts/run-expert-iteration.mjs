@@ -184,6 +184,8 @@ for (let generation = 0; generation < options.generations; generation += 1) {
       metrics,
       "--seed",
       String(options.seed + generation),
+      "--baseline-action-features",
+      "48",
     ],
     ROOT,
   );

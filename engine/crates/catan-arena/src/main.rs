@@ -17,9 +17,10 @@ use colonist_catan_core::{
 };
 use colonist_catan_search::{
     BeliefDepthConfig, BeliefParticle, BeliefSearchProvenance, DepthActionValue, ENGINE_REVISION,
-    Mcts, RootPromotionReason, RootPruneReason, SearchConfig, SearchMode, SearchReport,
-    action_prior, choose_rollout_action, compute_spatial_root_impacts, encode_action,
-    encode_heterogeneous_graph, evaluate, expansion_option_value, pool_heterogeneous_graph,
+    Mcts, RootPromotionReason, RootPruneReason, STRATEGIC_FEATURE_SCHEMA_VERSION, SearchConfig,
+    SearchMode, SearchReport, action_prior, choose_rollout_action, compute_spatial_root_impacts,
+    encode_actions, encode_heterogeneous_graph, evaluate, expansion_option_value,
+    pool_heterogeneous_graph,
     production_pips, search_maxn_bounded_timed, search_paranoid_bounded_timed,
     search_weighted_belief_maxn_with_config, search_weighted_belief_paranoid_with_config,
     strategic_utility, trade_acceptance_features,
@@ -2276,6 +2277,114 @@ struct ExpertSample {
     terminal: bool,
 }
 
+fn native_gpu_value_vector(value: &Value, field: &str) -> Result<[f32; 4], String> {
+    let values = value
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("native GPU response omitted {field}"))?;
+    if values.len() != 4 {
+        return Err(format!("native GPU {field} must contain four values"));
+    }
+    let mut output = [0.0f32; 4];
+    for (index, value) in values.iter().enumerate() {
+        output[index] = value
+            .as_f64()
+            .map(|value| value as f32)
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| format!("native GPU {field}[{index}] is not finite"))?;
+    }
+    Ok(output)
+}
+
+fn native_gpu_expert_sample(
+    state: &GameState,
+    board_seed: u64,
+    chance_seed: u64,
+    response: &Value,
+) -> Result<ExpertSample, String> {
+    let actor = state.actor();
+    let native_actions = response
+        .get("actions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "native GPU response omitted actions".to_string())?;
+    if native_actions.is_empty() {
+        return Err("native GPU response contained no teacher actions".to_string());
+    }
+
+    let mut parsed = Vec::with_capacity(native_actions.len());
+    for entry in native_actions {
+        let action = native_gpu_action(
+            entry
+                .get("action")
+                .ok_or_else(|| "native GPU teacher action omitted action".to_string())?,
+        )?;
+        let visits = entry
+            .get("visits")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| "native GPU teacher action omitted valid visits".to_string())?;
+        let value = native_gpu_value_vector(entry, "value")?;
+        parsed.push((action, visits, value));
+    }
+    // Racing sample counts measure ambiguity, not preference: an ambiguous
+    // root receives more GPU samples precisely because it needed more
+    // measurement. The policy teacher is therefore one-hot on the final native
+    // decision, never visits/total_visits. Using `chosen` also covers protocol
+    // phases where root provenance intentionally has no search winner.
+    let teacher_winner = response
+        .get("chosen")
+        .ok_or_else(|| "native GPU response omitted chosen".to_string())
+        .and_then(native_gpu_action)?;
+    if !parsed
+        .iter()
+        .any(|(action, _, _)| *action == teacher_winner)
+    {
+        return Err("native GPU chosen action is not among the teacher actions".to_string());
+    }
+
+    let root_search_value = native_gpu_value_vector(response, "rootValue")?;
+    let player_count = state.board.num_players as usize;
+    if root_search_value[..player_count].iter().sum::<f32>() <= f32::EPSILON {
+        return Err("native GPU rootValue contains no positive teacher mass".to_string());
+    }
+    let actions_for_features = parsed
+        .iter()
+        .map(|(action, _, _)| action.clone())
+        .collect::<Vec<_>>();
+    let encoded_actions = encode_actions(state, &actions_for_features);
+    let actions = parsed
+        .into_iter()
+        .zip(encoded_actions)
+        .map(|((action, visits, search_value), features)| ExpertActionSample {
+            key: format!("{action:?}"),
+            features: features.to_vec(),
+            visits,
+            policy: f32::from(action == teacher_winner),
+            search_value,
+        })
+        .collect();
+    let graph = encode_heterogeneous_graph(state, actor, false);
+
+    Ok(ExpertSample {
+        schema_version: STRATEGIC_FEATURE_SCHEMA_VERSION,
+        state_hash: format!("{:016x}", state.observation_hash(actor)),
+        board_seed,
+        chance_seed,
+        turn: state.turn,
+        phase: format!("{:?}", state.phase),
+        actor,
+        actor_victory_points: state.players[actor as usize].victory_points(),
+        players: state.board.num_players,
+        engine: "native-gpu-teacher".to_string(),
+        state_features: pool_heterogeneous_graph(&graph, actor).to_vec(),
+        actions,
+        root_search_value,
+        winner: u8::MAX,
+        outcome: [0.0; 4],
+        terminal: false,
+    })
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TradeSample {
@@ -2862,7 +2971,26 @@ fn play_game_from_state(
                 metrics.search_action_values[actor] += choice.action_values.len() as u64;
             }
             let should_record_expert = config.expert_output.is_some()
-                && metrics.decision_count[actor] % config.expert_stride == 0;
+                && metrics.decision_count[actor] % config.expert_stride == 0
+                && (!config.takeover_root_only || state.phase == Phase::Main);
+            let should_record_native_gpu_expert = config.expert_output.is_some()
+                && metrics.decision_count[actor] % config.expert_stride == 0
+                && first_root_pending
+                && config.takeover_native_gpu_host.is_some()
+                && config.expert_iterations == 0;
+            if should_record_native_gpu_expert
+                && let Some(response) = metrics.native_gpu_initial_diagnostics[actor].as_ref()
+            {
+                expert_samples.push(
+                    native_gpu_expert_sample(&state, board_seed, chance_seed, response)
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "native GPU expert conversion failed at state {:016x}: {error}",
+                                state.state_hash()
+                            )
+                        }),
+                );
+            }
             let teacher_report = if should_record_expert && config.expert_iterations > 0 {
                 let teacher_particles = search_belief_particles(&state, config);
                 let search = expert_searches[actor]
@@ -2886,6 +3014,18 @@ fn play_game_from_state(
             }
             if should_record_expert
                 && let Some(report) = teacher_report.as_ref().or(choice.search.as_ref())
+                && !report.actions.is_empty()
+                && report
+                    .root_value
+                    .iter()
+                    .take(state.board.num_players as usize)
+                    .all(|value| value.is_finite())
+                && report
+                    .root_value
+                    .iter()
+                    .take(state.board.num_players as usize)
+                    .sum::<f32>()
+                    > f32::EPSILON
             {
                 let graph = encode_heterogeneous_graph(&state, actor as u8, false);
                 let state_features = pool_heterogeneous_graph(&graph, actor as u8).to_vec();
@@ -2895,19 +3035,26 @@ fn play_game_from_state(
                     .map(|sample| sample.visits)
                     .sum::<u32>()
                     .max(1);
+                let report_actions = report
+                    .actions
+                    .iter()
+                    .map(|sample| sample.action.clone())
+                    .collect::<Vec<_>>();
+                let encoded_actions = encode_actions(&state, &report_actions);
                 let actions = report
                     .actions
                     .iter()
-                    .map(|sample| ExpertActionSample {
+                    .zip(encoded_actions)
+                    .map(|(sample, features)| ExpertActionSample {
                         key: format!("{:?}", sample.action),
-                        features: encode_action(&state, &sample.action).to_vec(),
+                        features: features.to_vec(),
                         visits: sample.visits,
                         policy: sample.visits as f32 / visit_total as f32,
                         search_value: sample.value,
                     })
                     .collect();
                 expert_samples.push(ExpertSample {
-                    schema_version: 1,
+                    schema_version: STRATEGIC_FEATURE_SCHEMA_VERSION,
                     state_hash: format!("{:016x}", state.observation_hash(actor as u8),),
                     board_seed,
                     chance_seed,
@@ -3164,9 +3311,13 @@ fn play_game_from_state(
             });
         }
         if config.takeover_root_only
-            && config
-                .takeover_target_seat
-                .is_some_and(|seat| metrics.first_decisions[seat as usize].is_some())
+            && config.takeover_target_seat.is_some_and(|seat| {
+                if config.expert_output.is_some() {
+                    !expert_samples.is_empty()
+                } else {
+                    metrics.first_decisions[seat as usize].is_some()
+                }
+            })
         {
             break;
         }
@@ -3346,6 +3497,12 @@ fn run_takeover_mode(config: &Config) {
         BufWriter::new(File::create(output_path).unwrap_or_else(|error| {
             panic!("failed to create takeover output {output_path}: {error}")
         }));
+    let mut expert_output = config.expert_output.as_ref().map(|path| {
+        BufWriter::new(
+            File::create(path)
+                .unwrap_or_else(|error| panic!("failed to create expert data {path}: {error}")),
+        )
+    });
     let mut native_gpu = config.takeover_native_gpu_host.as_deref().map(|path| {
         NativeGpuClient::spawn(path).unwrap_or_else(|error| {
             panic!("failed to initialize takeover native GPU host: {error}")
@@ -3444,6 +3601,14 @@ fn run_takeover_mode(config: &Config) {
             policy_rngs,
             native_gpu.as_mut(),
         );
+        if let Some(writer) = &mut expert_output {
+            for sample in &result.expert_samples {
+                serde_json::to_writer(&mut *writer, sample).expect("expert sample must serialize");
+                writer
+                    .write_all(b"\n")
+                    .expect("expert data must be writable");
+            }
+        }
         let metrics = &result.metrics;
         let decisions = metrics.decision_count[target].max(1) as f64;
         let searches = metrics.search_decision_count[target].max(1) as f64;
@@ -3553,6 +3718,9 @@ fn run_takeover_mode(config: &Config) {
             .write_all(b"\n")
             .expect("takeover outcome must be writable");
         output.flush().expect("takeover outcome must flush");
+    }
+    if let Some(writer) = &mut expert_output {
+        writer.flush().expect("expert data must flush");
     }
 }
 
@@ -4108,6 +4276,53 @@ mod tests {
         ArenaResult, Config, Engine, GameMetrics, GameResult, PartialArenaMetrics,
         belief_particles, information_mode, play_game, search_belief_particles, write_checkpoint,
     };
+
+    #[test]
+    fn native_gpu_teacher_policy_is_one_hot_on_final_choice_not_visits() {
+        use colonist_catan_core::GameState;
+
+        use super::{STRATEGIC_FEATURE_SCHEMA_VERSION, native_gpu_expert_sample};
+
+        let state = GameState::standard(1, 4);
+        // The ambiguous root received far more racing samples. Those counts
+        // measure ambiguity, not preference, and must not leak into policy.
+        let response = serde_json::json!({
+            "actions": [
+                {"action": {"kind": "roll"}, "visits": 900, "value": [1.0, 2.0, 2.0, 2.0]},
+                {"action": {"kind": "end-turn"}, "visits": 100, "value": [3.0, 1.0, 1.0, 1.0]},
+            ],
+            "rootValue": [3.0, 1.0, 1.0, 1.0],
+            "chosen": {"kind": "end-turn"},
+        });
+        let sample = native_gpu_expert_sample(&state, 7, 9, &response)
+            .expect("final-choice teacher sample must convert");
+        assert_eq!(sample.engine, "native-gpu-teacher");
+        assert_eq!(sample.schema_version, STRATEGIC_FEATURE_SCHEMA_VERSION);
+        let policies = sample
+            .actions
+            .iter()
+            .map(|action| action.policy)
+            .collect::<Vec<_>>();
+        assert_eq!(policies, vec![0.0, 1.0]);
+        assert_eq!(sample.actions[0].visits, 900);
+
+        let missing_choice = serde_json::json!({
+            "actions": [
+                {"action": {"kind": "roll"}, "visits": 10, "value": [1.0, 1.0, 1.0, 1.0]},
+            ],
+            "rootValue": [1.0, 1.0, 1.0, 1.0],
+        });
+        assert!(native_gpu_expert_sample(&state, 7, 9, &missing_choice).is_err());
+
+        let unmatched_choice = serde_json::json!({
+            "actions": [
+                {"action": {"kind": "roll"}, "visits": 10, "value": [1.0, 1.0, 1.0, 1.0]},
+            ],
+            "rootValue": [1.0, 1.0, 1.0, 1.0],
+            "chosen": {"kind": "end-turn"},
+        });
+        assert!(native_gpu_expert_sample(&state, 7, 9, &unmatched_choice).is_err());
+    }
 
     #[test]
     fn maxn_is_the_default_and_legacy_names_resolve_explicitly() {

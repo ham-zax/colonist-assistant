@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "kind": "colonist-task15-gpu-evidence-provenance",
+  "sourceSnapshots": {
+    "committed": false,
+    "count": 77,
+    "boardChanceGroups": 24,
+    "players": [
+      3,
+      4
+    ],
+    "sourceGitShas": [
+      "4caebe4e5ee2540c4739f746a8b43ffa196b5177"
+    ],
+    "sourceBuildDirty": [
+      true
+    ],
+    "sha256": "1390df76be3082e54cb2f89671a2797ae5c0b0811f50d1635f19e8cba013e3d5"
+  },
+  "nativeGpuTeacher": {
+    "expertCorpusCommitted": false,
+    "count": 77,
+    "teacherEngines": [
+      "native-gpu-teacher"
+    ],
+    "schemaVersions": [
+      2
+    ],
+    "decisionRevisions": [
+      "9668af033e69ce58f240d27952038541deeadfdf"
+    ],
+    "buildGitShas": [
+      "9668af033e69ce58f240d27952038541deeadfdf"
+    ],
+    "buildDirty": [
+      true
+    ],
+    "engineRevisions": [
+      "deep-maxn-v10"
+    ],
+    "gpuNames": [
+      "NVIDIA GeForce RTX 3070 Ti"
+    ],
+    "ptxSha256": [
+      "9c833ea2232a082b8c8c2d538b308d0363d13fab18515fe818b31830420eb9d4"
+    ],
+    "deadlineReachedCount": 0,
+    "illegalActionFailures": 0,
+    "protocolFailures": 0,
+    "expertCorpusSha256": "555a2b45539a078c90c06840ef9c3e0d5798627da67ef2ac48e45c87e44e4e92",
+    "rawOutcomesSha256": "544591d7c531c523ffe2bde1754336ecb969b88608ca1b8438dd24a2039b5471",
+    "rawOutcomesCommitted": false
+  },
+  "supersededFoldOutputsSha256": {
+    "gpu-onehot-fold-0.json": "41499b254012aba40415f9abe8bd3a95f1ecb293a26c63a6d6dd4246b4aac8d1",
+    "gpu-onehot-fold-1.json": "f3d86d5f9213f1a52c07fa9b24711f8598054619b4a84492d6c4cf357d87243a",
+    "gpu-onehot-fold-2.json": "931ca01cd40d42cebaee6bebdec768e66402f96c0fff1cbed9cc3c5383af295d",
+    "gpu-onehot-fold-3.json": "08b3f2155785c889101c3a0a3c0e3a3261f93a3ca39ce52ad730aa9d19e62672",
+    "gpu-onehot-fold-4.json": "c74d25a869ab4a499691abc9c5d515ce113b9cb7656b7f3ef074f9c8c5bb9b49"
+  },
+  "notes": [
+    "The native GPU run recorded buildDirty=true at decision revision 9668af0.",
+    "Wave 7 does not modify engine/crates/catan-wasm/src/native_gpu.rs; the dirty flag came from other worktree changes.",
+    "The generated expert corpus used one-hot final native decisions; adaptive racing sample counts are not policy preference mass.",
+    "The preserved folds predate the policy-only correction and incorrectly used rollout VP diagnostics for value, regret, and top-1 metrics; their acceptance fields are superseded.",
+    "The raw 8 MB takeover outcomes are not committed; their SHA-256 is retained above.",
+    "The corrected policy-only five-fold CUDA screen ran at clean commit ecadf07 and rejected the 52-feature candidate versus the exact 48-feature baseline.",
+    "No raw corrected fold output is committed; its SHA-256 values are retained under correctedPolicyOnlyScreen."
+  ],
+  "supersededHistoricalSummarySha256": "d1eb0ac797c2cabb18682bf998769a461aea1dfbdb7d0b8e8735cec56b7b5d0e",
+  "correctedPolicyOnlyScreen": {
+    "valid": true,
+    "benchmarkCommit": "ecadf07e0fcf2eca4db0103a0b370d70504b8bdd",
+    "benchmarkScriptSha256": "bb45a23c54161dd9f00b28016ea84a7b0675ae98c44a94f448180fb7fe56eee9",
+    "expertCorpusSha256": "555a2b45539a078c90c06840ef9c3e0d5798627da67ef2ac48e45c87e44e4e92",
+    "device": "cuda",
+    "gpu": "NVIDIA GeForce RTX 3070 Ti",
+    "folds": 5,
+    "policyGroups": 65,
+    "foldOutputsCommitted": false,
+    "foldOutputsSha256": {
+      "fold-0.json": "1d8ed0dd227c1d3805148ced31d271a8603cdc2f76f0f095a9e1dce7c66d2514",
+      "fold-1.json": "1f00452c048729dc1bb907d59cca0e02d6ef2125e41eed84b2aedc3423e10239",
+      "fold-2.json": "f76c71ca241b976f4e58f982898d7d64c2041791b6aba788b6a21cc9e7b7c1ce",
+      "fold-3.json": "71f37a42005497d2ea47df52bc9213e37c6c3e509a2a40cb85a6777ffcb79ea1",
+      "fold-4.json": "6afe324651d7fe4fc60a4e4c3b22295b53ca9f189c6454af82a879111527e3b6"
+    },
+    "featureAblationSupported": false,
+    "promotionQualified": false
+  }
+}

@@ -1,8 +1,8 @@
 use colonist_catan_core::{Action, GameState};
 
 use crate::features::{
-    ACTION_FEATURES, STATE_FEATURES, encode_action, encode_heterogeneous_graph,
-    pool_heterogeneous_graph,
+    ACTION_FEATURES, STATE_FEATURES, STRATEGIC_FEATURE_SCHEMA_VERSION, encode_actions,
+    encode_heterogeneous_graph, pool_heterogeneous_graph,
 };
 
 #[allow(clippy::excessive_precision)]
@@ -15,7 +15,8 @@ pub fn learned_model_version() -> &'static str {
 }
 
 pub fn learned_model_ready() -> bool {
-    weights::VALUE_HIDDEN > 0
+    weights::STRATEGIC_FEATURE_SCHEMA_VERSION == STRATEGIC_FEATURE_SCHEMA_VERSION
+        && weights::VALUE_HIDDEN > 0
         && weights::POLICY_HIDDEN > 0
         && weights::VALUE_W1.len() == weights::VALUE_HIDDEN * STATE_FEATURES
         && weights::VALUE_W2.len() == weights::VALUE_HIDDEN * 4
@@ -123,11 +124,11 @@ pub fn learned_action_logits(state: &GameState, actions: &[Action]) -> Option<Ve
                     .sum::<f32>()
         })
         .collect::<Vec<_>>();
+    let action_features = encode_actions(state, actions);
     Some(
-        actions
+        action_features
             .iter()
-            .map(|action| {
-                let action_features = encode_action(state, action);
+            .map(|action_features| {
                 weights::POLICY_B2
                     + (0..weights::POLICY_HIDDEN)
                         .map(|unit| {
@@ -161,7 +162,7 @@ mod tests {
     fn under_supported_checkpoint_cannot_supply_production_heads() {
         let state = GameState::standard(229, 4);
 
-        assert!(learned_model_ready());
+        assert!(!learned_model_ready());
         assert!(!learned_value_promoted());
         assert!(!learned_policy_promoted());
         assert!(learned_value(&state).is_none());

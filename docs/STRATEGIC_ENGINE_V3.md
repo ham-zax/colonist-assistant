@@ -220,11 +220,17 @@ uncertain threats remain available to normal strategic search.
 
 ## Learned models
 
-The Expert Iteration tooling can record diagnostic search targets and terminal
-outcomes from a league of MaxN, experimental belief PUCT, AlphaBeta, UCT,
-weighted, and style-varied opponents. A heterogeneous graph represents hexes,
-vertices, edges, players, the bank, development deck, and parameterized legal
-actions.
+The Expert Iteration checkpoint tooling records high-budget PUCT teacher visits
+and normalized strategic root-value vectors. The schema-2 native-GPU path instead
+provides a policy-only screen with a one-hot target on the final native decision;
+its adaptive-racing sample counts and rollout VP vectors are diagnostics, not
+policy preference mass or checkpoint value targets. Schema-2 PUCT training uses
+search targets directly rather than treating terminal winners as the strategic
+value teacher. A
+heterogeneous graph represents hexes, vertices, edges, players, the
+bank, development deck, and parameterized legal actions. Task 15 extends only the
+action encoding with accepted public-board root-impact quantities; the screened
+road-resilience state tail was not retained.
 
 Checkpoints are promoted only when game-grouped held-out tests show:
 
@@ -232,11 +238,44 @@ Checkpoints are promoted only when game-grouped held-out tests show:
 - value log loss beats a uniform player prior by at least 0.002;
 - value Brier score beats a uniform player prior by at least 0.001;
 - policy cross-entropy beats a uniform legal-action prior by at least 0.001;
+- a Task 15 structural-feature candidate does not worsen held-out policy
+  cross-entropy, value log loss, value Brier score, teacher action regret, or
+  expected action regret versus the matched action-tail ablation;
 - trade acceptance log loss and Brier score beat the training base rate.
 
-Those gates measure predictive quality, not playing strength. A checkpoint also
-needs a separately powered arena evaluation before it can support a policy
-promotion claim.
+Those gates measure predictive quality, not playing strength. Task 15-generated
+strategic checkpoints remain explicitly unpromoted until a separately powered
+matched arena evaluation also supports promotion.
+
+Wave 7 reused 77 frozen post-structural-gate takeover snapshots and produced a
+native-CUDA one-hot final-decision corpus without generating a new CPU arena
+corpus. The first grouped five-fold reports incorrectly treated native rollout VP
+diagnostics as strategic value and action-regret labels. Native final arbitration
+also considers terminal outcome, victory margin, tie-breaks, and exact/safety
+replacement, so those diagnostics cannot supply the checkpoint value or comparator
+contracts. The historical pooled summary and provenance hashes remain preserved for audit in
+`docs/benchmarks/latent-threat-wave7/`. The raw fold reports are intentionally not
+committed because they contain stale machine-readable acceptance fields from the
+invalidated interpretation. None of that material counts as Task 15 evidence.
+Generated source and teacher corpora remain excluded from Git under the
+repository's training-data policy.
+
+The corrected native-GPU path is policy-only and was rerun as a grouped five-fold
+CUDA screen at clean commit `ecadf07`. The 52-feature candidate fails that screen:
+pooled held-out policy cross-entropy is worse than the exact 48-feature baseline by
+about `0.00033869`, pooled final-choice top-1 agreement regresses by about `3.08`
+percentage points, and only 2 of 5 folds pass the matched policy ablation. This
+rejects the current feature tail as promotion evidence. Native records still cannot
+supply the strategic value target required for checkpoint training, and no matched
+candidate-versus-baseline gameplay evaluation exists. The original native teacher
+run recorded `buildDirty=true` at decision revision `9668af0`; Wave 7 does not modify
+`native_gpu.rs`, and that source-provenance limitation remains recorded.
+
+The existing native CUDA gameplay path does not load a candidate/baseline strategic
+checkpoint pair: it uses its own structural rollout policy, while the production
+learned head is compile-time gated through `model_weights.rs`. Wave 7 therefore
+keeps the learned head optional and unpromoted rather than adding a new runtime
+model-loading or GPU-policy path solely to manufacture matched gameplay evidence.
 
 The bundled checkpoint has only two validation state groups and misses the
 required evidence threshold. `VALUE_MODEL_PROMOTED` and

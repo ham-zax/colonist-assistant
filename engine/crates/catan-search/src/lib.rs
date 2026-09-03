@@ -47,9 +47,10 @@ pub use exact::{
     solve_exact_belief_excluding_controlled,
 };
 pub use features::{
-    ACTION_FEATURES, EDGE_FEATURES, GLOBAL_FEATURES, HEX_FEATURES, HeterogeneousGraphFeatures,
-    PLAYER_FEATURES, STATE_FEATURES, VERTEX_FEATURES, encode_action, encode_heterogeneous_graph,
-    pool_heterogeneous_graph,
+    ACTION_FEATURES, BASE_ACTION_FEATURES, EDGE_FEATURES, GLOBAL_FEATURES, HEX_FEATURES,
+    HeterogeneousGraphFeatures, PLAYER_FEATURES, ROOT_IMPACT_FEATURES, STATE_FEATURES,
+    STRATEGIC_FEATURE_SCHEMA_VERSION, VERTEX_FEATURES, encode_action,
+    encode_actions, encode_heterogeneous_graph, pool_heterogeneous_graph,
 };
 pub use mcts::{
     ActionStats, BeliefError, BeliefParticle, Mcts, SearchConfig, SearchMode, SearchReport,
