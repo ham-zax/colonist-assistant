@@ -345,6 +345,7 @@ fn reachable_tactical_threats(
     public_baseline: &GameState,
     protected: u8,
     attacker: u8,
+    monopoly_gain_penalty: Option<(Resource, u8)>,
 ) -> TacticalThreats {
     fn chance_tail(
         state: &GameState,
@@ -353,6 +354,7 @@ fn reachable_tactical_threats(
         attacker: u8,
         depth: u8,
         origin: Option<ProgressPath>,
+        monopoly_gain_penalty: Option<(Resource, u8)>,
         seen: &mut HashSet<(u64, u8, Option<ProgressPath>)>,
     ) -> TacticalThreats {
         let actions = state.legal_actions();
@@ -394,6 +396,7 @@ fn reachable_tactical_threats(
                         attacker,
                         depth,
                         origin,
+                        monopoly_gain_penalty,
                         seen,
                     ),
                     Phase::DevelopmentChance | Phase::ResolveSteal { .. } => chance_tail(
@@ -403,6 +406,7 @@ fn reachable_tactical_threats(
                         attacker,
                         depth,
                         origin,
+                        monopoly_gain_penalty,
                         seen,
                     ),
                     _ => TacticalThreats::default(),
@@ -421,6 +425,7 @@ fn reachable_tactical_threats(
         attacker: u8,
         depth: u8,
         origin: Option<ProgressPath>,
+        monopoly_gain_penalty: Option<(Resource, u8)>,
         seen: &mut HashSet<(u64, u8, Option<ProgressPath>)>,
     ) -> TacticalThreats {
         if depth >= TACTICAL_ACTION_DEPTH
@@ -444,6 +449,16 @@ fn reachable_tactical_threats(
             if next.apply(&action).is_err() {
                 continue;
             }
+            // Causal counterfactual: remove only the extra Monopoly haul created
+            // by the trade, after the action so earlier action legality is unchanged.
+            if let (Action::PlayMonopoly { resource }, Some((penalized_resource, penalty))) =
+                (&action, monopoly_gain_penalty)
+                && *resource == penalized_resource
+            {
+                let held = &mut next.players[attacker as usize].resources[resource.index()];
+                debug_assert!(*held >= penalty);
+                *held = held.saturating_sub(penalty);
+            }
             let path_origin = extend_progress_path(origin, action_origin);
             let mut branch = TacticalThreats::default();
             record_threats(
@@ -465,6 +480,7 @@ fn reachable_tactical_threats(
                         attacker,
                         depth + 1,
                         path_origin,
+                        monopoly_gain_penalty,
                         seen,
                     ),
                     Phase::DevelopmentChance | Phase::ResolveSteal { .. } => chance_tail(
@@ -474,6 +490,7 @@ fn reachable_tactical_threats(
                         attacker,
                         depth + 1,
                         path_origin,
+                        monopoly_gain_penalty,
                         seen,
                     ),
                     _ => TacticalThreats::default(),
@@ -493,6 +510,7 @@ fn reachable_tactical_threats(
         attacker,
         0,
         None,
+        monopoly_gain_penalty,
         &mut HashSet::new(),
     )
 }
@@ -625,8 +643,40 @@ fn domestic_trade_evidence(state: &GameState, action: &Action) -> WorldTradeEvid
             continue;
         }
         let attacker = after.current_player;
-        let before_threats = reachable_tactical_threats(&before, &before, protected, attacker);
-        let after_threats = reachable_tactical_threats(&after, &before, protected, attacker);
+        let before_threats =
+            reachable_tactical_threats(&before, &before, protected, attacker, None);
+        let after_threats = reachable_tactical_threats(&after, &before, protected, attacker, None);
+        let mut monopoly_counterfactuals = HashMap::<Resource, TacticalThreats>::new();
+        for resource in Resource::ALL {
+            let appears_in_path = after_threats.progress_paths.keys().any(|(_, path)| {
+                matches!(
+                    path,
+                    ProgressPath::Single(ProgressChoice::Monopoly(found))
+                        | ProgressPath::Multiple {
+                            monopoly: Some(found)
+                        } if *found == resource
+                )
+            });
+            if !appears_in_path {
+                continue;
+            }
+            let gain = reclaimable_resource(&after, attacker, resource)
+                .saturating_sub(reclaimable_resource(&before, attacker, resource));
+            if gain == 0 {
+                continue;
+            }
+            let penalty = gain.min(u8::MAX as u16) as u8;
+            monopoly_counterfactuals.insert(
+                resource,
+                reachable_tactical_threats(
+                    &after,
+                    &before,
+                    protected,
+                    attacker,
+                    Some((resource, penalty)),
+                ),
+            );
+        }
 
         for (&key, &probability) in &after_threats.keys {
             let delta = probability_delta(&after_threats.keys, &before_threats.keys, &key);
@@ -664,21 +714,31 @@ fn domestic_trade_evidence(state: &GameState, action: &Action) -> WorldTradeEvid
                 ProgressPath::Single(choice) => monopoly_resource(choice),
                 ProgressPath::Multiple { monopoly } => monopoly,
             };
-            let dirty = monopoly.is_some_and(|resource| {
-                reclaimable_resource(&after, attacker, resource)
-                    > reclaimable_resource(&before, attacker, resource)
-            });
-            if dirty {
-                dirty_monopoly_probability = dirty_monopoly_probability.max(delta);
+            let dirty_probability = monopoly
+                .and_then(|resource| monopoly_counterfactuals.get(&resource))
+                .map_or(0.0, |counterfactual| {
+                    let trade_enabled =
+                        probability_delta(&after_threats.keys, &before_threats.keys, &key);
+                    let monopoly_gain_enabled =
+                        probability_delta(&after_threats.keys, &counterfactual.keys, &key);
+                    delta.min(trade_enabled).min(monopoly_gain_enabled)
+                });
+            if dirty_probability > f32::EPSILON {
+                dirty_monopoly_probability = dirty_monopoly_probability.max(dirty_probability);
             }
-            if (dirty || hard_threat_key(key))
-                && let ProgressPath::Single(choice) = path
-            {
-                TacticalThreats::insert_max(
-                    &mut hard_probabilities,
-                    HardPolicyChoice::Progress(choice),
-                    delta,
-                );
+            if let ProgressPath::Single(choice) = path {
+                let hard_probability = if hard_threat_key(key) {
+                    delta
+                } else {
+                    dirty_probability
+                };
+                if hard_probability > f32::EPSILON {
+                    TacticalThreats::insert_max(
+                        &mut hard_probabilities,
+                        HardPolicyChoice::Progress(choice),
+                        hard_probability,
+                    );
+                }
             }
         }
         if !hard_probabilities.is_empty() {
