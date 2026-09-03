@@ -55,7 +55,7 @@ enum ProgressChoice {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum ProgressPath {
     Single(ProgressChoice),
-    Multiple(ProgressChoice),
+    Multiple { monopoly: Option<Resource> },
 }
 
 #[derive(Clone, Default)]
@@ -257,13 +257,25 @@ fn progress_origin(action: &Action) -> Option<ProgressChoice> {
     })
 }
 
+fn monopoly_resource(choice: ProgressChoice) -> Option<Resource> {
+    match choice {
+        ProgressChoice::Monopoly(resource) => Some(resource),
+        _ => None,
+    }
+}
+
 fn extend_progress_path(
     path: Option<ProgressPath>,
     choice: Option<ProgressChoice>,
 ) -> Option<ProgressPath> {
     match (path, choice) {
         (None, Some(choice)) => Some(ProgressPath::Single(choice)),
-        (Some(_), Some(choice)) => Some(ProgressPath::Multiple(choice)),
+        (Some(ProgressPath::Single(first)), Some(choice)) => Some(ProgressPath::Multiple {
+            monopoly: monopoly_resource(first).or_else(|| monopoly_resource(choice)),
+        }),
+        (Some(ProgressPath::Multiple { monopoly }), Some(choice)) => Some(ProgressPath::Multiple {
+            monopoly: monopoly.or_else(|| monopoly_resource(choice)),
+        }),
         (path, None) => path,
     }
 }
@@ -648,16 +660,14 @@ fn domestic_trade_evidence(state: &GameState, action: &Action) -> WorldTradeEvid
             if delta <= f32::EPSILON {
                 continue;
             }
-            let latest_choice = match path {
-                ProgressPath::Single(choice) | ProgressPath::Multiple(choice) => choice,
+            let monopoly = match path {
+                ProgressPath::Single(choice) => monopoly_resource(choice),
+                ProgressPath::Multiple { monopoly } => monopoly,
             };
-            let dirty = match latest_choice {
-                ProgressChoice::Monopoly(resource) => {
-                    reclaimable_resource(&after, attacker, resource)
-                        > reclaimable_resource(&before, attacker, resource)
-                }
-                _ => false,
-            };
+            let dirty = monopoly.is_some_and(|resource| {
+                reclaimable_resource(&after, attacker, resource)
+                    > reclaimable_resource(&before, attacker, resource)
+            });
             if dirty {
                 dirty_monopoly_probability = dirty_monopoly_probability.max(delta);
             }
