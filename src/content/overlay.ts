@@ -467,6 +467,12 @@ export class AssistantOverlay {
         nextBoard?.gameKey &&
         this.board.gameKey !== nextBoard.gameKey,
     );
+    const turnChanged = Boolean(
+      !gameChanged &&
+        this.board?.turn !== undefined &&
+        nextBoard?.turn !== undefined &&
+        this.board.turn !== nextBoard.turn,
+    );
     if (gameChanged) {
       this.lastRejectedDomesticTrade = undefined;
       this.rootTradeActionExclusions.length = 0;
@@ -652,31 +658,41 @@ export class AssistantOverlay {
     ) {
       this.robberVictimPlan = undefined;
     }
-    if (
-      this.queuedPlacement &&
-      nextBoard &&
-      (
-        (
-          this.queuedPlacement.gameKey &&
-          nextBoard.gameKey &&
-          this.queuedPlacement.gameKey !== nextBoard.gameKey
-        ) ||
-        !nextBoard.isMyTurn ||
-        (
-          nextBoard.action !== "none" &&
-          nextBoard.action !== this.queuedPlacement.action
-        )
-      )
-    ) {
-      this.queuedPlacement = undefined;
+    if (turnChanged) {
+      this.freeRoadPlan = undefined;
     }
-    if (
-      this.pendingPlacement &&
-      nextBoard &&
-      placementHasAdvanced(this.pendingPlacement, nextBoard)
-    ) {
-      this.clearPendingPlacement();
-      this.confirmedPlacementSpend = undefined;
+    if (this.queuedPlacement && nextBoard) {
+      const gameChanged = Boolean(
+        this.queuedPlacement.gameKey &&
+          nextBoard.gameKey &&
+          this.queuedPlacement.gameKey !== nextBoard.gameKey,
+      );
+      const turnLost = identityResolved && !nextBoard.isMyTurn;
+      const incompatibleAction =
+        identityResolved &&
+        nextBoard.action !== "none" &&
+        nextBoard.action !== this.queuedPlacement.action;
+      if (gameChanged || turnChanged || turnLost || incompatibleAction) {
+        this.queuedPlacement = undefined;
+      }
+    }
+    if (this.pendingPlacement && nextBoard) {
+      const gameChanged = Boolean(
+        this.pendingPlacement.gameKey &&
+          nextBoard.gameKey &&
+          this.pendingPlacement.gameKey !== nextBoard.gameKey,
+      );
+      const timedOut =
+        Date.now() - this.pendingPlacement.startedAt >= PLACEMENT_SYNC_TIMEOUT_MS;
+      if (
+        gameChanged ||
+        timedOut ||
+        (identityResolved &&
+          placementHasAdvanced(this.pendingPlacement, nextBoard))
+      ) {
+        this.clearPendingPlacement();
+        this.confirmedPlacementSpend = undefined;
+      }
     }
     this.board = nextBoard;
     if (nextBoard && !identityResolved) {
@@ -690,10 +706,6 @@ export class AssistantOverlay {
       this.decisionWorker.reset();
       this.activeSpatial = undefined;
       this.roadPlan = undefined;
-      this.freeRoadPlan = undefined;
-      this.queuedPlacement = undefined;
-      this.robberVictimPlan = undefined;
-      this.clearPendingPlacement();
       destroyTradeVerdicts();
       destroyActionGuide();
       destroyWinOdds();
@@ -725,9 +737,23 @@ export class AssistantOverlay {
     previous: BoardSnapshot | undefined,
     next: BoardSnapshot | undefined,
   ): void {
+    if (!next || next.gameOver) {
+      this.localSevenProtocol = undefined;
+      return;
+    }
     if (
-      !next ||
-      next.gameOver ||
+      this.localSevenProtocol?.gameKey &&
+      next.gameKey &&
+      this.localSevenProtocol.gameKey !== next.gameKey
+    ) {
+      this.localSevenProtocol = undefined;
+    }
+    const identityResolved =
+      next.localSeatDiagnostics?.identity.status === "resolved";
+    if (!identityResolved) {
+      return;
+    }
+    if (
       !next.isMyTurn ||
       next.hasRolled !== true ||
       next.lastRoll !== 7
@@ -735,6 +761,14 @@ export class AssistantOverlay {
       this.localSevenProtocol = undefined;
       return;
     }
+    const effectivePrevious =
+      this.lastResolvedBoard?.gameKey === next.gameKey
+        ? this.lastResolvedBoard
+        : previous &&
+            previous.gameKey === next.gameKey &&
+            previous.localSeatDiagnostics?.identity.status === "resolved"
+          ? previous
+          : undefined;
     const sameScope = (candidate: typeof this.localSevenProtocol): boolean =>
       Boolean(
         candidate &&
@@ -742,11 +776,11 @@ export class AssistantOverlay {
           candidate.turn === next.turn,
       );
     const rollStarted = Boolean(
-      previous &&
-        previous.gameKey === next.gameKey &&
-        previous.turn === next.turn &&
-        previous.isMyTurn &&
-        previous.hasRolled === false,
+      effectivePrevious &&
+        effectivePrevious.gameKey === next.gameKey &&
+        effectivePrevious.turn === next.turn &&
+        effectivePrevious.isMyTurn &&
+        effectivePrevious.hasRolled === false,
     );
     const protocolVisible =
       next.action === "discard" ||
@@ -756,7 +790,7 @@ export class AssistantOverlay {
       this.localSevenProtocol = {
         gameKey: next.gameKey,
         turn: next.turn,
-        robberHexBefore: previous?.hexes.find((hex) => hex.blocked)?.id ??
+        robberHexBefore: effectivePrevious?.hexes.find((hex) => hex.blocked)?.id ??
           next.hexes.find((hex) => hex.blocked)?.id,
         robberObserved: false,
       };
@@ -765,8 +799,8 @@ export class AssistantOverlay {
     if (next.action === "robber" || next.robberVictimSelection) {
       this.localSevenProtocol!.robberObserved = true;
     }
-    const previousVictimSelection = Boolean(previous?.robberVictimSelection);
-    const robberMoveJustCompleted = previous?.action === "robber";
+    const previousVictimSelection = Boolean(effectivePrevious?.robberVictimSelection);
+    const robberMoveJustCompleted = effectivePrevious?.action === "robber";
     const blockedHex = next.hexes.find((hex) => hex.blocked)?.id;
     const robberMoved = Boolean(
       blockedHex && blockedHex !== this.localSevenProtocol!.robberHexBefore,
@@ -1122,6 +1156,68 @@ export class AssistantOverlay {
     }, PLACEMENT_SYNC_TIMEOUT_MS);
   }
 
+  private retainedPlacementTarget(board: BoardSnapshot): string | undefined {
+    const queued = this.queuedPlacement;
+    if (
+      queued &&
+      queued.gameKey === board.gameKey &&
+      queued.action === board.action &&
+      board.isMyTurn
+    ) {
+      if (queued.action === "road") {
+        const edge = board.edges.find((candidate) => candidate.id === queued.targetId);
+        if (
+          edge &&
+          !edge.player &&
+          board.legalEdgeIds?.includes(queued.targetId) === true
+        ) {
+          return queued.targetId;
+        }
+      } else {
+        const vertex = board.vertices.find(
+          (candidate) => candidate.id === queued.targetId,
+        );
+        const listed = board.legalVertexIds?.includes(queued.targetId) === true;
+        if (
+          vertex &&
+          listed &&
+          (
+            (queued.action === "settlement" && !vertex.building) ||
+            (
+              queued.action === "city" &&
+              vertex.building?.kind === "settlement" &&
+              (!board.myPlayer || vertex.building.player === board.myPlayer)
+            )
+          )
+        ) {
+          return queued.targetId;
+        }
+      }
+    }
+
+    const freeRoadPlan = this.freeRoadPlan;
+    if (
+      board.action === "road" &&
+      board.isMyTurn &&
+      freeRoadPlan &&
+      freeRoadPlan.gameKey === board.gameKey
+    ) {
+      const targetId = freeRoadPlan.edgeIds[0];
+      const edge = targetId
+        ? board.edges.find((candidate) => candidate.id === targetId)
+        : undefined;
+      if (
+        targetId &&
+        edge &&
+        !edge.player &&
+        board.legalEdgeIds?.includes(targetId) === true
+      ) {
+        return targetId;
+      }
+    }
+    return undefined;
+  }
+
   private rememberBuildPlacement(
     next: Extract<NextClick, { kind: "build" }>,
     spatial: ReturnType<AssistantOverlay["spatialRecommendation"]> | undefined,
@@ -1337,19 +1433,31 @@ export class AssistantOverlay {
         : 0;
     const state = this.reconciledState();
     const ready = Boolean(this.session || this.board);
-    if (
-      this.pendingPlacement &&
-      this.board &&
-      placementHasAdvanced(this.pendingPlacement, this.board)
-    ) {
-      this.clearPendingPlacement();
-    }
-    const awaitingPlacement = placementIsAwaitingSync(
-      this.pendingPlacement,
-      this.board,
-    );
     const localIdentityResolved =
       this.board?.localSeatDiagnostics?.identity.status === "resolved";
+    if (this.pendingPlacement && this.board) {
+      const gameChanged = Boolean(
+        this.pendingPlacement.gameKey &&
+          this.board.gameKey &&
+          this.pendingPlacement.gameKey !== this.board.gameKey,
+      );
+      const timedOut =
+        Date.now() - this.pendingPlacement.startedAt >= PLACEMENT_SYNC_TIMEOUT_MS;
+      if (
+        gameChanged ||
+        timedOut ||
+        (localIdentityResolved &&
+          placementHasAdvanced(this.pendingPlacement, this.board))
+      ) {
+        this.clearPendingPlacement();
+      }
+    }
+    const awaitingPlacement =
+      localIdentityResolved &&
+      placementIsAwaitingSync(
+        this.pendingPlacement,
+        this.board,
+      );
     const spatial = awaitingPlacement || !localIdentityResolved
       ? undefined
       : this.spatialRecommendation(state);
@@ -2518,21 +2626,7 @@ export class AssistantOverlay {
       }
       return;
     }
-    const retainedPlacementTarget =
-      (
-        (
-          board.action === "road" ||
-          board.action === "settlement" ||
-          board.action === "city"
-        ) &&
-        this.queuedPlacement?.gameKey === board.gameKey &&
-        this.queuedPlacement?.action === board.action
-      )
-        ? this.queuedPlacement.targetId
-        : board.action === "road" &&
-            this.freeRoadPlan?.gameKey === board.gameKey
-          ? this.freeRoadPlan?.edgeIds[0]
-          : undefined;
+    const retainedPlacementTarget = this.retainedPlacementTarget(board);
     const retainedAnalysis = this.decisionAnalysis;
     if (
       retainedPlacementTarget &&
@@ -2564,6 +2658,16 @@ export class AssistantOverlay {
         // deep build/development action, not a fresh strategic position.
         this.decisionTraces.complete(traceKey, retainedAnalysis);
       }
+      return;
+    }
+    if (retainedPlacementTarget) {
+      this.decisionAnalysis = undefined;
+      this.decisionKey = "";
+      this.decisionPendingKey = "";
+      this.decisionSlowKey = "";
+      this.decisionWaitingForPreviousSearch = false;
+      this.decisionRuntimeError = "";
+      this.decisionWorker.reset();
       return;
     }
     const visibleControl = visibleTurnControl();
@@ -2996,6 +3100,30 @@ export class AssistantOverlay {
       : undefined;
     const action = activeAction ?? proactiveAction;
     if (!action) return undefined;
+    const retainedTargetId = activeAction
+      ? this.retainedPlacementTarget(board)
+      : undefined;
+    if (retainedTargetId) {
+      const source =
+        action === "road"
+          ? board.edges.find((candidate) => candidate.id === retainedTargetId)
+          : board.vertices.find((candidate) => candidate.id === retainedTargetId);
+      if (!source) return undefined;
+      return {
+        action,
+        recommendation: {
+          id: retainedTargetId,
+          label: source.label ?? retainedTargetId,
+          score: 0,
+          reasons: [
+            "Continue the previously selected target after local seat identity recovered",
+          ],
+        },
+        alternatives: [],
+        proactive: false,
+        ...(report ? { report } : {}),
+      };
+    }
     const context = this.placementContext(board, state, report);
     context.legalVertexIds =
       action === "settlement"
