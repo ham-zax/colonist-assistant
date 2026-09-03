@@ -52,15 +52,21 @@ enum ProgressChoice {
     Monopoly(Resource),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum ProgressPath {
+    Single(ProgressChoice),
+    Multiple(ProgressChoice),
+}
+
 #[derive(Clone, Default)]
 struct TacticalThreats {
     keys: HashMap<ThreatKey, f32>,
     non_progress_paths: HashMap<ThreatKey, f32>,
-    progress_paths: HashMap<(ThreatKey, ProgressChoice), f32>,
+    progress_paths: HashMap<(ThreatKey, ProgressPath), f32>,
 }
 
 impl TacticalThreats {
-    fn insert(&mut self, key: ThreatKey, origin: Option<ProgressChoice>, probability: f32) {
+    fn insert(&mut self, key: ThreatKey, origin: Option<ProgressPath>, probability: f32) {
         let probability = probability.clamp(0.0, 1.0);
         if probability <= f32::EPSILON {
             return;
@@ -251,6 +257,17 @@ fn progress_origin(action: &Action) -> Option<ProgressChoice> {
     })
 }
 
+fn extend_progress_path(
+    path: Option<ProgressPath>,
+    choice: Option<ProgressChoice>,
+) -> Option<ProgressPath> {
+    match (path, choice) {
+        (None, Some(choice)) => Some(ProgressPath::Single(choice)),
+        (Some(_), Some(choice)) => Some(ProgressPath::Multiple(choice)),
+        (path, None) => path,
+    }
+}
+
 fn contested_settlement(public_state: &GameState, vertex: u8, protected: u8, attacker: u8) -> bool {
     let Some(candidate) = public_state.board.vertices.get(vertex as usize) else {
         return false;
@@ -278,7 +295,7 @@ fn record_threats(
     action: &Action,
     protected: u8,
     attacker: u8,
-    origin: Option<ProgressChoice>,
+    origin: Option<ProgressPath>,
     probability: f32,
     result: &mut TacticalThreats,
 ) {
@@ -323,8 +340,8 @@ fn reachable_tactical_threats(
         protected: u8,
         attacker: u8,
         depth: u8,
-        origin: Option<ProgressChoice>,
-        seen: &mut HashSet<(u64, u8, Option<ProgressChoice>)>,
+        origin: Option<ProgressPath>,
+        seen: &mut HashSet<(u64, u8, Option<ProgressPath>)>,
     ) -> TacticalThreats {
         let actions = state.legal_actions();
         let total_weight = actions
@@ -391,8 +408,8 @@ fn reachable_tactical_threats(
         protected: u8,
         attacker: u8,
         depth: u8,
-        origin: Option<ProgressChoice>,
-        seen: &mut HashSet<(u64, u8, Option<ProgressChoice>)>,
+        origin: Option<ProgressPath>,
+        seen: &mut HashSet<(u64, u8, Option<ProgressPath>)>,
     ) -> TacticalThreats {
         if depth >= TACTICAL_ACTION_DEPTH
             || state.phase != Phase::Main
@@ -415,7 +432,7 @@ fn reachable_tactical_threats(
             if next.apply(&action).is_err() {
                 continue;
             }
-            let path_origin = origin.or(action_origin);
+            let path_origin = extend_progress_path(origin, action_origin);
             let mut branch = TacticalThreats::default();
             record_threats(
                 public_baseline,
@@ -622,16 +639,19 @@ fn domestic_trade_evidence(state: &GameState, action: &Action) -> WorldTradeEvid
                 );
             }
         }
-        for (&(key, choice), _) in &after_threats.progress_paths {
+        for (&(key, path), _) in &after_threats.progress_paths {
             let delta = probability_delta(
                 &after_threats.progress_paths,
                 &before_threats.progress_paths,
-                &(key, choice),
+                &(key, path),
             );
             if delta <= f32::EPSILON {
                 continue;
             }
-            let dirty = match choice {
+            let latest_choice = match path {
+                ProgressPath::Single(choice) | ProgressPath::Multiple(choice) => choice,
+            };
+            let dirty = match latest_choice {
                 ProgressChoice::Monopoly(resource) => {
                     reclaimable_resource(&after, attacker, resource)
                         > reclaimable_resource(&before, attacker, resource)
@@ -641,7 +661,9 @@ fn domestic_trade_evidence(state: &GameState, action: &Action) -> WorldTradeEvid
             if dirty {
                 dirty_monopoly_probability = dirty_monopoly_probability.max(delta);
             }
-            if dirty || hard_threat_key(key) {
+            if (dirty || hard_threat_key(key))
+                && let ProgressPath::Single(choice) = path
+            {
                 TacticalThreats::insert_max(
                     &mut hard_probabilities,
                     HardPolicyChoice::Progress(choice),
@@ -710,9 +732,9 @@ pub fn domestic_trade_threat(state: &GameState, action: &Action) -> Option<Domes
 
 /// Aggregate the safety evidence over a weighted hidden-state belief without
 /// collapsing sub-threshold malicious-trade risk into a categorical veto.
-/// Hard evidence is aggregated by the acting opponent's observation and the
-/// concrete progress-card policy choice, so indistinguishable worlds cannot
-/// select different hidden-state-dependent Knight, YOP, or Monopoly actions.
+/// Hard evidence is aggregated by the acting opponent's observation and one
+/// concrete progress-card policy choice. Multi-progress tactical lines remain
+/// diagnostic but are conservatively excluded from categorical hard-veto mass.
 pub fn belief_domestic_trade_assessment<'a>(
     worlds: impl IntoIterator<Item = (&'a GameState, f32)>,
     action: &Action,
