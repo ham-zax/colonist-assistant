@@ -51,12 +51,40 @@ export interface CompactRecordContracts {
   unavailable: "~";
 }
 
-type LocalSeatIdentityHistoryEntry = Omit<
+export type LocalSeatIdentityHistoryEntry = Omit<
   NonNullable<BoardSnapshot["localSeatDiagnostics"]>,
   "occupiedBuildings" | "occupiedRoads"
 > & {
   capturedAt: number;
 };
+
+export const localSeatIdentitySignature = (
+  diagnostics:
+    | NonNullable<BoardSnapshot["localSeatDiagnostics"]>
+    | LocalSeatIdentityHistoryEntry,
+): string => {
+  const {
+    currentActorColor: _actorColor,
+    currentActorPlayer: _actorPlayer,
+    isMyTurn: _isMyTurn,
+    localActionState: _actionState,
+    managerPlacedPieceCount: _managerPieces,
+    storePlacedPieceCount: _storePieces,
+    occupiedBuildings: _buildings,
+    occupiedRoads: _roads,
+    ...rest
+  } = diagnostics as Record<string, unknown>;
+  const { capturedAt: _capturedAt, ...identitySpecific } = rest;
+  return JSON.stringify(identitySpecific);
+};
+
+export const isContradictionEntry = (
+  entry: LocalSeatIdentityHistoryEntry,
+): boolean =>
+  entry.identity.status === "unresolved" ||
+  entry.identity.reason !== "cross-checked" ||
+  entry.seatSource === "unresolved";
+
 
 export interface CompactGameRecord {
   schema: "catan-evidence/2";
@@ -1195,18 +1223,27 @@ export class CompactGameBuilder {
         ...identityDiagnostics
       } = board.localSeatDiagnostics;
       const history = record.meta.localSeatIdentityHistory ?? [];
-      const previousIdentity = history[history.length - 1];
-      const nextIdentity = {
-        ...identityDiagnostics,
-        capturedAt: board.observedAt ?? Date.now(),
-      };
-      const previousSignature = previousIdentity
-        ? JSON.stringify({ ...previousIdentity, capturedAt: 0 })
+      const previousEntry = history[history.length - 1];
+      const previousSignature = previousEntry
+        ? localSeatIdentitySignature(previousEntry)
         : undefined;
-      const nextSignature = JSON.stringify({ ...nextIdentity, capturedAt: 0 });
+      const nextSignature = localSeatIdentitySignature(board.localSeatDiagnostics);
       if (previousSignature !== nextSignature) {
+        const nextIdentity: LocalSeatIdentityHistoryEntry = {
+          ...identityDiagnostics,
+          capturedAt: board.observedAt ?? Date.now(),
+        };
         history.push(nextIdentity);
-        if (history.length > 32) history.splice(0, history.length - 32);
+        while (history.length > 32) {
+          const evictIndex = history.findIndex(
+            (entry) => !isContradictionEntry(entry),
+          );
+          if (evictIndex >= 0) {
+            history.splice(evictIndex, 1);
+          } else {
+            history.shift();
+          }
+        }
         record.meta.localSeatIdentityHistory = history;
       }
     }

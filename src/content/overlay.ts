@@ -314,6 +314,7 @@ export class AssistantOverlay {
   private collapsed: boolean;
   private session?: GameSession;
   private board?: BoardSnapshot;
+  private lastResolvedBoard?: BoardSnapshot;
   private tradeOfferSnapshots = new Map<string, TradeOfferSnapshot>();
   private position: OverlayPosition = {};
   private drag?: { offsetX: number; offsetY: number };
@@ -458,7 +459,15 @@ export class AssistantOverlay {
     ) {
       this.resetGameScope = undefined;
     }
-    if (tradeMemoryScopeChanged(this.board, nextBoard)) {
+    const identityResolved =
+      nextBoard?.localSeatDiagnostics?.identity.status === "resolved";
+
+    const gameChanged = Boolean(
+      this.board?.gameKey &&
+        nextBoard?.gameKey &&
+        this.board.gameKey !== nextBoard.gameKey,
+    );
+    if (gameChanged) {
       this.lastRejectedDomesticTrade = undefined;
       this.rootTradeActionExclusions.length = 0;
       this.failedTradeActions.clear();
@@ -466,82 +475,109 @@ export class AssistantOverlay {
       this.outgoingTradeSeenAt.clear();
       this.tradeOfferSnapshots.clear();
       this.clearOutgoingTradeWatchdogs();
+      this.lastResolvedBoard = undefined;
     }
-    if (this.session && nextBoard) {
-      const nextSnapshots = snapshotActiveTrades(nextBoard.activeTrades);
-      const tradeEvents = tradeBeliefEventsFromDiff(
-        this.tradeOfferSnapshots,
-        nextSnapshots,
-        this.session.state.tradeEmbargoes,
-      );
-      this.tradeOfferSnapshots = nextSnapshots;
-      if (tradeEvents.length) {
-        this.session.ingestEvents(tradeEvents, "active-trade");
+
+    if (identityResolved) {
+      if (
+        !gameChanged &&
+        tradeMemoryScopeChanged(this.lastResolvedBoard ?? this.board, nextBoard)
+      ) {
+        this.lastRejectedDomesticTrade = undefined;
+        this.rootTradeActionExclusions.length = 0;
+        this.failedTradeActions.clear();
+        this.completedIncomingTradeIds.clear();
+        this.outgoingTradeSeenAt.clear();
+        this.tradeOfferSnapshots.clear();
+        this.clearOutgoingTradeWatchdogs();
       }
-    } else if (!nextBoard) {
-      this.tradeOfferSnapshots.clear();
-    }
-    const outgoingTrades =
-      nextBoard?.activeTrades?.filter((trade) => !trade.incoming) ?? [];
-    if (outgoingTrades.length) {
-      for (const trade of outgoingTrades) {
-        if (!this.outgoingTradeSeenAt.has(trade.id)) {
-          this.outgoingTradeSeenAt.set(trade.id, Date.now());
-          const timer = window.setTimeout(() => {
-            this.outgoingTradeWatchdogs.delete(trade.id);
-            if (this.outgoingTradeSeenAt.has(trade.id)) {
-              window.dispatchEvent(
-                new CustomEvent("colonist-assistant-board-refresh"),
-              );
-              this.render();
-            }
-          }, 18_100);
-          this.outgoingTradeWatchdogs.set(trade.id, timer);
+      if (this.session && nextBoard) {
+        const nextSnapshots = snapshotActiveTrades(nextBoard.activeTrades);
+        const tradeEvents = tradeBeliefEventsFromDiff(
+          this.tradeOfferSnapshots,
+          nextSnapshots,
+          this.session.state.tradeEmbargoes,
+        );
+        this.tradeOfferSnapshots = nextSnapshots;
+        if (tradeEvents.length) {
+          this.session.ingestEvents(tradeEvents, "active-trade");
         }
-        const { give, receive } = localTradeBundles(trade);
-        if (
-          trade.responsesComplete &&
-          !trade.acceptedPlayers?.length &&
-          Boolean(trade.rejectedPlayers?.length)
-        ) {
-          this.lastRejectedDomesticTrade = {
-            give: { ...give },
-            receive: { ...receive },
-          };
-        }
-        const observedKey = tradeOfferKey(give, receive);
-        for (let index = this.rootTradeActionExclusions.length - 1; index >= 0; index -= 1) {
-          const exclusion = this.rootTradeActionExclusions[index]!;
+      }
+      const outgoingTrades =
+        nextBoard?.activeTrades?.filter((trade) => !trade.incoming) ?? [];
+      if (outgoingTrades.length) {
+        for (const trade of outgoingTrades) {
+          if (!this.outgoingTradeSeenAt.has(trade.id)) {
+            this.outgoingTradeSeenAt.set(trade.id, Date.now());
+            const timer = window.setTimeout(() => {
+              this.outgoingTradeWatchdogs.delete(trade.id);
+              if (this.outgoingTradeSeenAt.has(trade.id)) {
+                window.dispatchEvent(
+                  new CustomEvent("colonist-assistant-board-refresh"),
+                );
+                this.render();
+              }
+            }, 18_100);
+            this.outgoingTradeWatchdogs.set(trade.id, timer);
+          }
+          const { give, receive } = localTradeBundles(trade);
           if (
-            exclusion.kind === "offer-trade" &&
-            tradeOfferKey(exclusion.give, exclusion.receive) === observedKey
+            trade.responsesComplete &&
+            !trade.acceptedPlayers?.length &&
+            Boolean(trade.rejectedPlayers?.length)
           ) {
-            this.rootTradeActionExclusions.splice(index, 1);
+            this.lastRejectedDomesticTrade = {
+              give: { ...give },
+              receive: { ...receive },
+            };
+          }
+          const observedKey = tradeOfferKey(give, receive);
+          for (let index = this.rootTradeActionExclusions.length - 1; index >= 0; index -= 1) {
+            const exclusion = this.rootTradeActionExclusions[index]!;
+            if (
+              exclusion.kind === "offer-trade" &&
+              tradeOfferKey(exclusion.give, exclusion.receive) === observedKey
+            ) {
+              this.rootTradeActionExclusions.splice(index, 1);
+            }
           }
         }
       }
-    }
-    const outgoingIds = new Set(outgoingTrades.map((trade) => trade.id));
-    for (const id of this.outgoingTradeSeenAt.keys()) {
-      if (!outgoingIds.has(id)) {
-        this.outgoingTradeSeenAt.delete(id);
-        const timer = this.outgoingTradeWatchdogs.get(id);
-        if (timer !== undefined) window.clearTimeout(timer);
-        this.outgoingTradeWatchdogs.delete(id);
+      const outgoingIds = new Set(outgoingTrades.map((trade) => trade.id));
+      for (const id of this.outgoingTradeSeenAt.keys()) {
+        if (!outgoingIds.has(id)) {
+          this.outgoingTradeSeenAt.delete(id);
+          const timer = this.outgoingTradeWatchdogs.get(id);
+          if (timer !== undefined) window.clearTimeout(timer);
+          this.outgoingTradeWatchdogs.delete(id);
+        }
       }
-    }
-    if (this.confirmedPlacement && nextBoard) {
+      if (this.confirmedPlacement && nextBoard) {
+        if (
+          placementHasAdvanced(this.confirmedPlacement.pending, nextBoard) ||
+          Date.now() >= this.confirmedPlacement.expiresAt
+        ) {
+          this.confirmedPlacement = undefined;
+        } else {
+          nextBoard = applyConfirmedPlacement(
+            this.confirmedPlacement.pending,
+            nextBoard,
+            this.confirmedPlacement.player,
+          );
+        }
+      }
+      this.lastResolvedBoard = nextBoard;
+    } else if (!nextBoard) {
+      this.tradeOfferSnapshots.clear();
+      this.lastResolvedBoard = undefined;
+    } else if (this.confirmedPlacement) {
       if (
-        placementHasAdvanced(this.confirmedPlacement.pending, nextBoard) ||
+        (nextBoard.gameKey &&
+          this.confirmedPlacement.pending.gameKey &&
+          nextBoard.gameKey !== this.confirmedPlacement.pending.gameKey) ||
         Date.now() >= this.confirmedPlacement.expiresAt
       ) {
         this.confirmedPlacement = undefined;
-      } else {
-        nextBoard = applyConfirmedPlacement(
-          this.confirmedPlacement.pending,
-          nextBoard,
-          this.confirmedPlacement.player,
-        );
       }
     }
     if (this.confirmedPlacementSpend && nextBoard) {
@@ -643,10 +679,7 @@ export class AssistantOverlay {
       this.confirmedPlacementSpend = undefined;
     }
     this.board = nextBoard;
-    if (
-      nextBoard &&
-      nextBoard.localSeatDiagnostics?.identity.status !== "resolved"
-    ) {
+    if (nextBoard && !identityResolved) {
       this.decisionAnalysis = undefined;
       this.decisionKey = "";
       this.decisionPendingKey = "";
@@ -837,6 +870,8 @@ export class AssistantOverlay {
     this.failedTradeActions.clear();
     this.completedIncomingTradeIds.clear();
     this.outgoingTradeSeenAt.clear();
+    this.tradeOfferSnapshots.clear();
+    this.lastResolvedBoard = undefined;
     this.clearOutgoingTradeWatchdogs();
     this.clearPendingPlacement();
     destroyTradeVerdicts();
