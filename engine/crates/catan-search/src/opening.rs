@@ -18,12 +18,128 @@ const OPENING_BUILD_COSTS: [(ResourceHand, f32); 4] = [
     (CITY_COST, 0.82),
     (DEVELOPMENT_COST, 0.92),
 ];
+// Current engine chance/search semantics assume fair i.i.d. 2d6. Colonist's
+// Balanced Dice mode is stateful and is intentionally not approximated here by
+// swapping in another fixed probability table.
+const OPENING_EXPECTED_ROLL_DENOMINATOR: f32 = 36.0;
 
-/// Setup-specific endpoint value derived from the strongest published
-/// JSettlers opening ablation: reward production and build coverage, while
-/// explicitly penalizing repeated roll numbers and putting both settlements
-/// on the same hex.
-fn opening_position_bonus(state: &GameState, player: u8, exact_hand: bool) -> f32 {
+#[derive(Clone, Copy, Debug)]
+struct OpeningBuildEconomy {
+    /// Expected-roll ETA for road, settlement, city, and development card.
+    #[cfg(test)]
+    eta_rolls: [f32; 4],
+    /// Existing opening importance weights applied to the complete-build ETAs.
+    weighted_access: f32,
+    /// Best legal maritime ratio for each sold resource (4:1 / 3:1 / 2:1).
+    #[cfg(test)]
+    maritime_ratios: ResourceHand,
+}
+
+/// Continuous expected-card feasibility for one complete build.
+///
+/// Cards needed directly by the build are reserved first. Only production/hand
+/// surplus may be converted, and each surplus resource contributes through its
+/// single best maritime ratio exactly once. This prevents one strong stream
+/// from being independently counted as if it could solve every missing color
+/// simultaneously. The relaxation is fractional in expectation; it does not
+/// simulate integer trade batches, domestic negotiations, or bank exhaustion.
+fn opening_build_cost_fundable_at_rolls(
+    production: &[f32; 5],
+    hand: &ResourceHand,
+    maritime_ratios: &ResourceHand,
+    cost: &ResourceHand,
+    rolls: f32,
+) -> bool {
+    let mut missing_cards = 0.0_f32;
+    let mut maritime_capacity = 0.0_f32;
+    for resource in 0..5 {
+        let available = hand[resource] as f32
+            + production[resource] * rolls / OPENING_EXPECTED_ROLL_DENOMINATOR;
+        let required = cost[resource] as f32;
+        if available >= required {
+            maritime_capacity += (available - required) / maritime_ratios[resource].max(1) as f32;
+        } else {
+            missing_cards += required - available;
+        }
+    }
+    missing_cards <= maritime_capacity + 1e-4
+}
+
+fn opening_build_eta_rolls(
+    production: &[f32; 5],
+    hand: &ResourceHand,
+    maritime_ratios: &ResourceHand,
+    cost: &ResourceHand,
+) -> f32 {
+    if opening_build_cost_fundable_at_rolls(production, hand, maritime_ratios, cost, 0.0) {
+        return 0.0;
+    }
+    if production.iter().sum::<f32>() <= f32::EPSILON {
+        return f32::INFINITY;
+    }
+
+    let mut high = 18.0_f32;
+    while high < 9_216.0
+        && !opening_build_cost_fundable_at_rolls(production, hand, maritime_ratios, cost, high)
+    {
+        high *= 2.0;
+    }
+    if !opening_build_cost_fundable_at_rolls(production, hand, maritime_ratios, cost, high) {
+        return f32::INFINITY;
+    }
+
+    let mut low = 0.0_f32;
+    for _ in 0..28 {
+        let mid = (low + high) * 0.5;
+        if opening_build_cost_fundable_at_rolls(production, hand, maritime_ratios, cost, mid) {
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+    high
+}
+
+fn opening_build_economy_from_inputs(
+    production: &[f32; 5],
+    hand: &ResourceHand,
+    maritime_ratios: &ResourceHand,
+) -> OpeningBuildEconomy {
+    let eta_rolls = OPENING_BUILD_COSTS
+        .map(|(cost, _)| opening_build_eta_rolls(production, hand, maritime_ratios, &cost));
+    let weighted_access = eta_rolls
+        .iter()
+        .zip(OPENING_BUILD_COSTS)
+        .map(|(eta, (_, importance))| importance / (1.0 + *eta / 18.0))
+        .sum::<f32>();
+    OpeningBuildEconomy {
+        #[cfg(test)]
+        eta_rolls,
+        weighted_access,
+        #[cfg(test)]
+        maritime_ratios: *maritime_ratios,
+    }
+}
+
+fn opening_build_economy(state: &GameState, player: u8) -> OpeningBuildEconomy {
+    let production = production_pips(state, player);
+    // Setup resource cards are deterministic public consequences of each
+    // player's second settlement. Role identity must not erase them.
+    let hand = state.players[player as usize].resources;
+    // `trade_ratios` already implements the best applicable maritime ratio per
+    // sold resource. This model intentionally stops at deterministic/self-
+    // controlled acquisition: domestic/player trades are not assigned a
+    // speculative rate, while bank/port conversion remains fully represented.
+    let ratios = state.trade_ratios(player);
+    opening_build_economy_from_inputs(&production, &hand, &ratios)
+}
+
+/// Setup-specific endpoint value. Expected production and conversion-aware
+/// complete-build access are the main economic terms. Resource/color diversity
+/// and roll-number distribution remain only residual flexibility/variance
+/// signals; they are deliberately too small to substitute for build economics.
+/// Shared-hex exposure remains a separate correlated-blocking/robber risk term.
+fn opening_position_bonus(state: &GameState, player: u8) -> f32 {
     let production = production_pips(state, player);
     let mut number_uses = [0u8; 13];
     let mut hex_uses = vec![0u8; state.board.hexes.len()];
@@ -65,32 +181,13 @@ fn opening_position_bonus(state: &GameState, player: u8, exact_hand: bool) -> f3
         .sum::<f32>();
     let resource_diversity = production.iter().filter(|pips| **pips > 0.0).count() as f32;
     let total_production = production.iter().sum::<f32>();
-    let hand = if exact_hand {
-        state.players[player as usize].resources
-    } else {
-        [0; 5]
-    };
-    let build_access = OPENING_BUILD_COSTS
-        .iter()
-        .map(|(cost, importance)| {
-            let slowest_resource_rolls = cost
-                .iter()
-                .enumerate()
-                .filter(|(_, required)| **required > 0)
-                .map(|(resource, required)| {
-                    let missing = required.saturating_sub(hand[resource]) as f32;
-                    missing * 36.0 / (production[resource] + 0.55)
-                })
-                .fold(0.0_f32, f32::max);
-            importance / (1.0 + slowest_resource_rolls / 18.0)
-        })
-        .sum::<f32>();
+    let build_economy = opening_build_economy(state, player);
 
     total_production * 0.055
-        + unique_strike_ways * 0.085
-        + resource_diversity * 0.30
-        + build_access * 0.82
-        - duplicate_number_exposure * 0.19
+        + unique_strike_ways * 0.030
+        + resource_diversity * 0.08
+        + build_economy.weighted_access * 0.82
+        - duplicate_number_exposure * 0.04
         - shared_hex_exposure * 0.38
 }
 
@@ -202,7 +299,29 @@ fn opening_robber_concentration(state: &GameState, player: u8) -> f32 {
     peak / total
 }
 
-fn opening_position_value(state: &GameState, player: u8, exact_hand: bool) -> f32 {
+fn opening_expansion_value(state: &GameState, player: u8) -> f32 {
+    let expansion = expansion_option_value(state, player);
+    if expansion.vertex.is_none() {
+        return 0.0;
+    }
+
+    let mut expansion_cost = SETTLEMENT_COST;
+    expansion_cost[0] = expansion_cost[0].saturating_add(expansion.roads_required);
+    expansion_cost[1] = expansion_cost[1].saturating_add(expansion.roads_required);
+    let production = production_pips(state, player);
+    let hand = state.players[player as usize].resources;
+    let ratios = state.trade_ratios(player);
+    let eta = opening_build_eta_rolls(&production, &hand, &ratios, &expansion_cost);
+    let accessibility = if eta.is_finite() {
+        1.0 / (1.0 + eta / 18.0)
+    } else {
+        0.0
+    };
+
+    (expansion.value * 0.32 + expansion.portfolio_value * 0.22) * accessibility
+}
+
+fn opening_position_value(state: &GameState, player: u8) -> f32 {
     let production = production_pips(state, player);
     let scarcity = board_resource_scarcity(state);
     let scarcity_alignment = production
@@ -216,11 +335,10 @@ fn opening_position_value(state: &GameState, player: u8, exact_hand: bool) -> f3
     ) {
         opening_setup_reach_prior(state, player)
     } else {
-        let expansion = expansion_option_value(state, player);
-        expansion.value * 0.32 + expansion.portfolio_value * 0.22
+        opening_expansion_value(state, player)
     };
     state.players[player as usize].public_victory_points as f32 * 1.8
-        + opening_position_bonus(state, player, exact_hand)
+        + opening_position_bonus(state, player)
         + expansion_value
         + opening_port_option_value(state, player)
         + scarcity_alignment
@@ -231,6 +349,8 @@ fn opening_position_value(state: &GameState, player: u8, exact_hand: bool) -> f3
 pub struct OpeningActionValue {
     pub action: Action,
     pub value: f32,
+    /// True only when this value's selected continuation reached the end of setup.
+    pub endpoint_complete: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -274,6 +394,12 @@ impl Default for OpeningConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct OpeningVisitValue {
+    value: f32,
+    endpoint_complete: bool,
+}
+
 struct OpeningSolver {
     root: u8,
     config: OpeningConfig,
@@ -282,17 +408,17 @@ struct OpeningSolver {
     aborted: bool,
     deadline_reached: bool,
     completed_setups: u32,
-    memo: HashMap<u64, f32>,
+    memo: HashMap<u64, OpeningVisitValue>,
     deadline: CooperativeDeadline,
 }
 
 impl OpeningSolver {
     fn value(&self, state: &GameState) -> f32 {
         let static_value = {
-            let own = opening_position_value(state, self.root, true);
+            let own = opening_position_value(state, self.root);
             let rival = (0..state.board.num_players)
                 .filter(|player| *player != self.root)
-                .map(|player| opening_position_value(state, player, false))
+                .map(|player| opening_position_value(state, player))
                 .fold(f32::NEG_INFINITY, f32::max);
             own - rival.max(0.0) * 0.34
         };
@@ -338,23 +464,33 @@ impl OpeningSolver {
         total / count as f32
     }
 
-    fn visit(&mut self, state: &GameState) -> f32 {
+    fn visit(&mut self, state: &GameState) -> OpeningVisitValue {
+        let endpoint_complete = !matches!(
+            state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        );
         if self.nodes >= self.node_limit {
             self.aborted = true;
-            return self.value(state);
+            return OpeningVisitValue {
+                value: self.value(state),
+                endpoint_complete,
+            };
         }
         if self.deadline.expired_at_checkpoint(self.nodes, 8) {
             self.aborted = true;
             self.deadline_reached = true;
-            return self.value(state);
+            return OpeningVisitValue {
+                value: self.value(state),
+                endpoint_complete,
+            };
         }
         self.nodes += 1;
-        if !matches!(
-            state.phase,
-            Phase::SetupSettlement | Phase::SetupRoad { .. }
-        ) {
+        if endpoint_complete {
             self.completed_setups += 1;
-            return self.value(state);
+            return OpeningVisitValue {
+                value: self.value(state),
+                endpoint_complete: true,
+            };
         }
         if let Some(value) = self.memo.get(&state.state_hash()) {
             return *value;
@@ -363,7 +499,10 @@ impl OpeningSolver {
         let legal = state.legal_actions();
         let ranked = normalize_priors(state, &legal, actor);
         let result = if actor == self.root {
-            let mut best = f32::NEG_INFINITY;
+            let mut best = OpeningVisitValue {
+                value: f32::NEG_INFINITY,
+                endpoint_complete: false,
+            };
             for (action, _) in ranked.into_iter().take(self.config.root_width) {
                 if self.nodes >= self.node_limit {
                     self.aborted = true;
@@ -371,9 +510,15 @@ impl OpeningSolver {
                 }
                 let mut next = state.clone();
                 if next.apply(&action).is_ok() {
-                    best = best.max(self.visit(&next));
+                    let candidate = self.visit(&next);
+                    if candidate.value > best.value {
+                        best = candidate;
+                    }
                     if self.deadline_reached {
-                        return self.value(state);
+                        return OpeningVisitValue {
+                            value: self.value(state),
+                            endpoint_complete: false,
+                        };
                     }
                 }
             }
@@ -391,7 +536,7 @@ impl OpeningSolver {
                 }
                 let mut next = state.clone();
                 if next.apply(&action).is_ok() {
-                    let opponent_score = opening_position_value(&next, actor, false);
+                    let opponent_score = opening_position_value(&next, actor);
                     if opponent_score > best_opponent_score {
                         best_opponent_score = opponent_score;
                         best_action = Some(action);
@@ -403,10 +548,16 @@ impl OpeningSolver {
                 if next.apply(&action).is_ok() {
                     self.visit(&next)
                 } else {
-                    self.value(state)
+                    OpeningVisitValue {
+                        value: self.value(state),
+                        endpoint_complete: false,
+                    }
                 }
             } else {
-                self.value(state)
+                OpeningVisitValue {
+                    value: self.value(state),
+                    endpoint_complete: false,
+                }
             }
         } else {
             let candidates = ranked
@@ -415,6 +566,7 @@ impl OpeningSolver {
                 .collect::<Vec<_>>();
             let mut weighted = 0.0;
             let mut explored_mass = 0.0;
+            let mut all_contributions_complete = true;
             for (action, prior) in candidates {
                 if self.nodes >= self.node_limit {
                     self.aborted = true;
@@ -422,19 +574,30 @@ impl OpeningSolver {
                 }
                 let mut next = state.clone();
                 if next.apply(&action).is_ok() {
-                    weighted += self.visit(&next) * prior;
+                    let candidate = self.visit(&next);
+                    weighted += candidate.value * prior;
+                    all_contributions_complete &= candidate.endpoint_complete;
                     if self.deadline_reached {
-                        return self.value(state);
+                        return OpeningVisitValue {
+                            value: self.value(state),
+                            endpoint_complete: false,
+                        };
                     }
                     explored_mass += prior;
                 }
             }
-            weighted / explored_mass.max(f32::EPSILON)
+            OpeningVisitValue {
+                value: weighted / explored_mass.max(f32::EPSILON),
+                endpoint_complete: explored_mass > 0.0 && all_contributions_complete,
+            }
         };
-        let result = if result.is_finite() {
+        let result = if result.value.is_finite() {
             result
         } else {
-            self.value(state)
+            OpeningVisitValue {
+                value: self.value(state),
+                endpoint_complete: false,
+            }
         };
         self.memo.insert(state.state_hash(), result);
         result
@@ -489,7 +652,16 @@ pub fn solve_opening(state: &GameState, root: u8, config: OpeningConfig) -> Open
             .total_cmp(&left.2)
             .then_with(|| right.1.total_cmp(&left.1))
     });
-    let deep_count = static_actions.len().min(solver.config.root_width.max(12));
+    let remaining_setup_pairs = state
+        .board
+        .num_players
+        .saturating_mul(2)
+        .saturating_sub(state.setup_step);
+    let deep_count = if remaining_setup_pairs <= 3 {
+        static_actions.len()
+    } else {
+        static_actions.len().min(solver.config.root_width.max(12))
+    };
     let budgets =
         crate::policy::allocate_root_node_budgets(deep_count, solver.config.maximum_nodes);
     let mut actions = Vec::new();
@@ -498,13 +670,12 @@ pub fn solve_opening(state: &GameState, root: u8, config: OpeningConfig) -> Open
         if next.apply(&action).is_err() {
             continue;
         }
-        let mut candidate_has_completed_leaf = false;
-        let value = if index >= deep_count || solver.deadline.has_elapsed() {
+        let (value, endpoint_complete) = if index >= deep_count || solver.deadline.has_elapsed() {
             if solver.deadline.has_elapsed() {
                 solver.aborted = true;
                 solver.deadline_reached = true;
             }
-            static_value
+            (static_value, false)
         } else {
             let per_root_budget = budgets.get(index).copied().unwrap_or(1).max(1);
             solver.node_limit = solver
@@ -512,35 +683,35 @@ pub fn solve_opening(state: &GameState, root: u8, config: OpeningConfig) -> Open
                 .saturating_add(per_root_budget)
                 .min(solver.config.maximum_nodes);
             if solver.nodes < solver.config.maximum_nodes {
-                let completed_before = solver.completed_setups;
                 let deep = solver.visit(&next);
-                candidate_has_completed_leaf = solver.completed_setups > completed_before;
-                if deep.is_finite() && candidate_has_completed_leaf {
-                    deep
+                if deep.value.is_finite() && deep.endpoint_complete {
+                    (deep.value, true)
                 } else {
-                    static_value
+                    (static_value, false)
                 }
             } else {
                 solver.aborted = true;
-                static_value
+                (static_value, false)
             }
         };
-        actions.push((OpeningActionValue { action, value }, candidate_has_completed_leaf));
+        actions.push(OpeningActionValue {
+            action,
+            value,
+            endpoint_complete,
+        });
     }
     if solver.deadline.has_elapsed() {
         solver.aborted = true;
         solver.deadline_reached = true;
     }
     // Partial setup scores are ordering priors, not comparable endpoint values.
-    // Once any root reaches a completed snake-draft leaf, only roots with a
-    // completed leaf may become authoritative. Preserve the all-static fallback
-    // only when the budget was too small to complete any root at all.
-    let has_completed_root = actions.iter().any(|(_, completed)| *completed);
+    // Once any root's returned value is backed by a completed snake-draft endpoint,
+    // only completion-backed values may become authoritative. Preserve the all-static
+    // fallback only when the budget was too small to return any completed root at all.
+    let has_completed_root = actions.iter().any(|candidate| candidate.endpoint_complete);
     let mut actions = actions
         .into_iter()
-        .filter_map(|(candidate, completed)| {
-            (!has_completed_root || completed).then_some(candidate)
-        })
+        .filter(|candidate| !has_completed_root || candidate.endpoint_complete)
         .collect::<Vec<_>>();
     actions.sort_by(|left, right| right.value.total_cmp(&left.value));
     OpeningReport {
@@ -615,14 +786,16 @@ pub(crate) fn opening_adjusted_priors(
 }
 
 #[cfg(test)]
+#[path = "opening_recorded_tests.rs"]
+mod recorded_tests;
+
+#[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use colonist_catan_core::{Action, Building, GameState, Phase, SETTLEMENT_COST};
 
-    use super::{
-        OpeningConfig, opening_position_bonus, opening_position_value, solve_opening,
-    };
+    use super::{OpeningConfig, opening_position_bonus, opening_position_value, solve_opening};
 
     #[test]
     fn second_road_is_anchored_to_the_second_settlement() {
@@ -753,9 +926,9 @@ mod tests {
             }
         }
 
-        let funded_rival = opening_position_value(&state, 0, true);
+        let funded_rival = opening_position_value(&state, 0);
         state.players[1].resources = [0; 5];
-        let starved_rival = opening_position_value(&state, 0, true);
+        let starved_rival = opening_position_value(&state, 0);
 
         assert!(
             starved_rival > funded_rival + 0.05,
@@ -805,8 +978,7 @@ mod tests {
         }
 
         assert!(
-            opening_position_bonus(&diverse, 0, false)
-                > opening_position_bonus(&duplicated, 0, false),
+            opening_position_bonus(&diverse, 0) > opening_position_bonus(&duplicated, 0),
             "equal-pip settlements on different roll numbers must beat duplicated exposure"
         );
     }
