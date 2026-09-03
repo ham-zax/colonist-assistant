@@ -3,6 +3,7 @@
 typedef unsigned int uint32_t;
 typedef unsigned long long uint64_t;
 #define EXACT_INFINITY 3.402823466e+38F
+#define F32_EPSILON 1.192092896e-7F
 
 #define MAX_PLAYERS 4u
 #define HEX_COUNT 19u
@@ -50,6 +51,8 @@ static const float PIPS[13] = {
 static const float BASE_RESOURCE_WEIGHTS[5] = {
     0.98f, 0.98f, 0.73f, 1.22f, 1.10f,
 };
+
+static const float PORT_VALUE_PER_RATIO_STEP = 0.35f;
 
 static const uint32_t BUILD_COSTS[4][5] = {
     {1u, 1u, 0u, 0u, 0u},
@@ -844,16 +847,68 @@ static inline __device__ float expansion_site_survival(
     );
 }
 
+static inline __device__ float prospective_port_option_value(
+    const uint32_t *state,
+    uint32_t vertex,
+    uint32_t player,
+    const float current_production[5],
+    const float site_production[5]
+) {
+    const uint32_t port = state[STATE_PORTS + vertex];
+    if (port == 0u) {
+        return 0.0f;
+    }
+
+    uint32_t before[5];
+    trade_ratios(state, player, before);
+    uint32_t after[5];
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        after[resource] = before[resource];
+    }
+    if (port == 1u) {
+        for (uint32_t resource = 0u; resource < 5u; ++resource) {
+            after[resource] = after[resource] < 3u ? after[resource] : 3u;
+        }
+    } else if (port >= 2u && port <= 6u) {
+        const uint32_t resource = port - 2u;
+        after[resource] = after[resource] < 2u ? after[resource] : 2u;
+    } else {
+        return 0.0f;
+    }
+
+    float prospective_production[5];
+    float total_production = 0.0f;
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        prospective_production[resource] =
+            current_production[resource] + site_production[resource];
+        total_production += prospective_production[resource];
+    }
+    if (total_production <= F32_EPSILON) {
+        return 0.0f;
+    }
+
+    float value = 0.0f;
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        const uint32_t improvement = before[resource] > after[resource]
+            ? before[resource] - after[resource]
+            : 0u;
+        value += (float)improvement * prospective_production[resource] / total_production;
+    }
+    return value * PORT_VALUE_PER_RATIO_STEP;
+}
+
 static inline __device__ float vertex_value_with_weights(
     const uint32_t *state,
     const uint32_t *topology,
     uint32_t vertex,
     const float weights[5],
-    uint32_t player
+    uint32_t player,
+    const float current_production[5]
 ) {
     float value = 0.0f;
     uint32_t numbers = 0u;
     uint32_t resources = 0u;
+    float site_production[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
     const uint32_t hex_count = topo_vertex_hex_count(topology, vertex);
     for (uint32_t slot = 0u; slot < hex_count; ++slot) {
         const uint32_t hex = topo_vertex_hex(topology, vertex, slot);
@@ -864,24 +919,21 @@ static inline __device__ float vertex_value_with_weights(
         const uint32_t resource = encoded_resource - 1u;
         const uint32_t number = state[STATE_HEX_NUMBERS + hex];
         const float robber_factor = hex == state[STATE_ROBBER_HEX] ? 0.30f : 1.0f;
-        value += PIPS[number] * weights[resource] * robber_factor;
+        const float pips = PIPS[number] * robber_factor;
+        value += pips * weights[resource];
+        site_production[resource] += pips;
         numbers |= 1u << number;
         resources |= 1u << resource;
     }
     value += (float)__popc(numbers) * 0.16f;
     value += (float)__popc(resources) * 0.22f;
-    if (state[STATE_PORTS + vertex] != 0u) {
-        uint32_t ratios[5];
-        trade_ratios(state, player, ratios);
-        int all_four = 1;
-        for (uint32_t resource = 0u; resource < 5u; ++resource) {
-            if (ratios[resource] != 4u) {
-                all_four = 0;
-                break;
-            }
-        }
-        value += all_four ? 0.7f : 0.0f;
-    }
+    value += prospective_port_option_value(
+        state,
+        vertex,
+        player,
+        current_production,
+        site_production
+    );
     return value;
 }
 
@@ -892,6 +944,7 @@ static inline __device__ void expansion_option_value(
     const uint32_t routes[MAX_PLAYERS][VERTEX_COUNT],
     const float arrivals[MAX_PLAYERS][16],
     const float weights[5],
+    const float current_production[5],
     float *value,
     float *portfolio
 ) {
@@ -925,7 +978,8 @@ static inline __device__ void expansion_option_value(
             topology,
             vertex,
             weights,
-            player
+            player,
+            current_production
         );
         const float road_cost = (float)distance * 1.45f;
         const float candidate = survival * (site + 5.4f) / (1.0f + road_cost * 0.34f);
@@ -1370,6 +1424,7 @@ static inline __device__ float strategic_utility(
         routes,
         arrivals,
         weights,
+        production,
         &expansion_value,
         &expansion_portfolio
     );
