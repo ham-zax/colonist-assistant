@@ -643,6 +643,28 @@ export class AssistantOverlay {
       this.confirmedPlacementSpend = undefined;
     }
     this.board = nextBoard;
+    if (
+      nextBoard &&
+      nextBoard.localSeatDiagnostics?.identity.status !== "resolved"
+    ) {
+      this.decisionAnalysis = undefined;
+      this.decisionKey = "";
+      this.decisionPendingKey = "";
+      this.decisionSlowKey = "";
+      this.decisionWaitingForPreviousSearch = false;
+      this.decisionRuntimeError = "";
+      this.decisionTraces.supersedePending();
+      this.decisionWorker.reset();
+      this.activeSpatial = undefined;
+      this.roadPlan = undefined;
+      this.freeRoadPlan = undefined;
+      this.queuedPlacement = undefined;
+      this.robberVictimPlan = undefined;
+      this.clearPendingPlacement();
+      destroyTradeVerdicts();
+      destroyActionGuide();
+      destroyWinOdds();
+    }
     if (nextBoard?.gameOver) {
       this.decisionAnalysis = undefined;
       this.decisionKey = "";
@@ -1291,11 +1313,13 @@ export class AssistantOverlay {
       this.pendingPlacement,
       this.board,
     );
-    const spatial = awaitingPlacement
+    const localIdentityResolved =
+      this.board?.localSeatDiagnostics?.identity.status === "resolved";
+    const spatial = awaitingPlacement || !localIdentityResolved
       ? undefined
       : this.spatialRecommendation(state);
     this.activeSpatial = spatial;
-    const user = this.userPlayer(state);
+    const user = localIdentityResolved ? this.userPlayer(state) : undefined;
     this.scheduleDecisionAnalysis(state, user);
     const report =
       spatial?.report ??
@@ -1306,13 +1330,15 @@ export class AssistantOverlay {
       report?.decisionAnalysis,
       this.board,
     );
-    const workflow = this.board?.gameOver
+    const workflow = this.board?.gameOver || !localIdentityResolved
       ? undefined
       : activeWorkflowAction(
           this.board?.action,
           this.board?.robberVictimSelection,
         );
-    const next = workflow ?? this.nextClick(state, spatial, report);
+    const next = localIdentityResolved
+      ? workflow ?? this.nextClick(state, spatial, report)
+      : undefined;
     const marker =
       spatial &&
       (
@@ -2148,6 +2174,7 @@ export class AssistantOverlay {
       const activeTrades = board?.activeTrades ?? [];
       if (
         !board ||
+        board.localSeatDiagnostics?.identity.status !== "resolved" ||
         board.gameOver ||
         !state ||
         !player ||
@@ -2364,6 +2391,7 @@ export class AssistantOverlay {
       !state ||
       !player ||
       !board ||
+      board.localSeatDiagnostics?.identity.status !== "resolved" ||
       board.gameOver
     ) {
       this.decisionTraces.supersedePending();
@@ -3085,6 +3113,7 @@ export class AssistantOverlay {
     const board = this.board;
     if (
       !board ||
+      board.localSeatDiagnostics?.identity.status !== "resolved" ||
       board.gameOver ||
       this.resetGameScope !== undefined
     ) {
@@ -3755,6 +3784,30 @@ export class AssistantOverlay {
         <span class="empty-mark">${assistantMark()}</span>
         <h1>${won ? "You won" : "Game complete"}</h1>
         <p>${winner ? `${escapeHtml(winner)} won this game.` : "Colonist has ended this game."} The assistant is stopped and will not issue or execute any more actions.</p>
+      </section>`;
+    }
+    if (
+      this.board &&
+      this.board.localSeatDiagnostics?.identity.status !== "resolved"
+    ) {
+      const identity = this.board.localSeatDiagnostics?.identity;
+      const reason = identity?.reason
+        ? identity.reason.replaceAll("-", " ")
+        : "independent local seat evidence is unavailable";
+      const controllerColor = identity?.myColor;
+      const accountColor = identity?.currentUserColor;
+      const disagreement =
+        controllerColor !== undefined && accountColor !== undefined
+          ? ` Controller color ${controllerColor} does not match account-linked color ${accountColor}.`
+          : "";
+      return `<section class="decision pending-decision" aria-live="assertive">
+        <div class="decision-meta"><span>LOCAL SEAT UNRESOLVED</span><span>FAIL CLOSED</span></div>
+        <div class="decision-command">
+          <span class="command-art">${assistantMark()}</span>
+          <h1>Waiting for consistent player identity</h1>
+        </div>
+        <p class="why">Strategist and autopilot are paused because ${escapeHtml(reason)}.${escapeHtml(disagreement)}</p>
+        <div class="board-confirm pending"><i></i><span>Public board evidence will continue recording for diagnosis</span></div>
       </section>`;
     }
     if (

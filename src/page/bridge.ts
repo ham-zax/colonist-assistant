@@ -1,5 +1,6 @@
 import { resolveLocalBoardAction } from "../core/forced-action";
 import { isTerminalGameHeading } from "../core/game-over";
+import { resolveLocalIdentity } from "../core/local-identity";
 import {
   openingRoadEdgeIds,
   type BoardAction,
@@ -71,6 +72,11 @@ import {
   let managerIdentity: Record<string, any> | undefined;
   let managerModuleId: string | undefined;
   let managerGeneration = 1;
+  let managerResolutionSource:
+    | "cached-module"
+    | "module-scan"
+    | "cached-fallback"
+    | undefined;
   let validatorExports: Record<string, any> | undefined;
   let previousPayload = "";
   let previousLiveProgress:
@@ -170,7 +176,10 @@ import {
     if (!runtime) return undefined;
     if (managerModuleId) {
       const current = managerFromModule(runtime, managerModuleId);
-      if (current) return acceptManager(current);
+      if (current) {
+        managerResolutionSource = "cached-module";
+        return acceptManager(current);
+      }
     }
     for (const [id, factory] of Object.entries(runtime.m)) {
       const source = Function.prototype.toString.call(factory);
@@ -180,8 +189,10 @@ import {
       const candidate = managerFromModule(runtime, id);
       if (!candidate) continue;
       managerModuleId = id;
+      managerResolutionSource = "module-scan";
       return acceptManager(candidate);
     }
+    if (manager) managerResolutionSource = "cached-fallback";
     return manager;
   };
 
@@ -234,18 +245,32 @@ import {
         typeof value.prototype?.[method] === "function",
     ) as (new (...args: any[]) => any) | undefined;
 
-  const playerName = (gameController: Record<string, any>, color: unknown): string => {
-    if (typeof color !== "number") return String(color ?? "");
+  const mappedPlayerName = (
+    gameController: Record<string, any>,
+    color: unknown,
+  ): string | undefined => {
+    if (typeof color !== "number") return undefined;
     try {
       const value = gameController.getPlayerNameWithColor(color);
       if (typeof value === "string" && value) return value;
       if (typeof value?.options?.value === "string" && value.options.value) {
         return value.options.value;
       }
-      return `Player ${color}`;
     } catch {
-      return `Player ${color}`;
+      // The diagnostic resolver records the unresolved mapping below.
     }
+    return undefined;
+  };
+
+  const playerName = (gameController: Record<string, any>, color: unknown): string => {
+    if (typeof color !== "number") return String(color ?? "");
+    return mappedPlayerName(gameController, color) ?? `Player ${color}`;
+  };
+
+  const userId = (value: unknown): string | number | undefined => {
+    if (typeof value === "string" && value) return value;
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    return undefined;
   };
 
   const screenPoint = (
@@ -394,7 +419,81 @@ import {
     }
 
     const myColor = gameController.myColor;
-    const myPlayer = playerName(gameController, myColor);
+    const playOrder: number[] = Array.isArray(gameController.playOrder)
+      ? gameController.playOrder.filter(
+          (color: unknown): color is number =>
+            typeof color === "number" && Number.isInteger(color),
+        )
+      : [];
+    const isReplay = Boolean(rootStoreState?.gameReplay?.isReplay);
+    const mappedMyPlayer = mappedPlayerName(gameController, myColor);
+    const currentUserId = userId(
+      rootStoreState?.gameClientConfig?.currentUserId,
+    );
+    const playerMappings = playOrder.map((color) => {
+      let controllerPlayer: string | undefined;
+      try {
+        const playerState = gameController.getPlayerState?.(color);
+        controllerPlayer =
+          typeof playerState?.username === "string" && playerState.username
+            ? playerState.username
+            : typeof playerState?.userState?.username === "string" &&
+                playerState.userState.username
+              ? playerState.userState.username
+              : undefined;
+      } catch {
+        controllerPlayer = undefined;
+      }
+
+      const gameUserStates = rootStoreState?.gameUserStates;
+      const storeUserState =
+        gameUserStates?.getUserState?.(color) ??
+        (Array.isArray(gameUserStates?.userStates)
+          ? gameUserStates.userStates.find(
+              (candidate: Record<string, any>) =>
+                Number(candidate?.selectedColor) === color,
+            )
+          : undefined);
+      const storePlayer =
+        typeof storeUserState?.username === "string" && storeUserState.username
+          ? storeUserState.username
+          : undefined;
+      const storeUserId = userId(storeUserState?.userId);
+      const currentUserMatch =
+        currentUserId !== undefined &&
+        storeUserId !== undefined &&
+        String(currentUserId) === String(storeUserId);
+      return {
+        color,
+        mappedPlayer: mappedPlayerName(gameController, color),
+        controllerPlayer,
+        storePlayer,
+        storeUserId,
+        currentUserMatch,
+      };
+    });
+    const playerSignals = playerMappings.map((player) => ({
+      color: player.color,
+      ...(player.storePlayer ? { name: player.storePlayer } : {}),
+      ...(player.storeUserId !== undefined ? { userId: player.storeUserId } : {}),
+    }));
+    const identity = resolveLocalIdentity({
+      myColor,
+      ...(mappedMyPlayer ? { mappedMyPlayer } : {}),
+      playOrder,
+      players: playerSignals,
+      ...(currentUserId !== undefined ? { currentUserId } : {}),
+      ...(managerResolutionSource ? { managerResolutionSource } : {}),
+      isReplay,
+    });
+    const identityResolved = identity.status === "resolved";
+    const myPlayer = identityResolved ? (identity.myPlayer ?? "") : "";
+    const myPlayerMapping =
+      typeof myColor === "number"
+        ? playerMappings.find((player) => player.color === myColor)
+        : undefined;
+    const playerStateMyPlayer = myPlayerMapping?.controllerPlayer;
+    const storeMyPlayer = myPlayerMapping?.storePlayer;
     const gameStoreState = liveGameState;
     const diceState =
       gameController.diceState?.state ??
@@ -494,6 +593,7 @@ import {
       ) ||
       visibleDiscardCount > 0;
     action = resolveLocalBoardAction(action, discardPromptVisible);
+    if (!identityResolved) action = "none";
     const initialPlacement = currentState.turnState === 0;
 
     const hexes = tileState._tiles.flatMap((tile: Record<string, any>, index: number) => {
@@ -678,10 +778,8 @@ import {
               });
             })
             .map((edge: Record<string, any>) => edge.id);
-    const playOrder: number[] = Array.isArray(gameController.playOrder)
-      ? gameController.playOrder
-      : [];
     const botOnlyGame =
+      identityResolved &&
       playOrder.length >= 2 &&
       playOrder
         .filter((color) => color !== myColor)
@@ -689,7 +787,7 @@ import {
           (color) =>
             gameController.getPlayerState?.(color)?.userState?.isBot === true,
         );
-    const myOrderIndex = playOrder.indexOf(myColor);
+    const myOrderIndex = identityResolved ? playOrder.indexOf(myColor) : -1;
     const ownedSettlements = vertices.filter(
       (vertex: Record<string, any>) => vertex.building?.player === myPlayer,
     ).length;
@@ -828,13 +926,16 @@ import {
         hasLongestRoad: Number(victoryPointsState[4] ?? 0) > 0,
       };
     }
-    const ownCards =
-      playerStates[myColor]?.resourceCards?.cards ??
-      gameController.getAllCardsInHand?.(myColor);
+    const ownCards = identityResolved
+      ? playerStates[myColor]?.resourceCards?.cards ??
+        gameController.getAllCardsInHand?.(myColor)
+      : undefined;
     const ownHand = Array.isArray(ownCards)
       ? resourceVector(ownCards.filter((card: unknown) => Number(card) >= 1))
       : undefined;
-    const ownDevelopmentState = developmentStates[myColor];
+    const ownDevelopmentState = identityResolved
+      ? developmentStates[myColor]
+      : undefined;
     const ownDevelopmentCardList = Array.isArray(
       ownDevelopmentState?.developmentCards?.cards,
     )
@@ -852,6 +953,7 @@ import {
       ownBoughtDevelopmentCardList,
     );
     const ownPlayableDevelopmentCards =
+      identityResolved &&
       gameController.isMyTurn &&
       !ownDevelopmentState?.hasUsedDevelopmentCardThisTurn
         ? subtractDevelopmentCards(ownDevelopmentCards, boughtThisTurn)
@@ -863,9 +965,10 @@ import {
       ? rootStoreState.gameState.experimentalMechanicState.currentState
           .currentTurnPlayers
       : [Number(currentState.currentTurnPlayerColor)].filter(Number.isFinite);
-    const activeTrades = Object.values<Record<string, any>>(
-      tradeState?.activeOffers ?? {},
-    ).flatMap((offer) => {
+    const activeTrades = identityResolved
+      ? Object.values<Record<string, any>>(
+          tradeState?.activeOffers ?? {},
+        ).flatMap((offer) => {
       if (!offer || typeof offer.id !== "string") return [];
       const counterOfferInResponseToTradeId =
         offer.counterOfferInResponseToTradeId != null
@@ -962,7 +1065,8 @@ import {
           ...(myResponse ? { myResponse } : {}),
         },
       ];
-    });
+    })
+      : [];
     const bankVisible =
       rootStoreState?.gameSettings?.hideBankCards === false &&
       bankState?.hideBankCards === false;
@@ -994,7 +1098,6 @@ import {
     const placedPieces =
       vertices.filter((vertex: Record<string, any>) => vertex.building).length +
       edges.filter((edge: Record<string, any>) => edge.player).length;
-    const isReplay = Boolean(rootStoreState?.gameReplay?.isReplay);
     const completedTurns = Number(currentState.completedTurns ?? 0);
     if (
       !isReplay &&
@@ -1038,7 +1141,9 @@ import {
     )?.[1]?.trim();
     const gameOver = Boolean(visibleWinner || endgameHeading || winnerText);
     const winner = visibleWinner ?? winnerText;
-    const colorAsset = COLOR_ASSET_NAME[myColor] ?? "blue";
+    const colorAsset = identityResolved
+      ? COLOR_ASSET_NAME[myColor] ?? "blue"
+      : undefined;
     const assets = {
       resources: {
         lumber: findAsset("card_lumber"),
@@ -1048,9 +1153,13 @@ import {
         ore: findAsset("card_ore"),
       },
       pieces: {
-        road: findAsset(`road_${colorAsset}`),
-        settlement: findAsset(`settlement_${colorAsset}`),
-        city: findAsset(`city_${colorAsset}`),
+        ...(colorAsset
+          ? {
+              road: findAsset(`road_${colorAsset}`),
+              settlement: findAsset(`settlement_${colorAsset}`),
+              city: findAsset(`city_${colorAsset}`),
+            }
+          : {}),
         development: findAsset("card_devcardback"),
         robber: findAsset("icon_robber"),
         longestRoad: findAsset("icon_longest_road"),
@@ -1078,11 +1187,23 @@ import {
       buildableSettlementIds,
       buildableCityIds,
       buildableRoadIds,
-      myPlayer,
+      ...(identityResolved && myPlayer ? { myPlayer } : {}),
       localSeatDiagnostics: {
+        identity,
         ...(typeof myColor === "number" ? { rawMyColor: myColor } : {}),
-        resolvedMyPlayer: myPlayer,
-        mappedMyPlayer: playerName(gameController, myColor),
+        ...(identityResolved && myPlayer ? { resolvedMyPlayer: myPlayer } : {}),
+        ...(mappedMyPlayer ? { mappedMyPlayer } : {}),
+        ...(playerStateMyPlayer ? { playerStateMyPlayer } : {}),
+        ...(storeMyPlayer ? { storeMyPlayer } : {}),
+        playerMappings: playerMappings.map((player) => ({
+          color: player.color,
+          ...(player.mappedPlayer ? { mappedPlayer: player.mappedPlayer } : {}),
+          ...(player.controllerPlayer
+            ? { controllerPlayer: player.controllerPlayer }
+            : {}),
+          ...(player.storePlayer ? { storePlayer: player.storePlayer } : {}),
+          currentUserMatch: player.currentUserMatch,
+        })),
         rawPlayOrderColors: [...playOrder],
         ...(currentTurnPlayers[0] !== undefined
           ? {
@@ -1096,10 +1217,12 @@ import {
           : {}),
         ...(managerModuleId ? { managerModuleId } : {}),
         managerGeneration,
+        ...(managerResolutionSource ? { managerResolutionSource } : {}),
         managerMatchesStoreState: managerGameState === storeGameState,
         selectedGameStateSource,
         managerPlacedPieceCount,
         storePlacedPieceCount,
+        isReplay,
         occupiedBuildings: tileState._tileCorners.flatMap(
           (corner: Record<string, any>) => {
             const owner = corner.owner ?? corner.state?.owner;
@@ -1123,17 +1246,26 @@ import {
               }]
             : [];
         }),
-        seatSource: "gameController.myColor",
+        seatSource:
+          identity.source === "controller+account-user-id+store-roster"
+            ? "gameController.myColor+currentUserId+gameUserStates"
+            : identity.source === "replay-perspective"
+              ? "replay-perspective"
+              : "unresolved",
       },
       ...(ownHand ? { ownHand } : {}),
-      ownDevelopmentCards: {
-        cards: ownDevelopmentCards,
-        playable: ownPlayableDevelopmentCards,
-        boughtThisTurn,
-        hasPlayedThisTurn: Boolean(
-          ownDevelopmentState?.hasUsedDevelopmentCardThisTurn,
-        ),
-      },
+      ...(identityResolved
+        ? {
+            ownDevelopmentCards: {
+              cards: ownDevelopmentCards,
+              playable: ownPlayableDevelopmentCards,
+              boughtThisTurn,
+              hasPlayedThisTurn: Boolean(
+                ownDevelopmentState?.hasUsedDevelopmentCardThisTurn,
+              ),
+            },
+          }
+        : {}),
       activeTrades: gameOver ? [] : activeTrades,
       ...(bank ? { bank } : {}),
       bankVisible,
@@ -1151,9 +1283,10 @@ import {
         : {}),
       gameKey,
       isMyTurn:
+        identityResolved &&
         !gameOver &&
         (action === "discard" || Boolean(gameController.isMyTurn)),
-      action: gameOver ? "none" : action,
+      action: identityResolved && !gameOver ? action : "none",
       initialPlacement,
       picksUntilNext,
       victoryTarget,
@@ -1164,7 +1297,7 @@ import {
           rootStoreState?.lobbyState?.isPrivateGame ??
           false,
       ),
-      botOnlyGame,
+      ...(identityResolved ? { botOnlyGame } : {}),
       ...(currentTurnPlayers[0] !== undefined
         ? {
             currentPlayer: playerName(
@@ -1241,13 +1374,17 @@ import {
             legalVertexIds?: string[];
             legalEdgeIds?: string[];
             hexes?: Array<{ id: string; blocked?: boolean }>;
+            localSeatDiagnostics?: {
+              identity?: { status?: "resolved" | "unresolved" };
+            };
           }
         | undefined;
       if (
         !gameManager ||
         !gameController?.isMyTurn ||
         !socket ||
-        !snapshot?.isMyTurn ||
+        snapshot?.localSeatDiagnostics?.identity?.status !== "resolved" ||
+        !snapshot.isMyTurn ||
         snapshot.action !== detail.action
       ) {
         return;

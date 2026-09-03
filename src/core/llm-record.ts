@@ -51,6 +51,13 @@ export interface CompactRecordContracts {
   unavailable: "~";
 }
 
+type LocalSeatIdentityHistoryEntry = Omit<
+  NonNullable<BoardSnapshot["localSeatDiagnostics"]>,
+  "occupiedBuildings" | "occupiedRoads"
+> & {
+  capturedAt: number;
+};
+
 export interface CompactGameRecord {
   schema: "catan-evidence/2";
   status: "recording" | "completed" | "interrupted";
@@ -73,6 +80,7 @@ export interface CompactGameRecord {
   meta: {
     myPlayer?: string;
     localSeatDiagnostics?: BoardSnapshot["localSeatDiagnostics"];
+    localSeatIdentityHistory?: LocalSeatIdentityHistoryEntry[];
     victoryTarget?: number;
     friendlyRobber?: boolean;
     privateGame?: boolean;
@@ -1181,6 +1189,26 @@ export class CompactGameBuilder {
     const record = this.record!;
     if (board.localSeatDiagnostics) {
       record.meta.localSeatDiagnostics = board.localSeatDiagnostics;
+      const {
+        occupiedBuildings: _occupiedBuildings,
+        occupiedRoads: _occupiedRoads,
+        ...identityDiagnostics
+      } = board.localSeatDiagnostics;
+      const history = record.meta.localSeatIdentityHistory ?? [];
+      const previousIdentity = history[history.length - 1];
+      const nextIdentity = {
+        ...identityDiagnostics,
+        capturedAt: board.observedAt ?? Date.now(),
+      };
+      const previousSignature = previousIdentity
+        ? JSON.stringify({ ...previousIdentity, capturedAt: 0 })
+        : undefined;
+      const nextSignature = JSON.stringify({ ...nextIdentity, capturedAt: 0 });
+      if (previousSignature !== nextSignature) {
+        history.push(nextIdentity);
+        if (history.length > 32) history.splice(0, history.length - 32);
+        record.meta.localSeatIdentityHistory = history;
+      }
     }
     const knownHexes = new Set(record.boardHexes.map((row) => String(row[0])));
     for (const hex of board.hexes) {

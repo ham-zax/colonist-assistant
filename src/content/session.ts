@@ -329,6 +329,9 @@ export class GameSession {
     const hadGameKey = Boolean(this.gameKey);
     this.gameKey = gameKey;
     if (hadGameKey) {
+      // Local identity belongs to the game generation just ended. Require the
+      // bridge to resolve it again before canonicalizing any new "You" logs.
+      this.myPlayer = undefined;
       // A new game can reuse the same mounted log/session object. Start its
       // record clock before reset() synchronously publishes the empty state.
       this.startedAt = Date.now();
@@ -342,13 +345,11 @@ export class GameSession {
 
   setMyPlayer(myPlayer?: string): void {
     const normalized = myPlayer?.trim();
-    if (
-      !normalized ||
-      normalized === "You" ||
-      normalized === this.myPlayer
-    ) {
+    if (!normalized || normalized === "You") {
+      this.myPlayer = undefined;
       return;
     }
+    if (normalized === this.myPlayer) return;
     this.myPlayer = normalized;
     const canonical = this.events.map((event) =>
       canonicalizeEvent(event, normalized),

@@ -7,6 +7,7 @@ import {
   type ResourceVector,
 } from "./resources";
 import { longestRoadFromEdges } from "./roads";
+import type { LocalIdentityResolution } from "./local-identity";
 
 export type BoardAction =
   | "settlement"
@@ -118,9 +119,19 @@ export interface BoardAssetMap {
 }
 
 export interface LocalSeatDiagnostics {
+  identity: LocalIdentityResolution;
   rawMyColor?: number;
   resolvedMyPlayer?: string;
   mappedMyPlayer?: string;
+  playerStateMyPlayer?: string;
+  storeMyPlayer?: string;
+  playerMappings?: Array<{
+    color: number;
+    mappedPlayer?: string;
+    controllerPlayer?: string;
+    storePlayer?: string;
+    currentUserMatch: boolean;
+  }>;
   rawPlayOrderColors?: number[];
   currentActorColor?: number;
   currentActorPlayer?: string;
@@ -128,13 +139,19 @@ export interface LocalSeatDiagnostics {
   localActionState?: number;
   managerModuleId?: string;
   managerGeneration?: number;
+  managerResolutionSource?: "cached-module" | "module-scan" | "cached-fallback";
   managerMatchesStoreState?: boolean;
   selectedGameStateSource?: "manager" | "store";
   managerPlacedPieceCount?: number;
   storePlacedPieceCount?: number;
+  isReplay?: boolean;
   occupiedBuildings?: Array<{ vertexId: string; ownerColor: number; player: string }>;
   occupiedRoads?: Array<{ edgeId: string; ownerColor: number; player: string }>;
-  seatSource: "gameController.myColor";
+  seatSource:
+    | "gameController.myColor"
+    | "gameController.myColor+currentUserId+gameUserStates"
+    | "replay-perspective"
+    | "unresolved";
 }
 
 export interface BoardSnapshot {

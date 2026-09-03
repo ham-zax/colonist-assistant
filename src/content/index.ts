@@ -22,7 +22,10 @@ const boot = async (): Promise<void> => {
   let currentMyPlayer: string | undefined;
   const initialBoard = readPublicBoardSnapshot();
   currentGameKey = initialBoard?.gameKey;
-  currentMyPlayer = initialBoard?.myPlayer;
+  currentMyPlayer =
+    initialBoard?.localSeatDiagnostics?.identity.status === "resolved"
+      ? initialBoard.myPlayer
+      : undefined;
 
   let overlay: AssistantOverlay;
   const clearCurrentSession = async (): Promise<void> => {
@@ -43,10 +46,12 @@ const boot = async (): Promise<void> => {
       currentGameKey = snapshot.gameKey;
       session?.setGameKey(snapshot.gameKey);
     }
-    if (snapshot?.myPlayer) {
-      currentMyPlayer = snapshot.myPlayer;
-      session?.setMyPlayer(snapshot.myPlayer);
-    }
+    const resolvedMyPlayer =
+      snapshot?.localSeatDiagnostics?.identity.status === "resolved"
+        ? snapshot.myPlayer
+        : undefined;
+    currentMyPlayer = resolvedMyPlayer;
+    session?.setMyPlayer(resolvedMyPlayer);
     overlay.updateBoard(snapshot ?? readPublicBoardSnapshot());
   });
 
