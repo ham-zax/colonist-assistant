@@ -101,14 +101,23 @@ function parseJsonl(text, source) {
     });
 }
 
+function observationKey(record, source) {
+  if (!record.snapshotId) throw new Error(`${source}: record is missing snapshotId.`);
+  if (record.continuationStream == null) return record.snapshotId;
+  if (!Number.isInteger(record.continuationStream) || record.continuationStream < 0) {
+    throw new Error(`${source}: invalid continuationStream for ${record.snapshotId}.`);
+  }
+  return `${record.snapshotId}#stream=${record.continuationStream}`;
+}
+
 function indexUnique(records, source) {
   const byId = new Map();
   for (const record of records) {
-    if (!record.snapshotId) throw new Error(`${source}: record is missing snapshotId.`);
-    if (byId.has(record.snapshotId)) {
-      throw new Error(`${source}: duplicate snapshotId ${record.snapshotId}.`);
+    const key = observationKey(record, source);
+    if (byId.has(key)) {
+      throw new Error(`${source}: duplicate observation ${key}.`);
     }
-    byId.set(record.snapshotId, record);
+    byId.set(key, record);
   }
   return byId;
 }
@@ -174,11 +183,11 @@ function makeRng(seed) {
   };
 }
 
-function bootstrapInterval(blockValues, seed) {
+function bootstrapInterval(blockValues, seed, sampleCount = 5000) {
   if (blockValues.length < 8) return null;
   const rng = makeRng(seed);
   const samples = [];
-  for (let sample = 0; sample < 5000; sample += 1) {
+  for (let sample = 0; sample < sampleCount; sample += 1) {
     let total = 0;
     for (let index = 0; index < blockValues.length; index += 1) {
       total += blockValues[Math.floor(rng() * blockValues.length)];
@@ -187,6 +196,19 @@ function bootstrapInterval(blockValues, seed) {
   }
   samples.sort((left, right) => left - right);
   return [percentile(samples, 0.025), percentile(samples, 0.975)];
+}
+
+function exactDiscordantBinomialTwoSided(rescues, regressions) {
+  const discordant = rescues + regressions;
+  if (discordant === 0) return 1;
+  const tail = Math.min(rescues, regressions);
+  let term = 2 ** -discordant;
+  let probability = term;
+  for (let successes = 1; successes <= tail; successes += 1) {
+    term *= (discordant - successes + 1) / successes;
+    probability += term;
+  }
+  return Math.min(1, 2 * probability);
 }
 
 function sourceGameId(snapshot) {
@@ -483,28 +505,44 @@ const [corpusText, baselineText, candidateText] = await Promise.all([
 const snapshots = parseJsonl(corpusText, options.corpus);
 const baselineOutcomes = parseJsonl(baselineText, options.baseline);
 const candidateOutcomes = parseJsonl(candidateText, options.candidate);
-if (baselineOutcomes.length !== snapshots.length || candidateOutcomes.length !== snapshots.length) {
+if (baselineOutcomes.length !== candidateOutcomes.length) {
+  throw new Error(
+    `Outcome cardinality mismatch: baseline=${baselineOutcomes.length}, candidate=${candidateOutcomes.length}.`,
+  );
+}
+const baselineUsesStreams = baselineOutcomes.some((record) => record.continuationStream != null);
+const candidateUsesStreams = candidateOutcomes.some((record) => record.continuationStream != null);
+if (baselineUsesStreams !== candidateUsesStreams) {
+  throw new Error("Baseline/candidate continuation-stream modes differ.");
+}
+if (
+  !baselineUsesStreams &&
+  (baselineOutcomes.length !== snapshots.length || candidateOutcomes.length !== snapshots.length)
+) {
   throw new Error(
     `Outcome cardinality mismatch: corpus=${snapshots.length}, baseline=${baselineOutcomes.length}, candidate=${candidateOutcomes.length}.`,
   );
 }
+const snapshotById = indexUnique(snapshots, options.corpus);
 const baselineById = indexUnique(baselineOutcomes, options.baseline);
 const candidateById = indexUnique(candidateOutcomes, options.candidate);
+if (baselineById.size !== candidateById.size) {
+  throw new Error(
+    `Outcome observation mismatch: baseline=${baselineById.size}, candidate=${candidateById.size}.`,
+  );
+}
 
-const pairs = snapshots.map((snapshot, index) => {
-  const baseline = baselineById.get(snapshot.snapshotId);
-  const candidate = candidateById.get(snapshot.snapshotId);
-  if (!baseline || !candidate) {
-    throw new Error(`Missing paired outcome for ${snapshot.snapshotId}.`);
-  }
-  if (baselineOutcomes[index].snapshotId !== snapshot.snapshotId) {
-    throw new Error(`Baseline output order diverges at ${snapshot.snapshotId}.`);
-  }
-  if (candidateOutcomes[index].snapshotId !== snapshot.snapshotId) {
-    throw new Error(`Candidate output order diverges at ${snapshot.snapshotId}.`);
-  }
+const pairs = baselineOutcomes.map((baseline) => {
+  const key = observationKey(baseline, options.baseline);
+  const candidate = candidateById.get(key);
+  if (!candidate) throw new Error(`Missing candidate outcome for ${key}.`);
+  const snapshot = snapshotById.get(baseline.snapshotId);
+  if (!snapshot) throw new Error(`Missing corpus snapshot for ${baseline.snapshotId}.`);
   assertOutcomeMatchesSnapshot(snapshot, baseline, "baseline");
   assertOutcomeMatchesSnapshot(snapshot, candidate, "candidate");
+  if (baseline.continuationStream !== candidate.continuationStream) {
+    throw new Error(`${key}: continuation stream mismatch.`);
+  }
 
   const baselineRoot = rootAction(baseline);
   const candidateRoot = rootAction(candidate);
@@ -523,6 +561,7 @@ const pairs = snapshots.map((snapshot, index) => {
   const candidateDecision = decisionIdentity(candidate);
   return {
     snapshotId: snapshot.snapshotId,
+    continuationStream: baseline.continuationStream ?? null,
     stateHash: snapshot.stateHash,
     sourceGameId: sourceGameId(snapshot),
     sourceBlockId: blockId(snapshot),
@@ -607,17 +646,27 @@ for (const pair of disagreements) {
     (provenanceBreakdown[pair.provenance.category] ?? 0) + 1;
 }
 
-const winBlocks = pairedBlockMeans(
-  pairs,
+const repeatedStreamMode = pairs.length > 0 && pairs.every((pair) => pair.continuationStream != null);
+if (repeatedStreamMode && new Set(pairs.map((pair) => pair.snapshotId)).size !== 1) {
+  throw new Error("Repeated continuation-stream analysis must contain exactly one frozen snapshot.");
+}
+if (!repeatedStreamMode && pairs.some((pair) => pair.continuationStream != null)) {
+  throw new Error("Cannot mix ordinary takeover rows with continuation-stream rows.");
+}
+const resampleValues = (value) =>
+  repeatedStreamMode ? pairs.map((pair) => value(pair)) : pairedBlockMeans(pairs, value).map((entry) => entry.value);
+const bootstrapSamples = repeatedStreamMode ? 10000 : 5000;
+const winBlocks = resampleValues(
   (pair) => Number(pair.candidate.targetWin) - Number(pair.baseline.targetWin),
 );
-const marginBlocks = pairedBlockMeans(pairs, (pair) => pair.deltas.victoryPointMargin);
-const vpBlocks = pairedBlockMeans(pairs, (pair) => pair.deltas.targetVictoryPoints);
-const rankBlocks = pairedBlockMeans(pairs, (pair) => pair.deltas.finalRank);
-const regretBlocks = pairedBlockMeans(pairs, (pair) => pair.deltas.rootRegret);
+const marginBlocks = resampleValues((pair) => pair.deltas.victoryPointMargin);
+const vpBlocks = resampleValues((pair) => pair.deltas.targetVictoryPoints);
+const rankBlocks = resampleValues((pair) => pair.deltas.finalRank);
+const regretBlocks = resampleValues((pair) => pair.deltas.rootRegret);
 const validRegretPairs = pairs.filter((pair) => Number.isFinite(pair.deltas.rootRegret));
 const sourceGames = new Set(pairs.map((pair) => pair.sourceGameId));
 const sourceBlocks = new Set(pairs.map((pair) => pair.sourceBlockId));
+const uniqueSnapshots = new Set(pairs.map((pair) => pair.snapshotId));
 
 const failures = {
   baselineCutoffs: sum(pairs.map((pair) => Number(Boolean(pair.baseline.cutoff)))),
@@ -663,13 +712,15 @@ const summary = {
     candidateAuthorities: [...new Set(pairs.map((pair) => pair.candidate.authority).filter(Boolean))],
   },
   corpus: {
-    snapshots: pairs.length,
+    snapshots: uniqueSnapshots.size,
+    pairedObservations: pairs.length,
+    continuationStreams: repeatedStreamMode ? pairs.length : 0,
     sourceGames: sourceGames.size,
     sourceBlocks: sourceBlocks.size,
   },
   stateRngMatching: {
     exact: true,
-    verifiedSnapshots: pairs.length,
+    verifiedObservations: pairs.length,
     fields: ["snapshotId", "stateHash", "boardSeed", "chanceSeed", "chanceRngState", "policyRngStates"],
   },
   rootChoice: {
@@ -681,7 +732,19 @@ const summary = {
   classifications: classificationCounts,
   outcomeStrata,
   netRescues,
+  discordantWinPairs: {
+    rescues: classificationCounts["candidate-rescue"],
+    regressions: classificationCounts["candidate-regression"],
+    total:
+      classificationCounts["candidate-rescue"] + classificationCounts["candidate-regression"],
+    exactBinomialTwoSidedP: exactDiscordantBinomialTwoSided(
+      classificationCounts["candidate-rescue"],
+      classificationCounts["candidate-regression"],
+    ),
+  },
   pairedDeltas: {
+    resamplingUnit: repeatedStreamMode ? "continuationStream" : "sourceBlock",
+    bootstrapSamples,
     meanWinDelta: mean(
       pairs.map((pair) => Number(pair.candidate.targetWin) - Number(pair.baseline.targetWin)),
     ),
@@ -689,12 +752,22 @@ const summary = {
     meanVictoryPointMargin: mean(pairs.map((pair) => pair.deltas.victoryPointMargin)),
     meanFinalRank: mean(pairs.map((pair) => pair.deltas.finalRank)),
     meanRankImprovement: mean(pairs.map((pair) => pair.deltas.rankImprovement)),
-    blockBootstrap95Ci: {
-      winDelta: bootstrapInterval(winBlocks.map((entry) => entry.value), 0x5157494e),
-      targetVictoryPoints: bootstrapInterval(vpBlocks.map((entry) => entry.value), 0x51425650),
-      victoryPointMargin: bootstrapInterval(marginBlocks.map((entry) => entry.value), 0x514d4152),
-      finalRank: bootstrapInterval(rankBlocks.map((entry) => entry.value), 0x5152414e),
-    },
+    blockBootstrap95Ci: repeatedStreamMode
+      ? null
+      : {
+          winDelta: bootstrapInterval(winBlocks, 0x5157494e, bootstrapSamples),
+          targetVictoryPoints: bootstrapInterval(vpBlocks, 0x51425650, bootstrapSamples),
+          victoryPointMargin: bootstrapInterval(marginBlocks, 0x514d4152, bootstrapSamples),
+          finalRank: bootstrapInterval(rankBlocks, 0x5152414e, bootstrapSamples),
+        },
+    continuationStreamBootstrap95Ci: repeatedStreamMode
+      ? {
+          winDelta: bootstrapInterval(winBlocks, 0x5157494e, bootstrapSamples),
+          targetVictoryPoints: bootstrapInterval(vpBlocks, 0x51425650, bootstrapSamples),
+          victoryPointMargin: bootstrapInterval(marginBlocks, 0x514d4152, bootstrapSamples),
+          finalRank: bootstrapInterval(rankBlocks, 0x5152414e, bootstrapSamples),
+        }
+      : null,
   },
   mechanismEventDeltas: aggregateMechanismDeltas(pairs),
   rootRegret: {
@@ -703,7 +776,12 @@ const summary = {
     meanBaseline: mean(validRegretPairs.map((pair) => pair.baseline.rootRegret)),
     meanCandidate: mean(validRegretPairs.map((pair) => pair.candidate.rootRegret)),
     meanDelta: mean(validRegretPairs.map((pair) => pair.deltas.rootRegret)),
-    blockBootstrap95Ci: bootstrapInterval(regretBlocks.map((entry) => entry.value), 0x51524547),
+    blockBootstrap95Ci: repeatedStreamMode
+      ? null
+      : bootstrapInterval(regretBlocks, 0x51524547, bootstrapSamples),
+    continuationStreamBootstrap95Ci: repeatedStreamMode
+      ? bootstrapInterval(regretBlocks, 0x51524547, bootstrapSamples)
+      : null,
   },
   provenanceBreakdown,
   failures,
@@ -730,6 +808,9 @@ await writeFile(options.output, `${JSON.stringify(summary, null, 2)}\n`);
 
 let selectedCount = null;
 if (options.selectOutput) {
+  if (repeatedStreamMode) {
+    throw new Error("Frozen-corpus selection is not supported for repeated continuation-stream analysis.");
+  }
   const selected = selectFrozenCorpus(
     snapshots,
     pairs,
@@ -788,7 +869,8 @@ console.log(
   JSON.stringify(
     {
       output: options.output,
-      snapshots: pairs.length,
+      snapshots: uniqueSnapshots.size,
+      pairedObservations: pairs.length,
       sourceGames: sourceGames.size,
       sourceBlocks: sourceBlocks.size,
       rootDisagreements: disagreements.length,
