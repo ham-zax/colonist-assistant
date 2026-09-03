@@ -117,6 +117,26 @@ export interface BoardAssetMap {
   >;
 }
 
+export interface LocalSeatDiagnostics {
+  rawMyColor?: number;
+  resolvedMyPlayer?: string;
+  mappedMyPlayer?: string;
+  rawPlayOrderColors?: number[];
+  currentActorColor?: number;
+  currentActorPlayer?: string;
+  isMyTurn?: boolean;
+  localActionState?: number;
+  managerModuleId?: string;
+  managerGeneration?: number;
+  managerMatchesStoreState?: boolean;
+  selectedGameStateSource?: "manager" | "store";
+  managerPlacedPieceCount?: number;
+  storePlacedPieceCount?: number;
+  occupiedBuildings?: Array<{ vertexId: string; ownerColor: number; player: string }>;
+  occupiedRoads?: Array<{ edgeId: string; ownerColor: number; player: string }>;
+  seatSource: "gameController.myColor";
+}
+
 export interface BoardSnapshot {
   hexes: BoardHex[];
   vertices: BoardVertex[];
@@ -127,6 +147,7 @@ export interface BoardSnapshot {
   buildableCityIds?: string[];
   buildableRoadIds?: string[];
   myPlayer?: string;
+  localSeatDiagnostics?: LocalSeatDiagnostics;
   ownHand?: ResourceVector;
   ownDevelopmentCards?: OwnDevelopmentCardState;
   activeTrades?: ActiveTradeOffer[];

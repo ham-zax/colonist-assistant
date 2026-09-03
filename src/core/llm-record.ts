@@ -72,6 +72,7 @@ export interface CompactGameRecord {
   contracts: CompactRecordContracts;
   meta: {
     myPlayer?: string;
+    localSeatDiagnostics?: BoardSnapshot["localSeatDiagnostics"];
     victoryTarget?: number;
     friendlyRobber?: boolean;
     privateGame?: boolean;
@@ -1178,6 +1179,9 @@ export class CompactGameBuilder {
     alias: (name?: string) => string | null,
   ): void {
     const record = this.record!;
+    if (board.localSeatDiagnostics) {
+      record.meta.localSeatDiagnostics = board.localSeatDiagnostics;
+    }
     const knownHexes = new Set(record.boardHexes.map((row) => String(row[0])));
     for (const hex of board.hexes) {
       if (knownHexes.has(hex.id)) continue;

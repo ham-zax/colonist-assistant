@@ -365,8 +365,12 @@ import {
       ).length;
       return buildings + roads;
     };
+    const managerPlacedPieceCount = placedPieceCount(managerGameState);
+    const storePlacedPieceCount = placedPieceCount(storeGameState);
+    const selectedGameStateSource =
+      managerPlacedPieceCount > storePlacedPieceCount ? "manager" : "store";
     const liveGameState =
-      placedPieceCount(managerGameState) > placedPieceCount(storeGameState)
+      selectedGameStateSource === "manager"
         ? managerGameState
         : storeGameState ?? managerGameState;
     const tileState =
@@ -1075,6 +1079,52 @@ import {
       buildableCityIds,
       buildableRoadIds,
       myPlayer,
+      localSeatDiagnostics: {
+        ...(typeof myColor === "number" ? { rawMyColor: myColor } : {}),
+        resolvedMyPlayer: myPlayer,
+        mappedMyPlayer: playerName(gameController, myColor),
+        rawPlayOrderColors: [...playOrder],
+        ...(currentTurnPlayers[0] !== undefined
+          ? {
+              currentActorColor: currentTurnPlayers[0],
+              currentActorPlayer: playerName(gameController, currentTurnPlayers[0]),
+            }
+          : {}),
+        isMyTurn: Boolean(gameController.isMyTurn),
+        ...(Number.isInteger(playerActionState)
+          ? { localActionState: Number(playerActionState) }
+          : {}),
+        ...(managerModuleId ? { managerModuleId } : {}),
+        managerGeneration,
+        managerMatchesStoreState: managerGameState === storeGameState,
+        selectedGameStateSource,
+        managerPlacedPieceCount,
+        storePlacedPieceCount,
+        occupiedBuildings: tileState._tileCorners.flatMap(
+          (corner: Record<string, any>) => {
+            const owner = corner.owner ?? corner.state?.owner;
+            const buildingType = corner.buildingType ?? corner.state?.buildingType;
+            return typeof owner === "number" && (buildingType === 1 || buildingType === 2)
+              ? [{
+                  vertexId: key("v", corner.hexCorner),
+                  ownerColor: owner,
+                  player: playerName(gameController, owner),
+                }]
+              : [];
+          },
+        ),
+        occupiedRoads: tileState._tileEdges.flatMap((edge: Record<string, any>) => {
+          const owner = edge.owner ?? edge.state?.owner;
+          return typeof owner === "number"
+            ? [{
+                edgeId: key("e", edge.hexEdge),
+                ownerColor: owner,
+                player: playerName(gameController, owner),
+              }]
+            : [];
+        }),
+        seatSource: "gameController.myColor",
+      },
       ...(ownHand ? { ownHand } : {}),
       ownDevelopmentCards: {
         cards: ownDevelopmentCards,
