@@ -128,6 +128,52 @@ fn representative_state() -> Result<(GameState, Vec<Action>, u64, usize), String
     Err("could not construct a deterministic representative midgame state".into())
 }
 
+fn development_closure_state(mut state: GameState) -> Result<GameState, String> {
+    let current = state.current_player as usize;
+    if state.players[current].development != [0; 5]
+        || state.players[current].bought_development != [0; 5]
+        || state.players[current].played_development_this_turn
+    {
+        return Err("development closure fixture expects a clean current-player development hand".into());
+    }
+    for card in [0usize, 2, 3, 4] {
+        if state.development_deck[card] == 0 {
+            return Err(format!("development deck has no card {card} for closure fixture"));
+        }
+        state.development_deck[card] -= 1;
+        state.players[current].development[card] += 1;
+    }
+    state.validate()?;
+    Ok(state)
+}
+
+fn select_development_roots(state: &GameState) -> Result<Vec<Action>, String> {
+    let legal = state
+        .legal_actions()
+        .into_iter()
+        .filter(root_supported)
+        .collect::<Vec<_>>();
+    let mut roots: Vec<Action> = Vec::with_capacity(ROOT_LIMIT);
+    let mut push_first = |matches: &dyn Fn(&Action) -> bool| -> Result<(), String> {
+        let action = legal
+            .iter()
+            .find(|action| matches(action) && !roots.contains(*action))
+            .map(|action| (*action).clone())
+            .ok_or_else(|| "development closure fixture is missing a required root family".to_string())?;
+        roots.push(action);
+        Ok(())
+    };
+    push_first(&|action| matches!(action, Action::EndTurn))?;
+    push_first(&|action| matches!(action, Action::BuildRoad { .. }))?;
+    push_first(&|action| matches!(action, Action::BuildRoad { .. }))?;
+    push_first(&|action| matches!(action, Action::PlayKnight { .. }))?;
+    push_first(&|action| matches!(action, Action::PlayRoadBuilding { .. }))?;
+    push_first(&|action| matches!(action, Action::PlayYearOfPlenty { .. }))?;
+    push_first(&|action| matches!(action, Action::PlayMonopoly { .. }))?;
+    push_first(&|action| matches!(action, Action::MaritimeTrade { .. }))?;
+    Ok(roots)
+}
+
 fn topology_words(state: &GameState) -> Result<Vec<u32>, String> {
     let board = state.board.as_ref();
     if board.hexes.len() != HEX_COUNT
@@ -313,7 +359,14 @@ fn bench_json(result: &BenchResult, roots: &[Action]) -> String {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let output = arg_value("output").unwrap_or_else(|| "experiments/webgpu-rollout/case.json".into());
+    let profile = arg_value("profile").unwrap_or_else(|| "baseline".into());
+    let output = arg_value("output").unwrap_or_else(|| {
+        if profile == "development" {
+            "experiments/webgpu-rollout/case-development.json".into()
+        } else {
+            "experiments/webgpu-rollout/case.json".into()
+        }
+    });
     let rollouts_per_root = arg_value("rollouts")
         .as_deref()
         .unwrap_or("4096")
@@ -326,7 +379,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(DEFAULT_REPETITIONS)
         .max(1);
 
-    let (state, roots, board_seed, generated_actions) = representative_state()?;
+    let (base_state, baseline_roots, board_seed, generated_actions) = representative_state()?;
+    let (state, roots, profile_name) = match profile.as_str() {
+        "baseline" => (base_state, baseline_roots, "baseline"),
+        "development" => {
+            let state = development_closure_state(base_state)?;
+            let roots = select_development_roots(&state)?;
+            (state, roots, "development-closure")
+        }
+        other => return Err(format!("unknown feasibility profile: {other}").into()),
+    };
     if roots.len() != ROOT_LIMIT {
         return Err(format!("expected {ROOT_LIMIT} roots, got {}", roots.len()).into());
     }
@@ -365,10 +427,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let seed_lo = SEED as u32;
     let seed_hi = (SEED >> 32) as u32;
+    let development_closure_cards = if profile_name == "development-closure" {
+        "[0,2,3,4]"
+    } else {
+        "[]"
+    };
     let mut report = String::from("{\n");
     report.push_str("  \"schema\": \"colonist-webgpu-rollout-feasibility/1\",\n");
     report.push_str(&format!(
-        "  \"generator\": {{\"boardSeed\": {board_seed}, \"generatedActions\": {generated_actions}, \"players\": 4, \"playerTradesEnabled\": false}},\n"
+        "  \"generator\": {{\"profile\": \"{profile_name}\", \"boardSeed\": {board_seed}, \"generatedActions\": {generated_actions}, \"players\": 4, \"playerTradesEnabled\": false, \"developmentClosureCards\": {development_closure_cards}}},\n"
     ));
     report.push_str(&format!(
         "  \"layout\": {{\"stateWords\": {STATE_WORDS}, \"actionWords\": {ACTION_WORDS}, \"topologyWords\": {TOPOLOGY_WORDS}, \"laneWords\": 421, \"stateBytesPerLane\": {}, \"laneBytesPerLane\": 1684, \"storageBuffers\": 5}},\n",

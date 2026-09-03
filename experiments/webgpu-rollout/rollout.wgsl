@@ -1,8 +1,8 @@
-// H2 feasibility-only WebGPU rollout kernel.
+// H2/H3 feasibility-only WebGPU rollout kernel.
 //
-// This deliberately preserves the production packed-state/root/reduction shape
-// while pruning only player-trade/setup branches and simplifying dev-card policy
-// selection. It is not a production replacement for sim.cu.
+// This preserves the production packed-state/root/reduction shape and the H3
+// no-player-trade rollout policy. Domestic trades and unreachable setup remain
+// outside the feasibility gate. It is not a production replacement for sim.cu.
 
 const MAX_PLAYERS: u32 = 4u;
 const HEX_COUNT: u32 = 19u;
@@ -141,6 +141,13 @@ struct RobberChoice {
   victim_code: u32,
 }
 
+struct RoadBuildingChoice {
+  found: u32,
+  first: u32,
+  second_code: u32,
+  score: u32,
+}
+
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> base_states: array<u32>;
 @group(0) @binding(2) var<storage, read> topology: array<u32>;
@@ -178,6 +185,16 @@ fn root_base_index(root: u32) -> u32 {
 }
 fn status_get(lane: u32) -> u32 { return lane_data[status_base() + lane]; }
 fn status_set(lane: u32, value: u32) { lane_data[status_base() + lane] = value; }
+fn dev_stats_base() -> u32 { return ROOT_STATS_WORDS * params.root_count; }
+fn record_dev_opportunity(slot: u32) { atomicAdd(&stats[dev_stats_base() + slot], 1u); }
+fn record_dev_selection(tag: u32) {
+  var slot = 0xffffffffu;
+  if (tag == ACTION_PLAY_KNIGHT) { slot = 0u; }
+  else if (tag == ACTION_PLAY_ROAD_BUILDING) { slot = 1u; }
+  else if (tag == ACTION_PLAY_YEAR_OF_PLENTY) { slot = 2u; }
+  else if (tag == ACTION_PLAY_MONOPOLY) { slot = 3u; }
+  if (slot != 0xffffffffu) { atomicAdd(&stats[dev_stats_base() + 4u + slot], 1u); }
+}
 
 fn player_field(player: u32, offset: u32) -> u32 {
   return STATE_PLAYERS + player * PLAYER_STRIDE + offset;
@@ -527,6 +544,114 @@ fn can_build_road(lane: u32, edge: u32, extra_edge: u32) -> bool {
   return false;
 }
 
+fn can_afford_with_gains(lane: u32, player: u32, kind: u32, first_gain: u32, second_gain: u32) -> bool {
+  var res = 0u;
+  loop {
+    if (res >= 5u) { break; }
+    var held = player_get(lane, player, PLAYER_RESOURCES + res);
+    if (first_gain == res) { held += 1u; }
+    if (second_gain == res) { held += 1u; }
+    if (held < cost_value(kind, res)) { return false; }
+    res += 1u;
+  }
+  return true;
+}
+
+fn immediate_build_completion_score(lane: u32, player: u32, first_gain: u32, second_gain: u32) -> u32 {
+  let public_vp = player_get(lane, player, PLAYER_PUBLIC_VP);
+  let hidden_vp = player_get(lane, player, PLAYER_DEVELOPMENT + 1u);
+  let victory_target = state_get(STATE_VICTORY_TARGET, lane);
+  var score = 0u;
+
+  if (player_get(lane, player, PLAYER_CITIES_LEFT) > 0u && can_afford_with_gains(lane, player, 2u, first_gain, second_gain)) {
+    var vertex = 0u;
+    loop {
+      if (vertex >= VERTEX_COUNT) { break; }
+      if (state_get(STATE_BUILDINGS + vertex, lane) == player + 1u) {
+        score = select(12000u, 50000u, public_vp + hidden_vp + 1u >= victory_target);
+        break;
+      }
+      vertex += 1u;
+    }
+  }
+
+  if (player_get(lane, player, PLAYER_SETTLEMENTS_LEFT) > 0u && can_afford_with_gains(lane, player, 1u, first_gain, second_gain)) {
+    var vertex = 0u;
+    loop {
+      if (vertex >= VERTEX_COUNT) { break; }
+      if (can_place_settlement(lane, vertex)) {
+        score = max(score, select(10000u, 48000u, public_vp + hidden_vp + 1u >= victory_target));
+        break;
+      }
+      vertex += 1u;
+    }
+  }
+
+  if (can_afford_with_gains(lane, player, 3u, first_gain, second_gain)) { score = max(score, 1800u); }
+  if (player_get(lane, player, PLAYER_ROADS_LEFT) > 0u && can_afford_with_gains(lane, player, 0u, first_gain, second_gain)) {
+    score = max(score, 900u);
+  }
+  return score;
+}
+
+fn road_owner_with_pair(lane: u32, edge: u32, first: u32, second: u32, player: u32) -> u32 {
+  if (edge == first || edge == second) { return player + 1u; }
+  return state_get(STATE_ROADS + edge, lane);
+}
+
+fn can_place_settlement_with_pair(lane: u32, vertex: u32, first: u32, second: u32) -> bool {
+  if (vertex >= VERTEX_COUNT || state_get(STATE_BUILDINGS + vertex, lane) != 0u) { return false; }
+  let adjacent_vertices = topo_vertex_vertex_count(vertex);
+  var slot = 0u;
+  loop {
+    if (slot >= adjacent_vertices) { break; }
+    if (state_get(STATE_BUILDINGS + topo_vertex_vertex(vertex, slot), lane) != 0u) { return false; }
+    slot += 1u;
+  }
+  let player = state_get(STATE_CURRENT_PLAYER, lane);
+  let adjacent_edges = topo_vertex_edge_count(vertex);
+  slot = 0u;
+  loop {
+    if (slot >= adjacent_edges) { break; }
+    if (road_owner_with_pair(lane, topo_vertex_edge(vertex, slot), first, second, player) == player + 1u) { return true; }
+    slot += 1u;
+  }
+  return false;
+}
+
+fn actor_road_path_between(lane: u32, player: u32, start: u32, goal: u32) -> bool {
+  var stack: array<u32, 54>;
+  var visited: array<u32, 54>;
+  var size = 0u;
+  stack[size] = start;
+  size += 1u;
+  visited[start] = 1u;
+  loop {
+    if (size == 0u) { break; }
+    size -= 1u;
+    let vertex = stack[size];
+    if (vertex == goal) { return true; }
+    let count = topo_vertex_edge_count(vertex);
+    var slot = 0u;
+    loop {
+      if (slot >= count) { break; }
+      let edge = topo_vertex_edge(vertex, slot);
+      if (state_get(STATE_ROADS + edge, lane) == player + 1u) {
+        let a = topo_edge_vertex(edge, 0u);
+        let b = topo_edge_vertex(edge, 1u);
+        let next = select(a, b, a == vertex);
+        if (visited[next] == 0u) {
+          visited[next] = 1u;
+          stack[size] = next;
+          size += 1u;
+        }
+      }
+      slot += 1u;
+    }
+  }
+  return false;
+}
+
 fn edge_used(mask: EdgeMask, edge: u32) -> bool {
   let bit = 1u << (edge & 31u);
   if (edge < 32u) { return (mask.a & bit) != 0u; }
@@ -605,6 +730,169 @@ fn longest_road_length(lane: u32, player: u32) -> u32 {
   }
   return best;
 }
+
+fn longest_road_from_with_pair(lane: u32, player: u32, root_edge: u32, root_through: u32, first: u32, second: u32) -> u32 {
+  var edge_stack: array<u32, 15>;
+  var through_stack: array<u32, 15>;
+  var next_slot: array<u32, 15>;
+  var depth = 0i;
+  var used = EdgeMask(0u, 0u, 0u);
+  edge_stack[0] = root_edge;
+  through_stack[0] = root_through;
+  next_slot[0] = 0u;
+  used = edge_mark(used, root_edge, true);
+  var best = 1u;
+  loop {
+    if (depth < 0i) { break; }
+    let d = u32(depth);
+    let edge = edge_stack[d];
+    let a = topo_edge_vertex(edge, 0u);
+    let b = topo_edge_vertex(edge, 1u);
+    let next_vertex = select(a, b, a == through_stack[d]);
+    let owner = building_player(state_get(STATE_BUILDINGS + next_vertex, lane));
+    if (owner != 0xffffffffu && owner != player) {
+      used = edge_mark(used, edge, false);
+      depth -= 1i;
+      continue;
+    }
+    let count = topo_vertex_edge_count(next_vertex);
+    var pushed = false;
+    var slot = next_slot[d];
+    loop {
+      if (slot >= count) { break; }
+      next_slot[d] = slot + 1u;
+      let candidate = topo_vertex_edge(next_vertex, slot);
+      if (candidate != edge
+          && !edge_used(used, candidate)
+          && road_owner_with_pair(lane, candidate, first, second, player) == player + 1u
+          && depth + 1i < 15i) {
+        depth += 1i;
+        let nd = u32(depth);
+        edge_stack[nd] = candidate;
+        through_stack[nd] = next_vertex;
+        next_slot[nd] = 0u;
+        used = edge_mark(used, candidate, true);
+        best = max(best, nd + 1u);
+        pushed = true;
+        break;
+      }
+      slot += 1u;
+    }
+    if (pushed) { continue; }
+    used = edge_mark(used, edge, false);
+    depth -= 1i;
+  }
+  return best;
+}
+
+fn longest_road_length_with_pair(lane: u32, player: u32, first: u32, second: u32) -> u32 {
+  var best = 0u;
+  var edge = 0u;
+  loop {
+    if (edge >= EDGE_COUNT) { break; }
+    if (road_owner_with_pair(lane, edge, first, second, player) == player + 1u) {
+      let a = topo_edge_vertex(edge, 0u);
+      let b = topo_edge_vertex(edge, 1u);
+      let from_a = longest_road_from_with_pair(lane, player, edge, a, first, second);
+      let from_b = longest_road_from_with_pair(lane, player, edge, b, first, second);
+      best = max(best, max(from_a, from_b));
+    }
+    edge += 1u;
+  }
+  return best;
+}
+
+fn road_building_pair_policy_score(lane: u32, first: u32, second: u32) -> u32 {
+  let player = state_get(STATE_CURRENT_PLAYER, lane);
+  var score = road_policy_score(lane, first);
+  if (second < EDGE_COUNT) { score += road_policy_score(lane, second); }
+  let public_vp = player_get(lane, player, PLAYER_PUBLIC_VP);
+  let hidden_vp = player_get(lane, player, PLAYER_DEVELOPMENT + 1u);
+  let victory_target = state_get(STATE_VICTORY_TARGET, lane);
+
+  if (player_get(lane, player, PLAYER_SETTLEMENTS_LEFT) > 0u && has_cost(lane, player, 1u)) {
+    var vertex = 0u;
+    loop {
+      if (vertex >= VERTEX_COUNT) { break; }
+      if (!can_place_settlement(lane, vertex) && can_place_settlement_with_pair(lane, vertex, first, second)) {
+        score += select(160000u, 600000u, public_vp + hidden_vp + 1u >= victory_target);
+        break;
+      }
+      vertex += 1u;
+    }
+  }
+
+  let actor_length = longest_road_length_with_pair(lane, player, first, second);
+  var best_other = 0u;
+  let players = state_get(STATE_NUM_PLAYERS, lane);
+  var opponent = 0u;
+  loop {
+    if (opponent >= players) { break; }
+    if (opponent != player) { best_other = max(best_other, longest_road_length(lane, opponent)); }
+    opponent += 1u;
+  }
+  let old_holder = state_get(STATE_LONGEST_HOLDER, lane);
+  let takes_longest = actor_length >= 5u && (old_holder == player + 1u || actor_length > best_other);
+  if (takes_longest && old_holder != player + 1u) {
+    score += select(220000u, 700000u, public_vp + hidden_vp + 2u >= victory_target);
+  }
+
+  let first_a = topo_edge_vertex(first, 0u);
+  let first_b = topo_edge_vertex(first, 1u);
+  var closes_existing_cycle = actor_road_path_between(lane, player, first_a, first_b);
+  if (!closes_existing_cycle && second < EDGE_COUNT) {
+    closes_existing_cycle = actor_road_path_between(
+      lane,
+      player,
+      topo_edge_vertex(second, 0u),
+      topo_edge_vertex(second, 1u),
+    );
+  }
+  if (closes_existing_cycle) { score += 120000u; }
+  return score;
+}
+
+fn choose_road_building_pair(lane: u32, rng: ptr<function, U64>) -> RoadBuildingChoice {
+  let player = state_get(STATE_CURRENT_PLAYER, lane);
+  let roads_left = player_get(lane, player, PLAYER_ROADS_LEFT);
+  var total_weight = 0u;
+  var choice = RoadBuildingChoice(0u, 0xffffffffu, 0u, 0u);
+  if (roads_left == 0u) { return choice; }
+  if (roads_left == 1u) {
+    var first = 0u;
+    loop {
+      if (first >= EDGE_COUNT) { break; }
+      if (can_build_road(lane, first, 0xffffffffu)) {
+        let weight = road_building_pair_policy_score(lane, first, 0xffffffffu);
+        let next_total = total_weight + weight;
+        if (rng_range(rng, next_total) < weight) { choice = RoadBuildingChoice(1u, first, 0u, weight); }
+        total_weight = next_total;
+      }
+      first += 1u;
+    }
+    return choice;
+  }
+  var first = 0u;
+  loop {
+    if (first >= EDGE_COUNT) { break; }
+    if (can_build_road(lane, first, 0xffffffffu)) {
+      var second = 0u;
+      loop {
+        if (second >= EDGE_COUNT) { break; }
+        if (can_build_road(lane, second, first)) {
+          let weight = road_building_pair_policy_score(lane, first, second);
+          let next_total = total_weight + weight;
+          if (rng_range(rng, next_total) < weight) { choice = RoadBuildingChoice(1u, first, second + 1u, weight); }
+          total_weight = next_total;
+        }
+        second += 1u;
+      }
+    }
+    first += 1u;
+  }
+  return choice;
+}
+
 fn update_longest_road(lane: u32) {
   let players = state_get(STATE_NUM_PLAYERS, lane);
   var lengths: array<u32, 4>;
@@ -784,14 +1072,105 @@ fn produce_roll(lane: u32, roll: u32) {
   }
 }
 
+fn resource_policy_score(res: u32) -> u32 {
+  if (res == 0u || res == 1u) { return 100u; }
+  if (res == 2u) { return 78u; }
+  if (res == 3u) { return 125u; }
+  if (res == 4u) { return 115u; }
+  return 1u;
+}
+
+fn observed_monopoly_resource_weight(lane: u32, observer: u32, res: u32) -> u32 {
+  var score = 1u;
+  let players = state_get(STATE_NUM_PLAYERS, lane);
+  var player = 0u;
+  loop {
+    if (player >= players) { break; }
+    if (player != observer) {
+      var resource_pips = 0u;
+      var total_pips = 0u;
+      var vertex = 0u;
+      loop {
+        if (vertex >= VERTEX_COUNT) { break; }
+        let building = state_get(STATE_BUILDINGS + vertex, lane);
+        if (building_player(building) == player) {
+          let multiplier = building_multiplier(building);
+          let count = topo_vertex_hex_count(vertex);
+          var slot = 0u;
+          loop {
+            if (slot >= count) { break; }
+            let hex = topo_vertex_hex(vertex, slot);
+            let pips = pips_for_number(state_get(STATE_HEX_NUMBERS + hex, lane)) * multiplier;
+            total_pips += pips;
+            if (state_get(STATE_HEX_RESOURCES + hex, lane) == res + 1u) { resource_pips += pips; }
+            slot += 1u;
+          }
+        }
+        vertex += 1u;
+      }
+      score += resource_total(lane, player) * (resource_pips + 1u) * 32u / (total_pips + 5u);
+    }
+    player += 1u;
+  }
+  return score;
+}
+
+fn year_of_plenty_pair_score(lane: u32, player: u32, first: u32, second: u32) -> u32 {
+  return resource_policy_score(first)
+    + resource_policy_score(second)
+    + immediate_build_completion_score(lane, player, first, second);
+}
+
+fn monopoly_resource_score(lane: u32, player: u32, res: u32) -> u32 {
+  let observed = observed_monopoly_resource_weight(lane, player, res);
+  let single_gain_conversion = immediate_build_completion_score(lane, player, res, 0xffffffffu);
+  let estimated_transfer = select(0u, observed - 1u, observed > 1u);
+  let conversion_scale = min(estimated_transfer, 32u);
+  return resource_policy_score(res) * observed + single_gain_conversion * conversion_scale / 32u;
+}
+
+fn knight_policy_base(lane: u32, player: u32) -> u32 {
+  let played = player_get(lane, player, PLAYER_PLAYED_KNIGHTS) + 1u;
+  if (played < 3u) { return 1200u; }
+  let players = state_get(STATE_NUM_PLAYERS, lane);
+  var opponent = 0u;
+  loop {
+    if (opponent >= players) { break; }
+    if (opponent != player && player_get(lane, opponent, PLAYER_PLAYED_KNIGHTS) >= played) { return 1200u; }
+    opponent += 1u;
+  }
+  if (state_get(STATE_LARGEST_HOLDER, lane) == player + 1u) { return 1200u; }
+  let actor_vp = player_get(lane, player, PLAYER_PUBLIC_VP) + player_get(lane, player, PLAYER_DEVELOPMENT + 1u);
+  return select(7000u, 20000000u, actor_vp + 2u >= state_get(STATE_VICTORY_TARGET, lane));
+}
+
+fn robber_blocks_actor_production(lane: u32, player: u32) -> bool {
+  let robber_hex = state_get(STATE_ROBBER_HEX, lane);
+  var vertex = 0u;
+  loop {
+    if (vertex >= VERTEX_COUNT) { break; }
+    if (building_player(state_get(STATE_BUILDINGS + vertex, lane)) == player) {
+      let count = topo_vertex_hex_count(vertex);
+      var slot = 0u;
+      loop {
+        if (slot >= count) { break; }
+        if (topo_vertex_hex(vertex, slot) == robber_hex) { return true; }
+        slot += 1u;
+      }
+    }
+    vertex += 1u;
+  }
+  return false;
+}
+
 fn robber_hex_allowed(lane: u32, hex: u32) -> bool {
   if (hex >= HEX_COUNT || hex == state_get(STATE_ROBBER_HEX, lane)) { return false; }
   if (state_get(STATE_FRIENDLY_ROBBER, lane) == 0u) { return true; }
   var vertex = 0u;
-  let current = state_get(STATE_CURRENT_PLAYER, lane);
   loop {
     if (vertex >= VERTEX_COUNT) { break; }
-    if (building_player(state_get(STATE_BUILDINGS + vertex, lane)) == current) {
+    let owner = building_player(state_get(STATE_BUILDINGS + vertex, lane));
+    if (owner != 0xffffffffu && player_get(lane, owner, PLAYER_PUBLIC_VP) < 3u) {
       let count = topo_vertex_hex_count(vertex);
       var slot = 0u;
       loop {
@@ -897,8 +1276,86 @@ fn generate_rollout_action(lane: u32) {
   var seen = false;
 
   if (phase == PHASE_PRE_ROLL) {
-    write_action(lane, ACTION_ROLL, 0u, 0u, 0u);
-    seen = true;
+    var total_weight = 0u;
+    if (weighted_select(&rng, &total_weight, profile_scaled_weight(lane, current, 0u, 6000u))) {
+      write_action(lane, ACTION_ROLL, 0u, 0u, 0u);
+    }
+    if (development_playable(lane, current, 0u)) {
+      let choice = choose_robber(lane, &rng);
+      if (choice.found != 0u) {
+        record_dev_opportunity(0u);
+        let unblock_base = select(1200u, 4200u, robber_blocks_actor_production(lane, current));
+        let decisive_base = knight_policy_base(lane, current);
+        let base = max(decisive_base, unblock_base);
+        if (weighted_select(&rng, &total_weight, profile_scaled_weight(lane, current, 2u, base))) {
+          write_action(lane, ACTION_PLAY_KNIGHT, choice.hex, choice.victim_code, 0u);
+        }
+      }
+    }
+    if (development_playable(lane, current, 2u) && player_get(lane, current, PLAYER_ROADS_LEFT) > 0u) {
+      let choice = choose_road_building_pair(lane, &rng);
+      if (choice.found != 0u) {
+        record_dev_opportunity(1u);
+        let roads_left = player_get(lane, current, PLAYER_ROADS_LEFT);
+        var base = 1600u;
+        if (choice.score >= 10000u) { base = 8000u; }
+        else if (roads_left == 1u) { base = 24u; }
+        if (weighted_select(&rng, &total_weight, profile_scaled_weight(lane, current, 2u, base))) {
+          write_action(lane, ACTION_PLAY_ROAD_BUILDING, choice.first, choice.second_code, 0u);
+        }
+      }
+    }
+    if (development_playable(lane, current, 3u) && state_get(STATE_BANK_PUBLIC, lane) != 0u) {
+      var pair_weight = 0u;
+      var selected_first = 0xffffffffu;
+      var selected_second = 0xffffffffu;
+      var first = 0u;
+      loop {
+        if (first >= 5u) { break; }
+        var second = first;
+        loop {
+          if (second >= 5u) { break; }
+          let needed = select(1u, 2u, first == second);
+          if (state_get(STATE_BANK + first, lane) >= needed && state_get(STATE_BANK + second, lane) > 0u) {
+            let weight = year_of_plenty_pair_score(lane, current, first, second);
+            let next_total = pair_weight + weight;
+            if (rng_range(&rng, next_total) < weight) {
+              selected_first = first;
+              selected_second = second;
+            }
+            pair_weight = next_total;
+          }
+          second += 1u;
+        }
+        first += 1u;
+      }
+      if (selected_first != 0xffffffffu) {
+        record_dev_opportunity(2u);
+        let base = select(3600u, 9000u, pair_weight >= 10000u);
+        if (weighted_select(&rng, &total_weight, profile_scaled_weight(lane, current, 2u, base))) {
+          write_action(lane, ACTION_PLAY_YEAR_OF_PLENTY, selected_first, selected_second, 0u);
+        }
+      }
+    }
+    if (development_playable(lane, current, 4u)) {
+      record_dev_opportunity(3u);
+      var resource_weight = 0u;
+      var selected_resource = 0u;
+      var monopoly_res = 0u;
+      loop {
+        if (monopoly_res >= 5u) { break; }
+        let weight = monopoly_resource_score(lane, current, monopoly_res);
+        let next_total = resource_weight + weight;
+        if (rng_range(&rng, next_total) < weight) { selected_resource = monopoly_res; }
+        resource_weight = next_total;
+        monopoly_res += 1u;
+      }
+      let base = select(1400u, 6000u, resource_weight >= 10000u);
+      if (weighted_select(&rng, &total_weight, profile_scaled_weight(lane, current, 2u, base))) {
+        write_action(lane, ACTION_PLAY_MONOPOLY, selected_resource, 0u, 0u);
+      }
+    }
+    seen = total_weight > 0u;
   } else if (phase == PHASE_ROLL_CHANCE) {
     write_action(lane, ACTION_RESOLVE_ROLL, rng_range(&rng, 6u) + rng_range(&rng, 6u) + 2u, 0u, 0u);
     seen = true;
@@ -1044,6 +1501,87 @@ fn generate_rollout_action(lane: u32) {
         write_action(lane, ACTION_MARITIME_TRADE, maritime_give, maritime_receive, maritime_ratio);
       }
     }
+
+    if (development_playable(lane, current, 0u)) {
+      let choice = choose_robber(lane, &rng);
+      if (choice.found != 0u) {
+        record_dev_opportunity(0u);
+        if (weighted_select(
+          &rng,
+          &family_weight,
+          profile_scaled_weight(lane, current, 2u, knight_policy_base(lane, current)),
+        )) {
+          write_action(lane, ACTION_PLAY_KNIGHT, choice.hex, choice.victim_code, 0u);
+        }
+      }
+    }
+
+    if (development_playable(lane, current, 2u) && player_get(lane, current, PLAYER_ROADS_LEFT) > 0u) {
+      let choice = choose_road_building_pair(lane, &rng);
+      if (choice.found != 0u) {
+        record_dev_opportunity(1u);
+        let roads_left = player_get(lane, current, PLAYER_ROADS_LEFT);
+        var base = 1600u;
+        if (choice.score >= 10000u) { base = 8000u; }
+        else if (roads_left == 1u) { base = 24u; }
+        if (weighted_select(&rng, &family_weight, profile_scaled_weight(lane, current, 2u, base))) {
+          write_action(lane, ACTION_PLAY_ROAD_BUILDING, choice.first, choice.second_code, 0u);
+        }
+      }
+    }
+
+    if (development_playable(lane, current, 3u) && state_get(STATE_BANK_PUBLIC, lane) != 0u) {
+      var pair_weight = 0u;
+      var selected_first = 0xffffffffu;
+      var selected_second = 0xffffffffu;
+      var first = 0u;
+      loop {
+        if (first >= 5u) { break; }
+        var second = first;
+        loop {
+          if (second >= 5u) { break; }
+          let needed = select(1u, 2u, first == second);
+          if (state_get(STATE_BANK + first, lane) >= needed && state_get(STATE_BANK + second, lane) > 0u) {
+            let weight = year_of_plenty_pair_score(lane, current, first, second);
+            let next_total = pair_weight + weight;
+            if (rng_range(&rng, next_total) < weight) {
+              selected_first = first;
+              selected_second = second;
+            }
+            pair_weight = next_total;
+          }
+          second += 1u;
+        }
+        first += 1u;
+      }
+      if (selected_first != 0xffffffffu) {
+        record_dev_opportunity(2u);
+        let base = select(3600u, 9000u, pair_weight >= 10000u);
+        if (weighted_select(&rng, &family_weight, profile_scaled_weight(lane, current, 2u, base))) {
+          write_action(lane, ACTION_PLAY_YEAR_OF_PLENTY, selected_first, selected_second, 0u);
+        }
+      }
+    }
+
+    if (development_playable(lane, current, 4u)) {
+      record_dev_opportunity(3u);
+      var resource_weight = 0u;
+      var selected_resource = 0u;
+      var monopoly_res = 0u;
+      loop {
+        if (monopoly_res >= 5u) { break; }
+        let weight = monopoly_resource_score(lane, current, monopoly_res);
+        let next_total = resource_weight + weight;
+        if (rng_range(&rng, next_total) < weight) { selected_resource = monopoly_res; }
+        resource_weight = next_total;
+        monopoly_res += 1u;
+      }
+      let base = select(1400u, 6000u, resource_weight >= 10000u);
+      if (weighted_select(&rng, &family_weight, profile_scaled_weight(lane, current, 2u, base))) {
+        write_action(lane, ACTION_PLAY_MONOPOLY, selected_resource, 0u, 0u);
+      }
+    }
+
     seen = family_weight > 0u;
   } else if (phase == PHASE_DEVELOPMENT_CHANCE) {
     var total = 0u;
@@ -1065,6 +1603,7 @@ fn generate_rollout_action(lane: u32) {
     seen = true;
   }
   if (!seen) { write_action(lane, 254u, 0u, 0u, 0u); }
+  record_dev_selection(action_get(ACTION_TAG, lane));
   store_rng(lane, chance, rng);
 }
 
@@ -1226,6 +1765,78 @@ fn apply_transition(lane: u32) {
     state_set(STATE_PHASE, lane, PHASE_MAIN);
     state_set(STATE_PHASE_ARG, lane, 0u);
     finish_if_won(lane);
+    return;
+  }
+  if (tag == ACTION_PLAY_KNIGHT) {
+    if (phase != PHASE_PRE_ROLL && phase != PHASE_MAIN) { status_set(lane, STATUS_INVALID_PHASE); return; }
+    let return_phase = phase;
+    let return_arg = state_get(STATE_PHASE_ARG, lane);
+    if (!consume_development(lane, 0u)) { status_set(lane, STATUS_INVALID_ACTION); return; }
+    player_set(lane, current, PLAYER_PLAYED_KNIGHTS, player_get(lane, current, PLAYER_PLAYED_KNIGHTS) + 1u);
+    update_largest_army(lane);
+    state_set(STATE_ROBBER_RETURN_PHASE, lane, return_phase);
+    state_set(STATE_ROBBER_RETURN_ARG, lane, return_arg);
+    let hex = action_get(ACTION_ARG0, lane);
+    let victim_code = action_get(ACTION_ARG0 + 1u, lane);
+    if (hex >= HEX_COUNT || hex == state_get(STATE_ROBBER_HEX, lane)) { status_set(lane, STATUS_INVALID_ACTION); return; }
+    state_set(STATE_ROBBER_HEX, lane, hex);
+    if (victim_code == 0u) { restore_robber_return_phase(lane); }
+    else {
+      let victim = victim_code - 1u;
+      if (victim >= players || victim == current) { status_set(lane, STATUS_INVALID_ACTION); return; }
+      state_set(STATE_PHASE, lane, PHASE_RESOLVE_STEAL);
+      state_set(STATE_PHASE_ARG, lane, victim);
+    }
+    finish_if_won(lane);
+    return;
+  }
+  if (tag == ACTION_PLAY_ROAD_BUILDING) {
+    if (phase != PHASE_PRE_ROLL && phase != PHASE_MAIN) { status_set(lane, STATUS_INVALID_PHASE); return; }
+    if (!consume_development(lane, 2u)) { status_set(lane, STATUS_INVALID_ACTION); return; }
+    let first = action_get(ACTION_ARG0, lane);
+    let second_code = action_get(ACTION_ARG0 + 1u, lane);
+    if (!place_road_piece(lane, first)) { status_set(lane, STATUS_INVALID_ACTION); return; }
+    update_longest_road(lane);
+    if (second_code != 0u) {
+      let second = second_code - 1u;
+      if (!place_road_piece(lane, second)) { status_set(lane, STATUS_INVALID_ACTION); return; }
+      update_longest_road(lane);
+    }
+    finish_if_won(lane);
+    return;
+  }
+  if (tag == ACTION_PLAY_YEAR_OF_PLENTY) {
+    if (phase != PHASE_PRE_ROLL && phase != PHASE_MAIN) { status_set(lane, STATUS_INVALID_PHASE); return; }
+    let first = action_get(ACTION_ARG0, lane);
+    let second = action_get(ACTION_ARG0 + 1u, lane);
+    if (first >= 5u || second >= 5u) { status_set(lane, STATUS_INVALID_ACTION); return; }
+    let first_needed = select(1u, 2u, first == second);
+    if (state_get(STATE_BANK + first, lane) < first_needed || state_get(STATE_BANK + second, lane) == 0u) {
+      status_set(lane, STATUS_INVALID_ACTION);
+      return;
+    }
+    if (!consume_development(lane, 3u)) { status_set(lane, STATUS_INVALID_ACTION); return; }
+    state_set(STATE_BANK + first, lane, state_get(STATE_BANK + first, lane) - 1u);
+    state_set(STATE_BANK + second, lane, state_get(STATE_BANK + second, lane) - 1u);
+    player_set(lane, current, PLAYER_RESOURCES + first, player_get(lane, current, PLAYER_RESOURCES + first) + 1u);
+    player_set(lane, current, PLAYER_RESOURCES + second, player_get(lane, current, PLAYER_RESOURCES + second) + 1u);
+    return;
+  }
+  if (tag == ACTION_PLAY_MONOPOLY) {
+    if (phase != PHASE_PRE_ROLL && phase != PHASE_MAIN) { status_set(lane, STATUS_INVALID_PHASE); return; }
+    let monopoly_res = action_get(ACTION_ARG0, lane);
+    if (monopoly_res >= 5u || !consume_development(lane, 4u)) { status_set(lane, STATUS_INVALID_ACTION); return; }
+    var total = 0u;
+    var player = 0u;
+    loop {
+      if (player >= players) { break; }
+      if (player != current) {
+        total += player_get(lane, player, PLAYER_RESOURCES + monopoly_res);
+        player_set(lane, player, PLAYER_RESOURCES + monopoly_res, 0u);
+      }
+      player += 1u;
+    }
+    player_set(lane, current, PLAYER_RESOURCES + monopoly_res, player_get(lane, current, PLAYER_RESOURCES + monopoly_res) + total);
     return;
   }
   if (tag == ACTION_MARITIME_TRADE) {

@@ -261,3 +261,170 @@ cargo run --release --manifest-path engine/Cargo.toml \
   --output=experiments/webgpu-rollout/case.json \
   --rollouts=4096 --repetitions=3
 ```
+
+# H3 — Production-policy closure
+
+Status: **complete**
+
+Decision: **PROMISING**
+
+H3 closes the development-card policy gap left by H2 for the no-player-trade production rollout path. The WebGPU shader now uses the CUDA production selection semantics and weights for Knight, Road Building, Year of Plenty, and Monopoly, plus the corresponding transition application. No production CUDA/search file changed.
+
+The remaining intentionally unported rollout families are domestic player trades and setup. Domestic trades are disabled in the H3 workloads. Setup is unreachable from the selected midgame states. There is no remaining known reachable policy omission for the no-player-trade rollout path exercised by this gate.
+
+## Development-card policy surface
+
+H3 ports the CUDA helpers and selection behavior needed by `generate_rollout_action_lane()`:
+
+- Knight: `development_playable`, `knight_policy_base`, `robber_blocks_actor_production`, and the production weighted robber selection;
+- Road Building: paired legal-road enumeration, `road_building_pair_policy_score`, settlement-access detection, longest-road takeover scoring, and cycle-closure scoring;
+- Year of Plenty: production resource weights plus `immediate_build_completion_score` for resource pairs;
+- Monopoly: `observed_monopoly_resource_weight`, production resource weights, and immediate-build conversion scoring;
+- transitions for `ACTION_PLAY_KNIGHT`, `ACTION_PLAY_ROAD_BUILDING`, `ACTION_PLAY_YEAR_OF_PLENTY`, and `ACTION_PLAY_MONOPOLY`.
+
+The H3 port also aligns the feasibility shader's friendly-robber filter with the existing CUDA rule because Knight depends directly on that selector. No strategic weights were changed.
+
+## Development-active workload
+
+H3 derives a development-active state from the H2 deterministic real midgame state. It transfers one Knight, Road Building, Year of Plenty, and Monopoly from the real development deck into the current player's playable development hand, decrements the deck, and calls `GameState::validate()` before packing the state with `CudaSimPackedState`.
+
+The eight roots are:
+
+1. `EndTurn`
+2. `BuildRoad { edge: 1 }`
+3. `BuildRoad { edge: 3 }`
+4. `PlayKnight { hex: 0, victim: None }`
+5. `PlayRoadBuilding { first: 1, second: Some(0) }`
+6. `PlayYearOfPlenty { first: Lumber, second: Lumber }`
+7. `PlayMonopoly { resource: Lumber }`
+8. `MaritimeTrade { give: Brick, receive: Lumber, ratio: 3 }`
+
+The workload uses 4,096 rollouts/root, or 32,768 lanes.
+
+## Development-active CUDA versus WebGPU
+
+Production-shaped WebGPU timings submit expansion, rollout stepping, reduction, and stats copy together before mapping the compact result.
+
+| Horizon | CUDA | WebGPU | WebGPU / CUDA latency | WebGPU throughput vs CUDA |
+| --- | ---: | ---: | ---: | ---: |
+| 48 | 832.79 ms | **1,092.2 ms** | 1.312× | 76.2% |
+| 96 | 1,321.15 ms | **1,686.1 ms** | 1.276× | 78.4% |
+
+CUDA rollout throughput was 1.889 M steps/s at 48 and 2.381 M steps/s at 96. WebGPU delivered 1.440 M and 1.866 M steps/s respectively.
+
+The full policy is substantially more expensive than the reduced H2 shader on a development-heavy state, but the measured WebGPU latency remains below two seconds at both required horizons and completes without transition errors.
+
+## Strategic agreement
+
+The development-active result is close to CUDA despite not requiring bit-exact trajectory parity.
+
+At 48 steps:
+
+- Spearman root-order correlation: **1.000**;
+- maximum absolute per-root victory-margin delta: **0.00513 VP**;
+- CUDA and WebGPU root ordering are identical.
+
+At 96 steps:
+
+- Spearman root-order correlation: **0.976**;
+- maximum absolute per-root victory-margin delta: **0.00757 VP**;
+- the only ordering difference is a near-tie between Knight and Maritime Trade; all other positions match.
+
+Both backends rank `BuildRoad { edge: 3 }` first and `PlayMonopoly { resource: Lumber }` second at both horizons. Both rank the chosen Road Building root last at both horizons.
+
+All 32,768 development-active lanes completed with zero transition errors at both horizons.
+
+## Development-card exercise
+
+The new policy is materially exercised rather than merely compiled.
+
+| Card | 48-step opportunities | 48-step selections | 96-step opportunities | 96-step selections |
+| --- | ---: | ---: | ---: | ---: |
+| Knight | 105,008 | 14,835 | 177,448 | 48,817 |
+| Road Building | 78,174 | 22,362 | 93,002 | 30,226 |
+| Year of Plenty | 64,877 | 25,976 | 71,858 | 30,283 |
+| Monopoly | 67,706 | 25,406 | 75,638 | 30,306 |
+
+This closes the H2 policy gap with tens of thousands of actual selections for every required card family.
+
+## Original H2 state with the full H3 policy
+
+The original H2 state was rerun with the same full H3 shader. Development cards are not initially in hand, but buying/drawing during rollouts makes all four play families reachable.
+
+| Horizon | CUDA | H3 WebGPU | WebGPU / CUDA latency | WebGPU throughput vs CUDA |
+| --- | ---: | ---: | ---: | ---: |
+| 48 | 166.45 ms | **180.6 ms** | 1.085× | 92.2% |
+| 96 | 428.13 ms | **488.4 ms** | 1.141× | 87.7% |
+
+At 48 steps the rollout selected 4,969 Knights, 680 Road Buildings, 725 Years of Plenty, and 753 Monopolies. At 96 steps it selected 15,350 Knights, 2,173 Road Buildings, 2,280 Years of Plenty, and 2,323 Monopolies. All lanes completed with zero transition errors.
+
+Compared with the reduced H2 WebGPU numbers on this same state (63.4 ms / 128.1 ms), the full policy costs about 2.85× / 3.81× more. That increase is real policy work, not browser transfer or dispatch overhead. The more relevant production comparison is CUDA: the full WebGPU path remains within about 8.5–14.1% latency on this ordinary midgame workload.
+
+## Memory and lane scaling
+
+The H3 policy closure does not change the resident lane layout or binding count:
+
+- five storage buffers;
+- 421 `u32` / 1,684 bytes per lane;
+- 55.19 MB resident at 32,768 lanes;
+- 110.37 MB resident at 65,536 lanes;
+- approximately 79,701 lanes remain the current portable 128 MiB binding ceiling.
+
+The development-heavy 65,536-lane / 48-step run completed with zero errors. Throughput was 1.459 M rollout-steps/s; the policy-heavy shader is close to saturation by this size, unlike the lighter H2 shader.
+
+## Full-shader cold and warm initialization
+
+The H3 shader grew from 52,556 to **76,438 bytes**.
+
+The first successful run after the H3 shader change reported:
+
+- WGSL compile reporting: **19.4 ms**;
+- four compute pipelines: **14,216.7 ms**.
+
+The immediately following run with the same shader reported:
+
+- WGSL compile reporting: **1.9 ms**;
+- four compute pipelines: **25.1 ms**.
+
+The larger first-use pipeline cost is therefore a cache-sensitive one-time event in this measurement, not repeated per-search latency. H3 records it but does not optimize it; the gate explicitly allows cold initialization latency unless it causes repeated operational failure. No such failure occurred.
+
+## H3 decision
+
+**PROMISING**.
+
+The materially missing H2 policy is now present and heavily exercised. WebGPU keeps the production packed-state layout, exact tested SplitMix64 arithmetic, five-storage-buffer layout, 65,536-lane capacity, zero transition errors, sub-two-second 48/96 development-heavy searches, and near-CUDA strategic aggregates. On the original H2 state, the full policy is within about 8.5–14.1% of CUDA latency.
+
+This is enough evidence to justify planning a browser-native production backend migration. It is **not** authorization to begin that migration in H3.
+
+A production migration still needs engineering work rather than more policy-feasibility proof:
+
+- replace the feasibility JSON handoff with a shared/target-neutral packed-state and root contract;
+- move the required native-only root racing, belief handling, and arbitration into a browser-capable boundary;
+- integrate WebGPU behind the existing asynchronous deep-search executor without changing user-visible strategy semantics;
+- handle WebGPU device loss and MV3 ServiceWorker recreation/lazy pipeline initialization;
+- run Chrome and Edge production acceptance and strategic regression before switching the backend;
+- retain I1/CUDA as fallback until that migration has passed its own acceptance gate.
+
+H3 does not modify `sim.cu`, `sim.ptx`, native production search, D68, Wave 3, Wave 4, or the installed Windows GPU Runtime.
+
+## H3 evidence
+
+- `case-development.json` — validated real development-active state and matched production CUDA reference.
+- `result-h3-policy-closure.json` — compact H3 browser/CUDA timing, policy-exercise, strategic-order, memory, and cold/warm evidence.
+
+Generate the development-active CUDA case with:
+
+```text
+cargo run --release --manifest-path engine/Cargo.toml \
+  -p colonist-catan-search --features cuda-sim \
+  --bin webgpu-rollout-feasibility -- \
+  --profile=development \
+  --output=experiments/webgpu-rollout/case-development.json \
+  --rollouts=4096 --repetitions=3
+```
+
+Serve the repository over a localhost HTTP origin and open:
+
+```text
+/experiments/webgpu-rollout/index.html?case=case-development.json
+```

@@ -1,5 +1,7 @@
 const WORKGROUP_SIZE = 128;
 const ROOT_STATS_WORDS = 10;
+const DEV_STATS_WORDS = 8;
+const DEV_CARD_NAMES = ["knight", "roadBuilding", "yearOfPlenty", "monopoly"];
 const PARAM_WORDS = 12;
 const U64_MASK = (1n << 64n) - 1n;
 
@@ -8,7 +10,7 @@ self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim(
 self.addEventListener("message", (event) => {
   if (event.data?.type !== "run") return;
   const port = event.ports[0];
-  const task = runFeasibility();
+  const task = runFeasibility(event.data.casePath ?? "./case.json");
   event.waitUntil(task);
   task.then(
     (result) => port.postMessage({ ok: true, result }),
@@ -97,6 +99,20 @@ const summarizeRoots = (words, rootCount, labels) => {
   });
 };
 
+const summarizeDevelopment = (words, rootCount) => {
+  const base = ROOT_STATS_WORDS * rootCount;
+  return DEV_CARD_NAMES.map((card, index) => {
+    const opportunities = words[base + index];
+    const selections = words[base + 4 + index];
+    return {
+      card,
+      opportunities,
+      selections,
+      selectionRate: opportunities === 0 ? 0 : selections / opportunities,
+    };
+  });
+};
+
 const mix64 = (value) => value & U64_MASK;
 const splitLoHi = (value) => [Number(value & 0xffff_ffffn), Number((value >> 32n) & 0xffff_ffffn)];
 const cpuMixStreamSeed = (baseSeed, globalIndex, domain) => {
@@ -113,10 +129,10 @@ const cpuSplitmixNext = (state) => {
   return { state, value: mix64(value ^ (value >> 31n)) };
 };
 
-async function runFeasibility() {
+async function runFeasibility(casePath) {
   if (!self.navigator.gpu) throw new Error("navigator.gpu is unavailable in this ServiceWorker");
   const [caseResponse, shaderResponse] = await Promise.all([
-    fetch("./case.json", { cache: "no-store" }),
+    fetch(casePath, { cache: "no-store" }),
     fetch("./rollout.wgsl", { cache: "no-store" }),
   ]);
   if (!caseResponse.ok || !shaderResponse.ok) throw new Error("failed to load feasibility inputs");
@@ -139,7 +155,7 @@ async function runFeasibility() {
   const deviceLimits = limits(device);
 
   const shaderStarted = performance.now();
-  const module = device.createShaderModule({ code: shader, label: "H2 real-state rollout feasibility" });
+  const module = device.createShaderModule({ code: shader, label: "real-state rollout feasibility" });
   const compilation = await module.getCompilationInfo();
   const shaderCompileMs = performance.now() - shaderStarted;
   const compilationMessages = compilation.messages.map((message) => ({
@@ -177,8 +193,9 @@ async function runFeasibility() {
   const rootWords = new Uint32Array([...data.rootActionWords, ...data.rootBaseIndices]);
   const rootBuffer = createBuffer(device, rootWords, GPUBufferUsage.STORAGE);
   const paramsBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const statsBytes = ROOT_STATS_WORDS * rootCount * 4;
-  const zeroStats = new Uint32Array(ROOT_STATS_WORDS * rootCount);
+  const statsWords = ROOT_STATS_WORDS * rootCount + DEV_STATS_WORDS;
+  const statsBytes = statsWords * 4;
+  const zeroStats = new Uint32Array(statsWords);
 
   const createScenario = (laneCount) => {
     if (laneCount % rootCount !== 0) throw new Error(`lane count ${laneCount} is not divisible by ${rootCount} roots`);
@@ -238,7 +255,7 @@ async function runFeasibility() {
   };
 
   const runScenario = async (scenario, steps) => {
-    if (steps % 16 !== 0) throw new Error("H2 measurements use 16-step chunks");
+    if (steps % 16 !== 0) throw new Error("feasibility measurements use 16-step chunks");
     device.queue.writeBuffer(scenario.statsBuffer, 0, zeroStats);
     writeParams(device, paramsBuffer, {
       laneCount: scenario.laneCount,
@@ -286,11 +303,12 @@ async function runFeasibility() {
       totalMs,
       rolloutStepsPerSecond: scenario.laneCount * steps / (totalMs / 1000),
       roots: summarizeRoots(readback.data, rootCount, data.rootLabels),
+      developmentActions: summarizeDevelopment(readback.data, rootCount),
     };
   };
 
   const runCombinedScenario = async (scenario, steps) => {
-    if (steps % 16 !== 0) throw new Error("H2 measurements use 16-step chunks");
+    if (steps % 16 !== 0) throw new Error("feasibility measurements use 16-step chunks");
     device.queue.writeBuffer(scenario.statsBuffer, 0, zeroStats);
     writeParams(device, paramsBuffer, {
       laneCount: scenario.laneCount,
@@ -325,6 +343,7 @@ async function runFeasibility() {
       totalMs,
       rolloutStepsPerSecond: scenario.laneCount * steps / (totalMs / 1000),
       roots: summarizeRoots(words, rootCount, data.rootLabels),
+      developmentActions: summarizeDevelopment(words, rootCount),
     };
   };
 
@@ -372,6 +391,7 @@ async function runFeasibility() {
       medianReadbackMs: median(runs.map((run) => run.readbackMs)),
       rolloutStepsPerSecond: primary.laneCount * steps / (medianTotal / 1000),
       representativeRoots: selected.roots,
+      developmentActions: selected.developmentActions,
       runTimesMs: runs.map((run) => run.totalMs),
     };
   };
@@ -387,6 +407,7 @@ async function runFeasibility() {
       medianMs: medianTotal,
       rolloutStepsPerSecond: primary.laneCount * steps / (medianTotal / 1000),
       representativeRoots: selected.roots,
+      developmentActions: selected.developmentActions,
       runTimesMs: runs.map((run) => run.totalMs),
     };
   };
@@ -434,6 +455,7 @@ async function runFeasibility() {
 
   return {
     kind: "browser-webgpu-rollout-feasibility",
+    caseProfile: data.generator.profile ?? "baseline",
     executionSurface: "Chrome ServiceWorker on http://localhost",
     adapter: {
       requestMs: adapterMs,
@@ -487,11 +509,26 @@ async function runFeasibility() {
     policyScope: {
       productionPackedStateLayout: true,
       includedTransitionSemanticsMatchProduction: true,
+      fullNoPlayerTradeRolloutPolicyParity: true,
       fullProductionRolloutPolicyParity: false,
       playerTradesEnabled: false,
-      includedRolloutFamilies: ["roll/chance", "discard", "robber/steal", "road", "settlement", "city", "buy-development/draw", "maritime-trade", "end-turn"],
-      omittedRolloutFamilies: ["development-card play policy", "domestic player trades", "setup phases"],
-      note: "H2 deliberately preserves real rules/state transitions but does not claim full production rollout-policy parity; literal CUDA dependency closure is ~88% of sim.cu.",
+      includedRolloutFamilies: [
+        "roll/chance",
+        "discard",
+        "robber/steal",
+        "road",
+        "settlement",
+        "city",
+        "buy-development/draw",
+        "knight",
+        "road-building",
+        "year-of-plenty",
+        "monopoly",
+        "maritime-trade",
+        "end-turn",
+      ],
+      omittedRolloutFamilies: ["domestic player trades", "setup phases"],
+      note: "H3 closes the reachable no-player-trade development-card policy against the production CUDA weights and transition semantics; domestic trades and unreachable setup remain outside the gate.",
     },
   };
 }

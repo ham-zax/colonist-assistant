@@ -1,0 +1,150 @@
+{
+  "schema": "colonist-webgpu-h3-policy-closure/1",
+  "decision": "PROMISING",
+  "executionSurface": "Chrome 152 ServiceWorker on http://localhost",
+  "gpu": "NVIDIA GeForce RTX 3070 Ti",
+  "shader": {
+    "h2SourceBytes": 52556,
+    "h3SourceBytes": 76438,
+    "firstSuccessfulH3CompileMs": 19.4,
+    "firstSuccessfulH3PipelineCreateMs": 14216.7,
+    "nextSameShaderCompileMs": 1.9,
+    "nextSameShaderPipelineCreateMs": 25.1,
+    "compilationErrorsOnSuccessfulRuns": 0
+  },
+  "layout": {
+    "storageBuffers": 5,
+    "stateWords": 404,
+    "stateBytesPerLane": 1616,
+    "laneWords": 421,
+    "laneBytesPerLane": 1684,
+    "defaultDeviceMaxStorageBufferBindingSize": 134217728,
+    "maxLanesAtCurrentPackingUnderBindingLimit": 79701,
+    "largestMeasuredLaneCount": 65536,
+    "largestMeasuredLaneBufferBytes": 110362624
+  },
+  "rng": {
+    "approach": "paired-u32 exact SplitMix64 arithmetic",
+    "expectedProbe": [808633232, 4253080808, 838270476, 2111939625, 0],
+    "actualProbe": [808633232, 4253080808, 838270476, 2111939625, 0],
+    "parity": true
+  },
+  "baselineCase": {
+    "description": "Original H2 real midgame state, now executed with the full no-player-trade H3 rollout policy",
+    "laneCount": 32768,
+    "rolloutsPerRoot": 4096,
+    "h48": {
+      "cudaMs": 166.446231,
+      "webgpuCombinedMs": 180.6,
+      "cudaRolloutStepsPerSecond": 9449682.282,
+      "webgpuRolloutStepsPerSecond": 8709102.99,
+      "webgpuLatencyOverCuda": 1.085035,
+      "webgpuThroughputVsCuda": 0.921629,
+      "transitionErrors": 0,
+      "developmentActions": {
+        "knight": {"opportunities": 10372, "selections": 4969},
+        "roadBuilding": {"opportunities": 1314, "selections": 680},
+        "yearOfPlenty": {"opportunities": 1156, "selections": 725},
+        "monopoly": {"opportunities": 1186, "selections": 753}
+      },
+      "webgpuMargins": [-0.042236328125, -0.04345703125, -0.025634765625, -0.056396484375, -0.03369140625, -0.039794921875, -0.025634765625, -0.072998046875],
+      "cudaMargins": [-0.041748, -0.045898, -0.024658, -0.054443, -0.034424, -0.039551, -0.022949, -0.072021]
+    },
+    "h96": {
+      "cudaMs": 428.133504,
+      "webgpuCombinedMs": 488.4,
+      "cudaRolloutStepsPerSecond": 7347539.893,
+      "webgpuRolloutStepsPerSecond": 6440884.521,
+      "webgpuLatencyOverCuda": 1.140766,
+      "webgpuThroughputVsCuda": 0.876604,
+      "transitionErrors": 0,
+      "developmentActions": {
+        "knight": {"opportunities": 31216, "selections": 15350},
+        "roadBuilding": {"opportunities": 4102, "selections": 2173},
+        "yearOfPlenty": {"opportunities": 3561, "selections": 2280},
+        "monopoly": {"opportunities": 3596, "selections": 2323}
+      },
+      "webgpuMargins": [-0.127685546875, -0.1484375, -0.092041015625, -0.1650390625, -0.129638671875, -0.1083984375, -0.09130859375, -0.16162109375],
+      "cudaMargins": [-0.131836, -0.146973, -0.091797, -0.164062, -0.132812, -0.110352, -0.094482, -0.162354]
+    },
+    "h2ReducedPolicyReference": {
+      "h48WebgpuCombinedMs": 63.4,
+      "h96WebgpuCombinedMs": 128.1,
+      "note": "H3 is 2.85x/3.81x slower than H2 on this state because the previously omitted production development-card selection is now executed when bought cards become playable."
+    }
+  },
+  "developmentClosureCase": {
+    "description": "Validated H2 midgame state with one playable Knight, Road Building, Year of Plenty and Monopoly transferred from the real development deck to the current player",
+    "rootLabels": [
+      "EndTurn",
+      "BuildRoad { edge: 1 }",
+      "BuildRoad { edge: 3 }",
+      "PlayKnight { hex: 0, victim: None }",
+      "PlayRoadBuilding { first: 1, second: Some(0) }",
+      "PlayYearOfPlenty { first: Lumber, second: Lumber }",
+      "PlayMonopoly { resource: Lumber }",
+      "MaritimeTrade { give: Brick, receive: Lumber, ratio: 3 }"
+    ],
+    "laneCount": 32768,
+    "rolloutsPerRoot": 4096,
+    "h48": {
+      "cudaMs": 832.786685,
+      "webgpuCombinedMs": 1092.2,
+      "cudaRolloutStepsPerSecond": 1888675.73,
+      "webgpuRolloutStepsPerSecond": 1440087.896,
+      "webgpuLatencyOverCuda": 1.3115,
+      "webgpuThroughputVsCuda": 0.762486,
+      "transitionErrors": 0,
+      "spearmanRootOrder": 1.0,
+      "maxAbsoluteMarginDelta": 0.005127,
+      "cudaRootOrder": [2, 6, 7, 5, 3, 1, 0, 4],
+      "webgpuRootOrder": [2, 6, 7, 5, 3, 1, 0, 4],
+      "cudaMargins": [0.99292, 1.219727, 2.363037, 1.282471, 0.761719, 1.449463, 1.59668, 1.5354],
+      "webgpuMargins": [0.990234375, 1.217041015625, 2.359619140625, 1.285400390625, 0.766845703125, 1.44873046875, 1.59326171875, 1.537841796875],
+      "developmentActions": {
+        "knight": {"opportunities": 105008, "selections": 14835, "selectionRate": 0.141275},
+        "roadBuilding": {"opportunities": 78174, "selections": 22362, "selectionRate": 0.286054},
+        "yearOfPlenty": {"opportunities": 64877, "selections": 25976, "selectionRate": 0.400388},
+        "monopoly": {"opportunities": 67706, "selections": 25406, "selectionRate": 0.37524}
+      }
+    },
+    "h96": {
+      "cudaMs": 1321.147678,
+      "webgpuCombinedMs": 1686.1,
+      "cudaRolloutStepsPerSecond": 2381057.055,
+      "webgpuRolloutStepsPerSecond": 1865682.937,
+      "webgpuLatencyOverCuda": 1.276239,
+      "webgpuThroughputVsCuda": 0.783552,
+      "transitionErrors": 0,
+      "spearmanRootOrder": 0.97619,
+      "maxAbsoluteMarginDelta": 0.007568,
+      "cudaRootOrder": [2, 6, 3, 7, 5, 0, 1, 4],
+      "webgpuRootOrder": [2, 6, 7, 3, 5, 0, 1, 4],
+      "cudaMargins": [1.77832, 1.759766, 2.644531, 1.954834, 1.220215, 1.827148, 1.998535, 1.950684],
+      "webgpuMargins": [1.77880859375, 1.7548828125, 2.650390625, 1.947265625, 1.21875, 1.822509765625, 2.005859375, 1.951416015625],
+      "developmentActions": {
+        "knight": {"opportunities": 177448, "selections": 48817, "selectionRate": 0.275106},
+        "roadBuilding": {"opportunities": 93002, "selections": 30226, "selectionRate": 0.325004},
+        "yearOfPlenty": {"opportunities": 71858, "selections": 30283, "selectionRate": 0.421428},
+        "monopoly": {"opportunities": 75638, "selections": 30306, "selectionRate": 0.400672}
+      }
+    },
+    "laneScaling48": [
+      {"lanes": 8192, "residentBytes": 13801280, "totalMs": 656.2, "rolloutStepsPerSecond": 599231.941, "errors": 0},
+      {"lanes": 16384, "residentBytes": 27596608, "totalMs": 804.0, "rolloutStepsPerSecond": 978149.254, "errors": 0},
+      {"lanes": 32768, "residentBytes": 55187264, "totalMs": 1117.4, "rolloutStepsPerSecond": 1407610.524, "errors": 0},
+      {"lanes": 65536, "residentBytes": 110368576, "totalMs": 2156.4, "rolloutStepsPerSecond": 1458786.867, "errors": 0}
+    ]
+  },
+  "policyClosure": {
+    "ported": [
+      "Knight pre-roll/main selection and robber policy",
+      "Road Building paired-road candidate generation and production pair score",
+      "Year of Plenty pair selection and immediate-build conversion score",
+      "Monopoly observed-resource scoring and conversion score",
+      "Knight/Road Building/Year of Plenty/Monopoly transition application"
+    ],
+    "remainingReachableNoPlayerTradePolicy": [],
+    "intentionallyOutOfScope": ["domestic player trades", "setup phases from a midgame state", "arena/benchmark kernels", "production backend integration"]
+  }
+}

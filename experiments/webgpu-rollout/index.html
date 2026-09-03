@@ -1,11 +1,13 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>Colonist H2 WebGPU Rollout Feasibility</title>
-<pre id="status">starting H2 WebGPU ServiceWorker feasibility run...</pre>
+<title>Colonist WebGPU Rollout Feasibility</title>
+<pre id="status">starting WebGPU ServiceWorker feasibility run...</pre>
 <script type="module">
 const status = document.querySelector("#status");
+const casePath = `./${new URLSearchParams(location.search).get("case") ?? "case.json"}`;
 const render = (value) => {
   window.__H2_RESULT__ = value;
+  window.__WEBGPU_RESULT__ = value;
   status.textContent = JSON.stringify(value, null, 2);
 };
 
@@ -16,7 +18,7 @@ try {
   const registration = await navigator.serviceWorker.register("./worker.js", { updateViaCache: "none" });
   await navigator.serviceWorker.ready;
   let worker = registration.active ?? registration.waiting ?? registration.installing;
-  if (!worker) throw new Error("H2 ServiceWorker did not install");
+  if (!worker) throw new Error("WebGPU ServiceWorker did not install");
   if (worker.state !== "activated") {
     await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error("ServiceWorker activation timed out")), 10000);
@@ -31,13 +33,13 @@ try {
   worker = registration.active ?? worker;
   const channel = new MessageChannel();
   const result = await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("H2 WebGPU run timed out")), 120000);
+    const timeout = setTimeout(() => reject(new Error("WebGPU run timed out")), 300000);
     channel.port1.onmessage = (event) => {
       clearTimeout(timeout);
       if (event.data?.ok) resolve(event.data.result);
       else reject(new Error(event.data?.error ?? "unknown ServiceWorker failure"));
     };
-    worker.postMessage({ type: "run" }, [channel.port2]);
+    worker.postMessage({ type: "run", casePath }, [channel.port2]);
   });
   render({ ok: true, ...result });
 } catch (error) {
