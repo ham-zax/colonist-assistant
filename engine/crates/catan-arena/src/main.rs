@@ -1179,6 +1179,78 @@ impl ProgressMechanism {
     }
 }
 
+#[derive(Clone, Debug)]
+struct ProgressCounterfactual {
+    mechanism: ProgressMechanism,
+    state: GameState,
+    diverged: bool,
+    dirty_monopoly: bool,
+}
+
+fn progress_counterfactual(
+    before: &GameState,
+    after: &GameState,
+    mechanism: ProgressMechanism,
+    dirty_monopoly: bool,
+) -> Option<ProgressCounterfactual> {
+    if mechanism == ProgressMechanism::RoadBuilding {
+        return None;
+    }
+    let mut counterfactual = after.clone();
+    match mechanism {
+        ProgressMechanism::Knight => {
+            counterfactual.robber_hex = before.robber_hex;
+            counterfactual.largest_army_holder = before.largest_army_holder;
+            for player in 0..before.board.num_players as usize {
+                counterfactual.players[player].played_knights =
+                    before.players[player].played_knights;
+                counterfactual.players[player].has_largest_army =
+                    before.players[player].has_largest_army;
+                counterfactual.players[player].public_victory_points =
+                    before.players[player].public_victory_points;
+            }
+        }
+        ProgressMechanism::YearOfPlenty | ProgressMechanism::Monopoly => {
+            counterfactual.bank = before.bank;
+            for player in 0..before.board.num_players as usize {
+                counterfactual.players[player].resources = before.players[player].resources;
+            }
+        }
+        ProgressMechanism::RoadBuilding => unreachable!(),
+    }
+    Some(ProgressCounterfactual {
+        mechanism,
+        state: counterfactual,
+        diverged: false,
+        dirty_monopoly,
+    })
+}
+
+fn advance_progress_counterfactual(sequence: &mut ProgressCounterfactual, action: &Action) {
+    if sequence.diverged {
+        return;
+    }
+    let restore_resources = sequence.mechanism == ProgressMechanism::Knight
+        && matches!(action, Action::ResolveSteal { .. });
+    let resources_before = restore_resources.then(|| {
+        sequence
+            .state
+            .players
+            .iter()
+            .map(|player| player.resources)
+            .collect::<Vec<_>>()
+    });
+    if sequence.state.apply(action).is_err() {
+        sequence.diverged = true;
+        return;
+    }
+    if let Some(resources_before) = resources_before {
+        for (player, resources) in sequence.state.players.iter_mut().zip(resources_before) {
+            player.resources = resources;
+        }
+    }
+}
+
 fn expansion_portfolios(state: &GameState) -> [f32; 4] {
     let mut values = [0.0; 4];
     for player in 0..state.board.num_players {
@@ -1786,10 +1858,8 @@ fn play_game_from_state(
     state.player_trades_enabled = config.player_trades_enabled;
     let mut actions = 0u32;
     let mut metrics = GameMetrics::default();
-    let mut pending_progress = [None; 4];
-    let mut progress_converted = [false; 4];
-    let mut traded_out_resources = [[0u32; 5]; 4];
-    let mut dirty_monopoly_pending = [false; 4];
+    let mut progress_sequence = None::<ProgressCounterfactual>;
+    let mut trade_resource_balance = [[0i32; 5]; 4];
     let mut calibration = Vec::<(u8, f32)>::new();
     let mut expert_samples = Vec::<ExpertSample>::new();
     let mut trade_samples = Vec::<TradeSample>::new();
@@ -1981,6 +2051,7 @@ fn play_game_from_state(
         let longest_road_holder_before = state.longest_road_holder;
         let largest_army_holder_before = state.largest_army_holder;
         let progress_mechanism = ProgressMechanism::from_action(&action);
+        let progress_before = progress_mechanism.map(|_| state.clone());
         let monopoly_transfer = if let Action::PlayMonopoly { resource } = &action {
             (0..state.board.num_players as usize)
                 .filter(|player| *player != turn_owner)
@@ -1990,7 +2061,7 @@ fn play_game_from_state(
             0
         };
         let dirty_monopoly_reclaim = if let Action::PlayMonopoly { resource } = &action {
-            actor == turn_owner && traded_out_resources[turn_owner][resource.index()] > 0
+            actor == turn_owner && trade_resource_balance[turn_owner][resource.index()] > 0
         } else {
             false
         };
@@ -2069,9 +2140,8 @@ fn play_game_from_state(
         }
         if let Some((player, outgoing, incoming)) = confirmed_trade_flow {
             for resource in 0..5 {
-                traded_out_resources[player][resource] = traded_out_resources[player][resource]
-                    .saturating_sub(u32::from(incoming[resource]))
-                    .saturating_add(u32::from(outgoing[resource]));
+                trade_resource_balance[player][resource] +=
+                    i32::from(outgoing[resource]) - i32::from(incoming[resource]);
             }
         }
 
@@ -2116,48 +2186,50 @@ fn play_game_from_state(
             metrics.expansion_protection_events[actor] += 1;
         }
 
-        if let Some(mechanism) = progress_mechanism {
-            metrics.progress_card_plays[turn_owner][mechanism.index()] += 1;
-            pending_progress[turn_owner] = Some(mechanism);
-            progress_converted[turn_owner] = false;
-            if mechanism == ProgressMechanism::Monopoly
-                && dirty_monopoly_reclaim
-                && monopoly_transfer > 0
-            {
-                dirty_monopoly_pending[turn_owner] = true;
-            }
-        }
         if monopoly_transfer > 0 {
             metrics.monopoly_cards_transferred[turn_owner] += monopoly_transfer;
         }
 
         let material_progress_conversion = matches!(
             action,
-            Action::BuildRoad { .. }
-                | Action::BuildSettlement { .. }
-                | Action::BuildCity { .. }
-                | Action::PlayRoadBuilding { .. }
+            Action::BuildRoad { .. } | Action::BuildSettlement { .. } | Action::BuildCity { .. }
         ) || actor_award_acquired
             || state.winner() == Some(turn_owner as u8);
-        if material_progress_conversion
-            && let Some(mechanism) = pending_progress[turn_owner]
-            && !progress_converted[turn_owner]
-        {
-            metrics.progress_card_conversions[turn_owner][mechanism.index()] += 1;
-            progress_converted[turn_owner] = true;
-            if mechanism == ProgressMechanism::Monopoly && dirty_monopoly_pending[turn_owner] {
-                metrics.dirty_monopoly_sequences[turn_owner] += 1;
-                dirty_monopoly_pending[turn_owner] = false;
+        if let Some(mechanism) = progress_mechanism {
+            metrics.progress_card_plays[turn_owner][mechanism.index()] += 1;
+            let immediate_conversion = mechanism == ProgressMechanism::RoadBuilding
+                || (mechanism == ProgressMechanism::Knight && material_progress_conversion);
+            if immediate_conversion {
+                metrics.progress_card_conversions[turn_owner][mechanism.index()] += 1;
+                progress_sequence = None;
+            } else {
+                progress_sequence = progress_counterfactual(
+                    progress_before
+                        .as_ref()
+                        .expect("progress action captured its pre-transition state"),
+                    &state,
+                    mechanism,
+                    mechanism == ProgressMechanism::Monopoly
+                        && dirty_monopoly_reclaim
+                        && monopoly_transfer > 0,
+                );
+            }
+        } else if let Some(sequence) = progress_sequence.as_mut() {
+            advance_progress_counterfactual(sequence, &action);
+            if material_progress_conversion && sequence.diverged {
+                metrics.progress_card_conversions[turn_owner][sequence.mechanism.index()] += 1;
+                if sequence.mechanism == ProgressMechanism::Monopoly && sequence.dirty_monopoly {
+                    metrics.dirty_monopoly_sequences[turn_owner] += 1;
+                }
+                progress_sequence = None;
             }
         }
         if state.winner() == Some(turn_owner as u8) {
             metrics.one_turn_closeouts[turn_owner] += 1;
         }
         if matches!(action, Action::EndTurn) {
-            pending_progress[turn_owner] = None;
-            progress_converted[turn_owner] = false;
-            traded_out_resources[turn_owner] = [0; 5];
-            dirty_monopoly_pending[turn_owner] = false;
+            progress_sequence = None;
+            trade_resource_balance[turn_owner] = [0; 5];
         }
         actions += 1;
         if config.validate {
