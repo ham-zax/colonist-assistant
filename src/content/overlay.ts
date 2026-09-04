@@ -101,7 +101,6 @@ import {
   AUTOPILOT_DELAY_OPTIONS,
   INTERFACE_SCALE_OPTIONS,
   normalizeAutopilotDelaySeconds,
-  normalizeDecisionEngine,
   normalizeInterfaceScale,
   readPosition,
   saveSettings,
@@ -1026,14 +1025,6 @@ export class AssistantOverlay {
         return;
       }
       if (target instanceof HTMLSelectElement) {
-        if (target.dataset.setting === "engine") {
-          this.releaseSettingsInteraction(target, false);
-          this.applySettings({
-            ...this.settings,
-            engine: normalizeDecisionEngine(target.value),
-          });
-          return;
-        }
         if (target.dataset.setting === "autopilotDelaySeconds") {
           this.releaseSettingsInteraction(target, false);
           this.applySettings({
@@ -1372,7 +1363,7 @@ export class AssistantOverlay {
     this.decisionSlowKey = "";
     this.decisionWaitingForPreviousSearch = false;
     this.decisionRuntimeError = "";
-    this.decisionRuntimeDetail = "Retrying the selected WASM engine.";
+    this.decisionRuntimeDetail = "Retrying Strategist.";
     this.decisionWorker.reset();
     this.render();
   }
@@ -2245,18 +2236,14 @@ export class AssistantOverlay {
 
   private renderEngineMetaChip(): string {
     const runtime = this.runtimePresentation();
-    const engine = this.decisionEngineLabel();
+    if (runtime.state === "healthy") return "";
     const statusText =
-      runtime.state === "healthy"
-        ? engine
-        : runtime.state === "searching"
-          ? `${engine} · SEARCHING`
-          : runtime.state === "slow"
-            ? `${engine} · SLOW`
-            : runtime.state === "connecting"
-              ? `${engine} · QUEUED`
-              : runtime.label.toUpperCase();
-    return `<button class="meta-engine-chip ${runtime.state}" data-action="view" data-view="settings" title="${escapeHtml(runtime.detail)}" aria-label="Decision engine: ${escapeHtml(engine)}, status: ${escapeHtml(runtime.label)}"><i></i><span>${escapeHtml(statusText)}</span></button>`;
+      runtime.state === "slow"
+        ? "SLOW"
+        : runtime.state === "connecting"
+          ? "QUEUED"
+          : runtime.label.toUpperCase();
+    return `<span class="meta-engine-chip ${runtime.state}" role="status" title="${escapeHtml(runtime.detail)}" aria-label="Strategist status: ${escapeHtml(runtime.label)}"><i></i><span>${escapeHtml(statusText)}</span></span>`;
   }
 
   private runtimePresentation(): {
@@ -2276,7 +2263,7 @@ export class AssistantOverlay {
     if (this.decisionRuntimeError) {
       return {
         label: "WASM error",
-        detail: `${this.decisionRuntimeError} Retry the selected engine when ready. No other algorithm was substituted.`,
+        detail: `${this.decisionRuntimeError} Retry Strategist when ready. No other algorithm was substituted.`,
         state: "error",
       };
     }
@@ -2312,7 +2299,7 @@ export class AssistantOverlay {
             ? "The native CUDA companion is evaluating this position with resident rollouts."
             : observedRuntime === "background-wasm"
               ? "The background engine is evaluating this position with a bounded node budget."
-              : "Waking the selected decision engine before evaluating this position.",
+              : "Waking Strategist before evaluating this position.",
         state: isSearchDecisionRuntime(observedRuntime) ? "searching" : "connecting",
       };
     }
@@ -2346,7 +2333,7 @@ export class AssistantOverlay {
     }
     return {
       label: "Connecting",
-      detail: "Waking the selected decision engine.",
+      detail: "Waking Strategist.",
       state: "connecting",
     };
   }
@@ -2821,7 +2808,7 @@ export class AssistantOverlay {
         this.decisionRuntimeDetail = displayedDetail;
         this.decisionTraces.failure(traceKey, displayedDetail);
         console.error(
-          `[Colonist Assistant] Selected decision engine failed: ${displayedDetail}`,
+          `[Colonist Assistant] Strategist failed: ${displayedDetail}`,
           {
             key,
             engine: this.settings.engine,
@@ -4040,7 +4027,7 @@ export class AssistantOverlay {
         <p class="why">${escapeHtml(detail)}. No heuristic recommendation or autonomous action can replace the failed decision.</p>
         ${reloadRequired
           ? `<div class="board-confirm pending"><i></i><span>Reload the tab to reconnect this content script</span></div>`
-          : `<div class="board-confirm pending"><i></i><span>The selected engine is paused after a transient failure</span></div><button class="reset-link" type="button" data-action="retry-engine">Retry selected engine</button>`}
+          : `<div class="board-confirm pending"><i></i><span>Strategist is paused after a transient failure</span></div><button class="reset-link" type="button" data-action="retry-engine">Retry Strategist</button>`}
       </section>`;
     }
     const discard = this.discardRecommendation(state);
@@ -4925,13 +4912,6 @@ export class AssistantOverlay {
         <h1>How it thinks</h1>
         <p>Changes apply immediately to this game.</p>
       </header>
-      <label class="settings-field engine-field">
-        <span><b>Decision engine</b><small>Choose full MaxN search or the fast weighted heuristic policy.</small></span>
-        <select data-setting="engine" aria-label="Decision engine">
-          <option value="deep-search"${this.settings.engine === "deep-search" ? " selected" : ""}>MaxN</option>
-          <option value="weighted"${this.settings.engine === "weighted" ? " selected" : ""}>Weighted</option>
-        </select>
-      </label>
       <label class="settings-field">
         <span><b>Interface size</b><small>Scale the whole assistant for comfortable reading.</small></span>
         <select data-setting="interfaceScale" aria-label="Interface size">

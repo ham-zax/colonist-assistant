@@ -63,9 +63,7 @@ const boot = async (): Promise<void> => {
     for (const select of document.querySelectorAll<HTMLSelectElement>(
       "select[data-setting]",
     )) {
-      if (select.dataset.setting === "engine") {
-        select.value = settings.engine;
-      } else if (select.dataset.setting === "autopilotDelaySeconds") {
+      if (select.dataset.setting === "autopilotDelaySeconds") {
         select.value = String(settings.autopilotDelaySeconds);
       }
     }
@@ -94,9 +92,7 @@ const boot = async (): Promise<void> => {
     "select[data-setting]",
   )) {
     select.addEventListener("change", () => {
-      if (select.dataset.setting === "engine") {
-        settings = { ...settings, engine: normalizeDecisionEngine(select.value) };
-      } else if (select.dataset.setting === "autopilotDelaySeconds") {
+      if (select.dataset.setting === "autopilotDelaySeconds") {
         settings = {
           ...settings,
           autopilotDelaySeconds: normalizeAutopilotDelaySeconds(

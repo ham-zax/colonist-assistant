@@ -592,7 +592,7 @@ describe("overlay settings interaction", () => {
     overlay.destroy();
   });
 
-  it("presents the connected MaxN and Weighted engine selector", () => {
+  it("keeps engine choice out of settings while exposing runtime health", () => {
     const overlay = new AssistantOverlay(
       { ...DEFAULT_SETTINGS },
       { reset: vi.fn() },
@@ -602,17 +602,49 @@ describe("overlay settings interaction", () => {
     )!;
     const shadow = root.shadowRoot!;
     shadow
-      .querySelector<HTMLElement>("[data-action='view'][data-view='settings']")!
+      .querySelector<HTMLElement>(
+        ".icon-button[data-action='view'][data-view='settings']",
+      )!
       .click();
-    const engine = shadow.querySelector<HTMLSelectElement>(
-      "select[data-setting='engine']",
+    expect(shadow.querySelector("select[data-setting='engine']")).toBeNull();
+    expect(shadow.querySelector(".runtime-field")).not.toBeNull();
+    overlay.destroy();
+  });
+
+  it("does not render a healthy engine control beside advice", () => {
+    const overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS },
+      { reset: vi.fn() },
     );
-    expect(engine).not.toBeNull();
-    expect(engine?.value).toBe("deep-search");
-    expect([...(engine?.options ?? [])].map((option) => option.value)).toEqual([
-      "deep-search",
-      "weighted",
-    ]);
+    const internals = overlay as unknown as {
+      decisionRuntime: "background-wasm";
+      decisionRuntimeError: string;
+      decisionPendingKey: string;
+      renderEngineMetaChip: () => string;
+    };
+    internals.decisionRuntime = "background-wasm";
+    internals.decisionRuntimeError = "";
+    internals.decisionPendingKey = "";
+
+    expect(internals.renderEngineMetaChip()).toBe("");
+    overlay.destroy();
+  });
+
+  it("renders an engine failure as passive status instead of a control", () => {
+    const overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS },
+      { reset: vi.fn() },
+    );
+    const internals = overlay as unknown as {
+      decisionRuntimeError: string;
+      renderEngineMetaChip: () => string;
+    };
+    internals.decisionRuntimeError = "Worker stopped.";
+
+    const status = internals.renderEngineMetaChip();
+    expect(status).toContain('role="status"');
+    expect(status).toContain("WASM ERROR");
+    expect(status).not.toContain("<button");
     overlay.destroy();
   });
 

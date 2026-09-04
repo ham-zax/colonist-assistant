@@ -183,8 +183,7 @@ label input:checked + i::after {
   cursor: default;
 }
 
-.delay-row select,
-.engine-row select {
+.delay-row select {
   width: 108px;
   min-height: 32px;
   flex: 0 0 108px;
@@ -197,41 +196,9 @@ label input:checked + i::after {
   font-size: 11px;
 }
 
-.delay-row select:focus-visible,
-.engine-row select:focus-visible {
+.delay-row select:focus-visible {
   outline: 2px solid #f1c84b;
   outline-offset: 2px;
-}
-
-.engine-row {
-  display: flex;
-  min-height: 66px;
-  align-items: center;
-  gap: 12px;
-  border-bottom: 1px solid #2b404e;
-}
-
-.engine-row > span {
-  display: grid;
-  flex: 1;
-}
-
-.engine-row b {
-  font-size: 11.5px;
-  font-weight: 670;
-}
-
-.engine-row small {
-  margin-top: 2px;
-  color: #6f8594;
-  font-size: 10px;
-}
-
-.engine-row strong {
-  flex: 0 0 auto;
-  color: #f1c84b;
-  font-size: 10.5px;
-  letter-spacing: .025em;
 }
 
 .actions {

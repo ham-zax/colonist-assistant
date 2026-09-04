@@ -21,8 +21,8 @@ import {
   type PlayerBoardProfile,
 } from "./strategy";
 
-/** Live decision policy selected by the user. Strategist prefers the native
- * GPU companion when available; both modes retain packaged WASM support. */
+/** Decision policies supported by the engine transport. Production settings
+ * pin Strategist; Weighted remains available for diagnostics and benchmarks. */
 export type DecisionEngine = "deep-search" | "weighted";
 
 export const isWasmDecisionEngine = (engine: DecisionEngine): boolean =>

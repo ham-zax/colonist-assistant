@@ -136,19 +136,10 @@ export const OVERLAY_STYLES = `
     font-size: 11px;
     font-weight: 700;
     letter-spacing: .03em;
-    cursor: pointer;
+    cursor: default;
     white-space: nowrap;
     text-transform: uppercase;
     transition: background-color .15s ease, color .15s ease, border-color .15s ease;
-  }
-  .meta-engine-chip:hover {
-    color: var(--ca-ink);
-    border-color: var(--ca-line-strong);
-    background: #172a37;
-  }
-  .meta-engine-chip:focus-visible {
-    outline: 2px solid var(--ca-accent);
-    outline-offset: 1px;
   }
   .meta-engine-chip i {
     width: 6px;
@@ -1034,15 +1025,6 @@ export const OVERLAY_STYLES = `
   .settings-field input:focus-visible + i {
     outline: 2px solid var(--ca-accent);
     outline-offset: 2px;
-  }
-  .engine-field {
-    min-height: 68px;
-  }
-  .engine-field > strong {
-    max-width: none;
-    color: var(--ca-accent);
-    font-size: 11.5px;
-    letter-spacing: .025em;
   }
   .settings-version {
     display: flex;

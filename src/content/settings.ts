@@ -24,8 +24,8 @@ export const normalizeInterfaceScale = (value: unknown): InterfaceScale =>
     ? (value as InterfaceScale)
     : 1.15;
 
-export const normalizeDecisionEngine = (value: unknown): DecisionEngine =>
-  value === "weighted" ? "weighted" : "deep-search";
+export const normalizeDecisionEngine = (_value: unknown): DecisionEngine =>
+  "deep-search";
 
 export interface AssistantSettings {
   enabled: boolean;

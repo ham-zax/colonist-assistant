@@ -72,6 +72,34 @@ describe("assistant settings", () => {
     );
   });
 
+  it("migrates the former Weighted live engine to Strategist", async () => {
+    const set = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("chrome", {
+      storage: {
+        sync: {
+          get: vi.fn().mockResolvedValue({
+            [SETTINGS_KEY]: {
+              ...DEFAULT_SETTINGS,
+              engine: "weighted",
+            },
+          }),
+          set,
+        },
+      },
+    });
+
+    const settings = await readSettings();
+
+    expect(settings.engine).toBe("deep-search");
+    expect(set).toHaveBeenCalledWith(
+      expect.objectContaining({
+        [SETTINGS_KEY]: expect.objectContaining({
+          engine: "deep-search",
+        }),
+      }),
+    );
+  });
+
   it("does not preserve a retired engine after migration", async () => {
     const set = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("chrome", {
