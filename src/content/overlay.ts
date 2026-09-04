@@ -99,8 +99,10 @@ import { WinPredictionStabilizer } from "../core/win-prediction";
 import type { GameSession } from "./session";
 import {
   AUTOPILOT_DELAY_OPTIONS,
+  INTERFACE_SCALE_OPTIONS,
   normalizeAutopilotDelaySeconds,
   normalizeDecisionEngine,
+  normalizeInterfaceScale,
   readPosition,
   saveSettings,
   type AssistantSettings,
@@ -390,16 +392,13 @@ export class AssistantOverlay {
     this.host.id = "colonist-assistant-root";
     this.host.style.cssText =
       `position:fixed;z-index:2147483000;right:${window.innerWidth <= 700 ? 8 : 18}px;top:72px;pointer-events:auto;color-scheme:dark;`;
+    this.applyInterfaceScale();
     // Keep the boundary open so accessibility tooling and the packaged
     // end-to-end harness can inspect the same runtime/action state the player
     // sees. A closed shadow root is not a security boundary and made live
     // failures impossible to diagnose.
     this.shadow = this.host.attachShadow({ mode: "open" });
-    const styles = OVERLAY_STYLES.replace(
-      "__CA_FONT_URL__",
-      chrome.runtime.getURL("assets/fonts/ArchivoNarrow-Variable.ttf"),
-    );
-    this.shadow.innerHTML = `<style>${styles}</style><div id="mount"></div>`;
+    this.shadow.innerHTML = `<style>${OVERLAY_STYLES}</style><div id="mount"></div>`;
     document.documentElement.append(this.host);
     this.installHandlers();
     void this.restorePosition();
@@ -854,6 +853,8 @@ export class AssistantOverlay {
   setSettings(settings: AssistantSettings): void {
     const wasRecording = this.settings.recordGame;
     const engineChanged = settings.engine !== this.settings.engine;
+    const interfaceScaleChanged =
+      settings.interfaceScale !== this.settings.interfaceScale;
     if (
       engineChanged ||
       settings.disablePlayerTrades !== this.settings.disablePlayerTrades
@@ -868,6 +869,7 @@ export class AssistantOverlay {
       this.winPredictions.reset();
     }
     this.settings = settings;
+    this.applyInterfaceScale();
     if (engineChanged) this.warmDecisionEngine();
     this.decisionTraces.setLegacyStorageEnabled(!settings.recordGame);
     if (wasRecording && !settings.recordGame) {
@@ -877,6 +879,13 @@ export class AssistantOverlay {
     }
     this.host.style.display = settings.enabled ? "block" : "none";
     this.render();
+    if (
+      interfaceScaleChanged &&
+      this.position.left !== undefined &&
+      this.position.top !== undefined
+    ) {
+      this.place(this.position.left, this.position.top);
+    }
   }
 
   async clearStoredSessionData(): Promise<void> {
@@ -947,14 +956,35 @@ export class AssistantOverlay {
   }
 
   private place(left: number, top: number): void {
-    const width = this.host.offsetWidth || 392;
-    const height = Math.min(this.host.offsetHeight || 560, window.innerHeight);
+    const bounds = this.host.getBoundingClientRect();
+    const width = bounds.width || this.host.offsetWidth || 392;
+    const height = Math.min(
+      bounds.height || this.host.offsetHeight || 560,
+      window.innerHeight,
+    );
     const safeLeft = Math.max(8, Math.min(left, window.innerWidth - width - 8));
     const safeTop = Math.max(8, Math.min(top, window.innerHeight - Math.min(height, 72) - 8));
     this.host.style.left = `${safeLeft}px`;
     this.host.style.top = `${safeTop}px`;
     this.host.style.right = "auto";
     this.position = { left: safeLeft, top: safeTop };
+  }
+
+  private applyInterfaceScale(): void {
+    const scale = this.settings.interfaceScale;
+    const horizontalRoom = Math.max(0, window.innerWidth - 16);
+    const top = this.position.top ?? 72;
+    const verticalRoom = Math.max(72, window.innerHeight - top - 8);
+    const heightRatio = window.innerWidth <= 700 ? 0.68 : 0.72;
+    const width = Math.min(392, horizontalRoom / scale);
+    const maxHeight = Math.min(
+      650,
+      window.innerHeight * heightRatio,
+      verticalRoom / scale,
+    );
+    this.host.style.setProperty("--ca-interface-scale", String(scale));
+    this.host.style.setProperty("--ca-interface-width", `${width}px`);
+    this.host.style.setProperty("--ca-interface-max-height", `${maxHeight}px`);
   }
 
   private installHandlers(): void {
@@ -1017,6 +1047,14 @@ export class AssistantOverlay {
               Number(target.value),
             ),
           });
+          return;
+        }
+        if (target.dataset.setting === "interfaceScale") {
+          this.releaseSettingsInteraction(target, false);
+          this.applySettings({
+            ...this.settings,
+            interfaceScale: normalizeInterfaceScale(Number(target.value)),
+          });
         }
       }
     });
@@ -1061,6 +1099,7 @@ export class AssistantOverlay {
       void savePosition(this.position);
     });
     window.addEventListener("resize", () => {
+      this.applyInterfaceScale();
       if (this.position.left !== undefined && this.position.top !== undefined) {
         this.place(this.position.left, this.position.top);
       } else {
@@ -4827,7 +4866,35 @@ export class AssistantOverlay {
       </header>
       <div class="matrix-head"><span>PLAYER</span>${headings}<span>Σ</span></div>
       <section class="player-matrix" aria-label="Tracked player resources">${rows}${bankRow}</section>
+      ${this.renderDiceDistribution(state)}
       <button class="reset-link" data-action="reset">Reset this session</button>`;
+  }
+
+  private renderDiceDistribution(state: TrackerState): string {
+    const totals = Array.from({ length: 11 }, (_, index) => index + 2);
+    const observed = totals.reduce(
+      (sum, total) => sum + (state.diceRolls[total] ?? 0),
+      0,
+    );
+    const maximum = Math.max(
+      1,
+      ...totals.map((total) => state.diceRolls[total] ?? 0),
+    );
+    const bars = totals
+      .map((total) => {
+        const count = state.diceRolls[total] ?? 0;
+        const height = Math.round((count / maximum) * 100);
+        return `<span class="dice-column ${total === 7 ? "is-seven" : ""} ${count > 0 ? "has-rolls" : ""}" data-dice-total="${total}" role="listitem" aria-label="${total} rolled ${count} time${count === 1 ? "" : "s"}" style="--roll-height:${height}%">
+          <span class="dice-count">${count}</span>
+          <span class="dice-track" aria-hidden="true"><i></i></span>
+          <b>${total}</b>
+        </span>`;
+      })
+      .join("");
+    return `<section class="dice-distribution" aria-label="Observed dice roll distribution">
+      <header><span>ROLL DISTRIBUTION</span><b>${observed} OBSERVED · SINCE TRACKING</b></header>
+      <div class="dice-bars" role="list">${bars}</div>
+    </section>`;
   }
 
   private renderSettings(): string {
@@ -4845,6 +4912,15 @@ export class AssistantOverlay {
         <select data-setting="engine" aria-label="Decision engine">
           <option value="deep-search"${this.settings.engine === "deep-search" ? " selected" : ""}>MaxN</option>
           <option value="weighted"${this.settings.engine === "weighted" ? " selected" : ""}>Weighted</option>
+        </select>
+      </label>
+      <label class="settings-field">
+        <span><b>Interface size</b><small>Scale the whole assistant for comfortable reading.</small></span>
+        <select data-setting="interfaceScale" aria-label="Interface size">
+          ${INTERFACE_SCALE_OPTIONS.map(
+            (scale) =>
+              `<option value="${scale}"${this.settings.interfaceScale === scale ? " selected" : ""}>${Math.round(scale * 100)}%</option>`,
+          ).join("")}
         </select>
       </label>
       <div class="runtime-field" data-runtime="${runtime.state}">

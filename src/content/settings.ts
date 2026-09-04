@@ -2,9 +2,14 @@ import type { DecisionEngine } from "../core/engine";
 import { isExtensionContextInvalidatedError } from "./extension-context";
 
 export type AutopilotDelaySeconds = 0 | 1 | 3 | 5;
+export type InterfaceScale = 1 | 1.15 | 1.3;
 
 export const AUTOPILOT_DELAY_OPTIONS: readonly AutopilotDelaySeconds[] = [
   0, 1, 3, 5,
+];
+
+export const INTERFACE_SCALE_OPTIONS: readonly InterfaceScale[] = [
+  1, 1.15, 1.3,
 ];
 
 export const normalizeAutopilotDelaySeconds = (
@@ -13,6 +18,11 @@ export const normalizeAutopilotDelaySeconds = (
   AUTOPILOT_DELAY_OPTIONS.includes(value as AutopilotDelaySeconds)
     ? (value as AutopilotDelaySeconds)
     : 0;
+
+export const normalizeInterfaceScale = (value: unknown): InterfaceScale =>
+  INTERFACE_SCALE_OPTIONS.includes(value as InterfaceScale)
+    ? (value as InterfaceScale)
+    : 1.15;
 
 export const normalizeDecisionEngine = (value: unknown): DecisionEngine =>
   value === "weighted" ? "weighted" : "deep-search";
@@ -27,6 +37,7 @@ export interface AssistantSettings {
   /** Legacy key name; enables autopilot in any Colonist game. */
   autonomousPrivateGames: boolean;
   autopilotDelaySeconds: AutopilotDelaySeconds;
+  interfaceScale: InterfaceScale;
 }
 
 export interface OverlayPosition {
@@ -43,6 +54,7 @@ export const DEFAULT_SETTINGS: AssistantSettings = {
   recordGame: false,
   autonomousPrivateGames: false,
   autopilotDelaySeconds: 0,
+  interfaceScale: 1.15,
 };
 
 export const SETTINGS_KEY = "colonistAssistantSettings";
@@ -66,11 +78,16 @@ export const readSettings = async (): Promise<AssistantSettings> => {
   const normalizedDelay = normalizeAutopilotDelaySeconds(
     settings.autopilotDelaySeconds,
   );
+  const normalizedInterfaceScale = normalizeInterfaceScale(
+    settings.interfaceScale,
+  );
   const needsNormalization =
     settings.engine !== normalizedEngine ||
-    settings.autopilotDelaySeconds !== normalizedDelay;
+    settings.autopilotDelaySeconds !== normalizedDelay ||
+    settings.interfaceScale !== normalizedInterfaceScale;
   settings.engine = normalizedEngine;
   settings.autopilotDelaySeconds = normalizedDelay;
+  settings.interfaceScale = normalizedInterfaceScale;
   if (needsNormalization) {
     await chrome.storage.sync.set({ [SETTINGS_KEY]: settings });
   }
@@ -86,6 +103,7 @@ export const saveSettings = async (settings: AssistantSettings): Promise<void> =
         autopilotDelaySeconds: normalizeAutopilotDelaySeconds(
           settings.autopilotDelaySeconds,
         ),
+        interfaceScale: normalizeInterfaceScale(settings.interfaceScale),
       },
     });
   } catch (error) {

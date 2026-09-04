@@ -68,6 +68,9 @@ beforeEach(() => {
 
 afterEach(() => {
   document.body.innerHTML = "";
+  document
+    .querySelectorAll("#colonist-assistant-root")
+    .forEach((root) => root.remove());
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -138,6 +141,86 @@ describe("overlay settings interaction", () => {
       ?.textContent;
     expect(autopilotLabel).toMatch(/any Colonist game/i);
     expect(autopilotLabel).not.toMatch(/private or bot/i);
+    overlay.destroy();
+  });
+
+  it("offers persistent 100%, 115%, and 130% interface sizes", () => {
+    const overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS },
+      { reset: vi.fn() },
+    );
+    const root = document.querySelector<HTMLDivElement>(
+      "#colonist-assistant-root",
+    )!;
+    const shadow = root.shadowRoot!;
+    shadow
+      .querySelector<HTMLElement>("[data-action='view'][data-view='settings']")!
+      .click();
+    const select = shadow.querySelector<HTMLSelectElement>(
+      "select[data-setting='interfaceScale']",
+    );
+
+    expect([...(select?.options ?? [])].map((option) => option.value)).toEqual([
+      "1",
+      "1.15",
+      "1.3",
+    ]);
+    expect(select?.value).toBe("1.15");
+    expect(root.style.getPropertyValue("--ca-interface-scale")).toBe("1.15");
+
+    select!.value = "1.3";
+    select!.dispatchEvent(new Event("change", { bubbles: true }));
+
+    expect(root.style.getPropertyValue("--ca-interface-scale")).toBe("1.3");
+    overlay.destroy();
+  });
+
+  it("shows the observed dice distribution below the tracked card matrix", () => {
+    let tracker = reduceTracker(createTrackerState(), {
+      type: "discover",
+      player: "You",
+    });
+    tracker = reduceTracker(tracker, {
+      type: "roll",
+      player: "You",
+      dice: [3, 4],
+    });
+    tracker = reduceTracker(tracker, {
+      type: "roll",
+      player: "You",
+      dice: [5, 2],
+    });
+    tracker = reduceTracker(tracker, {
+      type: "roll",
+      player: "You",
+      dice: [5, 3],
+    });
+    const overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS },
+      { reset: vi.fn() },
+    );
+    overlay.update({ state: tracker } as GameSession);
+    const shadow = document
+      .querySelector<HTMLDivElement>("#colonist-assistant-root")!
+      .shadowRoot!;
+
+    shadow
+      .querySelector<HTMLElement>("[data-action='view'][data-view='cards']")!
+      .click();
+
+    const chart = shadow.querySelector<HTMLElement>(
+      "[aria-label='Observed dice roll distribution']",
+    );
+    const seven = chart?.querySelector<HTMLElement>("[data-dice-total='7']");
+    const eight = chart?.querySelector<HTMLElement>("[data-dice-total='8']");
+    expect(chart?.previousElementSibling?.classList.contains("player-matrix")).toBe(
+      true,
+    );
+    expect(seven?.getAttribute("aria-label")).toBe("7 rolled 2 times");
+    expect(seven?.style.getPropertyValue("--roll-height")).toBe("100%");
+    expect(eight?.getAttribute("aria-label")).toBe("8 rolled 1 time");
+    expect(eight?.style.getPropertyValue("--roll-height")).toBe("50%");
+    expect(chart?.textContent).toContain("3 OBSERVED · SINCE TRACKING");
     overlay.destroy();
   });
 

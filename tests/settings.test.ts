@@ -154,6 +154,36 @@ describe("assistant settings", () => {
     );
   });
 
+  it("defaults invalid interface sizes to the readable 115% scale", async () => {
+    const set = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("chrome", {
+      storage: {
+        sync: {
+          get: vi.fn().mockResolvedValue({
+            [SETTINGS_KEY]: {
+              ...DEFAULT_SETTINGS,
+              interfaceScale: 2,
+            },
+            colonistAssistantStrategistDefaultV1: true,
+          }),
+          set,
+        },
+      },
+    });
+
+    const settings = await readSettings();
+
+    expect(DEFAULT_SETTINGS.interfaceScale).toBe(1.15);
+    expect(settings.interfaceScale).toBe(1.15);
+    expect(set).toHaveBeenCalledWith(
+      expect.objectContaining({
+        [SETTINGS_KEY]: expect.objectContaining({
+          interfaceScale: 1.15,
+        }),
+      }),
+    );
+  });
+
   it("preserves a valid zero-second autopilot delay", async () => {
     const set = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("chrome", {

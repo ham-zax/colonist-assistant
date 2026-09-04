@@ -168,7 +168,6 @@ export interface ActionGuideOptions {
 }
 
 const ROOT_ID = "colonist-assistant-action-guide";
-const FONT_STYLE_ID = "colonist-assistant-document-font";
 let lastClickSignature = "";
 const followupTimers = new Set<number>();
 let pendingAutopilotSignature = "";
@@ -1126,18 +1125,12 @@ const resolveElement = (action: NextClick): HTMLElement | undefined => {
 };
 
 const ensureRoot = (): HTMLDivElement => {
-  if (!document.getElementById(FONT_STYLE_ID)) {
-    const style = document.createElement("style");
-    style.id = FONT_STYLE_ID;
-    style.textContent = `@font-face{font-family:"Colonist Assistant Archivo";src:url("${chrome.runtime.getURL("assets/fonts/ArchivoNarrow-Variable.ttf")}") format("truetype");font-style:normal;font-weight:400 700;font-display:swap}`;
-    (document.head ?? document.documentElement).append(style);
-  }
   const existing = document.getElementById(ROOT_ID);
   if (existing instanceof HTMLDivElement) return existing;
   const root = document.createElement("div");
   root.id = ROOT_ID;
   root.style.cssText =
-    'position:fixed;inset:0;z-index:2147482997;pointer-events:none;font-family:"Colonist Assistant Archivo",ui-sans-serif,system-ui,sans-serif;';
+    'position:fixed;inset:0;z-index:2147482997;pointer-events:none;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;';
   document.documentElement.append(root);
   return root;
 };
@@ -1185,9 +1178,9 @@ const drawHighlight = (
     "padding:4px 8px",
     "background:#f1c84b",
     "color:#0d1821",
-    "font-size:10px",
-    "font-weight:900",
-    "letter-spacing:.055em",
+    "font-size:11px",
+    "font-weight:800",
+    "letter-spacing:.04em",
     "line-height:14px",
   ].join(";");
   const style = document.createElement("style");

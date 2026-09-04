@@ -1,18 +1,11 @@
 export const OVERLAY_STYLES = `
-  @font-face {
-    font-family: "Archivo Narrow";
-    src: url("__CA_FONT_URL__") format("truetype");
-    font-style: normal;
-    font-weight: 400 700;
-    font-display: swap;
-  }
   :host {
     --ca-bg: #0d1821;
     --ca-chrome: #101e28;
     --ca-raised: #12222e;
     --ca-ink: #f1f4ef;
-    --ca-copy: #9bb0bd;
-    --ca-quiet: #6f8594;
+    --ca-copy: #b4c7d5;
+    --ca-quiet: #8fa4b3;
     --ca-line: #2b404e;
     --ca-line-strong: #496171;
     --ca-accent: #f1c84b;
@@ -21,9 +14,9 @@ export const OVERLAY_STYLES = `
     --ca-danger: #ef7c72;
     all: initial;
     color: var(--ca-ink);
-    font-family: "Archivo Narrow", "Arial Narrow", system-ui, sans-serif;
-    font-size: 12.5px;
-    line-height: 1.38;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 13px;
+    line-height: 1.4;
   }
   * { box-sizing: border-box; }
   button { color: inherit; font: inherit; }
@@ -40,15 +33,16 @@ export const OVERLAY_STYLES = `
     position: relative;
     z-index: 2147483000;
     display: flex;
-    width: 392px;
-    max-height: min(72vh, 650px);
+    width: var(--ca-interface-width, 392px);
+    max-height: var(--ca-interface-max-height, min(72vh, 650px));
     flex-direction: column;
     overflow: hidden;
     border-radius: 12px;
     background: var(--ca-bg);
     box-shadow: 0 18px 54px rgba(3, 10, 15, .42);
+    zoom: var(--ca-interface-scale, 1.15);
   }
-  .assistant.collapsed { width: 286px; }
+  .assistant.collapsed { width: min(286px, var(--ca-interface-width, 286px)); }
   .topbar {
     display: flex;
     align-items: center;
@@ -83,9 +77,9 @@ export const OVERLAY_STYLES = `
     margin-left: auto;
     padding: 0 8px;
     color: var(--ca-quiet);
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
-    letter-spacing: .06em;
+    letter-spacing: .05em;
   }
   .status i {
     width: 6px;
@@ -110,9 +104,9 @@ export const OVERLAY_STYLES = `
     gap: 4px;
     min-width: 56px;
     padding: 0 6px;
-    font-size: 9.5px;
+    font-size: 11px;
     font-weight: 700;
-    letter-spacing: .055em;
+    letter-spacing: .03em;
   }
   .icon-button { width: 34px; flex: 0 0 34px; }
   .view-button:hover,
@@ -132,7 +126,7 @@ export const OVERLAY_STYLES = `
   .body {
     display: flex;
     min-height: 0;
-    max-height: calc(min(72vh, 650px) - 56px);
+    max-height: calc(var(--ca-interface-max-height, min(72vh, 650px)) - 56px);
     flex: 1;
     flex-direction: column;
   }
@@ -159,7 +153,7 @@ export const OVERLAY_STYLES = `
     border-bottom: 1px solid var(--ca-line);
     color: var(--ca-copy);
     background: var(--ca-raised);
-    font-size: 9.5px;
+    font-size: 11px;
     text-align: left;
   }
   .model-strip span {
@@ -175,9 +169,9 @@ export const OVERLAY_STYLES = `
   }
   .engine-strip small {
     color: var(--ca-success);
-    font-size: 8.5px;
+    font-size: 11px;
     font-weight: 700;
-    letter-spacing: .065em;
+    letter-spacing: .04em;
   }
   .engine-strip.error small { color: var(--ca-danger); }
   .engine-strip.connecting small { color: var(--ca-quiet); }
@@ -197,8 +191,8 @@ export const OVERLAY_STYLES = `
   .model-strip b {
     flex: 0 0 auto;
     color: var(--ca-accent);
-    font-size: 10px;
-    letter-spacing: .06em;
+    font-size: 11px;
+    letter-spacing: .04em;
   }
   .engine-strip { cursor: pointer; }
   .engine-strip:hover {
@@ -216,9 +210,9 @@ export const OVERLAY_STYLES = `
     gap: 14px;
     margin-bottom: 10px;
     color: var(--ca-quiet);
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
-    letter-spacing: .075em;
+    letter-spacing: .05em;
   }
   .decision-meta span {
     min-width: 0;
@@ -230,10 +224,10 @@ export const OVERLAY_STYLES = `
     max-width: 340px;
     margin: 0;
     color: var(--ca-accent);
-    font-size: 27px;
+    font-size: 26px;
     font-weight: 700;
-    line-height: 1;
-    letter-spacing: -.025em;
+    line-height: 1.1;
+    letter-spacing: -.02em;
     text-wrap: balance;
   }
   .decision-command {
@@ -269,8 +263,8 @@ export const OVERLAY_STYLES = `
   .why {
     margin: 11px 0 16px;
     color: var(--ca-copy);
-    font-size: 12px;
-    line-height: 1.48;
+    font-size: 13px;
+    line-height: 1.45;
   }
   .resource-plan {
     display: grid;
@@ -305,7 +299,7 @@ export const OVERLAY_STYLES = `
   .resource-plan b {
     color: var(--ca-copy);
     font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
-    font-size: 9.5px;
+    font-size: 11px;
     font-weight: 650;
     font-variant-numeric: tabular-nums;
   }
@@ -329,10 +323,10 @@ export const OVERLAY_STYLES = `
   }
   .trade-flow > div > em {
     color: var(--ca-quiet);
-    font-size: 9px;
+    font-size: 11px;
     font-style: normal;
     font-weight: 700;
-    letter-spacing: .075em;
+    letter-spacing: .04em;
   }
   .trade-flow > div > span {
     display: flex;
@@ -367,7 +361,7 @@ export const OVERLAY_STYLES = `
   .trade-resource b {
     align-self: end;
     color: var(--ca-ink);
-    font-size: 12px;
+    font-size: 12.5px;
     font-variant-numeric: tabular-nums;
     line-height: 1;
   }
@@ -376,8 +370,8 @@ export const OVERLAY_STYLES = `
     align-self: start;
     overflow: hidden;
     color: var(--ca-copy);
-    font-size: 9.5px;
-    line-height: 1.1;
+    font-size: 11px;
+    line-height: 1.2;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -394,16 +388,16 @@ export const OVERLAY_STYLES = `
   .trade-next span {
     display: block;
     color: var(--ca-accent);
-    font-size: 9px;
+    font-size: 11px;
     font-weight: 700;
-    letter-spacing: .075em;
+    letter-spacing: .05em;
   }
   .trade-next strong {
     display: block;
     min-width: 0;
     line-height: 1.25;
     overflow-wrap: anywhere;
-    font-size: 11.5px;
+    font-size: 12.5px;
   }
   .trade-decision .why { margin-top: 13px; }
   .discard-plan {
@@ -442,7 +436,7 @@ export const OVERLAY_STYLES = `
     overflow-wrap: anywhere;
     color: var(--ca-ink);
     font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
-    font-size: 10px;
+    font-size: 11.5px;
     font-weight: 650;
     font-variant-numeric: tabular-nums;
   }
@@ -458,11 +452,11 @@ export const OVERLAY_STYLES = `
   }
   .single-tactic span {
     color: var(--ca-accent);
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
-    letter-spacing: .08em;
+    letter-spacing: .05em;
   }
-  .single-tactic strong { font-size: 12px; font-weight: 700; }
+  .single-tactic strong { font-size: 12.5px; font-weight: 700; }
   .more {
     margin: 0 -17px;
     border-bottom: 1px solid var(--ca-line);
@@ -472,7 +466,7 @@ export const OVERLAY_STYLES = `
     padding: 0 17px;
     align-content: center;
     color: var(--ca-copy);
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 650;
     cursor: pointer;
     list-style-position: inside;
@@ -482,7 +476,7 @@ export const OVERLAY_STYLES = `
     margin: 0;
     padding: 0 17px 11px 32px;
     color: var(--ca-quiet);
-    font-size: 10.5px;
+    font-size: 12.5px;
   }
   .alternative {
     display: grid;
@@ -495,11 +489,11 @@ export const OVERLAY_STYLES = `
   .alternative > b {
     color: var(--ca-quiet);
     font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
-    font-size: 10px;
+    font-size: 11px;
   }
   .alternative > span { display: grid; }
-  .alternative strong { font-size: 11.5px; }
-  .alternative small { margin-top: 2px; color: var(--ca-quiet); font-size: 10px; }
+  .alternative strong { font-size: 12.5px; }
+  .alternative small { margin-top: 2px; color: var(--ca-quiet); font-size: 11px; }
   .board-confirm {
     display: flex;
     align-items: center;
@@ -510,7 +504,7 @@ export const OVERLAY_STYLES = `
     border-top: 1px solid var(--ca-line);
     border-bottom: 1px solid var(--ca-line);
     color: var(--ca-success);
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 650;
   }
   .board-confirm i {
@@ -581,9 +575,9 @@ export const OVERLAY_STYLES = `
     padding: 3px 6px;
     color: var(--ca-bg);
     background: var(--ca-accent);
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
-    letter-spacing: .055em;
+    letter-spacing: .04em;
     display: inline-flex;
     align-items: center;
     gap: 4px;
@@ -620,16 +614,16 @@ export const OVERLAY_STYLES = `
   .cards-heading { padding: 17px 14px 14px; }
   .cards-heading > span {
     color: var(--ca-accent);
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
-    letter-spacing: .075em;
+    letter-spacing: .05em;
   }
   .cards-heading h1 {
     margin: 3px 0 0;
     font-size: 23px;
     line-height: 1.05;
   }
-  .cards-heading p { margin: 5px 0 0; color: var(--ca-copy); font-size: 11px; }
+  .cards-heading p { margin: 5px 0 0; color: var(--ca-copy); font-size: 12px; }
   .matrix-head,
   .matrix-row {
     display: grid;
@@ -642,9 +636,9 @@ export const OVERLAY_STYLES = `
     border-top: 1px solid var(--ca-line);
     border-bottom: 1px solid var(--ca-line);
     color: var(--ca-quiet);
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
-    letter-spacing: .055em;
+    letter-spacing: .04em;
     text-align: center;
   }
   .matrix-head > span:first-child { text-align: left; }
@@ -673,6 +667,72 @@ export const OVERLAY_STYLES = `
   }
   .bank-row .player-name { padding-left: 0; }
   .bank-row .resource-cell { color: var(--ca-copy); }
+  .dice-distribution {
+    padding: 13px 12px 12px;
+    border-bottom: 1px solid var(--ca-line);
+    background: var(--ca-chrome);
+  }
+  .dice-distribution header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .dice-distribution header span {
+    color: var(--ca-accent);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .05em;
+  }
+  .dice-distribution header b {
+    color: var(--ca-quiet);
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: .035em;
+  }
+  .dice-bars {
+    display: grid;
+    height: 94px;
+    grid-template-columns: repeat(11, minmax(0, 1fr));
+    align-items: stretch;
+    gap: 4px;
+    margin-top: 10px;
+  }
+  .dice-column {
+    display: grid;
+    min-width: 0;
+    grid-template-rows: 17px 58px 19px;
+    color: var(--ca-copy);
+    text-align: center;
+  }
+  .dice-count,
+  .dice-column > b {
+    align-content: center;
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
+  }
+  .dice-count { color: var(--ca-quiet); }
+  .dice-column > b { font-weight: 700; }
+  .dice-track {
+    position: relative;
+    display: block;
+    overflow: hidden;
+    border: 1px solid var(--ca-line);
+    background: var(--ca-bg);
+  }
+  .dice-track i {
+    position: absolute;
+    right: 2px;
+    bottom: 2px;
+    left: 2px;
+    height: var(--roll-height);
+    max-height: calc(100% - 4px);
+    background: var(--ca-success);
+  }
+  .dice-column.has-rolls .dice-track i { min-height: 3px; }
+  .dice-column.is-seven { color: var(--ca-danger); }
+  .dice-column.is-seven .dice-track i { background: var(--ca-danger); }
   .player-name {
     position: relative;
     display: grid;
@@ -692,7 +752,8 @@ export const OVERLAY_STYLES = `
     align-items: center;
     gap: 4px;
     overflow: hidden;
-    font-size: 11.5px;
+    font-size: 12px;
+    font-weight: 700;
     white-space: nowrap;
     text-overflow: ellipsis;
   }
@@ -711,11 +772,11 @@ export const OVERLAY_STYLES = `
     object-fit: contain;
   }
   .player-name small {
-    min-height: 12px;
+    min-height: 14px;
     overflow: hidden;
     color: var(--ca-quiet);
-    font-size: 10px;
-    letter-spacing: .05em;
+    font-size: 11px;
+    letter-spacing: .03em;
     white-space: nowrap;
     text-overflow: ellipsis;
   }
@@ -726,7 +787,7 @@ export const OVERLAY_STYLES = `
     place-items: center;
     color: var(--ca-ink);
     font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
-    font-size: 11px;
+    font-size: 11.5px;
     font-weight: 650;
     font-variant-numeric: tabular-nums;
   }
@@ -743,7 +804,7 @@ export const OVERLAY_STYLES = `
     border-bottom: 1px solid #5b4545;
     color: #ffd5cd;
     background: #2b2023;
-    font-size: 10.5px;
+    font-size: 11.5px;
   }
   .notice svg { width: 14px; height: 14px; flex: 0 0 14px; }
   .settings-panel { min-height: 330px; }
@@ -753,9 +814,9 @@ export const OVERLAY_STYLES = `
   }
   .settings-heading > span {
     color: var(--ca-accent);
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
-    letter-spacing: .075em;
+    letter-spacing: .05em;
   }
   .settings-heading h1 {
     margin: 3px 0 0;
@@ -766,7 +827,7 @@ export const OVERLAY_STYLES = `
   .settings-heading p {
     margin: 6px 0 0;
     color: var(--ca-copy);
-    font-size: 11px;
+    font-size: 12px;
   }
   .settings-field {
     display: flex;
@@ -791,13 +852,13 @@ export const OVERLAY_STYLES = `
     flex: 1;
   }
   .runtime-field b {
-    font-size: 12px;
+    font-size: 12.5px;
     font-weight: 700;
   }
   .runtime-field small {
     margin-top: 2px;
     color: var(--ca-quiet);
-    font-size: 10.5px;
+    font-size: 11px;
     line-height: 1.35;
     overflow-wrap: anywhere;
   }
@@ -807,8 +868,8 @@ export const OVERLAY_STYLES = `
     align-items: center;
     gap: 6px;
     color: var(--ca-success);
-    font-size: 9.5px;
-    letter-spacing: .04em;
+    font-size: 11px;
+    letter-spacing: .03em;
     text-align: right;
   }
   .runtime-field > strong i {
@@ -836,13 +897,13 @@ export const OVERLAY_STYLES = `
     flex: 1;
   }
   .settings-field b {
-    font-size: 12px;
+    font-size: 12.5px;
     font-weight: 700;
   }
   .settings-field small {
     margin-top: 2px;
     color: var(--ca-quiet);
-    font-size: 10.5px;
+    font-size: 11px;
     line-height: 1.35;
   }
   .settings-field select {
@@ -854,7 +915,7 @@ export const OVERLAY_STYLES = `
     color: var(--ca-ink);
     background: var(--ca-chrome);
     font: inherit;
-    font-size: 11px;
+    font-size: 11.5px;
   }
   .settings-field select:focus-visible {
     outline: 2px solid var(--ca-accent);
@@ -903,7 +964,7 @@ export const OVERLAY_STYLES = `
   .engine-field > strong {
     max-width: none;
     color: var(--ca-accent);
-    font-size: 11px;
+    font-size: 11.5px;
     letter-spacing: .025em;
   }
   .settings-version {
@@ -914,13 +975,13 @@ export const OVERLAY_STYLES = `
     padding: 0 17px;
     border-bottom: 1px solid var(--ca-line);
     color: var(--ca-quiet);
-    font-size: 10px;
-    letter-spacing: .06em;
+    font-size: 11px;
+    letter-spacing: .04em;
   }
   .settings-version strong {
     color: var(--ca-success);
     font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
-    font-size: 10.5px;
+    font-size: 11px;
     font-variant-numeric: tabular-nums;
   }
   .reset-link {
@@ -929,7 +990,7 @@ export const OVERLAY_STYLES = `
     border: 0;
     color: var(--ca-quiet);
     background: transparent;
-    font-size: 10.5px;
+    font-size: 11.5px;
     cursor: pointer;
   }
   .reset-link:hover { color: var(--ca-ink); text-decoration: underline; text-underline-offset: 3px; }
@@ -943,14 +1004,12 @@ export const OVERLAY_STYLES = `
   .empty-mark { width: 34px; height: 34px; margin-bottom: 20px; color: var(--ca-accent); }
   .empty-mark svg { width: 100%; height: 100%; }
   .empty h1 { max-width: 300px; margin: 0; font-size: 23px; line-height: 1.05; }
-  .empty p { max-width: 300px; margin: 8px 0 0; color: var(--ca-copy); font-size: 12px; }
+  .empty p { max-width: 300px; margin: 8px 0 0; color: var(--ca-copy); font-size: 12.5px; }
   .compact-empty { min-height: 190px; }
   @media (max-width: 700px) {
     .assistant {
-      width: min(392px, calc(100vw - 16px));
-      max-height: 68vh;
+      width: var(--ca-interface-width, calc(100vw - 16px));
     }
-    .body { max-height: calc(68vh - 56px); }
     .status { display: none; }
     .matrix-head,
     .matrix-row { grid-template-columns: minmax(82px, 1fr) repeat(5, 34px) 37px; }

@@ -12,17 +12,7 @@ const ensureStyles = (): void => {
   if (document.getElementById(STYLE_ID)) return;
   const style = document.createElement("style");
   style.id = STYLE_ID;
-  const fontUrl = chrome.runtime.getURL(
-    "assets/fonts/ArchivoNarrow-Variable.ttf",
-  );
   style.textContent = `
-    @font-face {
-      font-family: "Colonist Assistant Archivo";
-      src: url("${fontUrl}") format("truetype");
-      font-style: normal;
-      font-weight: 400 700;
-      font-display: swap;
-    }
     .${VERDICT_CLASS} {
       display: grid;
       grid-template-columns: 8px minmax(58px, auto) minmax(0, 1fr);
@@ -35,8 +25,8 @@ const ensureStyles = (): void => {
       border-bottom: 1px solid #2b404e;
       color: #f1f4ef;
       background: #101e28;
-      font-family: "Colonist Assistant Archivo", ui-sans-serif, system-ui, sans-serif;
-      line-height: 1.2;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      line-height: 1.25;
       pointer-events: none;
     }
     .${VERDICT_CLASS}::before {
@@ -48,17 +38,17 @@ const ensureStyles = (): void => {
     }
     .${VERDICT_CLASS} strong {
       color: var(--ca-trade-verdict-color);
-      font-size: 10.5px;
+      font-size: 11.5px;
       font-weight: 800;
-      letter-spacing: .075em;
+      letter-spacing: .05em;
     }
     .${VERDICT_CLASS} span {
       min-width: 0;
       overflow-wrap: anywhere;
-      color: #c4d1d8;
-      font-size: 11.5px;
-      font-weight: 650;
-      line-height: 1.25;
+      color: #d6e2e9;
+      font-size: 12.5px;
+      font-weight: 600;
+      line-height: 1.3;
     }
     .${VERDICT_CLASS}[data-verdict="accept"] {
       --ca-trade-verdict-color: #7ad7a2;

@@ -2,7 +2,6 @@ import type { DecisionAnalysis } from "../core/engine";
 import type { TrackerState } from "../core/types";
 
 const ROOT_ID = "colonist-assistant-win-odds";
-const FONT_STYLE_ID = "colonist-assistant-document-font";
 const STALE_AFTER_MS = 15_000;
 const REPOSITION_DELAY_MS = 48;
 
@@ -11,14 +10,6 @@ let lastState: TrackerState | undefined;
 let staleTimer: number | undefined;
 let repositionTimer: number | undefined;
 let observer: MutationObserver | undefined;
-
-const ensureFont = (): void => {
-  if (document.getElementById(FONT_STYLE_ID)) return;
-  const style = document.createElement("style");
-  style.id = FONT_STYLE_ID;
-  style.textContent = `@font-face{font-family:"Colonist Assistant Archivo";src:url("${chrome.runtime.getURL("assets/fonts/ArchivoNarrow-Variable.ttf")}") format("truetype");font-style:normal;font-weight:400 700;font-display:swap}`;
-  (document.head ?? document.documentElement).append(style);
-};
 
 const visible = (element: HTMLElement): boolean => {
   const style = getComputedStyle(element);
@@ -89,13 +80,12 @@ const findPlayerPanel = (
 };
 
 const ensureRoot = (): HTMLDivElement => {
-  ensureFont();
   const existing = document.getElementById(ROOT_ID);
   if (existing instanceof HTMLDivElement) return existing;
   const root = document.createElement("div");
   root.id = ROOT_ID;
   root.style.cssText =
-    'position:fixed;inset:0;z-index:2147482988;pointer-events:none;font-family:"Colonist Assistant Archivo",ui-sans-serif,system-ui,sans-serif;';
+    'position:fixed;inset:0;z-index:2147482988;pointer-events:none;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;';
   document.documentElement.append(root);
   return root;
 };
@@ -208,17 +198,17 @@ const renderCurrentWinOdds = (
       `left:${Math.round(left)}px`,
       `top:${Math.round(top)}px`,
       "display:grid",
-      "min-width:66px",
-      "height:20px",
+      "min-width:68px",
+      "height:22px",
       "place-items:center",
       "padding:0 6px",
       "border:1px solid rgba(241,200,75,.7)",
       "background:rgba(13,24,33,.94)",
       "color:#f1c84b",
       "box-shadow:0 4px 14px rgba(3,10,15,.34)",
-      "font-size:10px",
-      "font-weight:800",
-      "letter-spacing:.045em",
+      "font-size:11px",
+      "font-weight:700",
+      "letter-spacing:.03em",
       "font-variant-numeric:tabular-nums",
       "white-space:nowrap",
     ].join(";");
