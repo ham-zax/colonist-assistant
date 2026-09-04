@@ -175,6 +175,42 @@ describe("overlay settings interaction", () => {
     overlay.destroy();
   });
 
+  it("exposes Advice and Cards as pressed view buttons", () => {
+    const overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS },
+      { reset: vi.fn() },
+    );
+    const shadow = document
+      .querySelector<HTMLDivElement>("#colonist-assistant-root")!
+      .shadowRoot!;
+    const views = shadow.querySelector<HTMLElement>(
+      "[role='group'][aria-label='Assistant views']",
+    );
+    const advice = views?.querySelector<HTMLButtonElement>(
+      "button[data-view='advice']",
+    );
+    const cards = views?.querySelector<HTMLButtonElement>(
+      "button[data-view='cards']",
+    );
+
+    expect(advice?.getAttribute("aria-pressed")).toBe("true");
+    expect(cards?.getAttribute("aria-pressed")).toBe("false");
+
+    cards?.click();
+
+    expect(
+      shadow
+        .querySelector<HTMLButtonElement>("button[data-view='advice']")
+        ?.getAttribute("aria-pressed"),
+    ).toBe("false");
+    expect(
+      shadow
+        .querySelector<HTMLButtonElement>("button[data-view='cards']")
+        ?.getAttribute("aria-pressed"),
+    ).toBe("true");
+    overlay.destroy();
+  });
+
   it("shows the observed dice distribution below the tracked card matrix", () => {
     let tracker = reduceTracker(createTrackerState(), {
       type: "discover",
@@ -211,16 +247,26 @@ describe("overlay settings interaction", () => {
     const chart = shadow.querySelector<HTMLElement>(
       "[aria-label='Observed dice roll distribution']",
     );
+    const cardsHeading = shadow.querySelector<HTMLElement>(".cards-heading");
     const seven = chart?.querySelector<HTMLElement>("[data-dice-total='7']");
     const eight = chart?.querySelector<HTMLElement>("[data-dice-total='8']");
+    expect(cardsHeading?.textContent?.trim()).toBe("Table cards");
+    expect(cardsHeading?.querySelector("p")).toBeNull();
     expect(chart?.previousElementSibling?.classList.contains("player-matrix")).toBe(
       true,
     );
-    expect(seven?.getAttribute("aria-label")).toBe("7 rolled 2 times");
+    expect(seven?.getAttribute("aria-label")).toBe(
+      "7 rolled 2 times; 0.5 expected after 3 rolls",
+    );
     expect(seven?.style.getPropertyValue("--roll-height")).toBe("100%");
-    expect(eight?.getAttribute("aria-label")).toBe("8 rolled 1 time");
+    expect(eight?.getAttribute("aria-label")).toBe(
+      "8 rolled 1 time; 0.4 expected after 3 rolls",
+    );
     expect(eight?.style.getPropertyValue("--roll-height")).toBe("50%");
     expect(chart?.textContent).toContain("3 OBSERVED · SINCE TRACKING");
+    expect(chart?.querySelector(".dice-legend")?.textContent).toContain(
+      "SOLID OBSERVED · DASHED EXPECTED",
+    );
     overlay.destroy();
   });
 
@@ -690,6 +736,18 @@ describe("overlay settings interaction", () => {
           visiblePoints: 3,
         },
       },
+      localSeatDiagnostics: {
+        seatSource: "gameController.myColor+currentUserId+gameUserStates",
+        identity: {
+          status: "resolved",
+          reason: "cross-checked",
+          source: "controller+account-user-id+store-roster",
+          currentUserIdAvailable: true,
+          currentUserMatchColors: [1],
+          myColor: 1,
+          currentUserColor: 1,
+        },
+      },
     });
     await Promise.resolve();
     await Promise.resolve();
@@ -767,6 +825,18 @@ describe("overlay settings interaction", () => {
       isMyTurn: true,
       action: "none",
       activeTrades: [incoming, outgoing],
+      localSeatDiagnostics: {
+        seatSource: "gameController.myColor+currentUserId+gameUserStates",
+        identity: {
+          status: "resolved",
+          reason: "cross-checked",
+          source: "controller+account-user-id+store-roster",
+          currentUserIdAvailable: true,
+          currentUserMatchColors: [1],
+          myColor: 1,
+          currentUserColor: 1,
+        },
+      },
     };
     internals.completedIncomingTradeIds.add(incoming.id);
     internals.outgoingTradeSeenAt.set(outgoing.id, Date.now());

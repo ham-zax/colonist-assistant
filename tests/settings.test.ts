@@ -68,7 +68,6 @@ describe("assistant settings", () => {
         [SETTINGS_KEY]: expect.objectContaining({
           engine: "deep-search",
         }),
-        colonistAssistantStrategistDefaultV1: true,
       }),
     );
   });

@@ -244,11 +244,6 @@ const collapseIcon = (collapsed: boolean) =>
     collapsed ? "m8 10 4 4 4-4" : "m8 14 4-4 4 4"
   }"/></svg>`;
 
-const cardsIcon = (back: boolean) =>
-  back
-    ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m15 6-6 6 6 6"/></svg>'
-    : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="4" y="5" width="11" height="14"/><path d="M8 5V3h12v14h-5"/></svg>';
-
 const settingsIcon = () =>
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="square" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2.5" fill="currentColor" stroke="none"/><circle cx="15" cy="17" r="2.5" fill="currentColor" stroke="none"/></svg>';
 
@@ -1533,9 +1528,7 @@ export class AssistantOverlay {
       )
         ? this.renderBoardMarker(spatial.action, spatial.recommendation)
         : "";
-    const advice =
-      this.renderEngineStrip() +
-      this.renderAdvice(state, spatial, report, next);
+    const advice = this.renderAdvice(state, spatial, report, next);
     const panel =
       this.activeView === "advice"
         ? advice
@@ -1549,10 +1542,10 @@ export class AssistantOverlay {
           <span class="brand-mark">${assistantMark()}</span>
           <span class="product-name">Colonist Assistant</span>
           <span class="status ${ready ? "live" : ""}"><i></i>${ready ? (this.settings.recordGame ? "LIVE · REC" : "LIVE") : "WAITING"}</span>
-          <button class="view-button ${this.activeView === "cards" ? "active" : ""}" data-action="view" data-view="cards" aria-pressed="${this.activeView === "cards"}" aria-label="${this.activeView === "cards" ? "Back to your advice" : "Show tracked cards"}" title="${this.activeView === "cards" ? "Your advice" : "Tracked cards"}">
-            ${cardsIcon(this.activeView === "cards")}
-            <span>${this.activeView === "cards" ? "ADVICE" : "CARDS"}</span>
-          </button>
+          <div class="segmented-control" role="group" aria-label="Assistant views">
+            <button class="segment ${this.activeView === "advice" ? "active" : ""}" data-action="view" data-view="advice" aria-pressed="${this.activeView === "advice"}">Advice</button>
+            <button class="segment ${this.activeView === "cards" ? "active" : ""}" data-action="view" data-view="cards" aria-pressed="${this.activeView === "cards"}">Cards</button>
+          </div>
           <button class="icon-button ${this.activeView === "settings" ? "active" : ""}" data-action="view" data-view="settings" aria-pressed="${this.activeView === "settings"}" aria-label="${this.activeView === "settings" ? "Back to your advice" : "Open assistant settings"}" title="${this.activeView === "settings" ? "Your advice" : "Settings"}">${settingsIcon()}</button>
           <button class="icon-button" data-action="collapse" aria-label="${this.collapsed ? "Expand assistant" : "Collapse assistant"}" title="${this.collapsed ? "Expand" : "Collapse"}">${collapseIcon(this.collapsed)}</button>
         </header>
@@ -2250,12 +2243,20 @@ export class AssistantOverlay {
     return this.settings.engine === "weighted" ? WEIGHTED_LABEL : STRATEGIST_LABEL;
   }
 
-  private renderEngineStrip(): string {
+  private renderEngineMetaChip(): string {
     const runtime = this.runtimePresentation();
-    return `<button class="model-strip engine-strip ${runtime.state}" data-action="view" data-view="settings" aria-label="Open decision engine settings. Runtime: ${escapeHtml(runtime.label.toLowerCase())}">
-      <span>Decision engine <small>${escapeHtml(runtime.label.toUpperCase())}</small></span>
-      <b>${escapeHtml(this.decisionEngineLabel())}</b>
-    </button>`;
+    const engine = this.decisionEngineLabel();
+    const statusText =
+      runtime.state === "healthy"
+        ? engine
+        : runtime.state === "searching"
+          ? `${engine} · SEARCHING`
+          : runtime.state === "slow"
+            ? `${engine} · SLOW`
+            : runtime.state === "connecting"
+              ? `${engine} · QUEUED`
+              : runtime.label.toUpperCase();
+    return `<button class="meta-engine-chip ${runtime.state}" data-action="view" data-view="settings" title="${escapeHtml(runtime.detail)}" aria-label="Decision engine: ${escapeHtml(engine)}, status: ${escapeHtml(runtime.label)}"><i></i><span>${escapeHtml(statusText)}</span></button>`;
   }
 
   private runtimePresentation(): {
@@ -4008,7 +4009,7 @@ export class AssistantOverlay {
           ? ` Controller color ${controllerColor} does not match account-linked color ${accountColor}.`
           : "";
       return `<section class="decision pending-decision" aria-live="assertive">
-        <div class="decision-meta"><span>LOCAL SEAT UNRESOLVED</span><span>FAIL CLOSED</span></div>
+        <div class="decision-meta"><span>LOCAL SEAT UNRESOLVED</span>${this.renderEngineMetaChip()}</div>
         <div class="decision-command">
           <span class="command-art">${assistantMark()}</span>
           <h1>Waiting for consistent player identity</h1>
@@ -4031,7 +4032,7 @@ export class AssistantOverlay {
         ? EXTENSION_CONTEXT_RELOAD_MESSAGE
         : this.decisionRuntimeError;
       return `<section class="decision pending-decision" aria-live="assertive">
-        <div class="decision-meta"><span>STRATEGIST PAUSED</span><span>NO FALLBACK</span></div>
+        <div class="decision-meta"><span>STRATEGIST PAUSED</span>${this.renderEngineMetaChip()}</div>
         <div class="decision-command">
           <span class="command-art">${assistantMark()}</span>
           <h1>${reloadRequired ? "Reload this Colonist tab" : "Waiting for a valid engine result"}</h1>
@@ -4085,7 +4086,7 @@ export class AssistantOverlay {
         ).length,
       );
       return `<section class="decision pending-decision" aria-live="polite">
-        <div class="decision-meta"><span>${mandatory ? "EXACT DECISION" : this.board?.isMyTurn ? "PLANNING THIS TURN" : "PONDERING"}</span><span>STATE LOCKED</span></div>
+        <div class="decision-meta"><span>${mandatory ? "EXACT DECISION" : this.board?.isMyTurn ? "PLANNING THIS TURN" : "PONDERING"}</span>${this.renderEngineMetaChip()}</div>
         <div class="decision-command">
           <span class="command-art">${assistantMark()}</span>
           <h1>${mandatory ? "Comparing every legal choice" : this.board?.isMyTurn ? "Calculating the next action" : "Preparing your next turn"}</h1>
@@ -4262,7 +4263,7 @@ export class AssistantOverlay {
       ? '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="2" fill="currentColor"/><circle cx="8" cy="8" r="1.35" fill="#0d1821"/><circle cx="16" cy="8" r="1.35" fill="#0d1821"/><circle cx="12" cy="12" r="1.35" fill="#0d1821"/><circle cx="8" cy="16" r="1.35" fill="#0d1821"/><circle cx="16" cy="16" r="1.35" fill="#0d1821"/></svg>'
       : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h3v16H5zM10 5l9 7-9 7z" fill="currentColor"/></svg>';
     return `<section class="decision control-decision" aria-live="polite">
-      <div class="decision-meta"><span>${roll ? "START YOUR TURN" : "TURN COMPLETE"}</span><span>EXACT NEXT CLICK</span></div>
+      <div class="decision-meta"><span>${roll ? "START YOUR TURN" : "TURN COMPLETE"}</span>${this.renderEngineMetaChip()}</div>
       <div class="decision-command">
         <span class="command-art">${icon}</span>
         <h1>${roll ? "Roll the dice" : "End your turn"}</h1>
@@ -4297,7 +4298,7 @@ export class AssistantOverlay {
       ? `${rationale.summary}. ${rationale.reasons[0] ?? fallbackDetail}`
       : fallbackDetail;
     return `<section class="decision trade-decision" aria-live="polite">
-      <div class="decision-meta"><span>INCOMING TRADE</span><span>${next.verdict.toUpperCase()}</span></div>
+      <div class="decision-meta"><span>INCOMING TRADE · ${next.verdict.toUpperCase()}</span>${this.renderEngineMetaChip()}</div>
       <div class="decision-command">
         <span class="command-art">${this.pieceArt("development")}</span>
         <h1>${title}</h1>
@@ -4317,7 +4318,7 @@ export class AssistantOverlay {
       ? `${rationale.summary}. ${rationale.reasons[0] ?? "The final authority preferred closing this trade state"}`
       : "This offer has no useful live response. Closing it releases Colonist's trade state; the same bundle stays blocked for this turn";
     return `<section class="decision trade-decision" aria-live="polite">
-      <div class="decision-meta"><span>OUTGOING TRADE</span><span>RECOVERY</span></div>
+      <div class="decision-meta"><span>OUTGOING TRADE · RECOVERY</span>${this.renderEngineMetaChip()}</div>
       <div class="decision-command">
         <span class="command-art">${this.pieceArt("development")}</span>
         <h1>${escapeHtml(next.label)}</h1>
@@ -4333,7 +4334,7 @@ export class AssistantOverlay {
   ): string {
     const pending = trade.pendingPlayers?.length ?? 0;
     return `<section class="decision trade-decision" aria-live="polite">
-      <div class="decision-meta"><span>OUTGOING TRADE</span><span>WAITING</span></div>
+      <div class="decision-meta"><span>OUTGOING TRADE · WAITING</span>${this.renderEngineMetaChip()}</div>
       <div class="decision-command">
         <span class="command-art">${this.pieceArt("development")}</span>
         <h1>Waiting for ${pending === 1 ? "1 response" : `${pending || "the remaining"} responses`}</h1>
@@ -4351,7 +4352,7 @@ export class AssistantOverlay {
       ? `${rationale.summary}. ${rationale.reasons[0] ?? "This victim remained the strongest legal steal target"}`
       : "This victim best combines current win threat, steal value, and disruption of the strongest reachable build line";
     return `<section class="decision control-decision" aria-live="polite">
-      <div class="decision-meta"><span>ROBBER TARGET</span><span>EXACT NEXT CLICK</span></div>
+      <div class="decision-meta"><span>ROBBER TARGET</span>${this.renderEngineMetaChip()}</div>
       <div class="decision-command">
         <span class="command-art">${this.pieceArt("robber")}</span>
         <h1>Steal from ${escapeHtml(next.player)}</h1>
@@ -4370,7 +4371,7 @@ export class AssistantOverlay {
         ? "Robber move"
         : `${pending.action[0]!.toUpperCase()}${pending.action.slice(1)} placement`;
     return `<section class="decision sync-decision" aria-live="polite">
-      <div class="decision-meta"><span>PLACEMENT SENT</span><span>SYNCING BOARD</span></div>
+      <div class="decision-meta"><span>PLACEMENT SENT</span>${this.renderEngineMetaChip()}</div>
       <div class="decision-command">
         <span class="command-art">${this.pieceArt(pending.action)}</span>
         <h1>${escapeHtml(label)} received</h1>
@@ -4424,7 +4425,7 @@ export class AssistantOverlay {
       ? `${rationale.summary}. ${rationale.reasons[0] ?? "This conversion had the strongest continuation"}`
       : "The modeled conversion beats building, another trade, or ending the turn";
     return `<section class="decision trade-decision" aria-live="polite">
-      <div class="decision-meta"><span>DEEP SEARCH · ${maritime ? "BANK TRADE" : "PLAYER TRADE"}</span><span>NEXT SEQUENCE</span></div>
+      <div class="decision-meta"><span>${maritime ? "BANK TRADE" : "PLAYER TRADE"}</span>${this.renderEngineMetaChip()}</div>
       <div class="decision-command">
         <span class="command-art">${firstGive ? this.resourceArt(firstGive) : this.pieceArt("development")}</span>
         <h1>${maritime ? "Trade with the bank" : "Send this offer"}</h1>
@@ -4486,7 +4487,7 @@ export class AssistantOverlay {
       ? `${rationale.summary}. ${rationale.reasons[0] ?? "This line had the strongest modeled continuation"}`
       : "This line has the best modeled continuation from your exact hand and the current opponent-card belief set";
     return `<section class="decision development-decision" aria-live="polite">
-      <div class="decision-meta"><span>DEEP SEARCH · PLAY NOW</span><span>${escapeHtml(search?.algorithm.toUpperCase() ?? "SEARCH")}</span></div>
+      <div class="decision-meta"><span>PLAY DEVELOPMENT CARD</span>${this.renderEngineMetaChip()}</div>
       <div class="decision-command">
         <span class="command-art">${this.pieceArt(card.art)}</span>
         <h1>Play ${card.label} now</h1>
@@ -4530,7 +4531,7 @@ export class AssistantOverlay {
       )
       .join("");
     return `<section class="decision development-decision" aria-live="polite">
-      <div class="decision-meta"><span>DEVELOPMENT CARD · PLAY NOW</span><span>ONE CARD THIS TURN</span></div>
+      <div class="decision-meta"><span>DEVELOPMENT CARD</span>${this.renderEngineMetaChip()}</div>
       <div class="decision-command">
         <span class="command-art">${this.pieceArt(artByCard[recommendation.card])}</span>
         <h1>${escapeHtml(recommendation.title)}</h1>
@@ -4604,7 +4605,7 @@ export class AssistantOverlay {
         .join("")}
     </details>`;
     return `<section class="decision spatial-decision">
-      <div class="decision-meta"><span>${kicker}</span><span>LIVE BOARD</span></div>
+      <div class="decision-meta"><span>${kicker}</span>${this.renderEngineMetaChip()}</div>
       <div class="decision-command">
         <span class="command-art">${this.pieceArt(spatial.action)}</span>
         <h1>${title}</h1>
@@ -4695,7 +4696,7 @@ export class AssistantOverlay {
       )
       .join("");
     return `<section class="decision discard-decision" aria-live="polite">
-      <div class="decision-meta"><span>SEVEN ROLLED</span><span>EXACT HAND</span></div>
+      <div class="decision-meta"><span>SEVEN ROLLED</span>${this.renderEngineMetaChip()}</div>
       <div class="decision-command">
         <span class="command-art">${this.pieceArt("robber")}</span>
         <h1>Discard these ${recommendation.count}</h1>
@@ -4743,7 +4744,7 @@ export class AssistantOverlay {
             ...report.primary,
             kind: forcedKind,
             label:
-              forcedKind === "development"
+            forcedKind === "development"
                 ? "Development Card"
                 : `${forcedKind[0]!.toUpperCase()}${forcedKind.slice(1)}`,
             deficit: fallbackDeficit,
@@ -4769,10 +4770,13 @@ export class AssistantOverlay {
     const cost = BUILD_COSTS[primary.kind] as Partial<ResourceVector>;
     const resourcePlan = RESOURCE_ORDER.filter((resource) => (cost[resource] ?? 0) > 0)
       .map((resource) => {
-        const missing = primary.deficit[resource];
-        return `<span class="${missing ? "missing" : "ready"}" title="${RESOURCE_LABELS[resource]}">
+        const needed = cost[resource] ?? 0;
+        const missing = primary.deficit[resource] ?? 0;
+        const held = Math.max(0, needed - missing);
+        const label = RESOURCE_LABELS[resource];
+        return `<span class="${missing ? "missing" : "ready"}" title="${label}">
           <i style="--resource:${RESOURCE_COLORS[resource]}">${this.resourceArt(resource)}</i>
-          <b>${missing ? `Need ${missing}` : "Ready"}</b>
+          <b>${label} ${held}/${needed}</b>
         </span>`;
       })
       .join("");
@@ -4801,7 +4805,7 @@ export class AssistantOverlay {
     return `<section class="decision">
       <div class="decision-meta">
         <span>YOUR NEXT MOVE</span>
-        <span>${report.phase.toUpperCase()} · ${report.strategy.replaceAll("-", " ").toUpperCase()}</span>
+        ${this.renderEngineMetaChip()}
       </div>
       <div class="decision-command">
         <span class="command-art">${this.pieceArt(primary.kind === "development" ? "development" : primary.kind)}</span>
@@ -4859,11 +4863,7 @@ export class AssistantOverlay {
       ? `<div class="model-strip"><span>${escapeHtml(displayedWinAnalysis.model)}</span><b>${displayedWinAnalysis.simulations ? `${displayedWinAnalysis.simulations} ROLLOUTS` : "DETERMINISTIC"}</b></div>`
       : "";
     return `${warning}${model}
-      <header class="cards-heading">
-        <span>PUBLIC EVIDENCE</span>
-        <h1>Table cards</h1>
-        <p>Exact counts or honest minimum–maximum ranges.</p>
-      </header>
+      <header class="cards-heading"><h1>Table cards</h1></header>
       <div class="matrix-head"><span>PLAYER</span>${headings}<span>Σ</span></div>
       <section class="player-matrix" aria-label="Tracked player resources">${rows}${bankRow}</section>
       ${this.renderDiceDistribution(state)}
@@ -4879,21 +4879,39 @@ export class AssistantOverlay {
     const maximum = Math.max(
       1,
       ...totals.map((total) => state.diceRolls[total] ?? 0),
+      (observed * 6) / 36,
     );
     const bars = totals
       .map((total) => {
         const count = state.diceRolls[total] ?? 0;
+        const combinations = 6 - Math.abs(total - 7);
+        const expectedCount = (observed * combinations) / 36;
         const height = Math.round((count / maximum) * 100);
-        return `<span class="dice-column ${total === 7 ? "is-seven" : ""} ${count > 0 ? "has-rolls" : ""}" data-dice-total="${total}" role="listitem" aria-label="${total} rolled ${count} time${count === 1 ? "" : "s"}" style="--roll-height:${height}%">
+        const expectedHeight = Math.round((expectedCount / maximum) * 100);
+        const isHighYield = total === 6 || total === 8;
+        const isSeven = total === 7;
+        const classes = [
+          "dice-column",
+          isSeven ? "is-seven" : "",
+          isHighYield ? "is-high-yield" : "",
+          count > 0 ? "has-rolls" : "",
+        ]
+          .filter(Boolean)
+          .join(" ");
+        return `<span class="${classes}" data-dice-total="${total}" role="listitem" aria-label="${total} rolled ${count} time${count === 1 ? "" : "s"}; ${expectedCount.toFixed(1)} expected after ${observed} roll${observed === 1 ? "" : "s"}" style="--roll-height:${height}%">
           <span class="dice-count">${count}</span>
-          <span class="dice-track" aria-hidden="true"><i></i></span>
+          <span class="dice-track" aria-hidden="true" style="--expected-height:${expectedHeight}%">
+            <em class="dice-benchmark"></em>
+            <i></i>
+          </span>
           <b>${total}</b>
         </span>`;
       })
       .join("");
-    return `<section class="dice-distribution" aria-label="Observed dice roll distribution">
+    return `<section class="dice-distribution ${observed < 8 ? "low-sample" : ""}" aria-label="Observed dice roll distribution">
       <header><span>ROLL DISTRIBUTION</span><b>${observed} OBSERVED · SINCE TRACKING</b></header>
       <div class="dice-bars" role="list">${bars}</div>
+      <p class="dice-legend">SOLID OBSERVED · DASHED EXPECTED</p>
     </section>`;
   }
 
