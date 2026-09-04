@@ -117,6 +117,30 @@ Synthetic board-generation changes do not change live recommendation ingestion. 
 
 Repository/build completion is also distinct from browser deployment. After the final build, the unpacked extension still needs to be reloaded in the actual Edge profile used for Colonist and open Colonist tabs refreshed before a live smoke can establish runtime deployment.
 
+## Remaining runtime follow-ups and evidence gaps
+
+The following items are deliberately kept separate from the completed engine/rules repairs above:
+
+### Bank-shortage log classification — open parser defect
+
+The captured Colonist line
+
+`Not enough wool for all players. 2 are left, and 3 were needed.`
+
+is real bank-shortage evidence, but the current log/evidence classifier does not recognize this Colonist message form as a structured integrity-relevant event. The line therefore remains an unmatched integrity signal and can make a recording ineligible for benchmark use even though the underlying game-rule production logic is now correct. This is a small, concrete parser/evidence repair and should use the exact recorded line as regression input. It is separate from the already-fixed CPU/CUDA bank-shortage rule.
+
+### Bounded GPU searches with no terminal completions — quality follow-up, not established defect
+
+Some recorded 96-step GPU searches produced no completed games inside the rollout horizon. In those cases arbitration necessarily relied on bounded rollout value/margin evidence rather than empirical terminal wins. The session did not establish that this caused a wrong recommendation, so it is not a correctness blocker. It is a search-quality/measurement investigation to reopen only if recommendation-quality evidence indicates that horizon/terminal coverage is materially affecting decisions.
+
+### Recording finalization — not demonstrated, not yet a bug
+
+The inspected `game4519` evidence was captured while the game state still reported `gameOver=false`; no grounded finalized `gameOver=true` / winner record was available from that capture. A recording marked as still recording is therefore not evidence of a recorder defect by itself. Investigate finalization only if an export taken after an actually completed game still fails to persist the terminal/winner state.
+
+### Player-trade accept/counter harness — previous concern discharged
+
+The two previously observed trade-UI test failures are no longer open on the integrated line. Focused current-HEAD runs for `clicks the current Colonist accept trade control` and `opens and completes a recommended counteroffer` both pass, as does the post-dispatch decline-watcher regression. Reopen this area only for new live evidence, not because of the old baseline failures.
+
 ## Deferred / intentionally not implemented
 
 - No exact Colonist Balanced-Dice stochastic model is claimed or implemented without authoritative server algorithm/state evidence.
