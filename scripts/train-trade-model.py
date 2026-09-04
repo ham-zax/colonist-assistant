@@ -53,7 +53,7 @@ def load(
     labels = np.asarray([float(sample["accepted"]) for sample in samples], dtype=np.float64)
     groups = np.asarray(
         [
-            f'{sample.get("boardSeed", "unknown")}:{sample.get("chanceSeed", "unknown")}'
+            f'{sample.get("boardGenerator", "legacy-randomized-v1")}:{sample.get("boardSeed", "unknown")}:{sample.get("chanceSeed", "unknown")}'
             for sample in samples
         ]
     )

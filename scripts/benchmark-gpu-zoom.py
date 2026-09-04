@@ -485,10 +485,7 @@ def main() -> None:
         if value_teacher_available
         else None
     )
-    state_groups = [
-        f'{record.get("boardSeed", "unknown")}:{record.get("chanceSeed", "unknown")}'
-        for record in data
-    ]
+    state_groups = [trainer.synthetic_game_group(record) for record in data]
     held_out_group_keys = held_out_groups(
         state_groups,
         args.validation_fraction,

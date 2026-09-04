@@ -210,8 +210,10 @@ impl CudaExactEvaluator {
             return Err(CudaExactError::LearnedValuePromoted);
         }
 
-        let standard_board = Board::standard(0, 4);
-        let topology_host = topology_words(&standard_board)?;
+        // Tile labels are irrelevant here; this board supplies only the immutable
+        // base topology. Keep legacy V1 explicit until topology has its own type.
+        let topology_board = Board::randomized_base_v1(0, 4);
+        let topology_host = topology_words(&topology_board)?;
         let context = CudaContext::new(ordinal)?;
         // CompileOptions::default intentionally leaves fast math, flush-to-zero,
         // approximate division, and approximate square root disabled.

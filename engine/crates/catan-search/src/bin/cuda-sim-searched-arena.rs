@@ -1,4 +1,4 @@
-use colonist_catan_core::GameState;
+use colonist_catan_core::{GameState, SyntheticBoardGenerator};
 use colonist_catan_search::{
     CudaSimAgentSearchConfig, CudaSimArenaConfig, CudaSimArenaResult, CudaSimEngine,
     CudaSimSearchedArenaResult, cuda_sim_board_seed,
@@ -9,12 +9,21 @@ const SEARCH_SEED: u64 = 0x441a_70c3_9e20_8817;
 const BOARD_SEED: u64 = 0x7fa4_61b2_d0e1_3009;
 const PROFILE: [u8; 5] = [51; 5];
 
+fn board_generator(players: u8) -> SyntheticBoardGenerator {
+    if players == 4 {
+        SyntheticBoardGenerator::Classic4pV1
+    } else {
+        SyntheticBoardGenerator::LegacyRandomizedV1
+    }
+}
+
 fn paired_states(players: u8, blocks: usize) -> Vec<GameState> {
     let mut states = Vec::with_capacity(blocks * players as usize);
     for block in 0..blocks {
         let board_seed = cuda_sim_board_seed(BOARD_SEED, block as u64);
         for _seat in 0..players {
-            let mut state = GameState::standard(board_seed, players);
+            let mut state = GameState::from_generator(board_generator(players), board_seed, players)
+                .expect("searched arena generator must support configured player count");
             state.player_trades_enabled = true;
             states.push(state);
         }

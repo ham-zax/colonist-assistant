@@ -1,7 +1,7 @@
 use std::env;
 use std::time::Instant;
 
-use colonist_catan_core::GameState;
+use colonist_catan_core::{GameState, SyntheticBoardGenerator};
 use colonist_catan_search::{
     CudaSimArenaConfig, CudaSimArenaResult, CudaSimEngine, CudaSimPolicyProfile,
     cuda_sim_board_seed,
@@ -102,6 +102,7 @@ struct CampaignConfigReport {
 #[serde(rename_all = "camelCase")]
 struct TrialReport {
     players: u8,
+    board_generator: &'static str,
     candidate_profile: ProfileReport,
     games: u64,
     terminal_games: u64,
@@ -214,6 +215,7 @@ impl TrialAccumulator {
         let mean_best_opponent_vp = self.best_opponent_victory_points as f64 / games;
         TrialReport {
             players,
+            board_generator: strength_board_generator(players).serialized_id(),
             candidate_profile: candidate_profile.into(),
             games: self.games,
             terminal_games: self.terminal_games,
@@ -465,6 +467,14 @@ fn print_help() {
     );
 }
 
+fn strength_board_generator(players: u8) -> SyntheticBoardGenerator {
+    if players == 4 {
+        SyntheticBoardGenerator::Classic4pV1
+    } else {
+        SyntheticBoardGenerator::LegacyRandomizedV1
+    }
+}
+
 fn base_state_chunk(
     players: u8,
     global_game_offset: usize,
@@ -482,7 +492,9 @@ fn base_state_chunk(
                 global_game
             };
             let board_seed = cuda_sim_board_seed(seed, board_index as u64);
-            let mut state = GameState::standard(board_seed, players);
+            let mut state =
+                GameState::from_generator(strength_board_generator(players), board_seed, players)
+                    .expect("strength benchmark generator must support configured player count");
             state.player_trades_enabled = player_trades_enabled;
             state
         })

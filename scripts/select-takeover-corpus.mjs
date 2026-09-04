@@ -92,8 +92,13 @@ function assertChallenge(snapshot) {
   }
 }
 
+function boardGenerator(snapshot) {
+  return snapshot.boardGenerator ?? "legacy-randomized-v1";
+}
+
 function stableCompare(left, right) {
   return (
+    boardGenerator(left).localeCompare(boardGenerator(right)) ||
     left.sourceBlock - right.sourceBlock ||
     left.sourceRotation - right.sourceRotation ||
     left.targetSeat - right.targetSeat ||
@@ -158,7 +163,7 @@ for (const snapshot of all) {
       engineRevision: snapshot.engineRevision,
     },
   );
-  const sourceGame = `${snapshot.players}:${snapshot.boardSeed}:${snapshot.chanceSeed}:${snapshot.sourceBlock}:${snapshot.sourceRotation}`;
+  const sourceGame = `${snapshot.players}:${boardGenerator(snapshot)}:${snapshot.boardSeed}:${snapshot.chanceSeed}:${snapshot.sourceBlock}:${snapshot.sourceRotation}`;
   const sourceTarget = `${sourceGame}:${snapshot.targetSeat}`;
   if (sourceTargetKeys.has(sourceTarget)) {
     throw new Error(`More than one challenge exists for target seat/source game: ${sourceTarget}`);

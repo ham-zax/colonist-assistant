@@ -206,7 +206,7 @@ fn assert_valid(state: &GameState, label: &str) {
 }
 
 fn setup_state(board_seed: u64, players: u8) -> GameState {
-    let mut state = GameState::standard(board_seed, players);
+    let mut state = GameState::randomized_base_v1(board_seed, players);
     while matches!(
         state.phase,
         Phase::SetupSettlement | Phase::SetupRoad { .. }

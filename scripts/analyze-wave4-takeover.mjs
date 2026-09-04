@@ -132,9 +132,15 @@ function sameArray(left, right) {
 }
 
 function assertOutcomeMatchesSnapshot(snapshot, outcome, arm) {
+  if (boardGenerator(outcome) !== boardGenerator(snapshot)) {
+    throw new Error(
+      `${arm} ${snapshot.snapshotId}: boardGenerator mismatch (${boardGenerator(outcome)} != ${boardGenerator(snapshot)}).`,
+    );
+  }
   const scalarFields = [
     "snapshotId",
     "stateHash",
+    "boardGeneratorStateHash",
     "boardSeed",
     "chanceSeed",
     "players",
@@ -211,12 +217,16 @@ function exactDiscordantBinomialTwoSided(rescues, regressions) {
   return Math.min(1, 2 * probability);
 }
 
+function boardGenerator(snapshot) {
+  return snapshot.boardGenerator ?? "legacy-randomized-v1";
+}
+
 function sourceGameId(snapshot) {
-  return `${snapshot.players}p:${snapshot.boardSeed}:${snapshot.chanceSeed}:b${snapshot.sourceBlock}:r${snapshot.sourceRotation}`;
+  return `${snapshot.players}p:${boardGenerator(snapshot)}:${snapshot.boardSeed}:${snapshot.chanceSeed}:b${snapshot.sourceBlock}:r${snapshot.sourceRotation}`;
 }
 
 function blockId(snapshot) {
-  return `${snapshot.players}p:${snapshot.boardSeed}:${snapshot.chanceSeed}:b${snapshot.sourceBlock}`;
+  return `${snapshot.players}p:${boardGenerator(snapshot)}:${snapshot.boardSeed}:${snapshot.chanceSeed}:b${snapshot.sourceBlock}`;
 }
 
 function progressArray(outcome, field) {
@@ -721,7 +731,7 @@ const summary = {
   stateRngMatching: {
     exact: true,
     verifiedObservations: pairs.length,
-    fields: ["snapshotId", "stateHash", "boardSeed", "chanceSeed", "chanceRngState", "policyRngStates"],
+    fields: ["snapshotId", "stateHash", "boardGenerator", "boardGeneratorStateHash", "boardSeed", "chanceSeed", "chanceRngState", "policyRngStates"],
   },
   rootChoice: {
     concordant: pairs.length - disagreements.length,

@@ -11,7 +11,7 @@ const D95_BRIDGE_EDGE: u8 = 36;
 const D95_APPROACH_EDGE: u8 = 37;
 
 fn d95_corridor(attacker_hand: [u8; 5]) -> GameState {
-    let mut state = GameState::standard(1, 4);
+    let mut state = GameState::randomized_base_v1(1, 4);
     state.phase = Phase::Main;
     state.current_player = ACTOR;
     state.roads.fill(None);

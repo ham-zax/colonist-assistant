@@ -5,7 +5,8 @@ use colonist_catan_arena::tactical_corpus::{
     build_state, default_corpus_path, load_tactical_corpus, TacticalScenario,
 };
 use colonist_catan_core::{
-    Building, GameState, NodeKind, Phase, PlayerState, SplitMix64, TradeOffer,
+    Building, GameState, NodeKind, Phase, PlayerState, SplitMix64, SyntheticBoardGenerator,
+    TradeOffer,
 };
 use colonist_catan_search::{
     search_maxn_bounded, search_maxn_hostility_stress_bounded, DepthActionValue, DepthSearchResult,
@@ -257,6 +258,12 @@ fn default_player_trades_enabled() -> bool {
     true
 }
 
+fn default_board_generator() -> String {
+    SyntheticBoardGenerator::LegacyRandomizedV1
+        .serialized_id()
+        .to_string()
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GameStateSnapshot {
@@ -295,8 +302,13 @@ struct GameStateSnapshot {
 }
 
 impl GameStateSnapshot {
-    fn restore(self, board_seed: u64, players: u8) -> GameState {
-        let mut state = GameState::standard(board_seed, players);
+    fn restore(
+        self,
+        board_generator: SyntheticBoardGenerator,
+        board_seed: u64,
+        players: u8,
+    ) -> Result<GameState, String> {
+        let mut state = GameState::from_generator(board_generator, board_seed, players)?;
         state.players = self.players.into_iter().map(PlayerState::from).collect();
         state.buildings = self
             .buildings
@@ -331,14 +343,19 @@ impl GameStateSnapshot {
         state.trade_negotiation_round = self.trade_negotiation_round;
         state.longest_road_holder = self.longest_road_holder;
         state.largest_army_holder = self.largest_army_holder;
-        state
+        Ok(state)
     }
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TakeoverSnapshot {
+    schema_version: u8,
     snapshot_id: String,
+    #[serde(default = "default_board_generator")]
+    board_generator: String,
+    #[serde(default)]
+    board_generator_state_hash: Option<String>,
     board_seed: u64,
     players: u8,
     state_hash: String,
@@ -639,7 +656,32 @@ fn run_takeover_snapshot(snapshot: TakeoverSnapshot, args: &Args) -> ScenarioRep
     let snapshot_id = snapshot.snapshot_id.clone();
     let source_state_hash = snapshot.state_hash.clone();
     let target_seat = snapshot.target_seat;
-    let state = snapshot.game_state.restore(snapshot.board_seed, snapshot.players);
+    let board_generator = SyntheticBoardGenerator::parse_serialized_id(&snapshot.board_generator)
+        .unwrap_or_else(|error| panic!("snapshot {snapshot_id} board generator error: {error}"));
+    let expected_hash = u64::from_str_radix(&source_state_hash, 16)
+        .unwrap_or_else(|error| panic!("snapshot {snapshot_id} state hash error: {error}"));
+    match snapshot.schema_version {
+        1 => assert_eq!(
+            board_generator,
+            SyntheticBoardGenerator::LegacyRandomizedV1,
+            "schema-v1 takeover snapshots must use legacy-randomized-v1"
+        ),
+        2 => {
+            let recorded = snapshot.board_generator_state_hash.as_deref().unwrap_or_else(|| {
+                panic!("schema-v2 snapshot {snapshot_id} is missing boardGeneratorStateHash")
+            });
+            assert_eq!(
+                recorded,
+                format!("{:016x}", board_generator.provenance_state_hash(expected_hash)),
+                "takeover snapshot generator provenance mismatch"
+            );
+        }
+        version => panic!("unsupported takeover snapshot schema version {version}"),
+    }
+    let state = snapshot
+        .game_state
+        .restore(board_generator, snapshot.board_seed, snapshot.players)
+        .unwrap_or_else(|error| panic!("snapshot {snapshot_id} board restore error: {error}"));
     assert_eq!(
         format!("{:016x}", state.state_hash()),
         source_state_hash,

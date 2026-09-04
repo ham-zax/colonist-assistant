@@ -20,7 +20,7 @@ fn finish_setup(state: &mut GameState) {
 }
 
 fn base_state(seed: u64, players: u8) -> GameState {
-    let mut state = GameState::standard(seed, players);
+    let mut state = GameState::randomized_base_v1(seed, players);
     finish_setup(&mut state);
     state.phase = Phase::Main;
     state.player_trades_enabled = true;

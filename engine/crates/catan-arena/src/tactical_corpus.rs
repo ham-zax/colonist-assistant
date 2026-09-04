@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use colonist_catan_core::{
     Action, Building, DevCard, GameState, Phase, Resource, ResourceHand, ROAD_COST,
-    SETTLEMENT_COST,
+    SETTLEMENT_COST, SyntheticBoardGenerator,
 };
 use serde::{Deserialize, Serialize};
 
@@ -190,6 +190,8 @@ pub struct RoadEdgeSpec {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TacticalStateSpec {
+    #[serde(default = "default_board_generator")]
+    pub board_generator: String,
     pub board_seed: u64,
     pub players: u8,
     pub active_player: u8,
@@ -218,6 +220,12 @@ pub struct TacticalStateSpec {
     pub largest_army_holder: Option<u8>,
     #[serde(default)]
     pub domestic_trade_disabled: u8,
+}
+
+fn default_board_generator() -> String {
+    SyntheticBoardGenerator::LegacyRandomizedV1
+        .serialized_id()
+        .to_string()
 }
 
 const fn default_victory_target() -> u8 {
@@ -542,7 +550,8 @@ fn refresh_longest_road_via_public_transition(
 
 /// Constructs and validates a resource-conserving GameState from a TacticalStateSpec.
 pub fn build_state(spec: &TacticalStateSpec) -> Result<GameState, String> {
-    let mut state = GameState::standard(spec.board_seed, spec.players);
+    let board_generator = SyntheticBoardGenerator::parse_serialized_id(&spec.board_generator)?;
+    let mut state = GameState::from_generator(board_generator, spec.board_seed, spec.players)?;
     state.current_player = spec.active_player;
     state.phase = phase_from_spec(spec)?;
     state.victory_target = spec.victory_target;

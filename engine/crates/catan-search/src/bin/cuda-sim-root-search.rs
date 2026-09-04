@@ -9,7 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut states = Vec::with_capacity(LANES);
     for lane in 0..LANES {
         let players = if lane % 2 == 0 { 3 } else { 4 };
-        let mut state = GameState::standard(91_000 + lane as u64 * 37, players);
+        let mut state = GameState::randomized_base_v1(91_000 + lane as u64 * 37, players);
         state.player_trades_enabled = false;
         let mut rng = SplitMix64::new(42_000 + lane as u64);
         for _ in 0..40 {

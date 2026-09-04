@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::time::Instant;
 
-use colonist_catan_core::{Action, GameState, Phase, SplitMix64};
+use colonist_catan_core::{Action, GameState, Phase, SplitMix64, SyntheticBoardGenerator};
 use colonist_catan_search::{CudaSimEngine, CudaSimPackedState, CudaSimRootSearchResult};
 
 const STATE_WORDS: usize = 404;
@@ -96,7 +96,7 @@ fn root_supported(action: &Action) -> bool {
 fn representative_state() -> Result<(GameState, Vec<Action>, u64, usize), String> {
     for attempt in 0..256u64 {
         let board_seed = 91_000 + attempt * 37;
-        let mut state = GameState::standard(board_seed, 4);
+        let mut state = GameState::randomized_base_v1(board_seed, 4);
         state.player_trades_enabled = false;
         let mut rng = SplitMix64::new(42_000 + attempt * 101);
         for step in 0..240usize {
@@ -432,10 +432,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         "[]"
     };
+    let board_generator = SyntheticBoardGenerator::LegacyRandomizedV1.serialized_id();
     let mut report = String::from("{\n");
     report.push_str("  \"schema\": \"colonist-webgpu-rollout-feasibility/1\",\n");
     report.push_str(&format!(
-        "  \"generator\": {{\"profile\": \"{profile_name}\", \"boardSeed\": {board_seed}, \"generatedActions\": {generated_actions}, \"players\": 4, \"playerTradesEnabled\": false, \"developmentClosureCards\": {development_closure_cards}}},\n"
+        "  \"generator\": {{\"profile\": \"{profile_name}\", \"boardGenerator\": \"{board_generator}\", \"boardSeed\": {board_seed}, \"generatedActions\": {generated_actions}, \"players\": 4, \"playerTradesEnabled\": false, \"developmentClosureCards\": {development_closure_cards}}},\n"
     ));
     report.push_str(&format!(
         "  \"layout\": {{\"stateWords\": {STATE_WORDS}, \"actionWords\": {ACTION_WORDS}, \"topologyWords\": {TOPOLOGY_WORDS}, \"laneWords\": 421, \"stateBytesPerLane\": {}, \"laneBytesPerLane\": 1684, \"storageBuffers\": 5}},\n",

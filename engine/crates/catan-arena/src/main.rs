@@ -13,17 +13,16 @@ use std::time::{Duration, Instant};
 use colonist_catan_arena::belief_particles;
 use colonist_catan_core::{
     Action, Building, DevCard, GameState, NodeKind, Phase, PlayerState, Port, Resource, SplitMix64,
-    TradeOffer,
+    SyntheticBoardGenerator, TradeOffer,
 };
 use colonist_catan_search::{
     BeliefDepthConfig, BeliefParticle, BeliefSearchProvenance, DepthActionValue, ENGINE_REVISION,
     Mcts, RootPromotionReason, RootPruneReason, STRATEGIC_FEATURE_SCHEMA_VERSION, SearchConfig,
     SearchMode, SearchReport, action_prior, choose_rollout_action, compute_spatial_root_impacts,
     encode_actions, encode_heterogeneous_graph, evaluate, expansion_option_value,
-    pool_heterogeneous_graph,
-    production_pips, search_maxn_bounded_timed, search_paranoid_bounded_timed,
-    search_weighted_belief_maxn_with_config, search_weighted_belief_paranoid_with_config,
-    strategic_utility, trade_acceptance_features,
+    pool_heterogeneous_graph, production_pips, search_maxn_bounded_timed,
+    search_paranoid_bounded_timed, search_weighted_belief_maxn_with_config,
+    search_weighted_belief_paranoid_with_config, strategic_utility, trade_acceptance_features,
 };
 #[cfg(feature = "cuda-exact")]
 use colonist_catan_search::{
@@ -1540,6 +1539,16 @@ fn player_trades_enabled_default() -> bool {
     true
 }
 
+fn legacy_board_generator_id_default() -> String {
+    SyntheticBoardGenerator::LegacyRandomizedV1
+        .serialized_id()
+        .to_string()
+}
+
+fn parse_board_generator(value: &str) -> Result<SyntheticBoardGenerator, String> {
+    SyntheticBoardGenerator::parse_serialized_id(value)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GameStateSnapshot {
@@ -1621,8 +1630,13 @@ impl GameStateSnapshot {
         }
     }
 
-    fn restore(self, board_seed: u64, players: u8) -> GameState {
-        let mut state = GameState::standard(board_seed, players);
+    fn restore(
+        self,
+        board_generator: SyntheticBoardGenerator,
+        board_seed: u64,
+        players: u8,
+    ) -> Result<GameState, String> {
+        let mut state = GameState::from_generator(board_generator, board_seed, players)?;
         state.players = self.players.into_iter().map(PlayerState::from).collect();
         state.buildings = self
             .buildings
@@ -1657,7 +1671,7 @@ impl GameStateSnapshot {
         state.trade_negotiation_round = self.trade_negotiation_round;
         state.longest_road_holder = self.longest_road_holder;
         state.largest_army_holder = self.largest_army_holder;
-        state
+        Ok(state)
     }
 }
 
@@ -1711,6 +1725,10 @@ struct ChallengeSnapshot {
     schema_version: u8,
     kind: String,
     snapshot_id: String,
+    #[serde(default = "legacy_board_generator_id_default")]
+    board_generator: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    board_generator_state_hash: Option<String>,
     board_seed: u64,
     chance_seed: u64,
     players: u8,
@@ -1732,9 +1750,63 @@ struct ChallengeSnapshot {
     game_state: GameStateSnapshot,
 }
 
+impl ChallengeSnapshot {
+    fn restore_state_checked(&self) -> Result<GameState, String> {
+        let generator = parse_board_generator(&self.board_generator)?;
+        let expected_hash = u64::from_str_radix(&self.state_hash, 16)
+            .map_err(|_| format!("snapshot {} has invalid state hash", self.snapshot_id))?;
+        match self.schema_version {
+            1 => {
+                if generator != SyntheticBoardGenerator::LegacyRandomizedV1 {
+                    return Err(format!(
+                        "snapshot {} schema v1 must use legacy-randomized-v1",
+                        self.snapshot_id
+                    ));
+                }
+            }
+            2 => {
+                let recorded = self.board_generator_state_hash.as_deref().ok_or_else(|| {
+                    format!(
+                        "snapshot {} schema v2 is missing board generator state hash",
+                        self.snapshot_id
+                    )
+                })?;
+                let expected = format!("{:016x}", generator.provenance_state_hash(expected_hash));
+                if recorded != expected {
+                    return Err(format!(
+                        "snapshot {} board generator state hash mismatch for {}",
+                        self.snapshot_id, self.board_generator
+                    ));
+                }
+            }
+            version => {
+                return Err(format!(
+                    "snapshot {} has unsupported schema version {version}",
+                    self.snapshot_id
+                ));
+            }
+        }
+        let state = self
+            .game_state
+            .clone()
+            .restore(generator, self.board_seed, self.players)?;
+        if state.state_hash() != expected_hash {
+            return Err(format!(
+                "snapshot {} board generator {} reconstructed state hash {:016x}, expected {:016x}",
+                self.snapshot_id,
+                self.board_generator,
+                state.state_hash(),
+                expected_hash
+            ));
+        }
+        Ok(state)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn capture_challenge_snapshot(
     state: &GameState,
+    board_generator: SyntheticBoardGenerator,
     board_seed: u64,
     chance_seed: u64,
     chance_rng: &SplitMix64,
@@ -1781,9 +1853,14 @@ fn capture_challenge_snapshot(
         config.players, source_block, source_rotation, target, state.turn, state_hash
     );
     Some(ChallengeSnapshot {
-        schema_version: 1,
+        schema_version: 2,
         kind: "colonist-native-takeover-challenge".to_string(),
         snapshot_id,
+        board_generator: board_generator.serialized_id().to_string(),
+        board_generator_state_hash: Some(format!(
+            "{:016x}",
+            board_generator.provenance_state_hash(state_hash)
+        )),
         board_seed,
         chance_seed,
         players: config.players,
@@ -2147,6 +2224,7 @@ struct GameMetrics {
 #[serde(rename_all = "camelCase")]
 struct TrajectorySample {
     schema_version: u8,
+    board_generator: String,
     board_seed: u64,
     chance_seed: u64,
     block: u32,
@@ -2175,6 +2253,7 @@ struct TrajectorySample {
 
 fn capture_trajectory_sample(
     state: &GameState,
+    board_generator: SyntheticBoardGenerator,
     board_seed: u64,
     chance_seed: u64,
     engines: &[Engine],
@@ -2184,6 +2263,7 @@ fn capture_trajectory_sample(
     let win_values = evaluate(state);
     TrajectorySample {
         schema_version: 1,
+        board_generator: board_generator.serialized_id().to_string(),
         board_seed,
         chance_seed,
         block: 0,
@@ -2261,6 +2341,7 @@ struct ExpertActionSample {
 struct ExpertSample {
     schema_version: u8,
     state_hash: String,
+    board_generator: String,
     board_seed: u64,
     chance_seed: u64,
     turn: u16,
@@ -2298,6 +2379,7 @@ fn native_gpu_value_vector(value: &Value, field: &str) -> Result<[f32; 4], Strin
 
 fn native_gpu_expert_sample(
     state: &GameState,
+    board_generator: SyntheticBoardGenerator,
     board_seed: u64,
     chance_seed: u64,
     response: &Value,
@@ -2355,19 +2437,22 @@ fn native_gpu_expert_sample(
     let actions = parsed
         .into_iter()
         .zip(encoded_actions)
-        .map(|((action, visits, search_value), features)| ExpertActionSample {
-            key: format!("{action:?}"),
-            features: features.to_vec(),
-            visits,
-            policy: f32::from(action == teacher_winner),
-            search_value,
-        })
+        .map(
+            |((action, visits, search_value), features)| ExpertActionSample {
+                key: format!("{action:?}"),
+                features: features.to_vec(),
+                visits,
+                policy: f32::from(action == teacher_winner),
+                search_value,
+            },
+        )
         .collect();
     let graph = encode_heterogeneous_graph(state, actor, false);
 
     Ok(ExpertSample {
         schema_version: STRATEGIC_FEATURE_SCHEMA_VERSION,
         state_hash: format!("{:016x}", state.observation_hash(actor)),
+        board_generator: board_generator.serialized_id().to_string(),
         board_seed,
         chance_seed,
         turn: state.turn,
@@ -2390,6 +2475,7 @@ fn native_gpu_expert_sample(
 struct TradeSample {
     schema_version: u8,
     state_hash: String,
+    board_generator: String,
     board_seed: u64,
     chance_seed: u64,
     turn: u16,
@@ -2526,6 +2612,7 @@ struct ArenaCheckpoint {
     candidate: &'static str,
     baseline: &'static str,
     lineup: Option<Vec<&'static str>>,
+    board_generator: &'static str,
     seed: u64,
     iterations: u32,
     rollout_actions: u16,
@@ -2638,6 +2725,7 @@ impl PartialArenaMetrics {
                     .map(|engine| engine.as_str())
                     .collect::<Vec<_>>()
             }),
+            board_generator: ordinary_board_generator(config.players).serialized_id(),
             seed: config.seed,
             iterations: config.iterations,
             rollout_actions: config.rollout_actions,
@@ -2737,12 +2825,27 @@ fn compact_engine_metrics(metrics: &[CandidateMetrics; 6]) -> String {
     .join(",")
 }
 
+fn ordinary_board_generator(players: u8) -> SyntheticBoardGenerator {
+    if players == 4 {
+        SyntheticBoardGenerator::Classic4pV1
+    } else {
+        SyntheticBoardGenerator::LegacyRandomizedV1
+    }
+}
+
 fn initialized_game(
     board_seed: u64,
     chance_seed: u64,
     players: u8,
-) -> (GameState, SplitMix64, Vec<SplitMix64>) {
-    let mut state = GameState::standard(board_seed, players);
+) -> (
+    GameState,
+    SyntheticBoardGenerator,
+    SplitMix64,
+    Vec<SplitMix64>,
+) {
+    let board_generator = ordinary_board_generator(players);
+    let mut state = GameState::from_generator(board_generator, board_seed, players)
+        .expect("ordinary arena generator must support the configured player count");
     // Rotate explicit bounded-rational styles independently of engine family.
     // Paired seat rotations therefore test road-heavy, development-heavy,
     // trade-happy, and trade-resistant behavior instead of overfitting every
@@ -2764,7 +2867,7 @@ fn initialized_game(
     let policy_rngs = (0..players)
         .map(|player| SplitMix64::new(chance_seed ^ ((player as u64 + 1) * 0x9e37_79b9)))
         .collect::<Vec<_>>();
-    (state, chance_rng, policy_rngs)
+    (state, board_generator, chance_rng, policy_rngs)
 }
 
 fn play_game(
@@ -2774,7 +2877,7 @@ fn play_game(
     config: &Config,
     source: Option<(u32, u8)>,
 ) -> GameResult {
-    let (mut state, chance_rng, policy_rngs) =
+    let (mut state, board_generator, chance_rng, policy_rngs) =
         initialized_game(board_seed, chance_seed, config.players);
     state.player_trades_enabled = config.player_trades_enabled;
     play_game_from_state(
@@ -2783,6 +2886,7 @@ fn play_game(
         engines,
         config,
         source,
+        board_generator,
         state,
         chance_rng,
         policy_rngs,
@@ -2808,6 +2912,7 @@ fn play_game_from_state(
     engines: &[Engine],
     config: &Config,
     source: Option<(u32, u8)>,
+    board_generator: SyntheticBoardGenerator,
     mut state: GameState,
     mut chance_rng: SplitMix64,
     mut policy_rngs: Vec<SplitMix64>,
@@ -2837,6 +2942,7 @@ fn play_game_from_state(
             && let Some((source_block, source_rotation)) = source
             && let Some(snapshot) = capture_challenge_snapshot(
                 &state,
+                board_generator,
                 board_seed,
                 chance_seed,
                 &chance_rng,
@@ -2864,6 +2970,7 @@ fn play_game_from_state(
         {
             trajectory_samples.push(capture_trajectory_sample(
                 &state,
+                board_generator,
                 board_seed,
                 chance_seed,
                 engines,
@@ -2982,13 +3089,19 @@ fn play_game_from_state(
                 && let Some(response) = metrics.native_gpu_initial_diagnostics[actor].as_ref()
             {
                 expert_samples.push(
-                    native_gpu_expert_sample(&state, board_seed, chance_seed, response)
-                        .unwrap_or_else(|error| {
-                            panic!(
-                                "native GPU expert conversion failed at state {:016x}: {error}",
-                                state.state_hash()
-                            )
-                        }),
+                    native_gpu_expert_sample(
+                        &state,
+                        board_generator,
+                        board_seed,
+                        chance_seed,
+                        response,
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "native GPU expert conversion failed at state {:016x}: {error}",
+                            state.state_hash()
+                        )
+                    }),
                 );
             }
             let teacher_report = if should_record_expert && config.expert_iterations > 0 {
@@ -3056,6 +3169,7 @@ fn play_game_from_state(
                 expert_samples.push(ExpertSample {
                     schema_version: STRATEGIC_FEATURE_SCHEMA_VERSION,
                     state_hash: format!("{:016x}", state.observation_hash(actor as u8),),
+                    board_generator: board_generator.serialized_id().to_string(),
                     board_seed,
                     chance_seed,
                     turn: state.turn,
@@ -3086,6 +3200,7 @@ fn play_game_from_state(
                 trade_samples.push(TradeSample {
                     schema_version: 1,
                     state_hash: format!("{:016x}", state.observation_hash(actor as u8)),
+                    board_generator: board_generator.serialized_id().to_string(),
                     board_seed,
                     chance_seed,
                     turn: state.turn,
@@ -3414,6 +3529,9 @@ struct TakeoverOutcome {
     kind: &'static str,
     snapshot_id: String,
     state_hash: String,
+    board_generator: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    board_generator_state_hash: Option<String>,
     board_seed: u64,
     chance_seed: u64,
     chance_rng_state: u64,
@@ -3536,24 +3654,25 @@ fn run_takeover_mode(config: &Config) {
         replay_config.takeover_input = None;
         replay_config.takeover_output = None;
         replay_config.takeover_target_seat = Some(snapshot.target_seat);
-        let state = snapshot
-            .game_state
-            .clone()
-            .restore(snapshot.board_seed, snapshot.players);
+        let board_generator =
+            parse_board_generator(&snapshot.board_generator).unwrap_or_else(|error| {
+                panic!(
+                    "snapshot {} has invalid board generator {}: {error}",
+                    snapshot.snapshot_id, snapshot.board_generator
+                )
+            });
+        let state = snapshot.restore_state_checked().unwrap_or_else(|error| {
+            panic!(
+                "failed to restore snapshot {}: {error}",
+                snapshot.snapshot_id
+            )
+        });
         state.validate().unwrap_or_else(|error| {
             panic!(
                 "restored snapshot {} is invalid: {error}",
                 snapshot.snapshot_id
             )
         });
-        let expected_hash = u64::from_str_radix(&snapshot.state_hash, 16)
-            .expect("snapshot state hash must be hexadecimal");
-        assert_eq!(
-            state.state_hash(),
-            expected_hash,
-            "restored snapshot {} changed state hash",
-            snapshot.snapshot_id
-        );
         assert_eq!(
             state.phase,
             Phase::PreRoll,
@@ -3596,6 +3715,7 @@ fn run_takeover_mode(config: &Config) {
             &engines,
             &replay_config,
             None,
+            board_generator,
             state,
             chance_rng,
             policy_rngs,
@@ -3626,6 +3746,8 @@ fn run_takeover_mode(config: &Config) {
             kind: "colonist-native-takeover-outcome",
             snapshot_id: snapshot.snapshot_id,
             state_hash: snapshot.state_hash,
+            board_generator: snapshot.board_generator,
+            board_generator_state_hash: snapshot.board_generator_state_hash,
             board_seed: snapshot.board_seed,
             chance_seed: snapshot.chance_seed,
             chance_rng_state: snapshot.chance_rng_state,
@@ -4111,6 +4233,7 @@ fn main() {
                 "\"elapsedMs\":{},",
                 "\"gamesPerSecond\":{:.6},",
                 "\"seed\":{},",
+                "\"boardGenerator\":\"{}\",",
                 "\"iterations\":{},",
                 "\"rolloutActions\":{},",
                 "\"maxTurns\":{},",
@@ -4234,6 +4357,7 @@ fn main() {
             elapsed.as_millis(),
             games_per_second,
             config.seed,
+            ordinary_board_generator(config.players).serialized_id(),
             config.iterations,
             config.rollout_actions,
             config.max_turns,
@@ -4270,20 +4394,56 @@ fn main() {
 mod tests {
     use std::time::Duration;
 
-    use colonist_catan_core::Phase;
+    use colonist_catan_core::{GameState, Phase, SyntheticBoardGenerator};
 
     use super::{
-        ArenaResult, Config, Engine, GameMetrics, GameResult, PartialArenaMetrics,
-        belief_particles, information_mode, play_game, search_belief_particles, write_checkpoint,
+        ArenaResult, ArenaSearchProfileSnapshot, ChallengeSnapshot, Config, Engine, GameMetrics,
+        GameResult, GameStateSnapshot, PartialArenaMetrics, belief_particles, information_mode,
+        ordinary_board_generator, play_game, search_belief_particles, write_checkpoint,
     };
+
+    fn snapshot_fixture(generator: SyntheticBoardGenerator, seed: u64) -> ChallengeSnapshot {
+        let players = 4;
+        let state = GameState::from_generator(generator, seed, players).unwrap();
+        let state_hash = state.state_hash();
+        ChallengeSnapshot {
+            schema_version: 2,
+            kind: "test-snapshot".into(),
+            snapshot_id: format!("test-{}-{seed}", generator.serialized_id()),
+            board_generator: generator.serialized_id().into(),
+            board_generator_state_hash: Some(format!(
+                "{:016x}",
+                generator.provenance_state_hash(state_hash)
+            )),
+            board_seed: seed,
+            chance_seed: seed ^ 1,
+            players,
+            state_hash: format!("{state_hash:016x}"),
+            chance_rng_state: 7,
+            policy_rng_states: vec![11, 12, 13, 14],
+            target_seat: 0,
+            source_block: 0,
+            source_rotation: 0,
+            turn: state.turn,
+            source_engines: vec!["random".into(); players as usize],
+            source_git_sha: "test".into(),
+            source_build_dirty: false,
+            engine_revision: "test".into(),
+            search_profile: ArenaSearchProfileSnapshot::capture(&Config::default()),
+            target_public_victory_points: state.players[0].public_victory_points,
+            target_victory_points: state.players[0].victory_points(),
+            target_evaluator_win_value: 0.0,
+            game_state: GameStateSnapshot::capture(&state),
+        }
+    }
 
     #[test]
     fn native_gpu_teacher_policy_is_one_hot_on_final_choice_not_visits() {
-        use colonist_catan_core::GameState;
+        use colonist_catan_core::{GameState, SyntheticBoardGenerator};
 
         use super::{STRATEGIC_FEATURE_SCHEMA_VERSION, native_gpu_expert_sample};
 
-        let state = GameState::standard(1, 4);
+        let state = GameState::classic_4p_v1(1);
         // The ambiguous root received far more racing samples. Those counts
         // measure ambiguity, not preference, and must not leak into policy.
         let response = serde_json::json!({
@@ -4294,9 +4454,20 @@ mod tests {
             "rootValue": [3.0, 1.0, 1.0, 1.0],
             "chosen": {"kind": "end-turn"},
         });
-        let sample = native_gpu_expert_sample(&state, 7, 9, &response)
-            .expect("final-choice teacher sample must convert");
+        let sample = native_gpu_expert_sample(
+            &state,
+            SyntheticBoardGenerator::Classic4pV1,
+            7,
+            9,
+            &response,
+        )
+        .expect("final-choice teacher sample must convert");
         assert_eq!(sample.engine, "native-gpu-teacher");
+        assert_eq!(sample.board_generator, "classic4p-v1");
+        assert_eq!(
+            serde_json::to_value(&sample).unwrap()["boardGenerator"],
+            "classic4p-v1"
+        );
         assert_eq!(sample.schema_version, STRATEGIC_FEATURE_SCHEMA_VERSION);
         let policies = sample
             .actions
@@ -4312,7 +4483,16 @@ mod tests {
             ],
             "rootValue": [1.0, 1.0, 1.0, 1.0],
         });
-        assert!(native_gpu_expert_sample(&state, 7, 9, &missing_choice).is_err());
+        assert!(
+            native_gpu_expert_sample(
+                &state,
+                SyntheticBoardGenerator::Classic4pV1,
+                7,
+                9,
+                &missing_choice,
+            )
+            .is_err()
+        );
 
         let unmatched_choice = serde_json::json!({
             "actions": [
@@ -4321,7 +4501,119 @@ mod tests {
             "rootValue": [1.0, 1.0, 1.0, 1.0],
             "chosen": {"kind": "end-turn"},
         });
-        assert!(native_gpu_expert_sample(&state, 7, 9, &unmatched_choice).is_err());
+        assert!(
+            native_gpu_expert_sample(
+                &state,
+                SyntheticBoardGenerator::Classic4pV1,
+                7,
+                9,
+                &unmatched_choice,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn snapshot_board_generator_defaults_and_round_trips_are_backward_compatible() {
+        let legacy = snapshot_fixture(SyntheticBoardGenerator::LegacyRandomizedV1, 108_100_001);
+        let mut legacy_json = serde_json::to_value(&legacy).unwrap();
+        let legacy_object = legacy_json.as_object_mut().unwrap();
+        legacy_object.insert("schemaVersion".into(), serde_json::json!(1));
+        legacy_object.remove("boardGenerator");
+        legacy_object.remove("boardGeneratorStateHash");
+        let old_snapshot: ChallengeSnapshot = serde_json::from_value(legacy_json).unwrap();
+        assert_eq!(old_snapshot.board_generator, "legacy-randomized-v1");
+        let old_restored = old_snapshot.restore_state_checked().unwrap();
+        assert_eq!(
+            format!("{:016x}", old_restored.state_hash()),
+            old_snapshot.state_hash
+        );
+
+        for generator in [
+            SyntheticBoardGenerator::LegacyRandomizedV1,
+            SyntheticBoardGenerator::Classic4pV1,
+        ] {
+            let snapshot = snapshot_fixture(generator, 771_000 + generator as u64);
+            let value = serde_json::to_value(&snapshot).unwrap();
+            assert_eq!(
+                value
+                    .get("schemaVersion")
+                    .and_then(serde_json::Value::as_u64),
+                Some(2)
+            );
+            assert_eq!(
+                value
+                    .get("boardGenerator")
+                    .and_then(serde_json::Value::as_str),
+                Some(generator.serialized_id())
+            );
+            assert!(
+                value
+                    .get("boardGeneratorStateHash")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
+            );
+            let restored = snapshot.restore_state_checked().unwrap();
+            assert_eq!(
+                format!("{:016x}", restored.state_hash()),
+                snapshot.state_hash
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_rejects_unknown_or_wrong_generator_contract() {
+        let mut unknown = snapshot_fixture(SyntheticBoardGenerator::Classic4pV1, 882_001);
+        unknown.board_generator = "classic4p-v2".into();
+        assert!(
+            unknown
+                .restore_state_checked()
+                .unwrap_err()
+                .contains("unsupported")
+        );
+
+        let mut missing_identity = snapshot_fixture(SyntheticBoardGenerator::Classic4pV1, 882_002);
+        missing_identity.board_generator_state_hash = None;
+        assert!(
+            missing_identity
+                .restore_state_checked()
+                .unwrap_err()
+                .contains("missing board generator state hash")
+        );
+
+        let collision_seed = (0..10_000u64)
+            .find(|seed| {
+                GameState::randomized_base_v1(*seed, 4).board
+                    == GameState::classic_4p_v1(*seed).board
+            })
+            .expect("legacy and Classic V1 should share some structurally legal seed outputs");
+        assert_eq!(
+            GameState::randomized_base_v1(collision_seed, 4).state_hash(),
+            GameState::classic_4p_v1(collision_seed).state_hash(),
+            "fixture must prove plain state_hash cannot distinguish the generator contract"
+        );
+        let mut wrong = snapshot_fixture(SyntheticBoardGenerator::Classic4pV1, collision_seed);
+        wrong.board_generator = SyntheticBoardGenerator::LegacyRandomizedV1
+            .serialized_id()
+            .into();
+        let error = wrong.restore_state_checked().unwrap_err();
+        assert!(error.contains("board generator state hash mismatch"));
+    }
+
+    #[test]
+    fn ordinary_arena_routes_only_four_player_games_to_classic_v1() {
+        assert_eq!(
+            ordinary_board_generator(4),
+            SyntheticBoardGenerator::Classic4pV1
+        );
+        assert_eq!(
+            ordinary_board_generator(3),
+            SyntheticBoardGenerator::LegacyRandomizedV1
+        );
+        assert_eq!(
+            ordinary_board_generator(2),
+            SyntheticBoardGenerator::LegacyRandomizedV1
+        );
     }
 
     #[test]

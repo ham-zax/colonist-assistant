@@ -7,7 +7,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let states = (0..GAMES)
         .map(|game| {
             let players = if game % 2 == 0 { 3 } else { 4 };
-            let mut state = GameState::standard(120_000 + game as u64 * 101, players);
+            let mut state = GameState::randomized_base_v1(120_000 + game as u64 * 101, players);
             state.player_trades_enabled = false;
             state
         })

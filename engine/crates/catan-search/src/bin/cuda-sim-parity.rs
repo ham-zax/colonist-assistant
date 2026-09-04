@@ -19,7 +19,7 @@ fn finish_setup(state: &mut GameState) -> Result<(), Box<dyn std::error::Error>>
 }
 
 fn verify_end_turn_winner(engine: &mut CudaSimEngine) -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = GameState::standard(69_999, 3);
+    let mut state = GameState::randomized_base_v1(69_999, 3);
     state.player_trades_enabled = false;
     finish_setup(&mut state)?;
     state.phase = Phase::Main;
@@ -59,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut states = (0..LANES)
         .map(|lane| {
             let players = if lane % 2 == 0 { 3 } else { 4 };
-            let mut state = GameState::standard(70_000 + lane as u64 * 17, players);
+            let mut state = GameState::randomized_base_v1(70_000 + lane as u64 * 17, players);
             state.player_trades_enabled = false;
             state
         })

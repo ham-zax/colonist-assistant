@@ -2,7 +2,8 @@
 
 **Audit date:** 2026-09-04  
 **Evidence snapshot:** `docs/colonist-evidence/v320/`  
-**Repository baseline for this document branch:** `8cc6cfc5932674f178d9d39b21f9507ed6be7109`  
+**Original audit baseline:** `8cc6cfc5932674f178d9d39b21f9507ed6be7109`
+**Classic4P generator contract implementation base:** `61aa999dbd7a221773471c4ae31a8b02e8b8ff9c`
 **Primary product scope:** Colonist base game, currently 2–4 players.  
 **Future scope:** Colonist base-game 5–6 and 7–8 player modes.  
 **Out of scope here:** Seafarers, Cities & Knights, Rush-specific mechanics, scenarios, and other expansion rules except where they prove that a supposedly universal client path is mode-specific.
@@ -293,26 +294,23 @@ The shipped client exposes instantiated tile/corner/edge/port state. Our page br
 
 **Status:** **Correct architecture for live recommendations.**
 
-### 6.2 Synthetic `Board::standard()` is not normal Colonist Classic4P distribution
+### 6.2 Synthetic board generation has explicit distribution contracts
 
-The local generator:
+The engine now separates two seeded synthetic contracts:
 
-- builds the 19-hex base geometry;
-- shuffles resource types;
-- picks a desert location;
-- freely shuffles all 18 number tokens;
-- shuffles the 9 standard port types onto fixed coastline positions.
+- `legacy-randomized-v1` preserves the historical `Board::standard()` behavior exactly: resource shuffle, desert selection, unrestricted shuffle of all 18 number tokens, and shuffled standard port types on the existing coastline positions;
+- `classic4p-v1` is a repository-defined legal/intentional Classic4P generator with the normal 19-hex topology, exact base resource/number/port multisets, one desert, and no adjacent red 6/8 tokens.
 
-The current Colonist client has separate map identities for `Classic4P` and `Classic4PRandom`. The latter is presented as “Base Random” with random/no fixed numbers.
+`Board::standard()` remains only as a documented compatibility alias for `legacy-randomized-v1`; semantic runtime/benchmark callers should use an explicit contract. Seed-restored snapshots and new seed-based generated artifacts record the generator identifier so a bare seed is no longer treated as globally self-describing. New takeover challenge snapshots use schema v2 and bind `boardGenerator` to the recorded `stateHash` through `boardGeneratorStateHash`; historical schema-v1 snapshots with no generator metadata retain legacy interpretation.
 
-Therefore unrestricted number-token shuffling should not be described as a faithful generator for ordinary Colonist Classic4P.
+The current Colonist client has separate map identities for `Classic4P` and `Classic4PRandom`. The latter is presented as “Base Random” with random/no fixed numbers. That establishes the need for separate semantics, not Colonist's private server seed algorithm.
 
-**Status:** **Synthetic benchmark-distribution mismatch.**
+**Status:** **Synthetic contract split implemented.**
 
-**Live B3 impact:** none when the real observed board is used.  
-**Benchmark/training impact:** results from `Board::standard()` may represent a different opening distribution than ordinary Colonist Classic4P.
+**Live impact:** none when the real observed board is used.
+**Benchmark/training impact:** ordinary 4P arena/game-strength/training generation routes through `classic4p-v1`; parity, tactical, and stress fixtures may intentionally retain `legacy-randomized-v1`.
 
-A future benchmark-fidelity mission should decide whether to add explicit `Classic4P` versus `Classic4PRandom` board constructors rather than changing the live adapter.
+Do not describe `classic4p-v1` as reproducing Colonist server seed-to-board mapping. No such exact mapping is established by the preserved client evidence.
 
 ---
 
@@ -356,7 +354,7 @@ An earlier intermediate version discarded opponents' setup hands in the new buil
 | RF-01 | Single-recipient bank shortage | **Mismatch** | Base-game CPU/GPU correctness | `catan-core::produce`, CUDA `produce_roll` + parity contracts | Separate focused rules repair |
 | RF-02 | Dice-mode bridge | **Repaired in E2: behavior-inert metadata** | All live games | page bridge, `BoardSnapshot`, worker/WASM input, `GameState`, evidence metadata | Preserve `Unknown/Random/Balanced/Unsupported`; keep unsupported raw values evidence-only; do not retune stochastic behavior in E2 |
 | RF-03 | Balanced stochastic search | **Approximation** | Balanced games | chance-state model + search/evaluator consumers | Do not use a static alternate pip table; research/version exact model separately |
-| RF-04 | Synthetic Classic4P map | **Distribution mismatch** | Offline benchmarks/training only | `Board::standard` / arena board selection | Introduce explicit map-generation contract if benchmark fidelity requires it |
+| RF-04 | Synthetic Classic4P map | **Contract split implemented** | Offline benchmarks/training only | explicit `classic4p-v1` / `legacy-randomized-v1` generation + arena provenance | Preserve legacy seed identity; use Classic V1 only where ordinary 4P realism is intended |
 | RF-05 | Robber production heuristic | **Intentional approximation** | Evaluator, not rules transition | `production_pips` and robber-related evaluator terms | Keep labeled as future-value heuristic; do not confuse with current production rules |
 | RF-06 | Opponent domestic trade in opening ETA | **Intentional omission** | Opening strength model | opening evaluator | Only add calibrated trade-opportunity value if evidence justifies it |
 | RF-07 | 5–8P player/state widths | **Unsupported** | Future base 5–8P | core/WASM/search/CUDA/arena/protocol contracts | Coordinated migration; see dedicated roadmap |

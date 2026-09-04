@@ -133,8 +133,25 @@ impl GameState {
         }
     }
 
+    /// Compatibility alias for legacy-randomized-v1 synthetic state generation.
     pub fn standard(seed: u64, num_players: u8) -> Self {
-        Self::new(Board::standard(seed, num_players), 10)
+        Self::randomized_base_v1(seed, num_players)
+    }
+
+    pub fn randomized_base_v1(seed: u64, num_players: u8) -> Self {
+        Self::new(Board::randomized_base_v1(seed, num_players), 10)
+    }
+
+    pub fn classic_4p_v1(seed: u64) -> Self {
+        Self::new(Board::classic_4p_v1(seed), 10)
+    }
+
+    pub fn from_generator(
+        generator: crate::SyntheticBoardGenerator,
+        seed: u64,
+        num_players: u8,
+    ) -> Result<Self, String> {
+        Board::from_generator(generator, seed, num_players).map(|board| Self::new(board, 10))
     }
 
     pub fn actor(&self) -> u8 {

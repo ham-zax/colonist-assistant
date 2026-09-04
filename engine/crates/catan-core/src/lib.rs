@@ -10,7 +10,7 @@ mod rng;
 mod state;
 mod types;
 
-pub use board::{Board, Edge, Hex, Vertex};
+pub use board::{Board, Edge, Hex, SyntheticBoardGenerator, Vertex};
 pub use rng::SplitMix64;
 pub use state::{GameState, RuleError};
 pub use types::{

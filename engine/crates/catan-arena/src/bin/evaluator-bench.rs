@@ -1,7 +1,9 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use colonist_catan_core::{Action, GameState, NodeKind, Phase, SplitMix64};
+use colonist_catan_core::{
+    Action, GameState, NodeKind, Phase, SplitMix64, SyntheticBoardGenerator,
+};
 use colonist_catan_search::{
     encode_heterogeneous_graph, evaluate, evaluate_profiled, expansion_option_value,
     expected_discard_loss, largest_army_outlook, longest_road_outlook, marginal_development_value,
@@ -60,6 +62,7 @@ struct Report {
     players: u8,
     sampled_states: usize,
     repeats: u32,
+    board_generator: &'static str,
     seed: u64,
     player_trades_enabled: bool,
     measurements: Vec<Measurement>,
@@ -147,6 +150,14 @@ fn choose_action(state: &GameState, actions: &[Action], rng: &mut SplitMix64) ->
     rng.range(actions.len())
 }
 
+fn benchmark_board_generator(players: u8) -> SyntheticBoardGenerator {
+    if players == 4 {
+        SyntheticBoardGenerator::Classic4pV1
+    } else {
+        SyntheticBoardGenerator::LegacyRandomizedV1
+    }
+}
+
 fn sample_states(options: Options) -> Vec<GameState> {
     let mut sampled = Vec::with_capacity(options.states);
     let mut game_index = 0u64;
@@ -154,7 +165,12 @@ fn sample_states(options: Options) -> Vec<GameState> {
         let game_seed = options
             .seed
             .wrapping_add(game_index.wrapping_mul(0x9e37_79b9));
-        let mut state = GameState::standard(game_seed, options.players);
+        let mut state = GameState::from_generator(
+            benchmark_board_generator(options.players),
+            game_seed,
+            options.players,
+        )
+        .expect("benchmark generator must support configured player count");
         state.player_trades_enabled = options.player_trades_enabled;
         let mut rng = SplitMix64::new(game_seed ^ 0xd1b5_4a32_d192_ed03);
         let mut steps = 0usize;
@@ -403,6 +419,7 @@ fn main() {
         players: options.players,
         sampled_states: states.len(),
         repeats: options.repeats,
+        board_generator: benchmark_board_generator(options.players).serialized_id(),
         seed: options.seed,
         player_trades_enabled: options.player_trades_enabled,
         measurements,

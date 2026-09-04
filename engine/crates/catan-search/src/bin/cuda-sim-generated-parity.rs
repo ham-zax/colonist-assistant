@@ -8,7 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut states = (0..LANES)
         .map(|lane| {
             let players = if lane % 2 == 0 { 3 } else { 4 };
-            let mut state = GameState::standard(90_000 + lane as u64 * 29, players);
+            let mut state = GameState::randomized_base_v1(90_000 + lane as u64 * 29, players);
             state.player_trades_enabled = false;
             state
         })

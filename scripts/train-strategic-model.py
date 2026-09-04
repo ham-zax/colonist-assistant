@@ -237,11 +237,16 @@ def policy_groups(
             (
                 features,
                 target,
-                f'{record.get("boardSeed", "unknown")}:{record.get("chanceSeed", "unknown")}',
+                synthetic_game_group(record),
                 teacher_values,
             )
         )
     return groups
+
+
+def synthetic_game_group(record: dict) -> str:
+    generator = record.get("boardGenerator", "legacy-randomized-v1")
+    return f'{generator}:{record.get("boardSeed", "unknown")}:{record.get("chanceSeed", "unknown")}'
 
 
 def validation_groups(
@@ -526,10 +531,7 @@ def main() -> None:
         raise SystemExit("--baseline-action-features must be within the action feature width")
     y = np.asarray([relative_teacher_value(record) for record in data], dtype=np.float32)
     players = np.asarray([record["players"] for record in data], dtype=np.int64)
-    state_groups = [
-        f'{record.get("boardSeed", "unknown")}:{record.get("chanceSeed", "unknown")}'
-        for record in data
-    ]
+    state_groups = [synthetic_game_group(record) for record in data]
     held_out_groups = validation_groups(state_groups, args.validation_fraction)
     held_out = np.asarray(
         [group in held_out_groups for group in state_groups],
