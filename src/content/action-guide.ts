@@ -153,6 +153,11 @@ export interface ActionGuideOptions {
   /// React tree. When supplied, dispatch is only tentative until the owner
   /// observes the exact state mutation caused by this action.
   validateControlCommit?: () => boolean;
+  /// Once a control click has been dispatched, recommendation identity can
+  /// legitimately refresh before the bridge publishes the resulting state.
+  /// Keep commit observation alive while the original semantic transaction
+  /// still belongs to the same live game/control.
+  validateControlContinuation?: () => boolean;
   onExecutionStart?: (result: { signature: string }) => void;
   onExecution?: (result: {
     succeeded: boolean;
@@ -1356,9 +1361,11 @@ const awaitControlCommit = (
       requestBoardRefresh();
       return;
     }
-    const stillCurrent = currentGuideAction?.signature === action.signature;
-    const stillLegal = options.validate ? options.validate() : true;
-    if (!stillCurrent || !stillLegal) {
+    const canContinue = options.validateControlContinuation
+      ? options.validateControlContinuation()
+      : currentGuideAction?.signature === action.signature &&
+        (options.validate ? options.validate() : true);
+    if (!canContinue) {
       if (lastClickSignature === action.signature) lastClickSignature = "";
       options.onExecution?.({
         succeeded: false,

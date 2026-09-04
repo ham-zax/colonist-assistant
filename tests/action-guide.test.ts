@@ -961,6 +961,72 @@ describe("action guide autopilot", () => {
     },
   );
 
+  it("keeps a dispatched decline pending across a harmless guide-signature refresh", async () => {
+    const wrapper = document.createElement("div");
+    wrapper.className = "gameTradeOffersWrapper-fixture";
+    const offer = document.createElement("div");
+    offer.className = "tradeContainer-fixture";
+    const clicks = [vi.fn(), vi.fn(), vi.fn()];
+    for (const clicked of clicks) {
+      const button = document.createElement("div");
+      button.className = "tradeButton-fixture";
+      button.addEventListener("click", clicked);
+      offer.append(button);
+    }
+    wrapper.append(offer);
+    document.body.append(wrapper);
+
+    let rejectedVisibleInBridge = false;
+    const executions = vi.fn();
+    const action = {
+      kind: "trade" as const,
+      offerIndex: 0,
+      tradeId: "live-offer",
+      verdict: "decline" as const,
+      label: "Decline trade",
+      signature: "decline-before-refresh",
+      confidence: 1,
+    };
+
+    renderActionGuide(action, {
+      highlight: true,
+      autonomous: true,
+      validate: () => true,
+      validateControlCommit: () => rejectedVisibleInBridge,
+      validateControlContinuation: () => true,
+      onExecution: executions,
+    });
+    await vi.advanceTimersByTimeAsync(800);
+    expect(clicks[1]).toHaveBeenCalledOnce();
+    expect(executions).not.toHaveBeenCalled();
+
+    renderActionGuide(
+      { ...action, signature: "decline-after-refresh" },
+      {
+        highlight: true,
+        autonomous: true,
+        validate: () => true,
+        validateControlCommit: () => rejectedVisibleInBridge,
+        validateControlContinuation: () => true,
+      },
+    );
+    await vi.advanceTimersByTimeAsync(140);
+
+    rejectedVisibleInBridge = true;
+    await vi.advanceTimersByTimeAsync(280);
+
+    expect(executions).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        succeeded: false,
+        reason: "Colonist state changed without the expected control commit",
+      }),
+    );
+    expect(executions).toHaveBeenCalledWith({
+      succeeded: true,
+      signature: "decline-before-refresh",
+    });
+  });
+
   it("executes the enabled accepted-player check instead of an inert response", async () => {
     const wrapper = document.createElement("div");
     wrapper.className = "gameTradeOffersWrapper-fixture";

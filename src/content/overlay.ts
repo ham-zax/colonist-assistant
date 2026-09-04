@@ -1714,7 +1714,12 @@ export class AssistantOverlay {
       ...(transactionCommit
         ? { validateTransactionCommit: transactionCommit }
         : {}),
-      ...(controlCommit ? { validateControlCommit: controlCommit } : {}),
+      ...(controlCommit
+        ? {
+            validateControlCommit: controlCommit,
+            validateControlContinuation: stillInGuideGame,
+          }
+        : {}),
       onExecutionStart: () => {
         if (traceKey) this.decisionTraces.executionStarted(traceKey);
       },
