@@ -5,6 +5,7 @@ import {
   openingRoadEdgeIds,
   type BoardAction,
 } from "../core/placement";
+import { observeColonistDiceMode } from "./dice-mode";
 
 (() => {
   const SOURCE = "colonist-assistant-public-board";
@@ -1115,6 +1116,9 @@ import {
     const victoryTarget = Number(
       rootStoreState?.gameSettings?.victoryPointsToWin ?? 10,
     );
+    const diceModeObservation = observeColonistDiceMode(
+      rootStoreState?.gameSettings?.diceSetting,
+    );
     const visibleWinner = Object.entries(publicPlayers).find(
       ([, player]) =>
         Number(
@@ -1290,6 +1294,10 @@ import {
       initialPlacement,
       picksUntilNext,
       victoryTarget,
+      diceMode: diceModeObservation.mode,
+      ...(diceModeObservation.rawUnsupportedSetting !== undefined
+        ? { diceModeRaw: diceModeObservation.rawUnsupportedSetting }
+        : {}),
       friendlyRobber: Boolean(rootStoreState?.gameSettings?.friendlyRobber),
       privateGame: Boolean(
         rootStoreState?.gameSettings?.isPrivateGame ??

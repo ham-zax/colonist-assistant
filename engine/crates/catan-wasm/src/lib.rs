@@ -6,8 +6,8 @@
 use std::cell::RefCell;
 
 use colonist_catan_core::{
-    Action, Board, Building, Edge, GameState, Phase, PlayerState, Port, Resource, TradeOffer,
-    Vertex,
+    Action, Board, Building, DiceMode, Edge, GameState, Phase, PlayerState, Port, Resource,
+    TradeOffer, Vertex,
 };
 use colonist_catan_search::{
     ActionStats, BeliefParticle, BeliefSearchProvenance, BeliefSearchStageTimings,
@@ -109,6 +109,27 @@ struct TradeInput {
     rejected: u8,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum DiceModeInput {
+    #[default]
+    Unknown,
+    Random,
+    Balanced,
+    Unsupported,
+}
+
+impl From<DiceModeInput> for DiceMode {
+    fn from(value: DiceModeInput) -> Self {
+        match value {
+            DiceModeInput::Unknown => Self::Unknown,
+            DiceModeInput::Random => Self::Random,
+            DiceModeInput::Balanced => Self::Balanced,
+            DiceModeInput::Unsupported => Self::Unsupported,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StateInput {
@@ -127,6 +148,8 @@ struct StateInput {
     phase_parameter: Option<u8>,
     turn: u16,
     last_roll: u8,
+    #[serde(default)]
+    dice_mode: DiceModeInput,
     victory_target: u8,
     card_discard_limit: Option<u8>,
     friendly_robber: Option<bool>,
@@ -839,6 +862,7 @@ fn game_states(
             phase: game_phase,
             turn: input.turn,
             last_roll: input.last_roll,
+            dice_mode: input.dice_mode.into(),
             victory_target: input.victory_target,
             card_discard_limit: input.card_discard_limit.unwrap_or(7),
             friendly_robber: input.friendly_robber.unwrap_or(false),
@@ -1949,4 +1973,58 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
 #[wasm_bindgen]
 pub fn engine_version() -> String {
     ENGINE_REVISION.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use colonist_catan_core::DiceMode;
+    use serde_json::{Value, json};
+
+    use super::{DiceModeInput, StateInput};
+
+    fn legacy_state_json() -> Value {
+        json!({
+            "board": { "hexes": [], "vertices": [], "edges": [] },
+            "players": [],
+            "worlds": [],
+            "buildings": [],
+            "roads": [],
+            "bank": [19, 19, 19, 19, 19],
+            "developmentDeck": [14, 5, 2, 2, 2],
+            "playedDevelopment": [0, 0, 0, 0, 0],
+            "robberHex": 0,
+            "currentPlayer": 0,
+            "phase": "main",
+            "turn": 0,
+            "lastRoll": 0,
+            "victoryTarget": 10,
+            "setupStep": 0,
+            "discardRemaining": [0, 0, 0, 0],
+            "discardCursor": 0,
+            "robberReturnPhase": "main",
+            "tradeCursor": 0,
+            "domesticTradeUsed": false
+        })
+    }
+
+    #[test]
+    fn missing_legacy_dice_mode_deserializes_to_unknown() {
+        let input: StateInput = serde_json::from_value(legacy_state_json()).unwrap();
+        assert_eq!(input.dice_mode, DiceModeInput::Unknown);
+    }
+
+    #[test]
+    fn all_dice_modes_deserialize_and_map_to_core() {
+        for (raw, expected) in [
+            ("unknown", DiceMode::Unknown),
+            ("random", DiceMode::Random),
+            ("balanced", DiceMode::Balanced),
+            ("unsupported", DiceMode::Unsupported),
+        ] {
+            let mut value = legacy_state_json();
+            value["diceMode"] = Value::String(raw.to_owned());
+            let input: StateInput = serde_json::from_value(value).unwrap();
+            assert_eq!(DiceMode::from(input.dice_mode), expected);
+        }
+    }
 }

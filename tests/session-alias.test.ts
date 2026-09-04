@@ -50,6 +50,7 @@ describe("local player alias canonicalization", () => {
     const hand = emptyResources();
     const board = canonicalizeBoardPlayerAliases({
       hexes: [],
+      diceMode: "unknown",
       vertices: [
         {
           id: "v0",

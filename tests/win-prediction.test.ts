@@ -27,6 +27,7 @@ const analysis = (probabilities: number[]): DecisionAnalysis => ({
 const board = (gameKey: string, leaderPoints = 2): BoardSnapshot => ({
   gameKey,
   victoryTarget: 10,
+  diceMode: "unknown",
   hexes: [],
   vertices: [],
   edges: [],

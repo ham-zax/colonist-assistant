@@ -180,15 +180,26 @@ pub fn admit_promoted_roots(
     admitted
 }
 
-/// Losslessly merge particles whose complete game states are exactly equal.
-/// State hashes are only a lookup accelerator; equality is checked before mass
-/// is combined, so a hash collision cannot merge distinct worlds.
+fn same_belief_state(left: &GameState, right: &GameState) -> bool {
+    if left.dice_mode == right.dice_mode {
+        return left == right;
+    }
+    let mut normalized = left.clone();
+    normalized.dice_mode = right.dice_mode;
+    normalized == *right
+}
+
+/// Losslessly merge particles whose behaviorally relevant game states are equal.
+/// E2 dice mode is observation metadata and deliberately does not split belief
+/// identity until a later stochastic model makes it transition-relevant. State
+/// hashes are only a lookup accelerator; equality is checked before mass is
+/// combined, so a hash collision cannot merge distinct worlds.
 pub fn coalesce_identical_particles(particles: &[BeliefParticle]) -> Vec<BeliefParticle> {
     let mut coalesced = Vec::<BeliefParticle>::new();
     for particle in particles {
         if let Some(existing) = coalesced.iter_mut().find(|candidate| {
             candidate.state.state_hash() == particle.state.state_hash()
-                && candidate.state == particle.state
+                && same_belief_state(&candidate.state, &particle.state)
         }) {
             existing.weight += particle.weight;
         } else {
@@ -442,7 +453,9 @@ pub fn select_experimental_strategic_particles(
 
 #[cfg(test)]
 mod tests {
-    use colonist_catan_core::{Action, CITY_COST, DevCard, GameState, Resource, SETTLEMENT_COST};
+    use colonist_catan_core::{
+        Action, CITY_COST, DevCard, DiceMode, GameState, Resource, SETTLEMENT_COST,
+    };
 
     use super::{
         EXPERIMENTAL_STRATEGIC_PARTICLE_TARGET, admit_promoted_roots, coalesce_identical_particles,
@@ -450,6 +463,30 @@ mod tests {
         select_experimental_strategic_particles, shared_root_candidates,
     };
     use crate::mcts::BeliefParticle;
+
+    #[test]
+    fn dice_mode_metadata_does_not_split_belief_identity() {
+        let mut random = GameState::standard(76, 3);
+        random.dice_mode = DiceMode::Random;
+        let mut balanced = random.clone();
+        balanced.dice_mode = DiceMode::Balanced;
+        assert_eq!(random.state_hash(), balanced.state_hash());
+        assert_ne!(random, balanced);
+
+        let coalesced = coalesce_identical_particles(&[
+            BeliefParticle {
+                state: random,
+                weight: 0.4,
+            },
+            BeliefParticle {
+                state: balanced,
+                weight: 0.6,
+            },
+        ]);
+
+        assert_eq!(coalesced.len(), 1);
+        assert!((coalesced[0].weight - 1.0).abs() < 1e-6);
+    }
 
     #[test]
     fn strategic_particle_coalescing_is_lossless_and_exact() {

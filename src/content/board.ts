@@ -2,14 +2,16 @@ import {
   RESOURCE_ORDER,
   type Resource,
 } from "../core/resources";
-import type {
-  ActiveTradeOffer,
-  BoardAction,
-  BoardEdge,
-  BoardHex,
-  BoardSnapshot,
-  BoardVertex,
-  DevelopmentCardVector,
+import {
+  DICE_MODES,
+  type ActiveTradeOffer,
+  type BoardAction,
+  type BoardEdge,
+  type BoardHex,
+  type BoardSnapshot,
+  type BoardVertex,
+  type DevelopmentCardVector,
+  type DiceMode,
 } from "../core/placement";
 
 const BRIDGE_SOURCE = "colonist-assistant-public-board";
@@ -249,6 +251,13 @@ const optionalBoundedInteger = (
     Number(value) >= minimum &&
     Number(value) <= maximum);
 
+const normalizeSnapshotDiceMode = (value: unknown): unknown => {
+  if (!value || typeof value !== "object") return value;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.diceMode !== undefined) return value;
+  return { ...candidate, diceMode: "unknown" satisfies DiceMode };
+};
+
 const validSnapshot = (value: unknown): value is BoardSnapshot => {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<BoardSnapshot>;
@@ -391,6 +400,13 @@ const validSnapshot = (value: unknown): value is BoardSnapshot => {
     (candidate.picksUntilNext === undefined ||
       (Number.isInteger(candidate.picksUntilNext) && candidate.picksUntilNext >= 0)) &&
     optionalBoundedInteger(candidate.victoryTarget, 3, 100) &&
+    DICE_MODES.includes(candidate.diceMode as DiceMode) &&
+    (candidate.diceModeRaw === undefined ||
+      (candidate.diceMode === "unsupported" &&
+        typeof candidate.diceModeRaw === "number" &&
+        Number.isFinite(candidate.diceModeRaw) &&
+        candidate.diceModeRaw !== 0 &&
+        candidate.diceModeRaw !== 1)) &&
     (candidate.friendlyRobber === undefined ||
       typeof candidate.friendlyRobber === "boolean") &&
     (candidate.privateGame === undefined ||
@@ -449,9 +465,11 @@ export const parsePublicBoardMessage = (
   };
   if (message.source !== BRIDGE_SOURCE) return undefined;
   if (message.type === "clear") return "clear";
-  if (message.type !== "snapshot" || !validSnapshot(message.payload)) return undefined;
+  if (message.type !== "snapshot") return undefined;
+  const payload = normalizeSnapshotDiceMode(message.payload);
+  if (!validSnapshot(payload)) return undefined;
   return canonicalizeBoardPlayerAliases({
-    ...message.payload,
+    ...payload,
     observedAt: Date.now(),
   });
 };
@@ -488,7 +506,7 @@ const readJsonSnapshot = (root: ParentNode): BoardSnapshot | undefined => {
   );
   if (!script?.textContent) return undefined;
   try {
-    const parsed: unknown = JSON.parse(script.textContent);
+    const parsed: unknown = normalizeSnapshotDiceMode(JSON.parse(script.textContent));
     return validSnapshot(parsed)
       ? canonicalizeBoardPlayerAliases(parsed)
       : undefined;
@@ -553,6 +571,7 @@ const readSemanticSnapshot = (root: ParentNode): BoardSnapshot | undefined => {
     hexes,
     vertices,
     edges,
+    diceMode: "unknown",
     ...(legalVertexIds.length ? { legalVertexIds } : {}),
     ...(legalEdgeIds.length ? { legalEdgeIds } : {}),
   };

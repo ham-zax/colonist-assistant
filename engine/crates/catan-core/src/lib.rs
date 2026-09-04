@@ -14,6 +14,6 @@ pub use board::{Board, Edge, Hex, Vertex};
 pub use rng::SplitMix64;
 pub use state::{GameState, RuleError};
 pub use types::{
-    Action, Building, CITY_COST, DEVELOPMENT_COST, DevCard, NodeKind, Phase, PlayerState, Port,
-    ROAD_COST, Resource, ResourceHand, SETTLEMENT_COST, TradeOffer,
+    Action, Building, CITY_COST, DEVELOPMENT_COST, DevCard, DiceMode, NodeKind, Phase, PlayerState,
+    Port, ROAD_COST, Resource, ResourceHand, SETTLEMENT_COST, TradeOffer,
 };

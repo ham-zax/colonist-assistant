@@ -1444,6 +1444,7 @@ export const buildDeepSearchRequest = (
           : {}),
         turn: Math.max(0, board.turn ?? state.currentTurn.sequence),
         lastRoll: Math.max(0, board.lastRoll ?? 0),
+        diceMode: board.diceMode,
         victoryTarget: board.victoryTarget ?? 10,
         cardDiscardLimit,
         friendlyRobber: Boolean(board.friendlyRobber),
@@ -1651,6 +1652,8 @@ export const analyzeDeepSearch = async (
         };
   const search: DeepSearchResult = {
     engineRevision: response.engineRevision,
+    diceMode: board.diceMode,
+    chanceModel: "fair-iid-2d6",
     rootIndex: root,
     learnedModelVersion: response.learnedModelVersion,
     tradeModelVersion: response.tradeModelVersion,

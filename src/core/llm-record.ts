@@ -1,6 +1,6 @@
 import type { DecisionSearchAttempt, DecisionTrace } from "./decision-trace";
 import type { DeepSearchAction } from "./engine";
-import type { BoardSnapshot } from "./placement";
+import type { BoardSnapshot, DiceMode } from "./placement";
 import { RESOURCE_ORDER, type ResourceVector } from "./resources";
 import type { StoredEvent } from "./types";
 
@@ -107,6 +107,15 @@ export interface CompactGameRecord {
   contracts: CompactRecordContracts;
   meta: {
     myPlayer?: string;
+    diceMode: DiceMode;
+    diceModeRaw?: number;
+    diceModeConflicts?: Array<{
+      established: Exclude<DiceMode, "unknown">;
+      observed: Exclude<DiceMode, "unknown">;
+      observedAt: number;
+      establishedRawSetting?: number;
+      rawObservedSetting?: number;
+    }>;
     localSeatDiagnostics?: BoardSnapshot["localSeatDiagnostics"];
     localSeatIdentityHistory?: LocalSeatIdentityHistoryEntry[];
     victoryTarget?: number;
@@ -606,6 +615,7 @@ const updateRecordIntegrity = (record: CompactGameRecord): void => {
     issues.push(`unmatched-state-events:${record.unmatchedIntegrityCount}`);
   }
   if (record.meta.unresolvedPlayers?.length) issues.push("unresolved-player-evidence");
+  if (record.meta.diceModeConflicts?.length) issues.push("dice-mode-conflict");
   record.meta.integrityIssues = [...new Set(issues)];
   const lastWinner = [...record.frames]
     .reverse()
@@ -702,6 +712,7 @@ export const normalizeCompactRecordIntegrity = (
     record.unmatchedIntegrityCount = record.unmatchedCount;
   }
   migrateCompactRecordContracts(record);
+  record.meta.diceMode ??= "unknown";
   const unresolved = new Set(record.meta.unresolvedPlayers ?? []);
   let count = record.meta.playerCount;
   if (!Number.isInteger(count) || count === undefined || count < 2 || count > 4) {
@@ -1164,7 +1175,9 @@ export class CompactGameBuilder {
         assistant: { ...input.assistant },
         aliases: aliasing.aliases,
         contracts: contracts(),
-        meta: roster.length ? { playerCount: roster.length } : {},
+        meta: roster.length
+          ? { playerCount: roster.length, diceMode: "unknown" }
+          : { diceMode: "unknown" },
         boardHexes: [],
         boardVertices: [],
         boardEdges: [],
@@ -1236,6 +1249,52 @@ export class CompactGameBuilder {
     alias: (name?: string) => string | null,
   ): void {
     const record = this.record!;
+    const establishedDiceMode = record.meta.diceMode ?? "unknown";
+    if (establishedDiceMode === "unknown" && board.diceMode !== "unknown") {
+      record.meta.diceMode = board.diceMode;
+      if (board.diceMode === "unsupported" && board.diceModeRaw !== undefined) {
+        record.meta.diceModeRaw = board.diceModeRaw;
+      }
+    } else if (
+      establishedDiceMode !== "unknown" &&
+      board.diceMode !== "unknown" &&
+      (board.diceMode !== establishedDiceMode ||
+        (establishedDiceMode === "unsupported" &&
+          board.diceMode === "unsupported" &&
+          record.meta.diceModeRaw !== undefined &&
+          board.diceModeRaw !== undefined &&
+          board.diceModeRaw !== record.meta.diceModeRaw))
+    ) {
+      const conflicts = record.meta.diceModeConflicts ?? [];
+      const establishedRawSetting =
+        establishedDiceMode === "unsupported" ? record.meta.diceModeRaw : undefined;
+      const rawObservedSetting =
+        board.diceMode === "unsupported" ? board.diceModeRaw : undefined;
+      const duplicate = conflicts.some(
+        (conflict) =>
+          conflict.established === establishedDiceMode &&
+          conflict.observed === board.diceMode &&
+          conflict.establishedRawSetting === establishedRawSetting &&
+          conflict.rawObservedSetting === rawObservedSetting,
+      );
+      if (!duplicate) {
+        conflicts.push({
+          established: establishedDiceMode,
+          observed: board.diceMode,
+          observedAt: board.observedAt ?? Date.now(),
+          ...(establishedRawSetting !== undefined ? { establishedRawSetting } : {}),
+          ...(rawObservedSetting !== undefined ? { rawObservedSetting } : {}),
+        });
+        record.meta.diceModeConflicts = conflicts;
+      }
+    } else if (
+      establishedDiceMode === "unsupported" &&
+      board.diceMode === "unsupported" &&
+      record.meta.diceModeRaw === undefined &&
+      board.diceModeRaw !== undefined
+    ) {
+      record.meta.diceModeRaw = board.diceModeRaw;
+    }
     if (board.localSeatDiagnostics) {
       record.meta.localSeatDiagnostics = board.localSeatDiagnostics;
       const {

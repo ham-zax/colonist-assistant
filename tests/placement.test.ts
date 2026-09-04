@@ -15,6 +15,7 @@ describe("opening road legality", () => {
   it("anchors the second opening road to the newly placed settlement", () => {
     const board = {
       hexes: [],
+      diceMode: "unknown",
       vertices: [
         {
           id: "old",
@@ -55,6 +56,7 @@ describe("opening road legality", () => {
   it("refuses to guess when the opening anchor is ambiguous", () => {
     const board = {
       hexes: [],
+      diceMode: "unknown",
       vertices: [
         {
           id: "a",
@@ -86,6 +88,7 @@ describe("placement state synchronization", () => {
   };
   const board = {
     hexes: [],
+    diceMode: "unknown",
     vertices: [
       {
         id: "target",

@@ -11,6 +11,7 @@ const board = (): BoardSnapshot => ({
   hexes: [],
   vertices: [],
   edges: [],
+  diceMode: "unknown",
   isMyTurn: true,
   action: "none",
 });

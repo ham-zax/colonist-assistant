@@ -491,6 +491,7 @@ describe("decision service client", () => {
         hexes: [],
         vertices: [],
         edges: [],
+        diceMode: "unknown",
         gameKey: "test-game",
         turn: 7,
         isMyTurn: true,

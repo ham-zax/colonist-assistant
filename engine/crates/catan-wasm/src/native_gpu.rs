@@ -31,7 +31,7 @@ const HORIZON_ESCALATION_MIN_REMAINING_MS: u32 = 40;
 const HORIZON_ESCALATION_MIN_SAMPLES_PER_ROOT: usize = 16;
 const HORIZON_ESCALATION_MAX_SAMPLES_PER_ROOT: usize = 32;
 pub const NATIVE_GPU_PROTOCOL_VERSION: u32 = 6;
-pub const NATIVE_GPU_STATE_SCHEMA_VERSION: u32 = 2;
+pub const NATIVE_GPU_STATE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

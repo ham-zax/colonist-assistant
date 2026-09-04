@@ -41,7 +41,7 @@ The v320 preserved session has **no live gameplay protocol capture**. Static cli
 ### Confirmed current defects / gaps
 
 1. **Bank-shortage production:** CPU and CUDA currently give nobody a resource whenever aggregate demand exceeds the bank. Base CATAN rules require a special single-recipient branch: if only one player is owed that resource, that player receives all remaining cards of that type.
-2. **Dice-mode observability:** Colonist's client carries `diceSetting`; our `BoardSnapshot`/bridge does not. Search and opening economics therefore always assume fair i.i.d. 2d6.
+2. **Balanced-Dice stochastic fidelity:** dice mode is now observable and propagated as behavior-inert metadata, but search and opening economics intentionally still use the fair i.i.d. 2d6 model until E3 establishes a defensible Balanced transition model.
 3. **Synthetic board distribution:** `Board::standard()` freely shuffles all number tokens. Colonist distinguishes ordinary `Classic4P` from `Classic4PRandom` (“Base Random” / no fixed numbers). Live recommendations are unaffected because they ingest the observed board, but synthetic benchmark/training boards are not a faithful sample of ordinary Colonist Classic4P setup.
 4. **Player-count architecture:** state, WASM, search value vectors, embargo encoding, CUDA layouts, feature normalization, bank/development-card constants, and arena validation are intentionally 4-player-shaped. Future 5–8P support is a contract migration, not a constant bump.
 
@@ -131,26 +131,26 @@ Room-state data maps the incoming `diceType` into `gameSetting.diceSetting`. The
 
 **Status:** **Shipped-client contract established; active-game runtime capture still desirable.**
 
-### 2.3 Bridge gap
+### 2.3 Dice-mode observability and propagation
 
-`src/page/bridge.ts` already reads neighboring settings such as:
+The assistant now reads the active-game `gameSettings.diceSetting` value when that store path is available, terminates Colonist's numeric representation at the page boundary, and carries only a canonical semantic mode through `BoardSnapshot`, the WASM/native `StateInput`, and core `GameState`.
 
-- `cardDiscardLimit`;
-- `victoryPointsToWin`;
-- `friendlyRobber`;
-- private-game state.
-
-`BoardSnapshot` has no `diceSetting` field and the bridge does not publish it.
-
-**Status:** **Confirmed local observability gap.**
-
-A future contract should distinguish at least:
+The canonical states are:
 
 ```text
-Random | Balanced | Unknown
+Unknown      = the setting was not observed
+Random       = observed Colonist diceSetting 0
+Balanced     = observed Colonist diceSetting 1
+Unsupported  = a positively observed setting outside supported Random/Balanced production modes
 ```
 
-Do not use `diceSetting ?? 0`; missing/uninitialized state is not proof of Random.
+Preserved v320 values `2 = StressTestSequence` and `3 = PredefinedDiceSequenceDeleted` therefore map to `Unsupported`. Other positively observed unsupported numeric values also fail closed to `Unsupported`. Unsupported raw numeric values may be retained only as evidence/provenance; they do not cross into the engine state contract. Untrusted ingress rejects contradictory pairs such as `Unsupported + raw 0` or `Unsupported + raw 1`, because 0 and 1 are established Random and Balanced values.
+
+Legacy/untrusted snapshots that omit the field normalize immediately to `Unknown`. Missing active-game store access remains `Unknown`, never Random. The assistant does not infer dice mode from room type, privacy, custom-room defaults, or neighboring settings. Compact `catan-evidence/2` metadata may upgrade `Unknown` to a later known observation, but known-to-different-known observations are preserved as integrity conflicts rather than overwritten. That raw distinction is also preserved for `Unsupported(raw=2)` followed by `Unsupported(raw=3)`.
+
+**Archived-runtime caveat:** the preserved D2 browser session remained in the lobby, so `rootStoreState.gameSettings.diceSetting` was not directly evaluated in an active game during that capture. The shipped-client/static dataflow is established, but an active-game runtime capture remains desirable corroborating evidence.
+
+**Status:** **Local observability/propagation gap repaired; active-game archived runtime capture still absent.**
 
 ### 2.4 Balanced Dice model
 
@@ -160,9 +160,9 @@ Colonist's first-party Balanced Dice article describes a stateful dice-deck plus
 
 **Unsafe conclusion:** a published reshuffle threshold or weighting constant is proven to be the live v320 production-server contract.
 
-**Current engine:** all chance-search paths ultimately use `GameState::chance_weight()` and opening ETAs use `/36` fair-dice expectation.
+**Current engine:** all chance-search paths still use the ordinary fair-i.i.d.-2d6 `GameState::chance_weight()` model and opening ETAs still use `/36` fair-dice expectation. E2 does not change chance weights, chance sampling, state/public/observation hashes, search seeds, opening economics, CUDA packed state, CUDA dice generation, or PTX.
 
-**Status:** **Approximate under Balanced Dice.** Mode detection is a separate, safer change from stochastic-model replacement.
+**Status:** **Approximate under Balanced Dice.** E2 exposes the observed mode and the fair-i.i.d.-2d6 diagnostic status; Balanced stochastic behavior remains deferred to E3.
 
 ---
 
@@ -345,7 +345,7 @@ The latest dirty version:
 
 An earlier intermediate version discarded opponents' setup hands in the new build-economy term; that issue had already been corrected by the time this document was written. Do not resurrect the stale finding.
 
-**Remaining rule-fidelity dependency:** forwarding dice mode can identify when the fair-i.i.d. assumption is only approximate, but an exact Balanced stochastic replacement still needs separate evidence/modeling.
+**Remaining rule-fidelity dependency:** propagated dice mode now identifies when the fair-i.i.d. assumption is only approximate, but an exact Balanced stochastic replacement still needs separate E3 evidence/modeling.
 
 ---
 
@@ -354,7 +354,7 @@ An earlier intermediate version discarded opponents' setup hands in the new buil
 | ID | Area | Current status | Severity / scope | Authoritative owner(s) | Recommended treatment |
 |---|---|---|---|---|---|
 | RF-01 | Single-recipient bank shortage | **Mismatch** | Base-game CPU/GPU correctness | `catan-core::produce`, CUDA `produce_roll` + parity contracts | Separate focused rules repair |
-| RF-02 | Dice-mode bridge | **Missing observable field** | All live games using Balanced Dice | `BoardSnapshot`, page bridge, worker/WASM contract if consumed | Add explicit Random/Balanced/Unknown state before any stochastic retuning |
+| RF-02 | Dice-mode bridge | **Repaired in E2: behavior-inert metadata** | All live games | page bridge, `BoardSnapshot`, worker/WASM input, `GameState`, evidence metadata | Preserve `Unknown/Random/Balanced/Unsupported`; keep unsupported raw values evidence-only; do not retune stochastic behavior in E2 |
 | RF-03 | Balanced stochastic search | **Approximation** | Balanced games | chance-state model + search/evaluator consumers | Do not use a static alternate pip table; research/version exact model separately |
 | RF-04 | Synthetic Classic4P map | **Distribution mismatch** | Offline benchmarks/training only | `Board::standard` / arena board selection | Introduce explicit map-generation contract if benchmark fidelity requires it |
 | RF-05 | Robber production heuristic | **Intentional approximation** | Evaluator, not rules transition | `production_pips` and robber-related evaluator terms | Keep labeled as future-value heuristic; do not confuse with current production rules |
@@ -377,7 +377,7 @@ For current base-game 2–4P work, the following may be treated as stable contra
 8. disabling domestic trades for the assistant/root seat must not disable maritime trade;
 9. directed embargoes affect domestic player trading;
 10. live opening scarcity should be computed from the observed Colonist board;
-11. Colonist dice mode exists as a client game-setting concept, and an absent observation must remain Unknown.
+11. Colonist dice mode uses the canonical `Unknown/Random/Balanced/Unsupported` contract: absence remains Unknown, observed 0/1 map to Random/Balanced, and other positively observed values fail closed to Unsupported.
 
 # Do not encode as a proven live contract yet
 

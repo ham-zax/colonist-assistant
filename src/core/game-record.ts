@@ -95,6 +95,7 @@ interface LegacyGameRecord {
 
 const legacyBoardSnapshot = (frame: LegacyBoardFrame): BoardSnapshot => ({
   hexes: frame.robberHex ? [{ id: frame.robberHex, blocked: true }] : [],
+  diceMode: "unknown",
   vertices: (frame.buildings ?? []).map((building) => ({
     id: building.vertexId,
     adjacentHexes: [],

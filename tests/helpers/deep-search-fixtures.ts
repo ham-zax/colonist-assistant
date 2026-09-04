@@ -75,6 +75,7 @@ export const makeBoard = (
   turn: 1,
   victoryTarget: 10,
   ...overrides,
+  diceMode: overrides.diceMode ?? "unknown",
 });
 
 export const incomingTrade = (

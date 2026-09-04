@@ -15,6 +15,7 @@ const board = (): BoardSnapshot => ({
   hexes: [],
   vertices: [],
   edges: [],
+  diceMode: "unknown",
   myPlayer: "You",
   playerOrder: ["Rival", "You", "Third"],
   players: {
@@ -106,6 +107,8 @@ describe("decision trace recorder", () => {
       runtime: "background-wasm",
       deepSearch: {
         engineRevision: "trace-test",
+        diceMode: "unknown",
+        chanceModel: "fair-iid-2d6",
         rootIndex: 1,
         algorithm: "puct",
         authority: "deep-maxn",
@@ -191,6 +194,8 @@ describe("decision trace recorder", () => {
       stateHash: "state-17",
       turn: 17,
       deepTimedOut: true,
+      diceMode: "unknown",
+      chanceModel: "fair-iid-2d6",
       finalActionSource: "deep-maxn",
       sourceWorldCount: 5,
       wasmParticleCount: 3,

@@ -154,6 +154,14 @@ export interface LocalSeatDiagnostics {
     | "unresolved";
 }
 
+export const DICE_MODES = [
+  "unknown",
+  "random",
+  "balanced",
+  "unsupported",
+] as const;
+export type DiceMode = (typeof DICE_MODES)[number];
+
 export interface BoardSnapshot {
   hexes: BoardHex[];
   vertices: BoardVertex[];
@@ -182,6 +190,9 @@ export interface BoardSnapshot {
   initialPlacement?: boolean;
   picksUntilNext?: number;
   victoryTarget?: number;
+  diceMode: DiceMode;
+  /** Forensic-only Colonist value retained only for unsupported observations. */
+  diceModeRaw?: number;
   friendlyRobber?: boolean;
   privateGame?: boolean;
   botOnlyGame?: boolean;

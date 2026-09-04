@@ -149,6 +149,8 @@ export interface DecisionTrace {
   decisionModel?: string;
   runtimeReason?: string;
   engineRevision?: string;
+  diceMode?: BoardSnapshot["diceMode"];
+  chanceModel?: "fair-iid-2d6";
   nativeGpuBuild?: NativeGpuBuildIdentity;
   algorithm?: string;
   effectiveSearchEffort?: DeepSearchEffectiveEffort;
@@ -441,6 +443,8 @@ export class DecisionTraceRecorder {
     trace.engine = analysis.engine;
     trace.runtime = analysis.runtime;
     trace.engineRevision = analysis.deepSearch?.engineRevision;
+    trace.diceMode = analysis.deepSearch?.diceMode;
+    trace.chanceModel = analysis.deepSearch?.chanceModel;
     trace.nativeGpuBuild = analysis.nativeGpuBuild
       ? structuredClone(analysis.nativeGpuBuild)
       : undefined;

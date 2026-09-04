@@ -77,6 +77,15 @@ impl Building {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum DiceMode {
+    #[default]
+    Unknown,
+    Random,
+    Balanced,
+    Unsupported,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Phase {
     SetupSettlement,

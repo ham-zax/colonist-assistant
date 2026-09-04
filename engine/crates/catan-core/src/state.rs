@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use crate::types::{CITY_COST, DEVELOPMENT_COST, ROAD_COST, SETTLEMENT_COST};
 use crate::{
-    Action, Board, Building, DevCard, NodeKind, Phase, PlayerState, Port, Resource, ResourceHand,
-    SplitMix64, TradeOffer,
+    Action, Board, Building, DevCard, DiceMode, NodeKind, Phase, PlayerState, Port, Resource,
+    ResourceHand, SplitMix64, TradeOffer,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,6 +57,8 @@ pub struct GameState {
     pub phase: Phase,
     pub turn: u16,
     pub last_roll: u8,
+    /// Observed game dice setting. E2 metadata only; chance behavior remains fair i.i.d. 2d6.
+    pub dice_mode: DiceMode,
     pub victory_target: u8,
     pub card_discard_limit: u8,
     pub friendly_robber: bool,
@@ -108,6 +110,7 @@ impl GameState {
             phase: Phase::SetupSettlement,
             turn: 0,
             last_roll: 0,
+            dice_mode: DiceMode::Unknown,
             victory_target,
             card_discard_limit: 7,
             friendly_robber: false,
@@ -2133,8 +2136,8 @@ fn subtract(hand: &mut ResourceHand, cards: &ResourceHand) {
 #[cfg(test)]
 mod tests {
     use crate::{
-        Action, Building, DevCard, GameState, NodeKind, Phase, PlayerState, Resource, RuleError,
-        SplitMix64, TradeOffer,
+        Action, Building, DevCard, DiceMode, GameState, NodeKind, Phase, PlayerState, Resource,
+        RuleError, SplitMix64, TradeOffer,
     };
 
     fn play_setup(state: &mut GameState) {
@@ -2628,6 +2631,47 @@ mod tests {
                 state.sample_chance(&mut rng),
                 Some(Action::ResolveRoll { value: 2..=12 })
             ));
+        }
+    }
+
+    #[test]
+    fn dice_mode_metadata_is_behavior_inert_for_e2_chance_and_hashing() {
+        let mut base = GameState::standard(91, 3);
+        play_setup(&mut base);
+        base.apply(&Action::Roll).unwrap();
+        let expected_hash = base.state_hash();
+        let expected_weights = base
+            .legal_actions()
+            .iter()
+            .map(|action| base.chance_weight(action))
+            .collect::<Vec<_>>();
+        let mut expected_rng = SplitMix64::new(0xD1CE);
+        let expected_samples = (0..64)
+            .map(|_| base.sample_chance(&mut expected_rng))
+            .collect::<Vec<_>>();
+
+        for dice_mode in [
+            DiceMode::Unknown,
+            DiceMode::Random,
+            DiceMode::Balanced,
+            DiceMode::Unsupported,
+        ] {
+            let mut state = base.clone();
+            state.dice_mode = dice_mode;
+            assert_eq!(state.state_hash(), expected_hash);
+            assert_eq!(
+                state
+                    .legal_actions()
+                    .iter()
+                    .map(|action| state.chance_weight(action))
+                    .collect::<Vec<_>>(),
+                expected_weights
+            );
+            let mut rng = SplitMix64::new(0xD1CE);
+            let samples = (0..64)
+                .map(|_| state.sample_chance(&mut rng))
+                .collect::<Vec<_>>();
+            assert_eq!(samples, expected_samples);
         }
     }
 

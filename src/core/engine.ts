@@ -11,7 +11,7 @@ import {
   type Resource,
   type ResourceVector,
 } from "./resources";
-import { NUMBER_PIPS, type BoardSnapshot } from "./placement";
+import { NUMBER_PIPS, type BoardSnapshot, type DiceMode } from "./placement";
 import { getPlayerEstimate } from "./tracker";
 import type { HandWorld, TrackerState } from "./types";
 import {
@@ -282,6 +282,8 @@ export interface DecisionSearchConstraints {
 
 export interface DeepSearchResult {
   engineRevision: string;
+  diceMode: DiceMode;
+  chanceModel: "fair-iid-2d6";
   rootIndex: number;
   learnedModelVersion?: string;
   tradeModelVersion?: string;

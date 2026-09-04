@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import type { DecisionTrace } from "../src/core/decision-trace";
-import { CompactGameBuilder } from "../src/core/llm-record";
-import type { BoardSnapshot } from "../src/core/placement";
+import {
+  CompactGameBuilder,
+  normalizeCompactRecordIntegrity,
+} from "../src/core/llm-record";
+import type { BoardSnapshot, DiceMode } from "../src/core/placement";
 import type { ResourceVector } from "../src/core/resources";
 
 const resources = (
@@ -44,6 +47,19 @@ const captureBase = {
   events: [],
 };
 
+const diceBoard = (
+  diceMode: DiceMode,
+  observedAt: number,
+  diceModeRaw?: number,
+): BoardSnapshot => ({
+  hexes: [],
+  vertices: [],
+  edges: [],
+  diceMode,
+  ...(diceModeRaw !== undefined ? { diceModeRaw } : {}),
+  observedAt,
+});
+
 const encodedDisplay = (stateHash: string, finalAction: unknown): string => {
   const builder = new CompactGameBuilder();
   const record = builder.apply(
@@ -58,6 +74,128 @@ const encodedDisplay = (stateHash: string, finalAction: unknown): string => {
 };
 
 describe("compact LLM game record", () => {
+  it("records canonical dice mode and forensic unsupported raw evidence", () => {
+    for (const [diceMode, raw] of [
+      ["random", undefined],
+      ["balanced", undefined],
+      ["unsupported", 2],
+    ] as const) {
+      const builder = new CompactGameBuilder();
+      const record = builder.apply(
+        {
+          ...captureBase,
+          decisions: [],
+          board: diceBoard(diceMode, 1_100, raw),
+        },
+        false,
+      );
+      expect(record.meta.diceMode).toBe(diceMode);
+      expect(record.meta.diceModeRaw).toBe(raw);
+    }
+  });
+
+  it("normalizes legacy evidence without dice mode to Unknown", () => {
+    const builder = new CompactGameBuilder();
+    const current = builder.apply(
+      {
+        ...captureBase,
+        decisions: [],
+        board: diceBoard("unknown", 1_100),
+      },
+      false,
+    );
+    const legacy = structuredClone(current);
+    delete (legacy.meta as Partial<typeof legacy.meta>).diceMode;
+
+    expect(normalizeCompactRecordIntegrity(legacy).meta.diceMode).toBe("unknown");
+  });
+
+  it("upgrades Unknown dice evidence when a later active observation becomes known", () => {
+    const builder = new CompactGameBuilder();
+    builder.apply(
+      {
+        ...captureBase,
+        decisions: [],
+        board: diceBoard("unknown", 1_100),
+      },
+      false,
+    );
+    const record = builder.apply(
+      {
+        ...captureBase,
+        decisions: [],
+        board: diceBoard("balanced", 1_200),
+      },
+      false,
+    );
+
+    expect(record.meta.diceMode).toBe("balanced");
+    expect(record.meta.diceModeConflicts).toBeUndefined();
+  });
+
+  it("preserves conflicting known dice observations without overwriting established evidence", () => {
+    const builder = new CompactGameBuilder();
+    builder.apply(
+      {
+        ...captureBase,
+        decisions: [],
+        board: diceBoard("random", 1_100),
+      },
+      false,
+    );
+    const record = builder.apply(
+      {
+        ...captureBase,
+        decisions: [],
+        board: diceBoard("balanced", 1_200),
+      },
+      false,
+    );
+
+    expect(record.meta.diceMode).toBe("random");
+    expect(record.meta.diceModeConflicts).toEqual([
+      expect.objectContaining({
+        established: "random",
+        observed: "balanced",
+        observedAt: 1_200,
+      }),
+    ]);
+    expect(record.meta.integrityIssues).toContain("dice-mode-conflict");
+  });
+
+  it("treats different raw Unsupported values as contradictory evidence", () => {
+    const builder = new CompactGameBuilder();
+    builder.apply(
+      {
+        ...captureBase,
+        decisions: [],
+        board: diceBoard("unsupported", 1_100, 2),
+      },
+      false,
+    );
+    const record = builder.apply(
+      {
+        ...captureBase,
+        decisions: [],
+        board: diceBoard("unsupported", 1_200, 3),
+      },
+      false,
+    );
+
+    expect(record.meta.diceMode).toBe("unsupported");
+    expect(record.meta.diceModeRaw).toBe(2);
+    expect(record.meta.diceModeConflicts).toEqual([
+      expect.objectContaining({
+        established: "unsupported",
+        observed: "unsupported",
+        observedAt: 1_200,
+        establishedRawSetting: 2,
+        rawObservedSetting: 3,
+      }),
+    ]);
+    expect(record.meta.integrityIssues).toContain("dice-mode-conflict");
+  });
+
   it("preserves execution-significant live action payloads", () => {
     expect(
       encodedDisplay("discard", {
@@ -138,6 +276,7 @@ describe("compact LLM game record", () => {
       hexes: [],
       vertices: [],
       edges: [],
+      diceMode: "unknown",
       observedAt: 1_000,
       ownHand: resources(2, 1, 0, 3, 0),
     };

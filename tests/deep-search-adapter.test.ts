@@ -157,6 +157,7 @@ const board: BoardSnapshot = {
     { id: "e0", vertices: ["v0", "v1"] },
     { id: "e1", vertices: ["v1", "v2"] },
   ],
+  diceMode: "unknown",
   myPlayer: "You",
   ownHand: resources(1, 1, 1, 1, 0),
   ownDevelopmentCards: {
@@ -211,6 +212,25 @@ const board: BoardSnapshot = {
 };
 
 describe("deep-search state adapter", () => {
+  it("propagates all four canonical dice modes without changing the search seed", () => {
+    const modes = ["unknown", "random", "balanced", "unsupported"] as const;
+    const built = modes.map((diceMode) =>
+      buildDeepSearchRequest(
+        state,
+        {
+          ...board,
+          diceMode,
+          ...(diceMode === "unsupported" ? { diceModeRaw: 2 } : {}),
+        },
+        "You",
+      ),
+    );
+
+    expect(built.map(({ request }) => request.state.diceMode)).toEqual(modes);
+    expect(new Set(built.map(({ request }) => request.seed)).size).toBe(1);
+    expect(built[3]?.request.state).not.toHaveProperty("diceModeRaw");
+  });
+
   it("preserves exact resource worlds and weights when no lossy sample is needed", () => {
     const source = [
       {
