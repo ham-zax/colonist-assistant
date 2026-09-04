@@ -39,12 +39,12 @@ The v320 preserved session has **no live gameplay protocol capture**. Static cli
 - `disablePlayerTrades` being our assistant/root-seat policy, not a Colonist room toggle;
 - live board/resource/port geometry being read from the instantiated Colonist board rather than regenerated locally.
 
-### Confirmed current defects / gaps
+### Resolved and remaining fidelity gaps
 
-1. **Bank-shortage production:** CPU and CUDA currently give nobody a resource whenever aggregate demand exceeds the bank. Base CATAN rules require a special single-recipient branch: if only one player is owed that resource, that player receives all remaining cards of that type.
-2. **Balanced-Dice stochastic fidelity:** dice mode is now observable and propagated as behavior-inert metadata, but search and opening economics intentionally still use the fair i.i.d. 2d6 model until E3 establishes a defensible Balanced transition model.
-3. **Synthetic board distribution:** `Board::standard()` freely shuffles all number tokens. Colonist distinguishes ordinary `Classic4P` from `Classic4PRandom` (“Base Random” / no fixed numbers). Live recommendations are unaffected because they ingest the observed board, but synthetic benchmark/training boards are not a faithful sample of ordinary Colonist Classic4P setup.
-4. **Player-count architecture:** state, WASM, search value vectors, embargo encoding, CUDA layouts, feature normalization, bank/development-card constants, and arena validation are intentionally 4-player-shaped. Future 5–8P support is a contract migration, not a constant bump.
+1. **Bank-shortage production — repaired:** CPU and CUDA now implement the base-game single-recipient shortage branch: if only one player is owed a scarce resource, that player receives all remaining cards of that type; multi-recipient shortage still pays nobody.
+2. **Balanced-Dice stochastic fidelity — bounded approximation:** live runtime now confirms that the assistant can observe `Balanced` exactly (`diceSetting = 1` in `game4519`) and that ordinary Roll sends only the semantic `ClickedDice` action while the realized dice pair arrives in server state. The investigated client does not expose a sufficient balancing state or authoritative transition function, so search and opening economics intentionally retain the fair i.i.d. 2d6 model rather than inventing exact conditional probabilities.
+3. **Synthetic board distribution — repaired for offline generation:** F2 splits the historical fully randomized generator into explicit `legacy-randomized-v1` and repository-defined legal `classic4p-v1` contracts. Ordinary 4P benchmark/training generation uses Classic V1; parity/tactical/stress fixtures preserve legacy semantics. Live recommendations remain unaffected because they ingest the observed board.
+4. **Player-count architecture — remaining gap:** state, WASM, search value vectors, embargo encoding, CUDA layouts, feature normalization, bank/development-card constants, and arena validation are intentionally 4-player-shaped. Future 5–8P support is a contract migration, not a constant bump.
 
 ### Important approximations, not rules bugs
 
@@ -128,9 +128,9 @@ PredefinedDiceSequenceDeleted = 3
 
 Room-state data maps the incoming `diceType` into `gameSetting.diceSetting`. The client sends a `ClickedDice` intent and consumes dice state containing `diceThrown`, `dice1`, and `dice2`.
 
-**Important runtime caveat:** the preserved D2 browser session stayed in the lobby. `rootStoreState` and `gameController` were not instantiated, so `rootStoreState.gameSettings.diceSetting` was **not directly evaluated in an active game** in the archived runtime capture.
+The earlier preserved D2 browser capture stayed in the lobby, but E3 subsequently inspected live game `game4519` and directly observed both `gameController.gameSettings.diceSetting = 1` and active-store `gameSettings.diceSetting = 1`.
 
-**Status:** **Shipped-client contract established; active-game runtime capture still desirable.**
+**Status:** **Shipped-client contract and active-game Balanced-mode observability established.**
 
 ### 2.3 Dice-mode observability and propagation
 
@@ -149,21 +149,21 @@ Preserved v320 values `2 = StressTestSequence` and `3 = PredefinedDiceSequenceDe
 
 Legacy/untrusted snapshots that omit the field normalize immediately to `Unknown`. Missing active-game store access remains `Unknown`, never Random. The assistant does not infer dice mode from room type, privacy, custom-room defaults, or neighboring settings. Compact `catan-evidence/2` metadata may upgrade `Unknown` to a later known observation, but known-to-different-known observations are preserved as integrity conflicts rather than overwritten. That raw distinction is also preserved for `Unsupported(raw=2)` followed by `Unsupported(raw=3)`.
 
-**Archived-runtime caveat:** the preserved D2 browser session remained in the lobby, so `rootStoreState.gameSettings.diceSetting` was not directly evaluated in an active game during that capture. The shipped-client/static dataflow is established, but an active-game runtime capture remains desirable corroborating evidence.
+E3 closed the active-game corroboration gap in live game `game4519`: both the controller and active game store reported `diceSetting = 1` (`Balanced`). The normal Roll path sends `ClickedDice` with no chosen dice pair, random value, probability vector, or RNG seed; the realized `dice1`/`dice2` values arrive later through server state updates.
 
-**Status:** **Local observability/propagation gap repaired; active-game archived runtime capture still absent.**
+**Status:** **Local observability/propagation repaired and live active-game Balanced mode directly verified.**
 
 ### 2.4 Balanced Dice model
 
 Colonist's first-party Balanced Dice article describes a stateful dice-deck plus recent-roll weighting mechanism. Its prose and linked updated sample code have differed on tuning constants.
 
-**Safe conclusion:** Balanced Dice is stateful/non-i.i.d.; a second static pip table is not an exact stochastic model.
+**Safe conclusion:** Balanced Dice is stateful/non-i.i.d.; a second static pip table is not an exact stochastic model. Live E3 evidence establishes the mode and the server-authority boundary, not the private conditional transition law.
 
-**Unsafe conclusion:** a published reshuffle threshold or weighting constant is proven to be the live v320 production-server contract.
+**Unsafe conclusion:** a published reshuffle threshold, weighting constant, or finite observed roll history is proven to be the current production-server contract or sufficient to derive the exact next-roll distribution.
 
-**Current engine:** all chance-search paths still use the ordinary fair-i.i.d.-2d6 `GameState::chance_weight()` model and opening ETAs still use `/36` fair-dice expectation. E2 does not change chance weights, chance sampling, state/public/observation hashes, search seeds, opening economics, CUDA packed state, CUDA dice generation, or PTX.
+**Current engine:** all chance-search paths still use the ordinary fair-i.i.d.-2d6 `GameState::chance_weight()` model and opening ETAs still use `/36` fair-dice expectation. This remains a defensible long-run placement/production prior: central totals such as 5/6/8/9 receive more weight than edge totals such as 2/12, while no claim is made that these are Colonist Balanced Dice's exact conditional next-roll probabilities. Dice mode does not alter chance weights, chance sampling, state/public/observation hashes, search seeds, opening economics, CUDA packed state, CUDA dice generation, or PTX.
 
-**Status:** **Approximate under Balanced Dice.** E2 exposes the observed mode and the fair-i.i.d.-2d6 diagnostic status; Balanced stochastic behavior remains deferred to E3.
+**Status:** **NOT MODELABLE FROM CURRENT OBSERVABILITY for exact conditional Balanced probabilities.** The observed `Balanced` mode is exact metadata; the stochastic engine intentionally remains fair-i.i.d.-2d6 until authoritative server algorithm/state evidence exists.
 
 ---
 
@@ -314,26 +314,19 @@ Do not describe `classic4p-v1` as reproducing Colonist server seed-to-board mapp
 
 ---
 
-## 7. Current opening B2/B3 working-tree observations
+## 7. Opening B2/B3 integrated status
 
-This documentation branch intentionally does not contain the uncommitted B2/B3 implementation. The active `main` checkout was observed separately on 2026-09-04 with:
-
-```text
-MM engine/crates/catan-search/src/opening.rs
-AM engine/crates/catan-search/src/opening_recorded_tests.rs
-```
-
-The current full dirty diff relative to `8cc6cfc` includes two conceptually separate repairs.
+The B2/B3 opening repairs are integrated on `main` and were independently reviewed before integration.
 
 ### 7.1 B2 completion authority
 
-The opening solver now carries `endpoint_complete` alongside values so a cut-off partial setup score cannot become authoritative merely because some other continuation under the root reached a complete snake-draft endpoint.
+The opening solver carries `endpoint_complete` alongside values so a cut-off partial setup score cannot become authoritative merely because some other continuation under the root reached a complete snake-draft endpoint.
 
-**Status:** separate implementation lane; not part of this evidence branch.
+**Status:** integrated and reviewed.
 
 ### 7.2 B3 build economy
 
-The latest dirty version:
+The integrated version:
 
 - values road/settlement/city/development build access using complete costs rather than independent per-resource proxies;
 - includes each player's deterministic setup hand, not only the root's;
@@ -343,7 +336,7 @@ The latest dirty version:
 
 An earlier intermediate version discarded opponents' setup hands in the new build-economy term; that issue had already been corrected by the time this document was written. Do not resurrect the stale finding.
 
-**Remaining rule-fidelity dependency:** propagated dice mode now identifies when the fair-i.i.d. assumption is only approximate, but an exact Balanced stochastic replacement still needs separate E3 evidence/modeling.
+**Balanced-Dice boundary:** propagated dice mode identifies when the fair-i.i.d. model is only an approximation. E3 established that exact conditional Balanced probabilities are not identifiable from current client observability, so no stochastic replacement is justified without new authoritative server algorithm/state evidence.
 
 ---
 
@@ -351,9 +344,9 @@ An earlier intermediate version discarded opponents' setup hands in the new buil
 
 | ID | Area | Current status | Severity / scope | Authoritative owner(s) | Recommended treatment |
 |---|---|---|---|---|---|
-| RF-01 | Single-recipient bank shortage | **Mismatch** | Base-game CPU/GPU correctness | `catan-core::produce`, CUDA `produce_roll` + parity contracts | Separate focused rules repair |
-| RF-02 | Dice-mode bridge | **Repaired in E2: behavior-inert metadata** | All live games | page bridge, `BoardSnapshot`, worker/WASM input, `GameState`, evidence metadata | Preserve `Unknown/Random/Balanced/Unsupported`; keep unsupported raw values evidence-only; do not retune stochastic behavior in E2 |
-| RF-03 | Balanced stochastic search | **Approximation** | Balanced games | chance-state model + search/evaluator consumers | Do not use a static alternate pip table; research/version exact model separately |
+| RF-01 | Single-recipient bank shortage | **Repaired in D1** | Base-game CPU/GPU correctness | `catan-core::produce`, CUDA `produce_roll` + parity contracts | Preserve single-recipient payout and multi-recipient no-payout parity |
+| RF-02 | Dice-mode bridge | **Repaired in E2; live-verified in E3** | All live games | page bridge, `BoardSnapshot`, worker/WASM input, `GameState`, evidence metadata | Preserve `Unknown/Random/Balanced/Unsupported`; keep unsupported raw values evidence-only |
+| RF-03 | Balanced stochastic search | **Bounded approximation; exact model not identifiable from current client observability** | Balanced games | chance-state model + search/evaluator consumers | Keep fair-i.i.d.-2d6 as explicit approximation; do not invent a static alternate pip table or hidden transition law |
 | RF-04 | Synthetic Classic4P map | **Contract split implemented** | Offline benchmarks/training only | explicit `classic4p-v1` / `legacy-randomized-v1` generation + arena provenance | Preserve legacy seed identity; use Classic V1 only where ordinary 4P realism is intended |
 | RF-05 | Robber production heuristic | **Intentional approximation** | Evaluator, not rules transition | `production_pips` and robber-related evaluator terms | Keep labeled as future-value heuristic; do not confuse with current production rules |
 | RF-06 | Opponent domestic trade in opening ETA | **Intentional omission** | Opening strength model | opening evaluator | Only add calibrated trade-opportunity value if evidence justifies it |
