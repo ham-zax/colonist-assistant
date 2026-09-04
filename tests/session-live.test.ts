@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { GameSession } from "../src/content/session";
+import { parseBankShortageNotice } from "../src/core/parser";
 
 const localStorage = new Map<string, unknown>();
 let beforeNextSet: (() => Promise<void>) | undefined;
@@ -68,6 +69,42 @@ const rollPlayers = (session: GameSession): string[] =>
   );
 
 describe("live log session scanning", () => {
+  it("recognizes a Colonist bank-shortage notice without failing integrity", async () => {
+    const text =
+      "Not enough wool for all players. 2 are left, and 3 were needed.";
+    expect(
+      parseBankShortageNotice({
+        visibleText: text,
+        serialText: text,
+        language: "en",
+      }),
+    ).toEqual({
+      type: "bank-shortage",
+      resource: "wool",
+      bankCount: 2,
+      requiredCount: 3,
+    });
+
+    const root = document.createElement("div");
+    root.append(message(0, text));
+    document.body.append(root);
+    const session = new GameSession(root, vi.fn(), "bank-shortage-game");
+
+    await session.start();
+
+    expect(session.events).toEqual([]);
+    expect(session.unmatchedCount).toBe(1);
+    expect(session.unmatchedIntegrityCount).toBe(0);
+    expect(session.unmatchedSamples).toEqual([
+      expect.objectContaining({
+        reason: "known-bank-shortage-notice",
+        affectsIntegrity: false,
+        sample: text,
+      }),
+    ]);
+    session.stop();
+  });
+
   it("ingests a new message when a virtualized element is reused", async () => {
     const root = document.createElement("div");
     const entry = message(0, "Alice rolled");

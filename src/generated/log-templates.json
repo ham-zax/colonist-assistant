@@ -149,6 +149,7 @@
     "playerSelectedFromGoldTile": "{{playerName}} selected {{cardsString}} from gold tile",
     "playerSelectedFromAqueduct": "{{playerName}} selected {{cardsString}} from Aqueduct",
     "playerTookFromBank": "{{playerName}} took from bank {{cardString}}",
+    "notEnoughCardsInBankForPlayer_all": "Not enough {{cardString}} for all players. {{bankCount}} are left, and {{requiredCount}} were needed.",
     "playerDiscarded": "{{playerName}} discarded {{cardString}}",
     "stolenResourceThief": "You stole {{cardString}} from {{playerName}}",
     "stolenResourceVictim": "{{playerName}} stole {{cardString}} from you",

@@ -1,4 +1,4 @@
-import { parseLogSnapshot } from "../core/parser";
+import { parseBankShortageNotice, parseLogSnapshot } from "../core/parser";
 import { createTrackerState, reduceTracker, replayEvents } from "../core/tracker";
 import type { StoredEvent, TrackerEvent, TrackerState } from "../core/types";
 import {
@@ -18,6 +18,7 @@ import {
 import { isExtensionContextInvalidatedError } from "./extension-context";
 
 export type UnmatchedLogReason =
+  | "known-bank-shortage-notice"
   | "known-ignored-system-message"
   | "known-redundant-trade-offer"
   | "known-redundant-robber-move"
@@ -66,9 +67,16 @@ export interface SessionSummary {
 const MAX_STORED_EVENTS = 1600;
 
 const classifyUnmatchedLog = (
-  serialText: string,
+  snapshot: Parameters<typeof parseLogSnapshot>[0],
 ): { reason: UnmatchedLogReason; affectsIntegrity: boolean } => {
-  const normalized = serialText.replace(/\s+/gu, " ").trim();
+  if (parseBankShortageNotice(snapshot)) {
+    // Bank-shortage warnings are real game evidence, but they are not a
+    // resource-transfer event by themselves. The following production log
+    // entries carry the actual cards received, so keep this as a recognized,
+    // non-mutating notice rather than corrupting hidden-hand tracking.
+    return { reason: "known-bank-shortage-notice", affectsIntegrity: false };
+  }
+  const normalized = snapshot.serialText.replace(/\s+/gu, " ").trim();
   if (/^happy settling!|\blist of commands:\s*\/help\b/iu.test(normalized)) {
     return { reason: "known-ignored-system-message", affectsIntegrity: false };
   }
@@ -423,7 +431,7 @@ export class GameSession {
       if (!snapshot) continue;
       const parsed = parseLogSnapshot(snapshot);
       if (!parsed) {
-        const classification = classifyUnmatchedLog(snapshot.serialText);
+        const classification = classifyUnmatchedLog(snapshot);
         this.unmatchedCount += 1;
         if (classification.affectsIntegrity) this.unmatchedIntegrityCount += 1;
         this.recordUnmatched(snapshot.serialText, snapshot.index, classification);

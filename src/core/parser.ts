@@ -25,7 +25,12 @@ const PLAYER_FIELDS = new Set([
   "playerNameVictim",
   "acceptingPlayerName",
 ]);
-const NUMBER_FIELDS = new Set(["amountStolen", "count", "bankCount"]);
+const NUMBER_FIELDS = new Set([
+  "amountStolen",
+  "count",
+  "bankCount",
+  "requiredCount",
+]);
 const regexCache = new Map<string, RegExp>();
 
 const escapeRegex = (value: string): string =>
@@ -149,6 +154,38 @@ const firstResource = (value: string): Resource | undefined => {
     [/\b(?:ore|stone)\b/, "ore"],
   ];
   return textRules.find(([pattern]) => pattern.test(lower))?.[1];
+};
+
+export interface BankShortageNotice {
+  type: "bank-shortage";
+  resource: Resource;
+  bankCount: number;
+  requiredCount: number;
+}
+
+export const parseBankShortageNotice = (
+  snapshot: ParsedLogSnapshot,
+): BankShortageNotice | undefined => {
+  const groups = matchTemplate(snapshot, "notEnoughCardsInBankForPlayer_all");
+  if (!groups) return undefined;
+  const resource = firstResource(groups.cardString ?? snapshot.serialText);
+  const bankCount = Number(groups.bankCount);
+  const requiredCount = Number(groups.requiredCount);
+  if (
+    !resource ||
+    !Number.isSafeInteger(bankCount) ||
+    bankCount < 0 ||
+    !Number.isSafeInteger(requiredCount) ||
+    requiredCount < 1
+  ) {
+    return undefined;
+  }
+  return {
+    type: "bank-shortage",
+    resource,
+    bankCount,
+    requiredCount,
+  };
 };
 
 const countToken = (value: string, token: string): number =>

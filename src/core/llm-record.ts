@@ -17,6 +17,7 @@ type Scalar = string | number | boolean | null;
 type CompactCell = Scalar | number[] | string[];
 type CompactRow = CompactCell[];
 type UnmatchedLogReason =
+  | "known-bank-shortage-notice"
   | "known-ignored-system-message"
   | "known-redundant-trade-offer"
   | "known-redundant-robber-move"
