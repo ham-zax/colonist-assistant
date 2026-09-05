@@ -1096,13 +1096,22 @@ impl GameState {
                 }
             }
         }
-        if self.domestic_trade_allowed_for(self.current_player) && self.domestic_trade_count < 2 {
-            actions.extend(self.generated_domestic_trade_offers());
-        }
+        actions.extend(self.domestic_trade_offer_candidates(&self.bank));
         actions
     }
 
-    fn generated_domestic_trade_offers(&self) -> Vec<Action> {
+    /// Generates bounded domestic-trade proposal candidates using `bank_view`
+    /// only to decide whether an equivalent maritime conversion makes a
+    /// one-card request redundant. This is proposal pruning, not transition
+    /// legality: `legal_actions()` passes the exact bank, while imperfect-
+    /// information search may supply an observation-safe bank view.
+    pub fn domestic_trade_offer_candidates(&self, bank_view: &ResourceHand) -> Vec<Action> {
+        if self.phase != Phase::Main
+            || !self.domestic_trade_allowed_for(self.current_player)
+            || self.domestic_trade_count >= 2
+        {
+            return Vec::new();
+        }
         let player = &self.players[self.current_player as usize];
         let recipients = self.domestic_trade_recipients_for(self.current_player);
         if recipients == 0 {
@@ -1264,7 +1273,7 @@ impl GameState {
                     })
                     .flatten();
                 let maritime_dominated = requested_resource.is_some_and(|requested| {
-                    self.bank[requested.index()] > 0
+                    bank_view[requested.index()] > 0
                         && Resource::ALL
                             .iter()
                             .any(|resource| give[resource.index()] >= ratios[resource.index()])

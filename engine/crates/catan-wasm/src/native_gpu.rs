@@ -1778,6 +1778,60 @@ mod hidden_bank_tests {
         (left, right)
     }
 
+    fn hidden_bank_domestic_offer_pair() -> (GameState, GameState) {
+        let mut left = GameState::standard(433, 3);
+        while matches!(left.phase, Phase::SetupSettlement | Phase::SetupRoad { .. }) {
+            let action = left.legal_actions()[0].clone();
+            left.apply(&action).unwrap();
+        }
+        left.phase = Phase::Main;
+        left.current_player = 0;
+        left.bank_is_public = false;
+        for player in &mut left.players {
+            player.resources = [0; 5];
+        }
+        left.bank = [19; 5];
+        left.players[0].resources[Resource::Lumber.index()] = 4;
+        left.bank[Resource::Lumber.index()] = 15;
+        left.players[1].resources[Resource::Brick.index()] = 19;
+        left.bank[Resource::Brick.index()] = 0;
+
+        let mut right = left.clone();
+        right.players[1].resources[Resource::Brick.index()] -= 1;
+        right.players[1].resources[Resource::Ore.index()] += 1;
+        right.bank[Resource::Brick.index()] += 1;
+        right.bank[Resource::Ore.index()] -= 1;
+
+        left.validate().unwrap();
+        right.validate().unwrap();
+        assert_eq!(left.observation_hash(0), right.observation_hash(0));
+        (left, right)
+    }
+
+    #[test]
+    fn hidden_bank_native_gpu_root_domain_includes_domestic_offers_observation_safely() {
+        let (left, right) = hidden_bank_domestic_offer_pair();
+        let recipients = ((1u8 << left.board.num_players) - 1) & !1u8;
+        let target = Action::OfferTrade {
+            recipients,
+            give: [4, 0, 0, 0, 0],
+            receive: [0, 1, 0, 0, 0],
+        };
+        assert!(left.legal_actions().contains(&target));
+        assert!(!right.legal_actions().contains(&target));
+
+        let left_roots = actor_gpu_root_candidates(&left, 0, &[])
+            .into_iter()
+            .map(|(action, _)| action)
+            .collect::<Vec<_>>();
+        let right_roots = actor_gpu_root_candidates(&right, 0, &[])
+            .into_iter()
+            .map(|(action, _)| action)
+            .collect::<Vec<_>>();
+        assert_eq!(left_roots, right_roots);
+        assert!(left_roots.contains(&target));
+    }
+
     #[test]
     fn hidden_bank_native_gpu_root_domain_is_observation_safe() {
         let (left, right) = hidden_bank_observation_pair();

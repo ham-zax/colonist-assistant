@@ -4206,6 +4206,78 @@ mod tests {
         );
     }
 
+    fn hidden_bank_domestic_offer_pair_for_root() -> (GameState, GameState) {
+        let mut left = GameState::standard(241, 3);
+        while matches!(left.phase, Phase::SetupSettlement | Phase::SetupRoad { .. }) {
+            let action = left.legal_actions()[0].clone();
+            left.apply(&action).unwrap();
+        }
+        left.phase = Phase::Main;
+        left.current_player = 0;
+        left.bank_is_public = false;
+        for player in &mut left.players {
+            player.resources = [0; 5];
+        }
+        left.bank = [19; 5];
+        left.players[0].resources[Resource::Lumber.index()] = 4;
+        left.bank[Resource::Lumber.index()] = 15;
+        left.players[1].resources[Resource::Brick.index()] = 19;
+        left.bank[Resource::Brick.index()] = 0;
+
+        let mut right = left.clone();
+        right.players[1].resources[Resource::Brick.index()] -= 1;
+        right.players[1].resources[Resource::Ore.index()] += 1;
+        right.bank[Resource::Brick.index()] += 1;
+        right.bank[Resource::Ore.index()] -= 1;
+
+        left.validate().unwrap();
+        right.validate().unwrap();
+        assert_eq!(left.observation_hash(0), right.observation_hash(0));
+        (left, right)
+    }
+
+    #[test]
+    fn belief_root_domain_is_observation_safe_for_hidden_bank_domestic_offer() {
+        let (left, right) = hidden_bank_domestic_offer_pair_for_root();
+        let recipients = ((1u8 << left.board.num_players) - 1) & !1u8;
+        let target = Action::OfferTrade {
+            recipients,
+            give: [4, 0, 0, 0, 0],
+            receive: [0, 1, 0, 0, 0],
+        };
+        assert!(left.legal_actions().contains(&target));
+        assert!(!right.legal_actions().contains(&target));
+
+        let left_ranked = normalize_belief_root_priors(
+            &[BeliefParticle {
+                state: left,
+                weight: 1.0,
+            }],
+            0,
+            1_000,
+        );
+        let right_ranked = normalize_belief_root_priors(
+            &[BeliefParticle {
+                state: right,
+                weight: 1.0,
+            }],
+            0,
+            1_000,
+        );
+        let canonical = |ranked: Vec<(Action, f32)>| {
+            let mut actions = ranked
+                .into_iter()
+                .map(|(action, _)| action)
+                .collect::<Vec<_>>();
+            actions.sort_by(|left, right| format!("{left:?}").cmp(&format!("{right:?}")));
+            actions
+        };
+        let left_actions = canonical(left_ranked);
+        let right_actions = canonical(right_ranked);
+        assert_eq!(left_actions, right_actions);
+        assert!(left_actions.contains(&target));
+    }
+
     #[test]
     fn belief_root_priors_apply_the_whole_turn_planner_before_truncation() {
         let mut state = GameState::standard(107, 3);

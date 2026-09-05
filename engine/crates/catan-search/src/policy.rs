@@ -38,10 +38,14 @@ pub fn actor_proposal_actions(state: &GameState) -> Vec<Action> {
     } else {
         guaranteed_hidden_bank_lower_bound(state, actor)
     };
-    state
+    let mut proposals = state
         .legal_actions()
         .into_iter()
         .filter(|action| match action {
+            // Exact legal-action generation may prune a domestic offer because
+            // the sampled bank makes an equivalent maritime trade available.
+            // Rebuild this proposal family below from the actor-safe bank view.
+            Action::OfferTrade { .. } => false,
             Action::MaritimeTrade { receive, .. } => bank[receive.index()] > 0,
             Action::PlayYearOfPlenty { first, second } if first == second => {
                 bank[first.index()] >= 2
@@ -51,7 +55,9 @@ pub fn actor_proposal_actions(state: &GameState) -> Vec<Action> {
             }
             _ => true,
         })
-        .collect()
+        .collect::<Vec<_>>();
+    proposals.extend(state.domestic_trade_offer_candidates(&bank));
+    proposals
 }
 
 pub fn action_class(action: &Action) -> ActionClass {
@@ -1079,6 +1085,59 @@ mod tests {
         right.validate().unwrap();
         assert_eq!(left.observation_hash(0), right.observation_hash(0));
         (left, right)
+    }
+
+    fn hidden_bank_domestic_offer_pair() -> (GameState, GameState) {
+        let mut left = GameState::standard(239, 3);
+        while matches!(left.phase, Phase::SetupSettlement | Phase::SetupRoad { .. }) {
+            let action = left.legal_actions()[0].clone();
+            left.apply(&action).unwrap();
+        }
+        left.phase = Phase::Main;
+        left.current_player = 0;
+        left.bank_is_public = false;
+        for player in &mut left.players {
+            player.resources = [0; 5];
+        }
+        left.bank = [19; 5];
+        left.players[0].resources[Resource::Lumber.index()] = 4;
+        left.bank[Resource::Lumber.index()] = 15;
+        left.players[1].resources[Resource::Brick.index()] = 19;
+        left.bank[Resource::Brick.index()] = 0;
+
+        let mut right = left.clone();
+        right.players[1].resources[Resource::Brick.index()] -= 1;
+        right.players[1].resources[Resource::Ore.index()] += 1;
+        right.bank[Resource::Brick.index()] += 1;
+        right.bank[Resource::Ore.index()] -= 1;
+
+        left.validate().unwrap();
+        right.validate().unwrap();
+        assert_eq!(left.observation_hash(0), right.observation_hash(0));
+        (left, right)
+    }
+
+    #[test]
+    fn hidden_bank_complete_actor_proposal_domain_is_observation_safe_for_domestic_offer() {
+        let (left, right) = hidden_bank_domestic_offer_pair();
+        let recipients = ((1u8 << left.board.num_players) - 1) & !1u8;
+        let target = Action::OfferTrade {
+            recipients,
+            give: [4, 0, 0, 0, 0],
+            receive: [0, 1, 0, 0, 0],
+        };
+
+        assert!(left.legal_actions().contains(&target));
+        assert!(!right.legal_actions().contains(&target));
+        let mut left_transition = left.clone();
+        let mut right_transition = right.clone();
+        assert!(left_transition.apply(&target).is_ok());
+        assert!(right_transition.apply(&target).is_ok());
+
+        let left_proposals = actor_proposal_actions(&left);
+        let right_proposals = actor_proposal_actions(&right);
+        assert_eq!(left_proposals, right_proposals);
+        assert!(left_proposals.contains(&target));
     }
 
     #[test]
