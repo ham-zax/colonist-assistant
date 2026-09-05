@@ -5,11 +5,13 @@ use std::rc::Rc;
 use colonist_catan_core::{Action, GameState, NodeKind, Phase};
 
 use crate::deadline::CooperativeDeadline;
-use crate::eval::{evaluate, strategic_utility};
+use crate::eval::{RoadIntent, evaluate, road_intent, strategic_utility};
 use crate::exact::{
     DEVELOPMENT_EXACT_FAMILIES, ExactActionFamily, ExactDecisionResult, exact_family_for_action,
     solve_exact_belief_excluding_controlled,
 };
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+use crate::exact::solve_exact_belief;
 use crate::mcts::BeliefParticle;
 use crate::opening::opening_adjusted_priors;
 use crate::opening::{OpeningConfig, solve_opening};
@@ -23,7 +25,8 @@ use crate::root_impact::{
     compute_spatial_root_impacts,
 };
 use crate::shared::{
-    admit_promoted_roots, coalesce_identical_particles, select_experimental_strategic_particles,
+    admit_promoted_roots, coalesce_identical_particles, immediate_winning_roots,
+    select_experimental_strategic_particles,
 };
 use crate::threats::{
     RoadCutContinuationAssessment, belief_road_cut_continuation_assessment, forced_loss_weight,
@@ -104,6 +107,7 @@ pub struct PrunedRootDiagnostic {
 pub struct RootCausalEvidence {
     pub action: Action,
     pub promotion_reason: Option<RootPromotionReason>,
+    pub road_intent: Option<RoadIntent>,
     /// Structural road vulnerability introduced or worsened by this root.
     pub introduced_road_fragility: IntroducedRoadFragility,
     /// Belief-weighted, legally proved opponent road -> settlement exploitation
@@ -120,6 +124,15 @@ pub struct RootCausalEvidence {
     pub dirty_monopoly_posterior: f32,
     pub trade_hard_veto_posterior: f32,
     pub trade_hard_veto: bool,
+}
+
+fn road_intent_for_root(state: &GameState, actor: u8, action: &Action) -> Option<RoadIntent> {
+    match action {
+        Action::BuildRoad { edge } | Action::PlaceRoad { edge } => {
+            Some(road_intent(state, *edge, actor))
+        }
+        _ => None,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -899,7 +912,11 @@ impl Searcher {
         let safe_ranked = ranked
             .iter()
             .filter(|(action, _)| {
-                belief_domestic_trade_threat(std::iter::once((state, 1.0)), action).is_none()
+                let mut next = state.clone();
+                let ends_game = next.apply(action).is_ok() && next.is_terminal();
+                ends_game
+                    || belief_domestic_trade_threat(std::iter::once((state, 1.0)), action)
+                        .is_none()
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -1074,12 +1091,14 @@ fn belief_search(
         let minimum = report
             .actions
             .iter()
+            .filter(|candidate| candidate.authoritative)
             .map(|candidate| candidate.value)
             .reduce(f32::min)
             .unwrap_or(0.0);
         let maximum = report
             .actions
             .iter()
+            .filter(|candidate| candidate.authoritative)
             .map(|candidate| candidate.value)
             .reduce(f32::max)
             .unwrap_or(minimum);
@@ -1091,6 +1110,7 @@ fn belief_search(
         let action_values = report
             .actions
             .into_iter()
+            .filter(|candidate| candidate.authoritative)
             .map(|candidate| {
                 let normalized = if maximum > minimum {
                     (candidate.value - minimum) / (maximum - minimum)
@@ -1349,23 +1369,26 @@ fn belief_search(
             .map(|particle| (&particle.state, particle.weight)),
         observer,
     );
-    let verified_blockers = if immediate_threat_weight > f32::EPSILON {
-        root_scored
-            .iter()
-            .filter_map(|(action, _)| {
-                let residual_loss = forced_loss_weight(
-                    posterior
-                        .iter()
-                        .map(|particle| (&particle.state, particle.weight)),
-                    observer,
-                    action,
-                );
-                (residual_loss + 1e-6 < immediate_threat_weight)
-                    .then(|| (action.clone(), residual_loss))
-            })
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
+    let mut verified_blockers = immediate_winning_roots(first, observer, &root_scored);
+    if immediate_threat_weight > f32::EPSILON {
+        for (action, _) in &root_scored {
+            if verified_blockers
+                .iter()
+                .any(|(candidate, _)| candidate == action)
+            {
+                continue;
+            }
+            let residual_loss = forced_loss_weight(
+                posterior
+                    .iter()
+                    .map(|particle| (&particle.state, particle.weight)),
+                observer,
+                action,
+            );
+            if residual_loss + 1e-6 < immediate_threat_weight {
+                verified_blockers.push((action.clone(), residual_loss));
+            }
+        }
     };
     let root_actions_list: Vec<Action> = root_scored.iter().map(|(a, _)| a.clone()).collect();
     let closeout_plans = closeout_plans_from_ranked_diagnostics(&ranked_diagnostics);
@@ -1417,9 +1440,13 @@ fn belief_search(
             };
             let road_cut_continuation =
                 road_cut_continuation_for_root(posterior, observer, &candidate.action, impact);
+            let road_intent = particles.first().and_then(|particle| {
+                road_intent_for_root(&particle.state, observer, &candidate.action)
+            });
             RootCausalEvidence {
                 action: candidate.action.clone(),
                 promotion_reason: impact.and_then(|impact| impact.promotion),
+                road_intent,
                 introduced_road_fragility: impact
                     .map(|impact| impact.introduced_road_fragility.clone())
                     .unwrap_or_default(),
@@ -3139,23 +3166,26 @@ fn cuda_belief_search_with_batch(
             .map(|particle| (&particle.state, particle.weight)),
         observer,
     );
-    let verified_blockers = if immediate_threat_weight > f32::EPSILON {
-        root_scored
-            .iter()
-            .filter_map(|(action, _)| {
-                let residual_loss = forced_loss_weight(
-                    posterior
-                        .iter()
-                        .map(|particle| (&particle.state, particle.weight)),
-                    observer,
-                    action,
-                );
-                (residual_loss + 1e-6 < immediate_threat_weight)
-                    .then(|| (action.clone(), residual_loss))
-            })
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
+    let mut verified_blockers = immediate_winning_roots(first, observer, &root_scored);
+    if immediate_threat_weight > f32::EPSILON {
+        for (action, _) in &root_scored {
+            if verified_blockers
+                .iter()
+                .any(|(candidate, _)| candidate == action)
+            {
+                continue;
+            }
+            let residual_loss = forced_loss_weight(
+                posterior
+                    .iter()
+                    .map(|particle| (&particle.state, particle.weight)),
+                observer,
+                action,
+            );
+            if residual_loss + 1e-6 < immediate_threat_weight {
+                verified_blockers.push((action.clone(), residual_loss));
+            }
+        }
     };
     let root_actions_list: Vec<Action> = root_scored.iter().map(|(a, _)| a.clone()).collect();
     let closeout_plans = closeout_plans_from_ranked_diagnostics(&ranked_diagnostics);
@@ -3207,9 +3237,13 @@ fn cuda_belief_search_with_batch(
             };
             let road_cut_continuation =
                 road_cut_continuation_for_root(posterior, observer, &candidate.action, impact);
+            let road_intent = particles.first().and_then(|particle| {
+                road_intent_for_root(&particle.state, observer, &candidate.action)
+            });
             RootCausalEvidence {
                 action: candidate.action.clone(),
                 promotion_reason: impact.and_then(|impact| impact.promotion),
+                road_intent,
                 introduced_road_fragility: impact
                     .map(|impact| impact.introduced_road_fragility.clone())
                     .unwrap_or_default(),
@@ -4751,17 +4785,15 @@ mod tests {
             &compressed,
             crate::exact::ExactActionFamily::Monopoly,
         );
-        assert_eq!(
-            full_exact.chosen,
-            Some(Action::PlayMonopoly {
-                resource: Resource::Grain,
-            })
-        );
-        assert_eq!(
-            compressed_exact.chosen,
-            Some(Action::PlayMonopoly {
-                resource: Resource::Ore,
-            })
+        let full_choice = full_exact
+            .chosen
+            .clone()
+            .expect("the full posterior has an exact Monopoly choice");
+        assert!(matches!(full_choice, Action::PlayMonopoly { .. }));
+        assert_ne!(
+            compressed_exact.chosen.as_ref(),
+            Some(&full_choice),
+            "this fixture must retain a parameter choice that changes under the intentionally compressed strategic subset"
         );
 
         let production =
@@ -4777,13 +4809,12 @@ mod tests {
             },
         )
         .unwrap();
+        assert_eq!(production.chosen.as_ref(), Some(&full_choice));
         assert_eq!(
-            production.chosen,
-            Some(Action::PlayMonopoly {
-                resource: Resource::Grain,
-            })
+            experimental_compressed.chosen.as_ref(),
+            Some(&full_choice),
+            "exact family arbitration must keep the full posterior parameter choice even when the strategic tree uses an experimental compressed subset"
         );
-        assert_eq!(experimental_compressed.chosen, Some(Action::EndTurn));
         assert_eq!(production.posterior_particles, 24);
         assert_eq!(production.particles, 24);
         assert_eq!(experimental_compressed.posterior_particles, 24);

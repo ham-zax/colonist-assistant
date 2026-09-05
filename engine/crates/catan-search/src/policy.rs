@@ -4,7 +4,8 @@ use crate::eval::{
     RoadFrontierContext, RobberDenialContext, city_value, hand_transition_value,
     observed_marginal_development_value, prepare_road_frontier_context,
     prepare_robber_denial_context, production_pips, road_frontier_value,
-    road_frontier_value_with_context, robber_denial, robber_denial_with_context, vertex_value,
+    road_frontier_value_with_context, road_intent_with_context, robber_denial,
+    robber_denial_with_context, vertex_value,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -214,9 +215,8 @@ fn completes_build(state: &GameState, give: Resource, receive: Resource, ratio: 
         .iter()
         .enumerate()
         .filter(|(_, cost)| {
-            hand.iter()
-                .zip(cost.iter())
-                .all(|(available, needed)| available >= needed)
+            hand.iter().zip(cost.iter()).all(|(available, needed)| available >= needed)
+                && player.resources.iter().zip(cost.iter()).any(|(available, needed)| available < needed)
         })
         .map(|(index, _)| [0.35, 1.1, 1.0, 0.65][index])
         .fold(0.0, f32::max)
@@ -425,7 +425,16 @@ fn action_prior_nonwinning(state: &GameState, action: &Action, actor: u8) -> f32
             give,
             receive,
             ratio,
-        } => 0.35 + completes_build(state, *give, *receive, *ratio),
+        } => {
+            let direct = crate::economy::maritime_advances_direct_build_closure(state, action, actor);
+            let progress = if direct {
+                crate::economy::maritime_build_closure_progress(state, action, actor)
+            } else { 0.0 };
+            let safety = if state.players[usize::from(actor)].resource_total() > state.card_discard_limit {
+                f32::from(ratio.saturating_sub(1)) * 0.08
+            } else { 0.0 };
+            0.02 + completes_build(state, *give, *receive, *ratio) + progress + safety
+        }
         Action::OfferTrade {
             recipients,
             give,
@@ -679,24 +688,6 @@ fn push_top_matching(
     }
 }
 
-fn road_endpoint(state: &GameState, action: &Action) -> Option<u8> {
-    let edge = match action {
-        Action::BuildRoad { edge } | Action::PlaceRoad { edge } => *edge,
-        _ => return None,
-    };
-    let actor = state.actor();
-    state.board.edges[edge as usize]
-        .vertices
-        .into_iter()
-        .find(|vertex| {
-            !state.board.vertices[*vertex as usize]
-                .adjacent_edges
-                .iter()
-                .any(|neighbor| state.roads[*neighbor as usize] == Some(actor))
-        })
-        .or_else(|| state.board.edges[edge as usize].vertices.first().copied())
-}
-
 fn domestic_trade_material(state: &GameState, actor: u8, action: &Action, prior: f32) -> bool {
     let Action::OfferTrade {
         recipients,
@@ -772,25 +763,55 @@ pub(crate) fn order_scored_with_state_quotas(
         matches!(action, Action::BuildCity { .. })
     });
 
-    // Prefer spatially distinct road endpoints over duplicate steps toward the
-    // same vertex. The difference between the best and second-best road is
-    // often larger than the gap between an average road and EndTurn.
-    let mut road_endpoints = Vec::<u8>::new();
-    for candidate in &ranked {
-        if road_endpoints.len() >= 3 {
+    // Road identity is the reachable settlement portfolio, not merely the
+    // immediate edge endpoint. Keep two distinct target intents first, then
+    // allow a third alternative route to the same target so one blocked path
+    // does not erase the destination from root search.
+    let road_context = prepare_road_frontier_context(state, actor);
+    let mut road_candidates = ranked
+        .iter()
+        .filter_map(|candidate| {
+            let edge = match &candidate.0 {
+                Action::BuildRoad { edge } | Action::PlaceRoad { edge } => *edge,
+                _ => return None,
+            };
+            let intent = road_intent_with_context(state, edge, actor, &road_context);
+            Some((candidate, intent))
+        })
+        .collect::<Vec<_>>();
+    road_candidates.sort_by(|left, right| {
+        right
+            .1
+            .ordering_score()
+            .total_cmp(&left.1.ordering_score())
+            .then_with(|| right.0.1.total_cmp(&left.0.1))
+    });
+    let mut target_vertices = Vec::<u8>::new();
+    let mut roads_kept = 0usize;
+    for (candidate, intent) in &road_candidates {
+        if roads_kept >= 2 {
             break;
         }
-        let Some(endpoint) = road_endpoint(state, &candidate.0) else {
+        let Some(target) = intent.target_vertex else {
             continue;
         };
-        if road_endpoints.contains(&endpoint) {
+        if target_vertices.contains(&target) {
             continue;
         }
         let before = selected.len();
         push_unique(&mut selected, candidate);
         if selected.len() > before {
-            road_endpoints.push(endpoint);
+            target_vertices.push(target);
+            roads_kept += 1;
         }
+    }
+    for (candidate, _) in &road_candidates {
+        if roads_kept >= 3 {
+            break;
+        }
+        let before = selected.len();
+        push_unique(&mut selected, candidate);
+        roads_kept += usize::from(selected.len() > before);
     }
 
     for candidate in ranked.iter().filter(|(action, prior)| {
@@ -1106,6 +1127,44 @@ mod tests {
                 .any(|(action, _)| matches!(action, Action::EndTurn)),
             "EndTurn must survive an eight-wide saturated root"
         );
+    }
+
+    #[test]
+    fn road_quota_orders_complete_route_before_local_endpoint_decoy() {
+        let mut state = GameState::standard(1, 2);
+        while matches!(
+            state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        ) {
+            let action = state.legal_actions()[0].clone();
+            state.apply(&action).unwrap();
+        }
+        state.phase = Phase::Main;
+        state.current_player = 0;
+        state.players[0].resources = [2, 2, 0, 0, 0];
+        let complete_route = Action::BuildRoad { edge: 23 };
+        let local_decoy = Action::BuildRoad { edge: 12 };
+        for action in [&complete_route, &local_decoy] {
+            assert!(state.legal_actions().contains(action));
+        }
+        let ordered = order_scored_with_state_quotas(
+            &state,
+            0,
+            vec![
+                (local_decoy.clone(), 0.90),
+                (complete_route.clone(), 0.10),
+                (Action::EndTurn, 0.05),
+            ],
+        );
+        let complete_rank = ordered
+            .iter()
+            .position(|(action, _)| action == &complete_route)
+            .unwrap();
+        let decoy_rank = ordered
+            .iter()
+            .position(|(action, _)| action == &local_decoy)
+            .unwrap();
+        assert!(complete_rank < decoy_rank);
     }
 
     #[test]

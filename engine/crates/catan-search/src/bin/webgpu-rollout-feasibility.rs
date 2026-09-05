@@ -410,7 +410,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     engine.upload_states(std::slice::from_ref(&state))?;
     let upload_ms = upload_started.elapsed().as_secs_f64() * 1000.0;
     let warm_started = Instant::now();
-    let warmup = engine.search_root_actions(&[roots.clone()], 64, 16, SEED)?;
+    let warmup = engine.search_root_actions(std::slice::from_ref(&roots), 64, 16, SEED)?;
     let warmup_ms = warm_started.elapsed().as_secs_f64() * 1000.0;
     if warmup.rows[0].iter().any(|stats| stats.errors != 0) {
         return Err("CUDA warmup produced rollout errors".into());

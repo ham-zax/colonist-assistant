@@ -237,6 +237,7 @@ fn root_actor_parity(engine: &mut CudaSimEngine) -> Result<usize, Box<dyn std::e
     Ok(states.len())
 }
 
+#[allow(clippy::type_complexity)]
 fn generated_trade_policy_parity(
     engine: &mut CudaSimEngine,
 ) -> Result<(usize, usize, usize, usize, usize, usize), Box<dyn std::error::Error>> {

@@ -75,10 +75,7 @@ describe("decision service client", () => {
     );
 
     await vi.waitFor(() =>
-      expect(callback).toHaveBeenCalledWith({
-        ...analysis,
-        runtime: "background-rollout",
-      }),
+      expect(callback).toHaveBeenCalledWith(analysis),
     );
     expect(sendMessage).toHaveBeenCalledOnce();
     client.destroy();
@@ -208,7 +205,7 @@ describe("decision service client", () => {
     client.destroy();
   });
 
-  it("keeps the selected request alive after the one-second warning", async () => {
+  it("keeps the selected request alive after the three-second warning", async () => {
     vi.useFakeTimers();
     const analysis: DecisionAnalysis = {
       engine: "deep-search",
@@ -227,7 +224,7 @@ describe("decision service client", () => {
         new Promise<{ id: number; analysis: DecisionAnalysis }>((resolve) => {
           globalThis.setTimeout(
             () => resolve({ id: message.id, analysis }),
-            1_500,
+            3_500,
           );
         }),
     );
@@ -248,9 +245,9 @@ describe("decision service client", () => {
       slow,
       failure,
     );
-    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(3_000);
 
-    expect(slow).toHaveBeenCalledWith(1_000);
+    expect(slow).toHaveBeenCalledWith(3_000);
     expect(callback).not.toHaveBeenCalled();
     expect(failure).not.toHaveBeenCalled();
     expect(sendMessage).toHaveBeenCalledOnce();
@@ -269,7 +266,6 @@ describe("decision service client", () => {
     expect(callback).toHaveBeenCalledWith(
       expect.objectContaining({
         model: "eventual-wasm-result",
-        runtime: "background-rollout",
       }),
     );
     expect(sendMessage).toHaveBeenCalledOnce();
@@ -290,12 +286,20 @@ describe("decision service client", () => {
       simulations: 1,
       model: "next-position-result",
     };
-    const sendMessage = vi.fn((message: { id: number }) => {
-      if (sendMessage.mock.calls.length === 1) {
-        return new Promise(() => undefined);
-      }
-      return Promise.resolve({ id: message.id, analysis });
-    });
+    const sendMessage = vi.fn(
+      (message: { id: number; type: string }) => {
+        if (
+          message.type === "colonist-assistant:decision" &&
+          message.id === 1
+        ) {
+          return new Promise(() => undefined);
+        }
+        if (message.type === "colonist-assistant:decision-cancel") {
+          return Promise.resolve({ id: message.id });
+        }
+        return Promise.resolve({ id: message.id, analysis });
+      },
+    );
     vi.stubGlobal("chrome", { runtime: { sendMessage } });
     const callback = vi.fn();
     const failure = vi.fn();
@@ -315,7 +319,11 @@ describe("decision service client", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(sendMessage).toHaveBeenCalledOnce();
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(sendMessage.mock.calls.map(([message]) => message.type)).toEqual([
+      "colonist-assistant:decision",
+      "colonist-assistant:decision-cancel",
+    ]);
     expect(callback).not.toHaveBeenCalled();
     expect(failure).toHaveBeenCalledWith(
       "Strategist did not return before the 12-second safety limit",
@@ -333,14 +341,13 @@ describe("decision service client", () => {
     await vi.advanceTimersByTimeAsync(0);
     await Promise.resolve();
 
-    expect(sendMessage).toHaveBeenCalledTimes(2);
-    expect(sendMessage.mock.calls[1]?.[0]).toEqual(
+    expect(sendMessage).toHaveBeenCalledTimes(3);
+    expect(sendMessage.mock.calls[2]?.[0]).toEqual(
       expect.objectContaining({ engine: "deep-search", id: 2 }),
     );
     expect(nextCallback).toHaveBeenCalledWith(
       expect.objectContaining({
         model: "next-position-result",
-        runtime: "background-rollout",
       }),
     );
     client.destroy();
@@ -354,13 +361,17 @@ describe("decision service client", () => {
       }) => void
     > = [];
     const sendMessage = vi.fn(
-      (message: { id: number }) =>
-        new Promise<{
+      (message: { id: number; type: string }) => {
+        if (message.type === "colonist-assistant:decision-cancel") {
+          return Promise.resolve({ id: message.id });
+        }
+        return new Promise<{
           id: number;
           analysis: DecisionAnalysis;
         }>((resolve) => {
           resolvers.push(resolve);
-        }),
+        });
+      },
     );
     vi.stubGlobal("chrome", { runtime: { sendMessage } });
     const firstCallback = vi.fn();
@@ -397,7 +408,13 @@ describe("decision service client", () => {
     );
 
     resolvers[0]?.({ id: 1, analysis: analysis("stale") });
-    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() =>
+      expect(
+        sendMessage.mock.calls.filter(
+          ([message]) => message.type === "colonist-assistant:decision",
+        ),
+      ).toHaveLength(2),
+    );
     expect(firstCallback).not.toHaveBeenCalled();
 
     resolvers[1]?.({ id: 2, analysis: analysis("current") });
@@ -405,7 +422,6 @@ describe("decision service client", () => {
       expect(secondCallback).toHaveBeenCalledWith(
         expect.objectContaining({
           model: "current",
-          runtime: "background-rollout",
         }),
       ),
     );
@@ -456,7 +472,7 @@ describe("decision service client", () => {
     client.destroy();
   });
 
-  it("prints structured diagnostics when a decision exceeds one second", async () => {
+  it("prints structured diagnostics when a decision exceeds three seconds", async () => {
     vi.useFakeTimers();
     const analysis: DecisionAnalysis = {
       engine: "deep-search",
@@ -475,7 +491,7 @@ describe("decision service client", () => {
         new Promise<{ id: number; analysis: DecisionAnalysis }>((resolve) => {
           globalThis.setTimeout(
             () => resolve({ id: message.id, analysis }),
-            1_100,
+            3_100,
           );
         }),
     );
@@ -501,7 +517,7 @@ describe("decision service client", () => {
       "deep-search",
       callback,
     );
-    await vi.advanceTimersByTimeAsync(1_100);
+    await vi.advanceTimersByTimeAsync(3_100);
 
     expect(warning).toHaveBeenCalledWith(
       expect.stringMatching(
@@ -510,8 +526,8 @@ describe("decision service client", () => {
       expect.objectContaining({
         key: "slow-position",
         engine: "deep-search",
-        totalMs: 1_100,
-        serviceMs: 1_100,
+        totalMs: 3_100,
+        serviceMs: 3_100,
         gameKey: "test-game",
         turn: 7,
       }),

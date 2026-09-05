@@ -1,9 +1,10 @@
 use colonist_catan_core::{Action, GameState, NodeKind, SplitMix64};
 
 use crate::deadline::CooperativeDeadline;
-use crate::eval::{evaluate, road_frontier_value};
+use crate::eval::{evaluate, road_frontier_value, road_intent};
 use crate::exact::{
-    ExactActionFamily, ExactDecisionResult, exact_family_for_action, solve_exact_belief,
+    ExactActionFamily, ExactDecisionResult, exact_family_for_action,
+    solve_exact_belief_excluding,
 };
 use crate::opening::opening_adjusted_priors;
 use crate::planner::plan_adjusted_priors;
@@ -248,6 +249,7 @@ pub fn safer_end_turn_alternative(
             }
             if let Action::BuildRoad { edge } = &candidate.action
                 && road_frontier_value(state, *edge, actor as u8) <= 0.04
+                && road_intent(state, *edge, actor as u8).ordering_score() <= 0.20
             {
                 return false;
             }
@@ -398,6 +400,10 @@ pub struct Mcts {
     root_priors: Vec<(Action, f32)>,
     turn_plan_priors: Vec<(u64, Vec<(Action, f32)>)>,
     belief_fingerprint: Option<u64>,
+    /// UI/runtime exclusions apply only at the current root. They are part of
+    /// the reusable tree identity because retaining an excluded root child
+    /// would let a failed action silently re-enter a later report.
+    root_exclusions: Vec<Action>,
 }
 
 impl Mcts {
@@ -414,6 +420,7 @@ impl Mcts {
             root_priors: Vec::new(),
             turn_plan_priors: Vec::new(),
             belief_fingerprint: None,
+            root_exclusions: Vec::new(),
         }
     }
 
@@ -491,19 +498,32 @@ impl Mcts {
     }
 
     pub fn search(&mut self, state: &GameState) -> SearchReport {
+        self.search_excluding(state, &[])
+    }
+
+    pub fn search_excluding(
+        &mut self,
+        state: &GameState,
+        root_exclusions: &[Action],
+    ) -> SearchReport {
         let timer = CooperativeDeadline::start(self.config.time_budget_ms);
         self.information_set_mode = false;
         self.belief_fingerprint = None;
-        if state.state_hash() != self.root_hash && !self.reuse_identity(state.state_hash()) {
+        let identity = state.state_hash();
+        if self.root_exclusions != root_exclusions {
+            self.root_exclusions = root_exclusions.to_vec();
+            self.reset_identity(identity);
+        } else if identity != self.root_hash && !self.reuse_identity(identity) {
             self.reset(state);
         }
         self.statistics = SearchStatistics::default();
-        let exact = solve_exact_belief(
+        let exact = solve_exact_belief_excluding(
             &[BeliefParticle {
                 state: state.clone(),
                 weight: 1.0,
             }],
             ExactActionFamily::Mandatory,
+            &self.root_exclusions,
         );
         if exact.applicable {
             // Discard, robber, and trade-response prompts have one compact,
@@ -519,6 +539,15 @@ impl Mcts {
             self.config.tactical_depth,
             self.config.tactical_nodes,
         );
+        let tactical = if tactical
+            .principal_line
+            .first()
+            .is_some_and(|action| self.root_exclusions.contains(action))
+        {
+            empty_tactical_result()
+        } else {
+            tactical
+        };
         self.prepare_root_priors(state);
         for _ in 0..self.config.iterations {
             if self.arena.parent.len() >= self.config.max_nodes {
@@ -552,6 +581,14 @@ impl Mcts {
     pub fn search_weighted_belief(
         &mut self,
         particles: &[BeliefParticle],
+    ) -> Result<SearchReport, BeliefError> {
+        self.search_weighted_belief_excluding(particles, &[])
+    }
+
+    pub fn search_weighted_belief_excluding(
+        &mut self,
+        particles: &[BeliefParticle],
+        root_exclusions: &[Action],
     ) -> Result<SearchReport, BeliefError> {
         let timer = CooperativeDeadline::start(self.config.time_budget_ms);
         let Some(first_particle) = particles.first() else {
@@ -587,7 +624,10 @@ impl Mcts {
         }
         self.statistics = SearchStatistics::default();
         self.information_set_mode = true;
-        if observation != self.root_hash {
+        if self.root_exclusions != root_exclusions {
+            self.root_exclusions = root_exclusions.to_vec();
+            self.reset_identity(observation);
+        } else if observation != self.root_hash {
             if !self.reuse_identity(observation) {
                 self.reset_identity(observation);
             }
@@ -598,7 +638,11 @@ impl Mcts {
             self.reset_identity(observation);
         }
         self.belief_fingerprint = Some(posterior_fingerprint);
-        let exact = solve_exact_belief(particles, ExactActionFamily::Mandatory);
+        let exact = solve_exact_belief_excluding(
+            particles,
+            ExactActionFamily::Mandatory,
+            &self.root_exclusions,
+        );
         if exact.applicable {
             // The response family already evaluates every legal action over
             // the full weighted posterior. Resetting here also prevents stale
@@ -616,6 +660,15 @@ impl Mcts {
             self.config.tactical_depth,
             self.config.tactical_nodes,
         );
+        let tactical = if tactical
+            .principal_line
+            .first()
+            .is_some_and(|action| self.root_exclusions.contains(action))
+        {
+            empty_tactical_result()
+        } else {
+            tactical
+        };
         self.prepare_root_priors(first);
         let total_weight = particles
             .iter()
@@ -648,7 +701,11 @@ impl Mcts {
     }
 
     fn prepare_root_priors(&mut self, state: &GameState) {
-        let legal = state.legal_actions();
+        let legal = state
+            .legal_actions()
+            .into_iter()
+            .filter(|action| !self.root_exclusions.contains(action))
+            .collect::<Vec<_>>();
         let actor = state.actor();
         let observed = state.observed_state(actor);
         let mut ranked = normalize_observed_priors(state, &legal, actor);
@@ -754,6 +811,9 @@ impl Mcts {
             let Some(action) = self.arena.action[child as usize].clone() else {
                 continue;
             };
+            if self.root_exclusions.contains(&action) {
+                continue;
+            }
             let visits = self.arena.visits[child as usize];
             if let Some(existing) = aggregate.iter_mut().find(|entry| entry.action == action) {
                 existing.visits += visits;
@@ -875,14 +935,15 @@ impl Mcts {
             && let Some(family) = chosen.as_ref().and_then(exact_family_for_action)
         {
             exact = if let Some(worlds) = particles {
-                solve_exact_belief(worlds, family)
+                solve_exact_belief_excluding(worlds, family, &self.root_exclusions)
             } else {
-                solve_exact_belief(
+                solve_exact_belief_excluding(
                     &[BeliefParticle {
                         state: state.clone(),
                         weight: 1.0,
                     }],
                     family,
+                    &self.root_exclusions,
                 )
             };
             chosen = exact.chosen.clone().or(chosen);

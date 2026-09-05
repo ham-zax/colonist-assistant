@@ -119,6 +119,7 @@ import {
 } from "./trade-verdicts";
 import {
   activeWorkflowAction,
+  developmentFollowupAction,
   destroyActionGuide,
   renderActionGuide,
   tradePanelIsOpen,
@@ -2057,8 +2058,7 @@ export class AssistantOverlay {
         board.isMyTurn &&
         (
           board.action === "none" ||
-          board.action === "road" ||
-          board.action === "robber"
+          board.action === developmentFollowupAction(next.card)
         ),
       );
     }

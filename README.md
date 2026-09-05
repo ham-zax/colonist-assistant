@@ -81,14 +81,16 @@ For the Chrome Web Store field copy, test steps, and release package command,
 see [docs/CHROME_WEB_STORE.md](docs/CHROME_WEB_STORE.md).
 
 `Background WASM` means the packaged Rust Strategist is authoritative. A
-normal live request uses depth 4, a branch cap of 16, at most 4,000 strategic
-nodes, and a cooperative 350 ms strategic-search deadline. The generated-WASM
-cold-adapter regression must return a legal action in less than one second.
-The `WASM · 1s+` label and twelve-second client cutoff are failure-containment
-limits, not acceptable target latency. At the client cutoff the request is
-reported as an engine error and autopilot remains paused. A service-worker or
-WASM failure is also shown as `WASM error`; no JavaScript action policy
-substitutes for Strategist.
+normal live request uses depth 5, a branch cap of 10, up to 8,000 strategic
+nodes per depth wave, and a cooperative 2,000 ms strategic-search budget. That
+larger live budget is intentional quality headroom; the normal slow-decision
+warning starts at three seconds. Separately, the generated-WASM cold-package
+smoke uses a short cooperative deadline and must still return a legal action in
+less than one second, so startup/bridge regressions remain visible without
+capping live search quality. The twelve-second client cutoff is an outer
+failure-containment limit. At that cutoff the request is reported as an engine
+error and autopilot remains paused. A service-worker or WASM failure is also
+shown as `WASM error`; no JavaScript action policy substitutes for Strategist.
 
 ## Decision engine
 

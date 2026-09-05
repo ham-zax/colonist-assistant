@@ -68,8 +68,11 @@ cargo run --release -p colonist-catan-arena -- \
 ```
 
 Use matched board/chance seeds, rotate every seat, report cutoffs, and retain
-confidence intervals. Keep interactive live decisions under one second on the
-reference machine; long training and arena runs must not share the live worker.
+confidence intervals. The normal live WASM request intentionally carries a
+2,000 ms cooperative search budget for decision quality, with the slow-decision
+warning above that budget. Keep the separate cold packaged-WASM smoke under one
+second on the reference machine so startup/bridge regressions remain visible;
+long training and arena runs must not share the live worker.
 
 ## Implementation rules
 

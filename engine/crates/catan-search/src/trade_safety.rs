@@ -301,6 +301,7 @@ fn contested_settlement(public_state: &GameState, vertex: u8, protected: u8, att
     connected(protected) && connected(attacker)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_threats(
     baseline: &GameState,
     next: &GameState,
@@ -347,6 +348,7 @@ fn reachable_tactical_threats(
     attacker: u8,
     monopoly_gain_penalty: Option<(Resource, u8)>,
 ) -> TacticalThreats {
+    #[allow(clippy::too_many_arguments)]
     fn chance_tail(
         state: &GameState,
         public_baseline: &GameState,
@@ -418,6 +420,7 @@ fn reachable_tactical_threats(
         threats
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn visit(
         state: &GameState,
         public_baseline: &GameState,
@@ -701,7 +704,7 @@ fn domestic_trade_evidence(state: &GameState, action: &Action) -> WorldTradeEvid
                 );
             }
         }
-        for (&(key, path), _) in &after_threats.progress_paths {
+        for &(key, path) in after_threats.progress_paths.keys() {
             let delta = probability_delta(
                 &after_threats.progress_paths,
                 &before_threats.progress_paths,

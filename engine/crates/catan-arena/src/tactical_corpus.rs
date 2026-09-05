@@ -479,9 +479,9 @@ fn configure_development(state: &mut GameState, spec: &TacticalStateSpec) -> Res
 
     if let Some(deck) = spec.development_deck {
         state.development_deck = deck;
-        for card in 0..5 {
+        for (card, total) in DEVELOPMENT_TOTALS.iter().copied().enumerate() {
             let accounted = deck[card] as u16 + held(card);
-            state.played_development[card] = (DEVELOPMENT_TOTALS[card] as u16)
+            state.played_development[card] = (total as u16)
                 .checked_sub(accounted)
                 .ok_or_else(|| format!("development card {card} exceeds supply"))?
                 as u8;
@@ -490,9 +490,9 @@ fn configure_development(state: &mut GameState, spec: &TacticalStateSpec) -> Res
             return Err("played Knights exceed consumed Knight cards".into());
         }
     } else {
-        for card in 0..5 {
+        for (card, total) in DEVELOPMENT_TOTALS.iter().copied().enumerate() {
             let accounted = held(card) + state.played_development[card] as u16;
-            state.development_deck[card] = (DEVELOPMENT_TOTALS[card] as u16)
+            state.development_deck[card] = (total as u16)
                 .checked_sub(accounted)
                 .ok_or_else(|| format!("development card {card} exceeds supply"))?
                 as u8;
@@ -645,13 +645,13 @@ pub fn apply_hidden_variant(
                 state.players[player].bought_development = [0; 5];
             }
         }
-        for card in 0..5 {
+        for (card, total) in DEVELOPMENT_TOTALS.iter().copied().enumerate() {
             let held = state
                 .players
                 .iter()
                 .map(|player| player.development[card] as u16)
                 .sum::<u16>();
-            state.development_deck[card] = (DEVELOPMENT_TOTALS[card] as u16)
+            state.development_deck[card] = (total as u16)
                 .checked_sub(held + state.played_development[card] as u16)
                 .ok_or_else(|| format!("variant development card {card} exceeds supply"))?
                 as u8;

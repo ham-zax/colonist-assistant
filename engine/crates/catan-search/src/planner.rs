@@ -55,7 +55,7 @@ struct Planner {
     config: TurnPlanConfig,
     nodes: u32,
     node_limit: u32,
-    memo: HashMap<(u64, u8), PlanValue>,
+    memo: HashMap<(u64, u8, u8), PlanValue>,
 }
 
 impl Planner {
@@ -99,7 +99,7 @@ impl Planner {
                 && after.largest_army_holder == Some(self.root))
     }
 
-    fn visit(&mut self, state: &GameState, depth: u8) -> PlanValue {
+    fn visit(&mut self, state: &GameState, depth: u8, maritime_received: u8) -> PlanValue {
         if self.nodes >= self.node_limit
             || depth >= self.config.maximum_actions
             || state.is_terminal()
@@ -124,7 +124,7 @@ impl Planner {
             };
         }
         self.nodes += 1;
-        if let Some(value) = self.memo.get(&(state.state_hash(), depth)) {
+        if let Some(value) = self.memo.get(&(state.state_hash(), depth, maritime_received)) {
             return value.clone();
         }
         let legal = state.legal_actions();
@@ -180,7 +180,7 @@ impl Planner {
                         continue;
                     }
                     let child = if self.nodes < self.node_limit {
-                        self.visit(&next, depth + 1)
+                        self.visit(&next, depth + 1, next_maritime_mask(maritime_received, &action))
                     } else {
                         PlanValue {
                             value: self.endpoint_value(&next),
@@ -197,7 +197,11 @@ impl Planner {
                     response_window_mass += child.response_window_mass * probability;
                     weighted_response_windows += child.weighted_response_windows * probability;
                     if child.value > representative.value {
+                        // Keep the actual chance/response transition in the
+                        // representative line. Otherwise replay tries to build
+                        // while still in the chance or negotiation phase.
                         representative = child;
+                        representative.actions.insert(0, action);
                     }
                 }
                 PlanValue {
@@ -220,13 +224,17 @@ impl Planner {
                     weighted_response_windows: 0.0,
                 };
                 for (action, _) in ranked {
+                    if matches!(&action, Action::MaritimeTrade { give, .. }
+                        if maritime_received & (1 << give.index()) != 0) {
+                        continue;
+                    }
                     let mut next = state.clone();
                     if next.apply(&action).is_err() {
                         continue;
                     }
                     let decisive_now = self.materially_decisive_transition(state, &next, &action);
                     let mut child = if self.nodes < self.node_limit {
-                        self.visit(&next, depth + 1)
+                        self.visit(&next, depth + 1, next_maritime_mask(maritime_received, &action))
                     } else if next.is_terminal()
                         || (next.current_player != self.root
                             && !matches!(next.phase, Phase::TradeResponses))
@@ -305,7 +313,7 @@ impl Planner {
                 } else {
                     0.0
                 };
-                let weighted_actions = legal
+                let mut weighted_actions = legal
                     .into_iter()
                     .filter_map(|action| {
                         let probability = match action {
@@ -321,6 +329,21 @@ impl Planner {
                         (probability > 0.0).then_some((action, probability))
                     })
                     .collect::<Vec<_>>();
+                // A tiny live planner budget must reach at least one accepted
+                // response path before spending the entire slice on the first
+                // lexicographic decline/counter branch. Fully explored values
+                // are unchanged because probabilities remain authoritative.
+                weighted_actions.sort_by(|left, right| {
+                    let priority = |action: &Action| match action {
+                        Action::RespondTrade { accept: true } => 3u8,
+                        Action::CounterTrade { .. } => 2,
+                        Action::RespondTrade { accept: false } => 1,
+                        _ => 0,
+                    };
+                    priority(&right.0)
+                        .cmp(&priority(&left.0))
+                        .then_with(|| right.1.total_cmp(&left.1))
+                });
                 let total_probability = weighted_actions
                     .iter()
                     .map(|(_, probability)| *probability)
@@ -333,7 +356,7 @@ impl Planner {
                         continue;
                     }
                     let child = if self.nodes < self.node_limit {
-                        self.visit(&next, depth + 1)
+                        self.visit(&next, depth + 1, next_maritime_mask(maritime_received, &action))
                     } else {
                         PlanValue {
                             value: self.endpoint_value(&next),
@@ -354,7 +377,11 @@ impl Planner {
                         + child.response_window_mass)
                         * probability;
                     if child.value > representative.value {
+                        // Keep the actual chance/response transition in the
+                        // representative line. Otherwise replay tries to build
+                        // while still in the chance or negotiation phase.
                         representative = child;
+                        representative.actions.insert(0, action);
                     }
                 }
                 PlanValue {
@@ -374,12 +401,30 @@ impl Planner {
         // A budget-truncated value is only a lower-quality bound. Caching it
         // would let a later root action inherit an incomplete continuation
         // merely because it reached the same state after its fair budget slice.
-        if result.completion_mass >= 1.0 - 1e-6 {
+        if self.nodes < self.node_limit {
             self.memo
-                .insert((state.state_hash(), depth), result.clone());
+                .insert((state.state_hash(), depth, maritime_received), result.clone());
         }
         result
     }
+}
+
+fn next_maritime_mask(previous: u8, action: &Action) -> u8 {
+    match action {
+        Action::MaritimeTrade { receive, .. } => previous | (1 << receive.index()),
+        _ => 0,
+    }
+}
+
+#[cfg(test)]
+fn maritime_transshipment(first: &Action, second: &Action) -> bool {
+    matches!(
+        (first, second),
+        (
+            Action::MaritimeTrade { receive, .. },
+            Action::MaritimeTrade { give, .. }
+        ) if receive == give
+    )
 }
 
 fn is_domestic_trade(action: &Action) -> bool {
@@ -463,6 +508,41 @@ fn planner_root_budgets(
 /// Enumerates complete current-turn endpoints. Search still executes one
 /// state-validated action at a time, but roads, trades, development plays, and
 /// builds receive the value of the best coherent continuation they enable.
+#[cfg(test)]
+fn contains_dominated_maritime_sequence(state: &GameState, actions: &[Action]) -> bool {
+    let root = state.actor();
+    let mut cursor = state.clone();
+    let mut maritime_received = 0u8;
+    let mut prior_hands = vec![cursor.players[root as usize].resources];
+    for action in actions {
+        if matches!(action, Action::MaritimeTrade { give, .. }
+            if maritime_received & (1 << give.index()) != 0) {
+            return true;
+        }
+        maritime_received = next_maritime_mask(maritime_received, action);
+        if cursor.apply(action).is_err() {
+            return true;
+        }
+        if matches!(action, Action::MaritimeTrade { .. }) {
+            let hand = cursor.players[root as usize].resources;
+            if prior_hands.iter().any(|prior| {
+                prior.iter().zip(hand).all(|(before, after)| *before >= after)
+                    && prior != &hand
+            }) {
+                return true;
+            }
+            prior_hands.push(hand);
+        } else {
+            // A build or other action changes the strategic state, so only
+            // compare maritime transformations inside the next uninterrupted
+            // conversion segment.
+            prior_hands.clear();
+            prior_hands.push(cursor.players[root as usize].resources);
+        }
+    }
+    false
+}
+
 pub fn plan_current_turn(state: &GameState, config: TurnPlanConfig) -> Vec<TurnPlan> {
     if !matches!(state.phase, Phase::PreRoll | Phase::Main) {
         return Vec::new();
@@ -498,7 +578,7 @@ pub fn plan_current_turn(state: &GameState, config: TurnPlanConfig) -> Vec<TurnP
             continue;
         }
         let decisive_now = planner.materially_decisive_transition(state, &next, &action);
-        let mut result = planner.visit(&next, 1);
+        let mut result = planner.visit(&next, 1, next_maritime_mask(0, &action));
         if decisive_now {
             result.decisive_completion_mass = 1.0;
             result.response_window_mass = 1.0;
@@ -586,7 +666,58 @@ pub(crate) fn plan_adjusted_priors(
 mod tests {
     use colonist_catan_core::{Action, GameState, Phase, Resource};
 
-    use super::{TurnPlanConfig, plan_current_turn};
+    use super::{TurnPlanConfig, maritime_transshipment, plan_current_turn};
+
+    fn main_state_with_settlement_frontier(seed: u64) -> GameState {
+        let mut state = GameState::standard(seed, 2);
+        while matches!(
+            state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        ) {
+            let action = state.legal_actions()[0].clone();
+            state.apply(&action).unwrap();
+        }
+        state.phase = Phase::Main;
+        state.current_player = 0;
+        state.player_trades_enabled = false;
+        state.domestic_trade_disabled = 1;
+        state.players.iter_mut().for_each(|player| player.resources = [0; 5]);
+        state.bank = [19; 5];
+        let mut frontier = vec![state];
+        for _ in 0..=4 {
+            let mut next_frontier = Vec::new();
+            for mut candidate in frontier {
+                candidate.players[0].resources = [20; 5];
+                if candidate
+                    .legal_actions()
+                    .iter()
+                    .any(|action| matches!(action, Action::BuildSettlement { .. }))
+                {
+                    candidate.players[0].resources = [0; 5];
+                    candidate.bank = [19; 5];
+                    return candidate;
+                }
+                for road in candidate
+                    .legal_actions()
+                    .into_iter()
+                    .filter(|action| matches!(action, Action::BuildRoad { .. }))
+                {
+                    let mut next = candidate.clone();
+                    if next.apply(&road).is_ok() {
+                        next_frontier.push(next);
+                    }
+                }
+            }
+            frontier = next_frontier;
+        }
+        panic!("the fixture must expose an immediate settlement site");
+    }
+
+    fn set_root_hand(state: &mut GameState, hand: [u8; 5]) {
+        state.players.iter_mut().for_each(|player| player.resources = [0; 5]);
+        state.bank = std::array::from_fn(|resource| 19 - hand[resource]);
+        state.players[0].resources = hand;
+    }
 
     #[test]
     fn road_and_settlement_are_evaluated_as_one_turn_plan() {
@@ -664,7 +795,7 @@ mod tests {
     }
 
     #[test]
-    fn domestic_trade_planner_gets_completion_mass_under_live_belief_budget() {
+    fn domestic_trade_planner_gets_response_completion_mass_under_live_belief_budget() {
         let mut state = GameState::standard(211, 4);
         while matches!(
             state.phase,
@@ -693,15 +824,9 @@ mod tests {
         );
         let trade = live
             .iter()
-            .find(|plan| {
-                matches!(
-                    plan.first_action,
-                    Action::OfferTrade { give, receive, .. }
-                        if give == [1, 1, 1, 0, 0]
-                            && receive == [0, 0, 0, 1, 0]
-                )
-            })
-            .expect("live planner allocation must retain the settlement-unlocking trade");
+            .filter(|plan| matches!(plan.first_action, Action::OfferTrade { .. }))
+            .max_by(|left, right| left.completion_mass.total_cmp(&right.completion_mass))
+            .expect("live planner allocation must retain a material domestic-trade root");
         assert!(trade.completion_mass > 0.0);
         assert!(trade.completion_mass <= 1.0);
         assert!(live.iter().map(|plan| plan.nodes).sum::<u32>() <= per_particle_nodes);
@@ -759,6 +884,76 @@ mod tests {
     }
 
     #[test]
+    fn direct_maritime_trade_that_closes_a_settlement_is_retained() {
+        let mut state = main_state_with_settlement_frontier(607);
+        set_root_hand(&mut state, [1, 1, 0, 1, 4]);
+        let plans = plan_current_turn(
+            &state,
+            TurnPlanConfig {
+                maximum_nodes: 4_000,
+                root_cap: 28,
+                ..TurnPlanConfig::default()
+            },
+        );
+        let closing_trade = plans
+            .iter()
+            .find(|plan| {
+                matches!(
+                    plan.first_action,
+                    Action::MaritimeTrade {
+                        give: Resource::Ore,
+                        receive: Resource::Wool,
+                        ratio: 4,
+                    }
+                ) && plan
+                    .actions
+                    .iter()
+                    .any(|action| matches!(action, Action::BuildSettlement { .. }))
+            })
+            .expect("the one-trade settlement conversion must survive planning");
+        assert!(closing_trade.completion_mass > 0.0);
+        assert!(closing_trade.decisive_completion_mass > 0.99);
+    }
+
+    #[test]
+    fn immediate_city_dominates_maritime_churn() {
+        let mut state = main_state_with_settlement_frontier(613);
+        set_root_hand(&mut state, [0, 0, 0, 3, 5]);
+        let plans = plan_current_turn(
+            &state,
+            TurnPlanConfig {
+                maximum_nodes: 4_000,
+                root_cap: 28,
+                ..TurnPlanConfig::default()
+            },
+        );
+        assert!(matches!(
+            plans.first().map(|plan| &plan.first_action),
+            Some(Action::BuildCity { .. })
+        ));
+        assert!(plans.iter().all(|plan| {
+            plan.actions
+                .windows(2)
+                .all(|actions| !maritime_transshipment(&actions[0], &actions[1]))
+        }));
+    }
+
+    #[test]
+    fn maritime_transshipment_matches_the_observed_ore_grain_wool_waste_chain() {
+        let ore_to_grain = Action::MaritimeTrade {
+            give: Resource::Ore,
+            receive: Resource::Grain,
+            ratio: 4,
+        };
+        let grain_to_wool = Action::MaritimeTrade {
+            give: Resource::Grain,
+            receive: Resource::Wool,
+            ratio: 4,
+        };
+        assert!(maritime_transshipment(&ore_to_grain, &grain_to_wool));
+    }
+
+    #[test]
     fn twelve_cards_with_legal_conversions_do_not_end_the_turn() {
         let mut state = GameState::standard(13, 4);
         while matches!(
@@ -782,5 +977,74 @@ mod tests {
             plans.first().map(|plan| &plan.first_action),
             Some(Action::EndTurn)
         ));
+    }
+}
+
+#[cfg(test)]
+mod maritime_dominance_tests {
+    use super::*;
+    use colonist_catan_core::{Phase, Resource};
+
+    fn main_state() -> GameState {
+        let mut state = GameState::standard(7, 2);
+        while matches!(state.phase, Phase::SetupSettlement | Phase::SetupRoad { .. }) {
+            let action = state.legal_actions()[0].clone();
+            state.apply(&action).expect("legal setup action");
+        }
+        state.phase = Phase::Main;
+        state.current_player = 0;
+        state
+    }
+
+    #[test]
+    fn detects_reselling_a_card_acquired_in_the_same_maritime_segment() {
+        let mut state = main_state();
+        let old = state.players[0].resources;
+        let hand = [0, 0, 0, 3, 5];
+        for resource in 0..5 {
+            state.bank[resource] = state.bank[resource].saturating_add(old[resource]);
+            state.bank[resource] = state.bank[resource].saturating_sub(hand[resource]);
+        }
+        state.players[0].resources = hand;
+        let actions = [
+            Action::MaritimeTrade {
+                give: Resource::Ore,
+                receive: Resource::Grain,
+                ratio: 4,
+            },
+            Action::MaritimeTrade {
+                give: Resource::Grain,
+                receive: Resource::Wool,
+                ratio: 4,
+            },
+        ];
+
+        assert!(contains_dominated_maritime_sequence(&state, &actions));
+    }
+
+    #[test]
+    fn detects_a_card_destroying_inverse_maritime_segment() {
+        let mut state = main_state();
+        let old = state.players[0].resources;
+        let hand = [0, 0, 0, 3, 5];
+        for resource in 0..5 {
+            state.bank[resource] = state.bank[resource].saturating_add(old[resource]);
+            state.bank[resource] = state.bank[resource].saturating_sub(hand[resource]);
+        }
+        state.players[0].resources = hand;
+        let actions = [
+            Action::MaritimeTrade {
+                give: Resource::Ore,
+                receive: Resource::Grain,
+                ratio: 4,
+            },
+            Action::MaritimeTrade {
+                give: Resource::Grain,
+                receive: Resource::Ore,
+                ratio: 4,
+            },
+        ];
+
+        assert!(contains_dominated_maritime_sequence(&state, &actions));
     }
 }

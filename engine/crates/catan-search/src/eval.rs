@@ -2,9 +2,11 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 use colonist_catan_core::{
-    Building, CITY_COST, DEVELOPMENT_COST, GameState, Port, ROAD_COST, ResourceHand,
-    SETTLEMENT_COST,
+    Action, Building, CITY_COST, DEVELOPMENT_COST, GameState, Phase, Port, ROAD_COST,
+    ResourceHand, SETTLEMENT_COST,
 };
+
+use crate::economy::build_eta_rolls;
 
 const PIPS: [f32; 13] = [
     0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 0.0, 5.0, 4.0, 3.0, 2.0, 1.0,
@@ -26,6 +28,34 @@ pub struct ExpansionOption {
     /// Combined value of the best three surviving expansion options.
     pub portfolio_value: f32,
     pub option_count: u8,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RoadIntent {
+    pub target_vertex: Option<u8>,
+    pub roads_remaining: u8,
+    pub expected_rolls: f32,
+    pub survival_probability: f32,
+    pub target_value: f32,
+    pub portfolio_value: f32,
+    pub frontier_gain: f32,
+}
+
+impl RoadIntent {
+    pub fn ordering_score(self) -> f32 {
+        if self.target_vertex.is_none() { return 0.0; }
+        let eta_access = if self.expected_rolls.is_finite() {
+            1.0 / (1.0 + self.expected_rolls / 18.0)
+        } else {
+            0.0
+        };
+        self.frontier_gain * 1.35
+            + self.target_value * 0.16
+            + self.portfolio_value * 0.10
+            + self.survival_probability * 0.12
+            + 0.12 / (1.0 + self.roads_remaining as f32)
+            + eta_access * 0.45
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -135,7 +165,7 @@ fn acquisition_rate(production: &[f32; 5], ratios: &ResourceHand, target: usize)
             .sum::<f32>()
 }
 
-fn build_target_mask(state: &GameState, player: u8) -> [bool; 4] {
+pub(crate) fn build_target_mask(state: &GameState, player: u8) -> [bool; 4] {
     let player_state = &state.players[player as usize];
     let road = player_state.roads_left > 0
         && state
@@ -224,8 +254,19 @@ fn dynamic_resource_weights(state: &GameState, player: u8) -> [f32; 5] {
             3 => 1.08,
             _ => 1.0,
         };
+        let closed_economy = !state.player_trades_enabled || state.domestic_trade_disabled & (1 << player) != 0;
+        let self_reliance = if closed_economy && production[index] <= f32::EPSILON {
+            let ratio_steps = ratios[index].saturating_sub(2) as f32;
+            1.0 + ratio_steps * if index < 4 { 0.12 } else { 0.07 }
+        } else {
+            1.0
+        };
         let surplus = player_state.resources[index].saturating_sub(4) as f32;
-        weights[index] = BASE_RESOURCE_WEIGHTS[index] * scarcity * bottleneck * port_liquidity
+        weights[index] = BASE_RESOURCE_WEIGHTS[index]
+            * scarcity
+            * bottleneck
+            * port_liquidity
+            * self_reliance
             / (1.0 + surplus * 0.10);
     }
     weights
@@ -509,30 +550,36 @@ fn expansion_arrival_score(
     let mut plan_cost = SETTLEMENT_COST;
     plan_cost[0] = plan_cost[0].saturating_add(roads_required);
     plan_cost[1] = plan_cost[1].saturating_add(roads_required);
-    let missing = if exact_hand_visible {
-        deficit(&state.players[player as usize].resources, &plan_cost).map(f32::from)
+    let ratios = state.trade_ratios(player);
+    let expected_rolls = if exact_hand_visible {
+        build_eta_rolls(
+            production,
+            &state.players[player as usize].resources,
+            &ratios,
+            &plan_cost,
+        )
     } else {
         // Rival card identities are hidden. Estimate coverage from their
         // public hand total and production mix instead of consulting this
-        // sampled world.
+        // sampled world. Exact self-controlled closure is used whenever the
+        // hand is part of the acting information set.
         let public_cards = state.players[player as usize].resource_total() as f32;
         let production_total = production.iter().sum::<f32>();
-        std::array::from_fn(|resource| {
+        let missing: [f32; 5] = std::array::from_fn(|resource| {
             let expected_share = (production[resource] + 1.0) / (production_total + 5.0);
             (plan_cost[resource] as f32 - public_cards * expected_share).max(0.0)
-        })
+        });
+        missing
+            .iter()
+            .enumerate()
+            .map(|(resource, count)| {
+                *count * 36.0 / (acquisition_rate(production, &ratios, resource) + 0.65)
+            })
+            .sum::<f32>()
     };
-    if missing.iter().sum::<f32>() <= f32::EPSILON {
-        return turns_until_action(state, player);
+    if !expected_rolls.is_finite() {
+        return f32::INFINITY;
     }
-    let ratios = state.trade_ratios(player);
-    let expected_rolls = missing
-        .iter()
-        .enumerate()
-        .map(|(resource, count)| {
-            *count * 36.0 / (acquisition_rate(&production, &ratios, resource) + 0.65)
-        })
-        .sum::<f32>();
     turns_until_action(state, player)
         + expected_rolls / state.board.num_players.max(1) as f32
         + roads_required as f32 * 0.08
@@ -652,7 +699,17 @@ fn expansion_option_value_with_routes_and_weights(
         let site =
             vertex_value_with_weights(state, vertex as u8, resource_weights, player, &production);
         let road_cost = distance as f32 * 1.45;
-        let value = survival * (site + 5.4) / (1.0 + road_cost * 0.34);
+        let immediate_window = turns_until_action(state, player) + distance as f32 * 0.08;
+        let economic_delay = (arrival_scores[player as usize][distance as usize]
+            - immediate_window)
+            .max(0.0);
+        let access_scale = 18.0 / state.board.num_players.max(1) as f32;
+        let accessibility = if economic_delay.is_finite() {
+            1.0 / (1.0 + economic_delay / access_scale.max(1.0))
+        } else {
+            0.0
+        };
+        let value = survival * accessibility * (site + 5.4) / (1.0 + road_cost * 0.34);
         option_count = option_count.saturating_add(1);
         if value > top[0] {
             top[2] = top[1];
@@ -927,19 +984,7 @@ fn expected_build_tempo(state: &GameState, player: u8) -> f32 {
         .enumerate()
         .filter(|(kind, _)| build_targets[*kind])
         .map(|(kind, cost)| {
-            let missing = deficit(hand, cost);
-            let eta = missing
-                .iter()
-                .enumerate()
-                .map(|(index, amount)| {
-                    if *amount == 0 {
-                        0.0
-                    } else {
-                        *amount as f32 * 36.0
-                            / (acquisition_rate(&production, &ratios, index) + 0.75)
-                    }
-                })
-                .sum::<f32>();
+            let eta = build_eta_rolls(&production, hand, &ratios, cost);
             [0.32, 1.25, 1.18, 0.68][kind] / (1.0 + eta / 18.0)
         })
         .fold(0.0, f32::max)
@@ -1012,10 +1057,20 @@ fn strategic_utility_with_routes_and_knowledge(
         + port_flexibility * 0.07
         - expected_discard_loss(state, player) * 2.4
         - speculative_road_penalty(state, player, road)
+        + closed_economy_value(state, player)
 }
 
 fn strategic_utility_with_routes(state: &GameState, player: u8, route_maps: &[Vec<u8>]) -> f32 {
     strategic_utility_with_routes_and_knowledge(state, player, route_maps, true, None)
+}
+
+fn closed_economy_value(state: &GameState, player: u8) -> f32 {
+    let domestic_trades_disabled =
+        !state.player_trades_enabled || state.domestic_trade_disabled & (1_u8 << player) != 0;
+    let closure_weight = if domestic_trades_disabled { 0.10 } else { 0.035 };
+    let independence_weight = if domestic_trades_disabled { 0.18 } else { 0.055 };
+    crate::economy::immediate_build_closure_value(state, player) * closure_weight
+        + crate::economy::self_sufficient_production_value(state, player) * independence_weight
 }
 
 pub fn strategic_utility(state: &GameState, player: u8) -> f32 {
@@ -1381,6 +1436,63 @@ pub(crate) fn prepare_road_frontier_context(
     }
 }
 
+pub(crate) fn road_intent_with_context(
+    state: &GameState,
+    edge: u8,
+    actor: u8,
+    context: &RoadFrontierContext,
+) -> RoadIntent {
+    if state.roads.get(edge as usize).is_none_or(Option::is_some) {
+        return RoadIntent::default();
+    }
+    let action = if matches!(state.phase, Phase::SetupRoad { .. }) {
+        Action::PlaceRoad { edge }
+    } else {
+        Action::BuildRoad { edge }
+    };
+    let mut after = state.clone();
+    if after.apply(&action).is_err() {
+        return RoadIntent::default();
+    }
+    let route_maps = all_route_maps(&after);
+    let option = expansion_option_value_with_routes_and_weights(
+        &after,
+        actor,
+        &route_maps,
+        &context.resource_weights,
+        Some(actor),
+        false,
+        None,
+    );
+    let expected_rolls = option.vertex.map_or(f32::INFINITY, |_| {
+        let mut cost = SETTLEMENT_COST;
+        cost[0] = cost[0].saturating_add(option.roads_required);
+        cost[1] = cost[1].saturating_add(option.roads_required);
+        build_eta_rolls(
+            &production_pips(&after, actor),
+            &after.players[actor as usize].resources,
+            &after.trade_ratios(actor),
+            &cost,
+        )
+    });
+    let before_portfolio = context.before.value + context.before.portfolio_value * 0.55;
+    let after_portfolio = option.value + option.portfolio_value * 0.55;
+    RoadIntent {
+        target_vertex: option.vertex,
+        roads_remaining: option.roads_required,
+        expected_rolls,
+        survival_probability: option.survival_probability,
+        target_value: option.value,
+        portfolio_value: option.portfolio_value,
+        frontier_gain: after_portfolio - before_portfolio,
+    }
+}
+
+pub fn road_intent(state: &GameState, edge: u8, actor: u8) -> RoadIntent {
+    let context = prepare_road_frontier_context(state, actor);
+    road_intent_with_context(state, edge, actor, &context)
+}
+
 pub(crate) fn road_frontier_value_with_context(
     state: &GameState,
     edge: u8,
@@ -1430,12 +1542,16 @@ pub(crate) fn road_frontier_value(state: &GameState, edge: u8, actor: u8) -> f32
 mod tests {
     use std::sync::Arc;
 
-    use colonist_catan_core::{Building, GameState, Phase, Port, Resource, SETTLEMENT_COST};
+    use colonist_catan_core::{
+        Action, Building, GameState, Phase, Port, Resource, SETTLEMENT_COST,
+    };
 
     use super::{
-        all_route_maps, expansion_arrival_scores, expansion_site_survival, expected_discard_loss,
-        marginal_development_value, production_pips, public_strategic_utility, road_frontier_value,
-        robber_denial, rolls_before_next_spend, vertex_value,
+        all_route_maps, dynamic_resource_weights, expansion_arrival_scores,
+        expansion_site_survival, expected_discard_loss, marginal_development_value,
+        prepare_road_frontier_context, production_pips, public_strategic_utility,
+        road_frontier_value, road_intent_with_context, robber_denial,
+        rolls_before_next_spend, vertex_value,
     };
 
     fn after_setup(seed: u64, players: u8) -> GameState {
@@ -1522,6 +1638,25 @@ mod tests {
     }
 
     #[test]
+    fn closed_economy_increases_weight_of_unsupported_settlement_resource() {
+        let mut open = after_setup(1, 2);
+        open.phase = Phase::Main;
+        open.current_player = 0;
+        open.players[0].resources = [0; 5];
+        open.domestic_trade_disabled = 0;
+        let production = production_pips(&open, 0);
+        let missing = (0..4)
+            .find(|resource| production[*resource] <= f32::EPSILON)
+            .expect("fixture has an unsupported settlement resource");
+        let open_weights = dynamic_resource_weights(&open, 0);
+        let mut closed = open.clone();
+        closed.domestic_trade_disabled = 1;
+        let closed_weights = dynamic_resource_weights(&closed, 0);
+
+        assert!(closed_weights[missing] > open_weights[missing]);
+    }
+
+    #[test]
     fn future_port_value_requires_incremental_production_fit() {
         let mut state = GameState::standard(61, 4);
         state.buildings.fill(None);
@@ -1584,6 +1719,39 @@ mod tests {
         assert!((mismatched - plain).abs() < 1e-5);
         assert!(generic > plain);
         assert!(matched > generic);
+    }
+
+    #[test]
+    fn road_intent_can_prefer_complete_route_over_local_endpoint_numbers() {
+        let mut state = after_setup(1, 2);
+        state.phase = Phase::Main;
+        state.current_player = 0;
+        state.players[0].resources = [2, 2, 0, 0, 0];
+        let context = prepare_road_frontier_context(&state, 0);
+        let complete_route_edge = 23;
+        let local_number_decoy_edge = 12;
+        for edge in [complete_route_edge, local_number_decoy_edge] {
+            assert!(state
+                .legal_actions()
+                .contains(&Action::BuildRoad { edge }));
+        }
+        let local_score = |edge: u8| {
+            state.board.edges[edge as usize]
+                .vertices
+                .iter()
+                .map(|vertex| vertex_value(&state, *vertex, 0))
+                .fold(0.0_f32, f32::max)
+        };
+        let complete =
+            road_intent_with_context(&state, complete_route_edge, 0, &context);
+        let decoy =
+            road_intent_with_context(&state, local_number_decoy_edge, 0, &context);
+
+        assert!(local_score(local_number_decoy_edge) > local_score(complete_route_edge));
+        assert_eq!(complete.roads_remaining, 0);
+        assert_eq!(decoy.roads_remaining, 1);
+        assert!(complete.expected_rolls < decoy.expected_rolls);
+        assert!(complete.ordering_score() > decoy.ordering_score());
     }
 
     #[test]

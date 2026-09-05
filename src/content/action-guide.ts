@@ -177,6 +177,7 @@ let workflowAction: NextClick | undefined;
 let workflowGeneration = 0;
 let workflowOptions: ActionGuideOptions | undefined;
 let workflowCurrentElement: HTMLElement | undefined;
+let workflowHasDispatchedStep = false;
 let currentGuideOptions: ActionGuideOptions | undefined;
 let currentGuideAction: NextClick | undefined;
 let manualExecutionCleanup: (() => void) | undefined;
@@ -199,9 +200,28 @@ const reportedMissingControls = new Set<string>();
 const normalized = (value: string): string =>
   value.toLowerCase().replace(/\s+/gu, " ").trim();
 
-const visible = (element: HTMLElement): boolean => {
+const rendered = (element: HTMLElement): boolean => {
+  let cursor: HTMLElement | null = element;
+  while (cursor) {
+    const style = getComputedStyle(cursor);
+    if (
+      cursor.hidden ||
+      cursor.style.display === "none" ||
+      cursor.style.visibility === "hidden" ||
+      cursor.style.opacity === "0" ||
+      style.display === "none" ||
+      style.visibility === "hidden" ||
+      style.opacity === "0"
+    ) {
+      return false;
+    }
+    cursor = cursor.parentElement;
+  }
+  return true;
+};
+
+const displayed = (element: HTMLElement): boolean => {
   const rect = element.getBoundingClientRect();
-  const style = getComputedStyle(element);
   return (
     rect.width >= 12 &&
     rect.height >= 12 &&
@@ -209,13 +229,13 @@ const visible = (element: HTMLElement): boolean => {
     rect.right > 0 &&
     rect.top < innerHeight &&
     rect.left < innerWidth &&
-    style.display !== "none" &&
-    style.visibility !== "hidden" &&
-    Number(style.opacity) > 0 &&
-    !element.hasAttribute("disabled") &&
-    element.getAttribute("aria-disabled") !== "true"
+    rendered(element)
   );
 };
+
+const visible = (element: HTMLElement): boolean =>
+  displayed(element) &&
+  !element.closest("[disabled], [aria-disabled='true'], [class*='isDisabled-']");
 
 const CONTROL_SELECTOR =
   "button, [role='button'], input[type='button'], input[type='submit'], [class*='actionButton-'], [class*='tradeButton-'], [class*='confirmButton-']";
@@ -471,6 +491,17 @@ const tradeExecutionDiagnostic = (
   action: NextClick,
 ): ActionExecutionDiagnostic => {
   const diagnostic: ActionExecutionDiagnostic = { actionKind: action.kind };
+  if (action.kind === "trade-builder") {
+    const controls = [...document.querySelectorAll<HTMLElement>(
+      "#action-button-trade, #action-button-trade-bank, #action-button-trade-players, " +
+      "#player-card-inventory [data-card-enum], [class*='wantedCardSelectorContainer-'] [data-card-enum], " +
+      "[class*='bankTradeAvailableCards-'] button, [class*='bankTradeReceiveCards-'] button",
+    )].filter(displayed).slice(0, 24);
+    return {
+      ...diagnostic,
+      visibleTradeControlFingerprints: controls.map(diagnosticControlFingerprint),
+    };
+  }
   if (
     action.kind !== "trade" &&
     action.kind !== "trade-partner" &&
@@ -802,8 +833,11 @@ const findResourceInRoot = (
   return undefined;
 };
 
+const firstVisible = (selector: string): HTMLElement | undefined =>
+  [...document.querySelectorAll<HTMLElement>(selector)].find(visible);
+
 const findTradePanelControl = (): HTMLElement | undefined =>
-  document.querySelector<HTMLElement>("#action-button-trade") ??
+  firstVisible("#action-button-trade") ??
   findControl(
     ["make trade", "create trade", "offer trade", "trade"],
     ["accept", "decline", "reject", "history"],
@@ -812,25 +846,32 @@ const findTradePanelControl = (): HTMLElement | undefined =>
 const findTradeResourceChoice = (
   resource: Resource,
   side: "give" | "receive",
+  mode: "player" | "bank",
 ): HTMLElement | undefined => {
-  const root =
-    side === "give"
-      ? document.querySelector<HTMLElement>("#player-card-inventory")
-      : document.querySelector<HTMLElement>(
-          "[class*='wantedCardSelectorContainer-']",
-        );
-  return findResourceInRoot(root ?? undefined, resource);
+  const selector = side === "give"
+    ? "[id='player-card-inventory']" + (mode === "bank" ? ", [class*='bankTradeAvailableCards-']" : "")
+    : "[class*='wantedCardSelectorContainer-']" + (mode === "bank" ? ", [class*='bankTradeReceiveCards-']" : "");
+  // Colonist can retain an outgoing animated tree while mounting the current
+  // trade tree. IDs/classes are therefore not guaranteed to identify the
+  // first DOM node. Resolve the first *visible resource control* across all
+  // matching roots rather than becoming stuck behind a stale hidden copy.
+  for (const root of document.querySelectorAll<HTMLElement>(selector)) {
+    if (!rendered(root)) continue;
+    const choice = findResourceInRoot(root, resource);
+    if (choice && visible(choice)) return choice;
+  }
+  return undefined;
 };
 
 const findTradeSubmit = (
   mode: "player" | "bank",
 ): HTMLElement | undefined => {
-  const exact = document.querySelector<HTMLElement>(
+  const exact = firstVisible(
     mode === "bank"
       ? "#action-button-trade-bank"
       : "#action-button-trade-players",
   );
-  if (exact && visible(exact)) return exact;
+  if (exact) return exact;
   return mode === "bank"
     ? findControl(["trade with bank", "bank trade"], ["player"])
     : findControl(["trade with players", "send offer", "offer"], ["bank"]);
@@ -1668,20 +1709,13 @@ const resourceSteps = (
   );
 
 export const tradePanelIsOpen = (): boolean =>
-  [
-    document.querySelector<HTMLElement>(
-      "[class*='proposalWantedHalfContainer-']",
-    ),
-    document.querySelector<HTMLElement>(
-      "[class*='proposalOfferedHalfContainer-']",
-    ),
-  ].some((element) => Boolean(element && visible(element))) &&
-  Boolean(
-    [
-      document.querySelector<HTMLElement>("#action-button-trade-players"),
-      document.querySelector<HTMLElement>("#action-button-trade-bank"),
-    ].some((element) => Boolean(element && visible(element))),
-  );
+  // These submit controls are mounted only by the active trade panel. They are
+  // a stronger signal than proposal containers, which Colonist may replace or
+  // briefly omit while switching between bank and player mode.
+  // A newly opened, empty draft disables submission. Disabled is not closed.
+  [...document.querySelectorAll<HTMLElement>(
+    "#action-button-trade-players, #action-button-trade-bank",
+  )].some(displayed);
 
 const selectedTradeCards = (): HTMLElement[] =>
   [
@@ -1691,8 +1725,17 @@ const selectedTradeCards = (): HTMLElement[] =>
           "[class*='proposalWantedHalfContainer-'] img[src*='card_'], [class*='proposalOfferedHalfContainer-'] img[src*='card_']",
         ),
       ]
+        .filter((image) => {
+          const root = image.closest<HTMLElement>(
+            "[class*='proposalWantedHalfContainer-'], [class*='proposalOfferedHalfContainer-']",
+          );
+          return Boolean(root && rendered(root) && visible(image));
+        })
         .map((image) => nearestClickable(image))
-        .filter((element): element is HTMLElement => Boolean(element)),
+        .filter(
+          (element): element is HTMLElement =>
+            Boolean(element && visible(element)),
+        ),
     ),
   ];
 
@@ -1706,29 +1749,31 @@ const proposalResourceCount = (
     side === "give"
       ? "[class*='proposalOfferedHalfContainer-']"
       : "[class*='proposalWantedHalfContainer-']";
-  const root = document.querySelector<HTMLElement>(selector);
-  if (!root) return 0;
-  const matches = [
-    ...root.querySelectorAll<HTMLElement>(
-      `[data-card-enum="${resourceCardEnum[resource]}"], img[src], [aria-label], [title]`,
-    ),
-  ].filter((element) => resourceEvidence(element, resource));
-  const counts = matches.map((element) => {
-    const stack =
-      element.closest<HTMLElement>(
-        "[class*='cardStackContainer-'], [class*='cardContainer-'], [data-card-enum], button, [role='button']",
-      ) ?? element;
-    const badge = stack.querySelector<HTMLElement>(
-      "[class*='countBadge-'], [class*='cardCount-'], [class*='amount-']",
-    );
-    const value = Number.parseInt(
-      normalized(badge?.textContent ?? "").match(/\d+/u)?.[0] ?? "1",
-      10,
-    );
-    return Number.isFinite(value) ? Math.max(1, value) : 1;
-  });
-  // Colonist animates old and new stacks at the same time. The largest stack
-  // count is the committed draft state; summing would double-count animation.
+  const counts = [...document.querySelectorAll<HTMLElement>(selector)]
+    .filter(rendered)
+    .map((root) => {
+      const cards = new Set(
+        [...root.querySelectorAll<HTMLElement>(
+          `[data-card-enum="${resourceCardEnum[resource]}"], img[src], [aria-label], [title]`,
+        )]
+          .filter((element) => displayed(element) && resourceEvidence(element, resource))
+          .map((element) => element.closest<HTMLElement>(
+            "[data-card-enum], [class*='cardContainer-'], button, [role='button']",
+          ) ?? element),
+      );
+      const badgeCounts = [...cards].flatMap((card) => {
+        const badge = card.querySelector<HTMLElement>(
+          "[class*='countBadge-'], [class*='cardCount-'], [class*='amount-']",
+        );
+        if (!badge) return [];
+        const count = Number.parseInt(normalized(badge.textContent ?? ""), 10);
+        return Number.isFinite(count) ? [Math.max(0, count)] : [];
+      });
+      // Colonist numbers overlapping stack cards 1..N. Never sum those badges.
+      // Layouts that render distinct unbadged cards are counted once per card.
+      return badgeCounts.length ? Math.max(...badgeCounts) : cards.size;
+    });
+  // Outgoing/incoming animation trees may briefly coexist: do not add them.
   return counts.length ? Math.max(...counts) : 0;
 };
 
@@ -1736,6 +1781,7 @@ const tradeResourceSteps = (
   cards: ResourceVector,
   side: "give" | "receive",
   verb: string,
+  mode: "player" | "bank" = "player",
 ): WorkflowStep[] =>
   (Object.keys(cards) as Resource[]).flatMap((resource) =>
     Array.from({ length: cards[resource] }, (_, index) => {
@@ -1744,9 +1790,10 @@ const tradeResourceSteps = (
         proposalResourceCount(side, resource) >= expected;
       return {
         label: `${verb} ${resource}${cards[resource] > 1 ? ` ${expected}/${cards[resource]}` : ""}`,
-        resolve: () => findTradeResourceChoice(resource, side),
+        resolve: () => findTradeResourceChoice(resource, side, mode),
         ready: complete,
         complete,
+        retryOnIncomplete: true,
         settleMs: 320,
       };
     }),
@@ -1837,6 +1884,12 @@ const clearTradeDraftStep = (): WorkflowStep => ({
   settleMs: 220,
 });
 
+const tradeDraftMatches = (give: ResourceVector, receive: ResourceVector): boolean =>
+  (Object.keys(give) as Resource[]).every((resource) =>
+    proposalResourceCount("give", resource) === give[resource] &&
+    proposalResourceCount("receive", resource) === receive[resource],
+  );
+
 const tradeWorkflow = (
   action: Extract<NextClick, { kind: "trade-builder" }>,
 ): WorkflowStep[] => [
@@ -1852,14 +1905,16 @@ const tradeWorkflow = (
     settleMs: 320,
   },
   clearTradeDraftStep(),
-  ...tradeResourceSteps(action.give, "give", "Offer"),
-  ...tradeResourceSteps(action.receive, "receive", "Request"),
+  ...tradeResourceSteps(action.give, "give", "Offer", action.mode),
+  ...tradeResourceSteps(action.receive, "receive", "Request", action.mode),
   {
     label:
       action.mode === "bank"
         ? "Confirm bank trade"
         : "Send this offer",
-    resolve: () => findTradeSubmit(action.mode),
+    resolve: () => tradeDraftMatches(action.give, action.receive)
+      ? findTradeSubmit(action.mode)
+      : undefined,
     settleMs: 460,
   },
   closeTradePanelStep("Close completed trade panel"),
@@ -1897,7 +1952,10 @@ const counterWorkflow = (
     ...tradeResourceSteps(action.counterReceive, "receive", "Request"),
     {
       label: "Send counteroffer",
-      resolve: () => findTradeSubmit("player"),
+      resolve: () => action.counterGive && action.counterReceive
+        && tradeDraftMatches(action.counterGive, action.counterReceive)
+        ? findTradeSubmit("player")
+        : undefined,
       settleMs: 460,
     },
     closeTradePanelStep("Close completed counteroffer"),
@@ -2030,6 +2088,7 @@ const cancelWorkflow = (): void => {
   workflowAction = undefined;
   workflowOptions = undefined;
   workflowCurrentElement = undefined;
+  workflowHasDispatchedStep = false;
 };
 
 const cancelAutonomousContinuations = (): void => {
@@ -2046,11 +2105,37 @@ const cancelAutonomousContinuations = (): void => {
   reportedMissingControls.clear();
 };
 
+export const developmentFollowupAction = (
+  card: KnownDevelopmentCard,
+): "road" | "robber" | undefined =>
+  card === "knight" ? "robber" : card === "road-building" ? "road" : undefined;
+
 export const activeWorkflowAction = (
   boardAction?: BoardAction,
   robberVictimSelection = false,
 ): NextClick | undefined => {
   if (!workflowSignature || !workflowAction) return undefined;
+  if (
+    workflowAction.kind === "development" &&
+    workflowHasDispatchedStep &&
+    boardAction !== undefined &&
+    boardAction === developmentFollowupAction(workflowAction.card) &&
+    (!workflowOptions?.validateContinuation || workflowOptions.validateContinuation())
+  ) {
+    // Entering the card's parameter phase is authoritative proof that Colonist
+    // committed the development card. End the old card/confirmation workflow
+    // before the new road/robber decision takes ownership.
+    const completed = workflowAction;
+    const completedOptions = workflowOptions;
+    lastClickSignature = completed.signature;
+    cancelWorkflow();
+    document.getElementById(ROOT_ID)?.remove();
+    completedOptions?.onExecution?.({
+      succeeded: true,
+      signature: completed.signature,
+    });
+    return undefined;
+  }
   const stillOwnsBoardPhase =
     workflowAction.kind === "discard"
       ? boardAction === "discard"
@@ -2058,11 +2143,7 @@ export const activeWorkflowAction = (
         ? boardAction === "none" && robberVictimSelection
         : workflowAction.kind === "trade-builder"
           ? boardAction === "none" || tradePanelIsOpen()
-          : workflowAction.kind === "development"
-            ? boardAction === "none" ||
-              boardAction === "road" ||
-              boardAction === "robber"
-            : boardAction === "none";
+          : boardAction === "none";
   if (stillOwnsBoardPhase) return workflowAction;
   cancelWorkflow();
   document.getElementById(ROOT_ID)?.remove();
@@ -2285,9 +2366,17 @@ const startWorkflow = (
       };
       verify();
     };
+    // Mark dispatch before the page handles a direct phase transition, but
+    // verify draft/card changes only after its click handler has run.
+    element.addEventListener("click", () => {
+      if (generation === workflowGeneration && workflowSignature === action.signature) {
+        workflowHasDispatchedStep = true;
+      }
+    }, { once: true, capture: true });
     element.addEventListener(
       "click",
       () => {
+        if (generation !== workflowGeneration || workflowSignature !== action.signature) return;
         currentOptions.onExecutionStart?.({ signature: action.signature });
         advance();
       },
@@ -2336,12 +2425,16 @@ const startWorkflow = (
         if (
           !validatedClick(
             freshElement,
-            index === 0 || !currentOptions.validateContinuation
-              ? currentOptions
-              : {
-                  ...currentOptions,
-                  validate: currentOptions.validateContinuation,
-                },
+            {
+              ...currentOptions,
+              validate: index === 0 || !currentOptions.validateContinuation
+                ? currentOptions.validate
+                : currentOptions.validateContinuation,
+              onExecutionStart: (result) => {
+                workflowHasDispatchedStep = true;
+                currentOptions.onExecutionStart?.(result);
+              },
+            },
             `${action.signature}|step|${index}`,
             false,
           )

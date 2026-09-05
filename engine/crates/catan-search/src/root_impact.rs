@@ -503,7 +503,7 @@ mod tests {
 
         // An edge that doesn't claim award or cut anyone
         let road_action = Action::BuildRoad { edge: 1 };
-        let report = compute_spatial_root_impacts(&state, 0, &[road_action.clone()]);
+        let report = compute_spatial_root_impacts(&state, 0, std::slice::from_ref(&road_action));
         let impact = report
             .actions
             .iter()
@@ -541,7 +541,7 @@ mod tests {
             .expect("fixture must expose an actor-critical expansion edge");
         assert!(critical.expansion_loss > 0.35);
 
-        let report = compute_spatial_root_impacts(&state, 0, &[road_action.clone()]);
+        let report = compute_spatial_root_impacts(&state, 0, std::slice::from_ref(&road_action));
         let impact = report
             .actions
             .iter()

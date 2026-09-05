@@ -68,11 +68,29 @@ fn canonical_promotion_key(action: &Action) -> (u8, u8, u8) {
     }
 }
 
+/// Returns roots that end the game immediately for the acting player. The
+/// negative priority loss makes a proven win sort ahead of every merely
+/// defensive forced-loss escape in `admit_promoted_roots`.
+pub fn immediate_winning_roots(
+    state: &GameState,
+    root: u8,
+    ranked: &[(Action, f32)],
+) -> Vec<(Action, f32)> {
+    ranked
+        .iter()
+        .filter_map(|(action, _)| {
+            let mut next = state.clone();
+            (next.apply(action).is_ok() && next.winner() == Some(root))
+                .then(|| (action.clone(), -1.0))
+        })
+        .collect()
+}
+
 /// Merges mandatory blockers and promoted candidate actions with ordinary
 /// observation-ranked roots, ensuring:
-/// 1. Mandatory blockers (proven forced-loss escapes) take absolute precedence
-///    over spatial promotions and `EndTurn`, ordered by the least residual
-///    forced-loss mass with deterministic action tie-breaking.
+/// 1. Proven immediate wins and mandatory blockers (forced-loss escapes) take
+///    absolute precedence over spatial promotions and `EndTurn`, ordered by
+///    priority/residual loss with deterministic action tie-breaking.
 /// 2. Spatial promotions are admitted into remaining non-`EndTurn` capacity.
 /// 3. `EndTurn` is preserved when capacity remains after mandatory blockers.
 /// 4. Deduplication and backend-independent ordering are shared by CPU/native GPU.

@@ -1942,6 +1942,8 @@ static inline __device__ uint32_t pips_for_number(uint32_t number) {
     return 0u;
 }
 
+#include "rollout_cutoff.cuh"
+
 static inline __device__ uint32_t observed_monopoly_resource_weight(
     const uint32_t *states,
     const uint32_t *topology,
@@ -2160,7 +2162,11 @@ static inline __device__ uint32_t road_policy_score(
             best = score > best ? score : best;
         }
     }
-    return best + road_cut_settlement_policy_bonus(states, topology, stride, lane, edge);
+    const uint32_t actor = state_get(states, stride, STATE_CURRENT_PLAYER, lane);
+    const uint32_t before = cutoff_expansion(states, topology, stride, lane, actor, 0xffffffffu);
+    const uint32_t after = cutoff_expansion(states, topology, stride, lane, actor, edge);
+    const uint32_t gain = after > before ? after - before : 0;
+    return best + gain * 3u + road_cut_settlement_policy_bonus(states, topology, stride, lane, edge);
 }
 
 static inline __device__ uint32_t profile_scaled_weight(
@@ -2186,34 +2192,28 @@ static inline __device__ uint32_t maritime_policy_score(
     uint32_t ratio
 ) {
     uint32_t hand[5];
-    for (uint32_t resource = 0u; resource < 5u; ++resource) {
-        hand[resource] = player_get(states, stride, lane, player, PLAYER_RESOURCES + resource);
+    for (uint32_t r = 0; r < 5; ++r) hand[r] = player_get(states, stride, lane, player, PLAYER_RESOURCES + r);
+    uint32_t score = 0;
+    // A maritime leg may receive a real deficit only after preserving every
+    // card of the target. This excludes the ore->surplus grain->wool chain.
+    for (uint32_t plan = 0; plan < 6; ++plan) {
+        const uint32_t *cost = DOMESTIC_PLAN_COSTS[plan];
+        if (hand[receive] >= cost[receive] || hand[give] < ratio + cost[give]) continue;
+        if ((plan == 0 || plan >= 4) && player_get(states, stride, lane, player, PLAYER_ROADS_LEFT) == 0) continue;
+        if ((plan == 1 || plan >= 4) && player_get(states, stride, lane, player, PLAYER_SETTLEMENTS_LEFT) == 0) continue;
+        if (plan == 2 && player_get(states, stride, lane, player, PLAYER_CITIES_LEFT) == 0) continue;
+        uint32_t remaining = 0;
+        for (uint32_t r = 0; r < 5; ++r) {
+            const uint32_t after = hand[r] - (r == give ? ratio : 0u) + (r == receive ? 1u : 0u);
+            remaining += cost[r] > after ? cost[r] - after : 0;
+        }
+        const uint32_t importance = plan == 1 ? 900u : plan == 2 ? 850u : plan >= 4 ? 700u : plan == 3 ? 500u : 300u;
+        const uint32_t candidate = importance / (1u + remaining);
+        score = candidate > score ? candidate : score;
     }
-    hand[give] -= ratio;
-    hand[receive] += 1u;
-    uint32_t score = 150u + (receive == 3u ? 90u : receive == 4u ? 80u : receive < 2u ? 55u : 45u);
-    int can_road = 1;
-    int can_settlement = 1;
-    int can_city = 1;
-    int can_development = 1;
-    for (uint32_t resource = 0u; resource < 5u; ++resource) {
-        can_road &= hand[resource] >= ROAD_COST[resource];
-        can_settlement &= hand[resource] >= SETTLEMENT_COST[resource];
-        can_city &= hand[resource] >= CITY_COST[resource];
-        can_development &= hand[resource] >= DEVELOPMENT_COST[resource];
-    }
-    if (can_city) {
-        score += 700u;
-    }
-    if (can_settlement) {
-        score += 620u;
-    }
-    if (can_development) {
-        score += 320u;
-    }
-    if (can_road) {
-        score += 180u;
-    }
+    if (score == 0 && resource_total(states, stride, lane, player)
+        > state_get(states, stride, STATE_DISCARD_LIMIT, lane)
+        && hand[give] > 4 && hand[receive] < 2) score = 20;
     return score;
 }
 
@@ -3105,16 +3105,15 @@ static inline __device__ void generate_rollout_action_lane(
                 );
             }
         }
-        if (development_playable(states, stride, lane, current, 3u)
-            && state_get(states, stride, STATE_BANK_PUBLIC, lane) != 0u) {
+        if (development_playable(states, stride, lane, current, 3u)) {
             uint32_t pair_weight = 0u;
             uint32_t selected_first = 0xffffffffu;
             uint32_t selected_second = 0xffffffffu;
             for (uint32_t first = 0u; first < 5u; ++first) {
                 for (uint32_t second = first; second < 5u; ++second) {
                     const uint32_t needed = first == second ? 2u : 1u;
-                    if (state_get(states, stride, STATE_BANK + first, lane) < needed
-                        || state_get(states, stride, STATE_BANK + second, lane) == 0u) {
+                    if (observed_bank_lower_bound(states, stride, lane, current, first) < needed
+                        || observed_bank_lower_bound(states, stride, lane, current, second) == 0u) {
                         continue;
                     }
                     const uint32_t weight = year_of_plenty_pair_score(
@@ -3375,10 +3374,10 @@ static inline __device__ void generate_rollout_action_lane(
             );
         }
 
-        // When the bank composition is hidden, choosing a receive resource
-        // from the exact determinization would leak the particle into policy.
-        // Fail closed on this optional family until the bank is observable.
-        if (state_get(states, stride, STATE_BANK_PUBLIC, lane) != 0u) {
+        // Use guaranteed stock from the actor's hand and public hand totals
+        // when the exact bank is hidden. Every compatible world has the same
+        // proposed-action domain; unknown availability is not treated as known.
+        {
             uint32_t maritime_weight = 0u;
             uint32_t maritime_give = 0xffffffffu;
             uint32_t maritime_receive = 0xffffffffu;
@@ -3389,12 +3388,13 @@ static inline __device__ void generate_rollout_action_lane(
                     continue;
                 }
                 for (uint32_t receive = 0u; receive < 5u; ++receive) {
-                    if (give == receive || state_get(states, stride, STATE_BANK + receive, lane) == 0u) {
+                    if (give == receive || observed_bank_lower_bound(states, stride, lane, current, receive) == 0u) {
                         continue;
                     }
                     const uint32_t weight = maritime_policy_score(
                         states, stride, lane, current, give, receive, ratio
                     );
+                    if (weight == 0u) continue;
                     const uint32_t next_total = maritime_weight + weight;
                     if (rng_range(&rng, next_total) < weight) {
                         maritime_give = give;
@@ -3472,16 +3472,15 @@ static inline __device__ void generate_rollout_action_lane(
             }
         }
 
-        if (development_playable(states, stride, lane, current, 3u)
-            && state_get(states, stride, STATE_BANK_PUBLIC, lane) != 0u) {
+        if (development_playable(states, stride, lane, current, 3u)) {
             uint32_t pair_weight = 0u;
             uint32_t selected_first = 0xffffffffu;
             uint32_t selected_second = 0xffffffffu;
             for (uint32_t first = 0u; first < 5u; ++first) {
                 for (uint32_t second = first; second < 5u; ++second) {
                     const uint32_t needed = first == second ? 2u : 1u;
-                    if (state_get(states, stride, STATE_BANK + first, lane) < needed
-                        || state_get(states, stride, STATE_BANK + second, lane) == 0u) {
+                    if (observed_bank_lower_bound(states, stride, lane, current, first) < needed
+                        || observed_bank_lower_bound(states, stride, lane, current, second) == 0u) {
                         continue;
                     }
                     const uint32_t weight = year_of_plenty_pair_score(
@@ -4837,6 +4836,7 @@ extern "C" __global__ void select_candidate_root_actions_kernel(
     long long best_net = 0ll;
     uint64_t best_samples = 1ull;
     long long best_margin = 0ll;
+    long long best_strategic = 0ll;
     uint64_t best_valid = 1ull;
     uint64_t best_turns = 0ull;
 
@@ -4863,6 +4863,7 @@ extern "C" __global__ void select_candidate_root_actions_kernel(
         uint64_t turns = 0ull;
         uint64_t actor_vp = 0ull;
         uint64_t opponent_vp = 0ull;
+        uint64_t strategic_sum = 0ull;
         for (uint32_t peer = root; peer < end; ++peer) {
             if (root_actions[ACTION_TAG * root_count + peer] >= 254u
                 || !root_actions_equal(root_actions, root_count, root, peer)) {
@@ -4875,6 +4876,7 @@ extern "C" __global__ void select_candidate_root_actions_kernel(
             turns += root_stats[4u * root_count + peer];
             actor_vp += root_stats[5u * root_count + peer];
             opponent_vp += root_stats[6u * root_count + peer];
+            strategic_sum += root_stats[10u * root_count + peer];
         }
         if (samples == 0ull || errors >= samples) {
             continue;
@@ -4882,6 +4884,7 @@ extern "C" __global__ void select_candidate_root_actions_kernel(
         const uint64_t valid = samples - errors;
         const long long net = (long long)(2ull * wins) - (long long)terminals;
         const long long margin = (long long)actor_vp - (long long)opponent_vp;
+        const long long strategic = (long long)strategic_sum;
 
         int better = best_root == 0xffffffffu;
         if (!better) {
@@ -4890,8 +4893,8 @@ extern "C" __global__ void select_candidate_root_actions_kernel(
             if (net_left != net_right) {
                 better = net_left > net_right;
             } else {
-                const long long margin_left = margin * (long long)best_valid;
-                const long long margin_right = best_margin * (long long)valid;
+                const long long margin_left = strategic * (long long)best_valid;
+                const long long margin_right = best_strategic * (long long)valid;
                 if (margin_left != margin_right) {
                     better = margin_left > margin_right;
                 } else {
@@ -4908,6 +4911,7 @@ extern "C" __global__ void select_candidate_root_actions_kernel(
             best_net = net;
             best_samples = samples;
             best_margin = margin;
+            best_strategic = strategic;
             best_valid = valid;
             best_turns = turns;
         }
@@ -5035,6 +5039,7 @@ extern "C" __global__ void reduce_root_rollouts_kernel(
     const uint32_t *states,
     const uint32_t *status,
     const uint32_t *base_states,
+    const uint32_t *topology,
     const uint32_t *root_base_indices,
     uint64_t *stats,
     uint32_t stride,
@@ -5064,14 +5069,19 @@ extern "C" __global__ void reduce_root_rollouts_kernel(
     const uint32_t terminal = state_get(states, stride, STATE_PHASE, lane) == PHASE_FINISHED ? 1u : 0u;
     uint32_t actor_vp = 0u;
     uint32_t best_opponent_vp = 0u;
+    long long actor_strategic = 0;
+    long long best_opponent_strategic = -0x7fffffffffffffffll;
     uint32_t winner = 0xffffffffu;
     for (uint32_t player = 0u; player < players; ++player) {
         const uint32_t vp = player_get(states, stride, lane, player, PLAYER_PUBLIC_VP)
             + player_get(states, stride, lane, player, PLAYER_DEVELOPMENT + 1u);
+        const long long strategic = rollout_cutoff_player_score(states, topology, stride, lane, player);
         if (player == actor) {
             actor_vp = vp;
-        } else if (vp > best_opponent_vp) {
-            best_opponent_vp = vp;
+            actor_strategic = strategic;
+        } else {
+            if (vp > best_opponent_vp) best_opponent_vp = vp;
+            if (strategic > best_opponent_strategic) best_opponent_strategic = strategic;
         }
         if (terminal != 0u && winner == 0xffffffffu && vp >= target) {
             winner = player;
@@ -5096,4 +5106,16 @@ extern "C" __global__ void reduce_root_rollouts_kernel(
         &stats[9u * root_count + root],
         (uint64_t)best_opponent_vp * (uint64_t)best_opponent_vp
     );
+    const long long strategic_margin = actor_strategic - best_opponent_strategic;
+    // Two's-complement modular addition preserves signed sums in the u64 ABI.
+    atomicAdd(&stats[10u * root_count + root], (uint64_t)strategic_margin);
+    atomicAdd(&stats[11u * root_count + root], (uint64_t)(strategic_margin * strategic_margin));
+}
+
+// Checked before any resident state or reduction buffer is used by Rust.
+extern "C" __global__ void simulation_contract_kernel(uint32_t *out) {
+    out[0] = 2u;
+    out[1] = STATE_WORDS;
+    out[2] = ACTION_WORDS;
+    out[3] = 12u;
 }

@@ -13,9 +13,57 @@ benchmark-profile = []
 cuda-exact = ["dep:cudarc"]
 cuda-sim = ["dep:cudarc"]
 
+[[bin]]
+name = "cuda-sim-arena"
+path = "src/bin/cuda-sim-arena.rs"
+required-features = ["cuda-sim"]
+
+[[bin]]
+name = "cuda-sim-bulk-parity"
+path = "src/bin/cuda-sim-bulk-parity.rs"
+required-features = ["cuda-sim"]
+
+[[bin]]
+name = "cuda-sim-generated-parity"
+path = "src/bin/cuda-sim-generated-parity.rs"
+required-features = ["cuda-sim"]
+
+[[bin]]
+name = "cuda-sim-parity"
+path = "src/bin/cuda-sim-parity.rs"
+required-features = ["cuda-sim"]
+
+[[bin]]
+name = "cuda-sim-root-search"
+path = "src/bin/cuda-sim-root-search.rs"
+required-features = ["cuda-sim"]
+
+[[bin]]
+name = "cuda-sim-searched-arena"
+path = "src/bin/cuda-sim-searched-arena.rs"
+required-features = ["cuda-sim"]
+
+[[bin]]
+name = "cuda-sim-trade-generated-parity"
+path = "src/bin/cuda-sim-trade-generated-parity.rs"
+required-features = ["cuda-sim"]
+
+[[bin]]
+name = "cuda-sim-trade-parity"
+path = "src/bin/cuda-sim-trade-parity.rs"
+required-features = ["cuda-sim"]
+
+[[bin]]
+name = "webgpu-rollout-feasibility"
+path = "src/bin/webgpu-rollout-feasibility.rs"
+required-features = ["cuda-sim"]
+
 [dependencies]
 colonist-catan-core = { path = "../catan-core" }
 cudarc = { version = "0.19.9", optional = true, default-features = false, features = ["std", "driver", "nvrtc", "dynamic-loading", "cuda-13000"] }
+
+[build-dependencies]
+sha2 = "0.10"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"

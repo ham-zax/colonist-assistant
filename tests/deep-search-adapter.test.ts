@@ -949,7 +949,7 @@ describe("deep-search state adapter", () => {
     expect(retried.actions.some(matchesRejectedOffer)).toBe(false);
   });
 
-  it("crosses the packaged WASM boundary and returns a legal report", async () => {
+  it("crosses the packaged WASM boundary inside the cold smoke budget", async () => {
     const bytes = await readFile(
       new URL(
         "../src/generated/wasm/colonist_search_bg.wasm",
@@ -958,16 +958,27 @@ describe("deep-search state adapter", () => {
     );
     await initWasm({ module_or_path: bytes });
     const built = buildDeepSearchRequest(state, board, "You");
+
+    // The live request deliberately keeps a larger quality budget. This cold
+    // package smoke uses a short cooperative deadline so its <1s assertion
+    // measures startup/bridge regressions rather than capping live search quality.
+    expect(built.request.mode).toBe("maxn");
+    expect(built.request.depth).toBe(5);
+    expect(built.request.maxNodes).toBe(8_000);
+    expect(built.request.branchCap).toBe(10);
+    expect(built.request.tacticalNodes).toBe(900);
+    expect(built.request.timeBudgetMs).toBe(2_000);
+    expect(built.request.effort?.decisionTimeMs).toBe(2_000);
+
+    const coldSmokeBudgetMs = 350;
+    built.request.timeBudgetMs = coldSmokeBudgetMs;
+    built.request.effort = {
+      ...built.request.effort!,
+      decisionTimeMs: coldSmokeBudgetMs,
+    };
     const started = performance.now();
     const response = analyzeWasm(built.request);
     const elapsed = performance.now() - started;
-
-    expect(built.request.mode).toBe("maxn");
-    expect(built.request.depth).toBe(4);
-    expect(built.request.maxNodes).toBe(4_000);
-    expect(built.request.branchCap).toBe(8);
-    expect(built.request.tacticalNodes).toBe(900);
-    expect(built.request.timeBudgetMs).toBe(350);
     expect(response.algorithm).toBe("maxn");
     expect(response.engineRevision).toBe("deep-maxn-v10");
     expect([
@@ -1042,17 +1053,24 @@ describe("deep-search state adapter", () => {
     );
     await initWasm({ module_or_path: bytes });
     const built = buildDeepSearchRequest(state, board, "You");
-    built.request.depth = 6;
-    built.request.branchCap = 32;
-    built.request.maxNodes = 250_000;
-    built.request.tacticalNodes = 100;
-    built.request.timeBudgetMs = 250;
+    built.request.effort = {
+      decisionTimeMs: 50,
+      tactical: { maxDepth: 4, nodeBudget: 100 },
+      cpu: {
+        maxDepth: 6,
+        rootCap: 32,
+        nodesPerDepthWave: 250_000,
+      },
+      gpu: built.request.effort!.gpu,
+    };
     const started = performance.now();
     const response = analyzeWasm(built.request);
     const elapsed = performance.now() - started;
 
     expect(response.deadlineReached).toBe(true);
-    expect(response.nodes).toBeLessThan(built.request.maxNodes);
+    expect(response.nodes).toBeLessThan(
+      built.request.effort!.cpu.nodesPerDepthWave,
+    );
     expect(response.chosen).toBeDefined();
     expect(elapsed).toBeLessThan(2_000);
   }, 10_000);
@@ -1100,7 +1118,7 @@ describe("deep-search state adapter", () => {
     expect(response.rollouts).toBe(0);
   });
 
-  it("answers incoming trades through the exact family without running strategic search", async () => {
+  it("answers pending incoming trades through the bounded strategic family", async () => {
     const bytes = await readFile(
       new URL(
         "../src/generated/wasm/colonist_search_bg.wasm",
@@ -1133,14 +1151,18 @@ describe("deep-search state adapter", () => {
     };
     const built = buildDeepSearchRequest(state, incomingBoard, "You");
     built.request.mode = "puct";
-    built.request.iterations = 50_000;
-    built.request.maxNodes = 250_000;
+    built.request.iterations = 512;
+    built.request.maxNodes = 8_000;
+    built.request.effort = {
+      ...built.request.effort!,
+      decisionTimeMs: 750,
+    };
     const started = performance.now();
     const response = analyzeWasm(built.request);
     const elapsed = performance.now() - started;
 
-    expect(response.exactDecision).toBe(true);
-    expect(response.authority).toBe("exact-mandatory");
+    expect(response.exactDecision).toBe(false);
+    expect(response.authority).not.toBe("exact-mandatory");
     expect(["respond-trade", "counter-trade"]).toContain(
       response.chosen?.kind,
     );
@@ -1159,11 +1181,15 @@ describe("deep-search state adapter", () => {
       ],
     });
     retry.request.mode = "puct";
-    retry.request.iterations = 50_000;
-    retry.request.maxNodes = 250_000;
+    retry.request.iterations = 512;
+    retry.request.maxNodes = 8_000;
+    retry.request.effort = {
+      ...retry.request.effort!,
+      decisionTimeMs: 750,
+    };
     const retried = analyzeWasm(retry.request);
-    expect(retried.exactDecision).toBe(true);
-    expect(retried.authority).toBe("exact-mandatory");
+    expect(retried.exactDecision).toBe(false);
+    expect(retried.authority).not.toBe("exact-mandatory");
     expect(
       retried.actions.some(
         (candidate) =>
@@ -1173,10 +1199,8 @@ describe("deep-search state adapter", () => {
             counter!.receiveCards!.join(","),
       ),
     ).toBe(false);
-    expect(response.nodes).toBe(0);
-    expect(response.iterations).toBe(0);
-    expect(response.rollouts).toBe(0);
-    expect(elapsed).toBeLessThan(1_000);
+    expect(response.nodes + response.iterations + response.rollouts).toBeGreaterThan(0);
+    expect(elapsed).toBeLessThan(5_000);
   });
 
   it("disables player negotiations while keeping bank and port trades legal across packaged WASM", async () => {
@@ -1224,7 +1248,10 @@ describe("deep-search state adapter", () => {
       {},
       false,
     );
-    expect((main.request as any).state.playerTradesEnabled).toBe(false);
+    // Domestic trading remains globally modeled for opponents while the
+    // root-seat bitmask disables only the local player's negotiations.
+    expect((main.request as any).state.playerTradesEnabled).toBe(true);
+    expect((main.request as any).state.domesticTradeDisabled).toBe(1);
     main.request.branchCap = 32;
     const mainResponse = analyzeWasm(main.request);
     expect(

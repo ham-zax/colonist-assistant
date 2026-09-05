@@ -54,6 +54,7 @@ dependencies = [
  "colonist-catan-core",
  "cudarc",
  "js-sys",
+ "sha2",
  "web-sys",
 ]
 

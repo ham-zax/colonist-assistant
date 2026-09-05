@@ -60,11 +60,16 @@ const diceBoard = (
   observedAt,
 });
 
-const encodedDisplay = (stateHash: string, finalAction: unknown): string => {
+const encodedDisplay = (
+  stateHash: string,
+  finalAction: unknown,
+  playerOrder: string[] = [],
+): string => {
   const builder = new CompactGameBuilder();
   const record = builder.apply(
     {
       ...captureBase,
+      ...(playerOrder.length ? { playerOrder } : {}),
       decisions: [trace(stateHash, finalAction)],
     },
     false,
@@ -205,14 +210,18 @@ describe("compact LLM game record", () => {
       }),
     ).toContain("cards=1,0,2,3,0");
 
-    const playerTrade = encodedDisplay("player-trade", {
-      kind: "trade-builder",
-      mode: "player",
-      give: resources(0, 2, 0, 0, 0),
-      receive: resources(0, 0, 0, 1, 0),
-      recipients: ["Rival A", "Rival B"],
-      confidence: 0.91,
-    });
+    const playerTrade = encodedDisplay(
+      "player-trade",
+      {
+        kind: "trade-builder",
+        mode: "player",
+        give: resources(0, 2, 0, 0, 0),
+        receive: resources(0, 0, 0, 1, 0),
+        recipients: ["Rival A", "Rival B"],
+        confidence: 0.91,
+      },
+      ["Rival A", "Rival B"],
+    );
     expect(playerTrade).toContain("mode=player");
     expect(playerTrade).toContain("give=0,2,0,0,0");
     expect(playerTrade).toContain("get=0,0,0,1,0");
@@ -247,14 +256,18 @@ describe("compact LLM game record", () => {
     expect(counter).toContain("eg=1,0,0,0,0");
     expect(counter).toContain("er=0,0,1,0,0");
 
-    const board = encodedDisplay("board", {
-      kind: "board",
-      boardAction: "robber",
-      targetId: "h:-1,0",
-      point: { x: 123.5, y: 456.25 },
-      followupPlayer: "Rival",
-      confidence: 0.96,
-    });
+    const board = encodedDisplay(
+      "board",
+      {
+        kind: "board",
+        boardAction: "robber",
+        targetId: "h:-1,0",
+        point: { x: 123.5, y: 456.25 },
+        followupPlayer: "Rival",
+        confidence: 0.96,
+      },
+      ["Rival"],
+    );
     expect(board).toContain("ba=robber");
     expect(board).toContain("t=h:-1,0");
     expect(board).toContain("pt=123.5,456.25");

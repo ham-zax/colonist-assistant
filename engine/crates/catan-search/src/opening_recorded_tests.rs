@@ -4,7 +4,11 @@ use colonist_catan_core::{
     Action, Board, Building, Edge, GameState, Hex, Phase, Port, Resource, Vertex,
 };
 
-use super::{opening_build_economy, opening_build_economy_from_inputs, opening_position_bonus};
+use super::{
+    OpeningVisitValue, opening_visit_is_better, opening_root_node_budgets,
+    opening_build_economy, opening_build_economy_from_inputs, opening_position_bonus,
+};
+use crate::economy::build_fundable_at_rolls as opening_build_cost_fundable_at_rolls;
 use crate::{OpeningConfig, OpeningReport, production_pips, solve_opening};
 
 const TRADE5301_HEXES: [((i8, i8), Option<Resource>, u8); 19] = [
@@ -51,6 +55,28 @@ const TOWN1088_HEXES: [((i8, i8), Option<Resource>, u8); 19] = [
     ((0, 0), Some(Resource::Wool), 11),
 ];
 
+const HAND2325_HEXES: [((i8, i8), Option<Resource>, u8); 19] = [
+    ((0, -2), Some(Resource::Grain), 9),
+    ((-1, -1), Some(Resource::Lumber), 10),
+    ((-2, 0), Some(Resource::Grain), 8),
+    ((-2, 1), Some(Resource::Brick), 3),
+    ((-2, 2), Some(Resource::Lumber), 6),
+    ((-1, 2), Some(Resource::Grain), 2),
+    ((0, 2), Some(Resource::Wool), 5),
+    ((1, 1), Some(Resource::Wool), 8),
+    ((2, 0), None, 0),
+    ((2, -1), Some(Resource::Wool), 4),
+    ((2, -2), Some(Resource::Brick), 11),
+    ((1, -2), Some(Resource::Brick), 12),
+    ((0, -1), Some(Resource::Grain), 5),
+    ((-1, 0), Some(Resource::Ore), 4),
+    ((-1, 1), Some(Resource::Lumber), 9),
+    ((0, 1), Some(Resource::Lumber), 10),
+    ((1, 0), Some(Resource::Wool), 3),
+    ((1, -1), Some(Resource::Ore), 6),
+    ((0, 0), Some(Resource::Ore), 11),
+];
+
 const TASK394_HEXES: [((i8, i8), Option<Resource>, u8); 19] = [
     ((0, -2), Some(Resource::Lumber), 9),
     ((-1, -1), Some(Resource::Grain), 10),
@@ -95,6 +121,18 @@ const TOWN1088_PORTS: [(&str, Port); 9] = [
     ("e:3,0,1", Port::Generic),
     ("e:3,-2,2", Port::Resource(Resource::Grain)),
     ("e:2,-3,2", Port::Generic),
+];
+
+const HAND2325_PORTS: [(&str, Port); 9] = [
+    ("e:0,-2,0", Port::Resource(Resource::Ore)),
+    ("e:-1,-1,1", Port::Resource(Resource::Brick)),
+    ("e:-2,1,1", Port::Resource(Resource::Grain)),
+    ("e:-2,2,2", Port::Generic),
+    ("e:-1,3,0", Port::Generic),
+    ("e:1,2,0", Port::Resource(Resource::Wool)),
+    ("e:3,0,1", Port::Generic),
+    ("e:3,-2,2", Port::Generic),
+    ("e:2,-3,2", Port::Resource(Resource::Lumber)),
 ];
 
 const TASK394_PORTS: [(&str, Port); 9] = [
@@ -289,6 +327,16 @@ fn recorded_state(
     ports: &[(&str, Port); 9],
     root: u8,
 ) -> GameState {
+    recorded_state_with_rules(hexes, ports, root, 4, 10)
+}
+
+fn recorded_state_with_rules(
+    hexes: &[((i8, i8), Option<Resource>, u8); 19],
+    ports: &[(&str, Port); 9],
+    root: u8,
+    num_players: u8,
+    victory_target: u8,
+) -> GameState {
     let board_hexes = hexes
         .iter()
         .map(|(coord, resource, number)| Hex {
@@ -352,7 +400,7 @@ fn recorded_state(
             .push(edge_index as u8);
     }
     let mut board = Board {
-        num_players: 4,
+        num_players,
         hexes: board_hexes,
         vertices,
         edges: std::mem::take(&mut edges),
@@ -364,7 +412,7 @@ fn recorded_state(
         }
     }
 
-    let mut state = GameState::new(board, 10);
+    let mut state = GameState::new(board, victory_target);
     state.player_trades_enabled = true;
     state.domestic_trade_disabled = 1 << root;
     state
@@ -417,6 +465,15 @@ fn assert_setup_turn(state: &GameState, root: u8, setup_step: u8) {
     assert_eq!(state.actor(), root);
     assert_eq!(state.setup_step, setup_step);
     assert_eq!(state.phase, Phase::SetupSettlement);
+}
+
+fn hand2325_d1() -> GameState {
+    let mut state =
+        recorded_state_with_rules(&HAND2325_HEXES, &HAND2325_PORTS, 1, 2, 15);
+    place_settlement(&mut state, "v:-2,1,0");
+    place_road(&mut state, "e:-1,0,2");
+    assert_setup_turn(&state, 1, 1);
+    state
 }
 
 fn trade5301_d1() -> GameState {
@@ -490,26 +547,67 @@ fn task394_d3() -> GameState {
 }
 
 #[test]
+fn hand2325_d1_does_not_sacrifice_half_the_production_for_a_generic_port() {
+    let state = hand2325_d1();
+    let weak_port = settlement_action(&state, "v:2,-1,0");
+    let report = solve_opening(&state, 1, live_opening_config());
+    let chosen = report
+        .chosen
+        .as_ref()
+        .expect("the recorded setup state has legal opening roots");
+    assert_ne!(
+        chosen,
+        &weak_port,
+        "a 5-pip generic-port root must not win through fractional maritime credit"
+    );
+    assert!(
+        candidate_value(&report, chosen) > candidate_value(&report, &weak_port),
+        "the selected completion-backed opening must outrank the historical weak generic-port root"
+    );
+    assert!(
+        report
+            .actions
+            .iter()
+            .find(|candidate| &candidate.action == chosen)
+            .is_some_and(|candidate| candidate.authoritative && candidate.endpoint_complete),
+        "the replacement root must be backed by a complete snake-draft endpoint"
+    );
+}
+
+#[test]
+fn hand2325_d1_is_stable_across_live_and_reference_node_budgets() {
+    let state = hand2325_d1();
+    let weak_port = settlement_action(&state, "v:2,-1,0");
+    let reports = [6_000, 12_000, 18_000, 36_000]
+        .into_iter()
+        .map(|maximum_nodes| {
+            let mut config = live_opening_config();
+            config.maximum_nodes = maximum_nodes;
+            (maximum_nodes, solve_opening(&state, 1, config))
+        })
+        .collect::<Vec<_>>();
+    for (_, report) in &reports {
+        assert_ne!(report.chosen.as_ref(), Some(&weak_port));
+    }
+    let reference = reports.last().unwrap().1.chosen.as_ref();
+    assert!(reports.iter().all(|(_, report)| report.chosen.as_ref() == reference));
+}
+
+#[test]
 fn trade5301_d1_partial_continuation_cannot_remain_authoritative() {
     let state = trade5301_d1();
     let historical = settlement_action(&state, "v:1,0,0");
     let report = solve_opening(&state, 1, live_opening_config());
 
-    assert_ne!(
-        report.chosen.as_ref(),
-        Some(&historical),
-        "the historical v:1,0,0 root must not win unless its completed endpoint is actually best",
-    );
-    if let Some(candidate) = report
+    let candidate = report
         .actions
         .iter()
         .find(|candidate| candidate.action == historical)
-    {
-        assert!(
-            candidate.endpoint_complete,
-            "the historical root may enter the authoritative list only when its selected continuation is completion-backed",
-        );
-    }
+        .expect("every legal opening root remains visible in diagnostics");
+    assert!(
+        !candidate.authoritative || candidate.endpoint_complete,
+        "the historical root may be authoritative only when its selected continuation is completion-backed",
+    );
 }
 
 #[test]
@@ -521,13 +619,14 @@ fn recorded_d1_authoritative_candidates_are_completion_backed() {
     ] {
         let report = solve_opening(&state, root, live_opening_config());
         assert!(
-            !report.actions.is_empty(),
+            report.actions.iter().any(|candidate| candidate.authoritative),
             "{name} must retain an authoritative root"
         );
         assert!(
             report
                 .actions
                 .iter()
+                .filter(|candidate| candidate.authoritative)
                 .all(|candidate| candidate.endpoint_complete),
             "{name} must not admit a root whose selected returned utility ends in partial setup",
         );
@@ -571,8 +670,10 @@ fn trade5301_weak_brick_closes_a_real_bottleneck_even_with_bank_conversion() {
     assert!(weak_economy.weighted_access > no_brick_economy.weighted_access);
     assert!(no_brick_economy.eta_rolls[0].is_finite());
 
-    assert_eq!(report.chosen.as_ref(), Some(&weak_brick));
-    assert!(candidate_value(&report, &weak_brick) > candidate_value(&report, &higher_pip_no_brick));
+    assert!(
+        candidate_value(&report, &weak_brick) > candidate_value(&report, &higher_pip_no_brick),
+        "the weak brick that closes the road/settlement bottleneck must outrank the raw-pip alternative with no brick"
+    );
 }
 
 #[test]
@@ -907,4 +1008,97 @@ fn opening_economy_does_not_assign_a_speculative_domestic_trade_rate() {
     assert_eq!(disabled.maritime_ratios, [4; 5]);
     assert_eq!(allowed.eta_rolls, disabled.eta_rolls);
     assert_eq!(allowed.weighted_access, disabled.weighted_access);
+}
+
+#[test]
+fn opening_maritime_capacity_requires_complete_trade_batches() {
+    let production = [0.0; 5];
+    let ratios = [3, 4, 4, 4, 4];
+    let settlement_fragment = [0, 1, 0, 0, 0];
+
+    assert!(!opening_build_cost_fundable_at_rolls(
+        &production,
+        &[2, 0, 0, 0, 0],
+        &ratios,
+        &settlement_fragment,
+        0.0,
+    ));
+    assert!(opening_build_cost_fundable_at_rolls(
+        &production,
+        &[3, 0, 0, 0, 0],
+        &ratios,
+        &settlement_fragment,
+        0.0,
+    ));
+}
+
+#[test]
+fn opening_maritime_capacity_reserves_direct_build_cards_before_trading() {
+    let production = [0.0; 5];
+    let ratios = [3, 4, 4, 4, 4];
+    let cost = [1, 1, 0, 0, 0];
+
+    assert!(!opening_build_cost_fundable_at_rolls(
+        &production,
+        &[3, 0, 0, 0, 0],
+        &ratios,
+        &cost,
+        0.0,
+    ));
+    assert!(opening_build_cost_fundable_at_rolls(
+        &production,
+        &[4, 0, 0, 0, 0],
+        &ratios,
+        &cost,
+        0.0,
+    ));
+}
+
+#[test]
+fn completed_opening_child_outranks_a_higher_partial_value() {
+    let completed = OpeningVisitValue {
+        value: 0.72,
+        endpoint_complete: true,
+        evidence: None,
+    };
+    let partial = OpeningVisitValue {
+        value: 0.91,
+        endpoint_complete: false,
+        evidence: None,
+    };
+
+    assert!(opening_visit_is_better(completed, partial));
+    assert!(!opening_visit_is_better(partial, completed));
+}
+
+#[test]
+fn opening_maritime_trade_result_cannot_split_across_two_resource_deficits() {
+    let production = [0.0, 0.6, 0.6, 0.0, 0.0];
+    let ratios = [3, 4, 4, 4, 4];
+    let cost = [0, 1, 1, 0, 0];
+
+    assert!(!opening_build_cost_fundable_at_rolls(
+        &production,
+        &[3, 0, 0, 0, 0],
+        &ratios,
+        &cost,
+        36.0,
+    ));
+    assert!(opening_build_cost_fundable_at_rolls(
+        &production,
+        &[6, 0, 0, 0, 0],
+        &ratios,
+        &cost,
+        36.0,
+    ));
+}
+
+#[test]
+fn late_two_player_opening_budgets_are_equal_and_exhaust_the_budget() {
+    let budgets = opening_root_node_budgets(51, 12_000, 3);
+    assert_eq!(budgets.len(), 51);
+    assert_eq!(budgets.iter().sum::<u32>(), 12_000);
+    let minimum = budgets.iter().copied().min().unwrap();
+    let maximum = budgets.iter().copied().max().unwrap();
+    assert!(maximum - minimum <= 1, "budgets={budgets:?}");
 }

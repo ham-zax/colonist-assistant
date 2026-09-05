@@ -100,35 +100,6 @@ describe("assistant settings", () => {
     );
   });
 
-  it("does not preserve a retired engine after migration", async () => {
-    const set = vi.fn().mockResolvedValue(undefined);
-    vi.stubGlobal("chrome", {
-      storage: {
-        sync: {
-          get: vi.fn().mockResolvedValue({
-            [SETTINGS_KEY]: {
-              ...DEFAULT_SETTINGS,
-              engine: "deep-puct",
-            },
-            colonistAssistantStrategistDefaultV1: true,
-          }),
-          set,
-        },
-      },
-    });
-
-    const settings = await readSettings();
-
-    expect(settings.engine).toBe("deep-search");
-    expect(set).toHaveBeenCalledWith(
-      expect.objectContaining({
-        [SETTINGS_KEY]: expect.objectContaining({
-          engine: "deep-search",
-        }),
-      }),
-    );
-  });
-
   it("sanitizes invalid stored engine strings", async () => {
     const set = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("chrome", {

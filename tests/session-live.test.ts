@@ -105,6 +105,36 @@ describe("live log session scanning", () => {
     session.stop();
   });
 
+  it("recognizes Friendly Robber status messages without failing integrity", async () => {
+    const notices = [
+      "Friendly Robber is active, tiles available to block are limited",
+      "Friendly Robber is active, no available tiles to block",
+    ];
+    const root = document.createElement("div");
+    notices.forEach((text, index) => root.append(message(index, text)));
+    document.body.append(root);
+    const session = new GameSession(root, vi.fn(), "friendly-robber-game");
+
+    await session.start();
+
+    expect(session.events).toEqual([]);
+    expect(session.unmatchedCount).toBe(2);
+    expect(session.unmatchedIntegrityCount).toBe(0);
+    expect(session.unmatchedSamples).toHaveLength(2);
+    expect(session.unmatchedSamples).toEqual(
+      expect.arrayContaining(
+        notices.map((sample) =>
+          expect.objectContaining({
+            reason: "known-ignored-friendly-robber-status",
+            affectsIntegrity: false,
+            sample,
+          }),
+        ),
+      ),
+    );
+    session.stop();
+  });
+
   it("ingests a new message when a virtualized element is reused", async () => {
     const root = document.createElement("div");
     const entry = message(0, "Alice rolled");

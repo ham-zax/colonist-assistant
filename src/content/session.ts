@@ -20,6 +20,7 @@ import { isExtensionContextInvalidatedError } from "./extension-context";
 export type UnmatchedLogReason =
   | "known-bank-shortage-notice"
   | "known-ignored-system-message"
+  | "known-ignored-friendly-robber-status"
   | "known-redundant-trade-offer"
   | "known-redundant-robber-move"
   | "known-ignored-production-blocked"
@@ -82,6 +83,19 @@ const classifyUnmatchedLog = (
   }
   if (/^bot is selecting cards to discard for\b/iu.test(normalized)) {
     return { reason: "known-ignored-bot-status", affectsIntegrity: false };
+  }
+  if (
+    /\bfriendly robber is active,\s*(?:tiles available to block are limited|no available tiles to block)\b/iu.test(
+      normalized,
+    )
+  ) {
+    // Colonist emits this informational status beside robber actions. The
+    // authoritative setting is captured from game state, so the rendered log
+    // line is recognized but must not create a second state transition.
+    return {
+      reason: "known-ignored-friendly-robber-status",
+      affectsIntegrity: false,
+    };
   }
   if (/^player has no cards\.?$/iu.test(normalized)) {
     return { reason: "known-ignored-empty-robbery", affectsIntegrity: false };

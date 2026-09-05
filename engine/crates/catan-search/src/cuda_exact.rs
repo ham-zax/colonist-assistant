@@ -37,7 +37,8 @@ const STATE_BUILDINGS: usize = STATE_PORTS + VERTEX_COUNT;
 const STATE_ROADS: usize = STATE_BUILDINGS + VERTEX_COUNT;
 const STATE_PLAYERS: usize = STATE_ROADS + EDGE_COUNT;
 const PLAYER_STRIDE: usize = 22;
-const STATE_WORDS: usize = STATE_PLAYERS + MAX_PLAYERS * PLAYER_STRIDE;
+const STATE_DOMESTIC_TRADE_DISABLED: usize = STATE_PLAYERS + MAX_PLAYERS * PLAYER_STRIDE;
+const STATE_WORDS: usize = STATE_DOMESTIC_TRADE_DISABLED + 1;
 
 const TOPO_VERTEX_HEX_COUNTS: usize = 0;
 const TOPO_VERTEX_HEXES: usize = TOPO_VERTEX_HEX_COUNTS + VERTEX_COUNT;
@@ -462,6 +463,9 @@ fn pack_state_words(
     words[STATE_VICTORY_TARGET] = state.victory_target as u32;
     words[STATE_DISCARD_LIMIT] = state.card_discard_limit as u32;
     words[STATE_BANK_PUBLIC] = u32::from(state.bank_is_public);
+    words[STATE_DOMESTIC_TRADE_DISABLED] = if state.player_trades_enabled {
+        u32::from(state.domestic_trade_disabled)
+    } else { (1u32 << players) - 1 };
     words[STATE_LONGEST_HOLDER] = holder_code(state.longest_road_holder);
     words[STATE_LARGEST_HOLDER] = holder_code(state.largest_army_holder);
 

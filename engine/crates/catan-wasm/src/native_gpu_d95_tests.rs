@@ -61,6 +61,8 @@ fn aggregate_root_for_ordering(
         terminal_variance,
         victory_margin,
         victory_margin_variance,
+        strategic_margin: victory_margin,
+        strategic_margin_variance: victory_margin_variance,
         mean_turn: 50.0,
         candidate_vp: 0.0,
         candidate_vp_variance: 0.0,

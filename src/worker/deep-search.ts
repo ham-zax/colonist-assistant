@@ -678,6 +678,9 @@ const mapRootProvenance = (
       ...(typeof candidate.initialVictoryMargin === "number"
         ? { initialVictoryMargin: candidate.initialVictoryMargin }
         : {}),
+      ...(typeof candidate.initialStrategicMargin === "number"
+        ? { initialStrategicMargin: candidate.initialStrategicMargin }
+        : {}),
       ...(typeof candidate.terminalOutcome === "number"
         ? { terminalOutcome: candidate.terminalOutcome }
         : {}),
@@ -699,6 +702,15 @@ const mapRootProvenance = (
       ...(typeof candidate.victoryMarginUpperBound === "number"
         ? { victoryMarginUpperBound: candidate.victoryMarginUpperBound }
         : {}),
+      ...(typeof candidate.strategicMargin === "number"
+        ? { strategicMargin: candidate.strategicMargin }
+        : {}),
+      ...(typeof candidate.strategicMarginLowerBound === "number"
+        ? { strategicMarginLowerBound: candidate.strategicMarginLowerBound }
+        : {}),
+      ...(typeof candidate.strategicMarginUpperBound === "number"
+        ? { strategicMarginUpperBound: candidate.strategicMarginUpperBound }
+        : {}),
       ...(typeof candidate.meanTurn === "number"
         ? { meanTurn: candidate.meanTurn }
         : {}),
@@ -715,6 +727,28 @@ const mapRootProvenance = (
       action: mapAction(evidence.action, players, board),
       ...(evidence.promotionReason
         ? { promotionReason: evidence.promotionReason }
+        : {}),
+      ...(evidence.roadIntent
+        ? {
+            roadIntent: {
+              ...(typeof evidence.roadIntent.targetVertex === "number"
+                ? {
+                    targetVertexId:
+                      board.vertices[evidence.roadIntent.targetVertex]?.id ??
+                      `vertex:${evidence.roadIntent.targetVertex}`,
+                  }
+                : {}),
+              roadsRemaining: evidence.roadIntent.roadsRemaining,
+              ...(typeof evidence.roadIntent.expectedRolls === "number"
+                ? { expectedRolls: evidence.roadIntent.expectedRolls }
+                : {}),
+              survivalProbability: evidence.roadIntent.survivalProbability,
+              targetValue: evidence.roadIntent.targetValue,
+              portfolioValue: evidence.roadIntent.portfolioValue,
+              frontierGain: evidence.roadIntent.frontierGain,
+              orderingScore: evidence.roadIntent.orderingScore,
+            },
+          }
         : {}),
       ...(evidence.introducedRoadFragility
         ? {

@@ -59,11 +59,14 @@ fn matches_family(state: &GameState, action: &Action, family: ExactActionFamily)
         ExactActionFamily::Mandatory => match state.phase {
             Phase::Discard => matches!(action, Action::Discard { .. }),
             Phase::MoveRobber => matches!(action, Action::MoveRobber { .. }),
-            // Trade responses intentionally stay in the strategic search path.
-            // `GameState::legal_actions()` exposes a bounded counteroffer
-            // candidate family, so treating that family as exhaustive would
-            // overstate exact authority and can suppress a better legal counter.
-            Phase::TradeResponses => false,
+            // Pending responses stay in strategic search because generated
+            // counteroffers are a deliberately bounded neighborhood. Once all
+            // recipients have answered, however, the creator's Cancel/Confirm
+            // partner choices are the complete legal domain and are safe to
+            // arbitrate exactly.
+            Phase::TradeResponses => {
+                matches!(action, Action::ConfirmTrade { .. } | Action::CancelTrade)
+            },
             _ => false,
         },
         ExactActionFamily::Knight => matches!(action, Action::PlayKnight { .. }),
@@ -351,7 +354,20 @@ fn family_score(
                     3 => 1.15,
                     _ => 0.72,
                 };
-                return own_plan - opponent_gain * threat_multiplier;
+                let received_cards = state
+                    .trade
+                    .map(|trade| trade.give.iter().copied().sum::<u8>())
+                    .unwrap_or(0) as f32;
+                // Even when a one-ply heuristic cannot measure an immediate
+                // gain, handing material to a player close to the target is a
+                // real race exposure. Keep this a bounded tie-break; proven
+                // kingmaker continuations remain the responsibility of the
+                // hard trade-safety veto.
+                let public_race_exposure = received_cards * 0.32
+                    / f32::from(points_remaining.max(1));
+                return own_plan
+                    - opponent_gain * threat_multiplier
+                    - public_race_exposure;
             }
             return own_plan;
         }
@@ -361,6 +377,23 @@ fn family_score(
         return score;
     }
     evaluate(&next)[actor]
+}
+
+fn immediate_material_opportunity(state: &GameState, actor: u8) -> f32 {
+    if state.current_player != actor || !matches!(state.phase, Phase::PreRoll | Phase::Main) {
+        return 0.0;
+    }
+    state
+        .legal_actions()
+        .iter()
+        .map(|action| match action {
+            Action::BuildCity { .. } => 1.50,
+            Action::BuildSettlement { .. } => 1.35,
+            Action::BuyDevelopment => 0.42,
+            Action::BuildRoad { .. } => 0.18,
+            _ => 0.0,
+        })
+        .fold(0.0, f32::max)
 }
 
 fn post_action_development_score(
@@ -390,6 +423,9 @@ fn post_action_development_score(
     // the already transitioned state so Road Building does not rebuild the
     // same road graph twice per candidate and hidden world.
     let endpoint = crate::eval::strategic_utility(next, actor as u8);
+    let immediate_completion_gain = (immediate_material_opportunity(next, actor as u8)
+        - immediate_material_opportunity(state, actor as u8))
+    .max(0.0);
     if family == ExactActionFamily::Monopoly {
         // A Monopoly hand is immediately spendable in the same turn. The
         // static endpoint's nonlinear seven-risk otherwise treats a large
@@ -398,9 +434,9 @@ fn post_action_development_score(
         let gained = next.players[actor]
             .resource_total()
             .saturating_sub(state.players[actor].resource_total());
-        Some(endpoint + gained as f32 * 1.4)
+        Some(endpoint + gained as f32 * 1.4 + immediate_completion_gain)
     } else {
-        Some(endpoint)
+        Some(endpoint + immediate_completion_gain)
     }
 }
 
@@ -408,10 +444,11 @@ fn post_action_development_score(
 /// weighted belief. Missing/unavailable worlds retain their baseline value
 /// instead of disappearing from the denominator.
 ///
-/// This is used authoritatively for discard and robber/victim deadlines. Trade
-/// responses remain strategic because their counteroffer domain is deliberately
-/// bounded by the rules/search candidate generator. The same routine is exposed
-/// for exact Monopoly, Year of Plenty,
+/// This is used authoritatively for discard and robber/victim deadlines and for
+/// the creator's exhaustive Cancel/Confirm choice after every trade recipient
+/// has responded. Pending trade responses remain strategic because their
+/// counteroffer domain is deliberately bounded by the rules/search candidate
+/// generator. The same routine is exposed for exact Monopoly, Year of Plenty,
 /// and Road Building parameter selection and regression tests.
 pub fn solve_exact_belief(
     particles: &[BeliefParticle],
@@ -606,7 +643,7 @@ mod tests {
 
     use colonist_catan_core::{Action, Building, GameState, Phase, Resource, TradeOffer};
 
-    use super::{ExactActionFamily, solve_exact_belief};
+    use super::{ExactActionFamily, exact_action_comparator_score, solve_exact_belief};
     use crate::mcts::BeliefParticle;
 
     fn particle(state: GameState) -> Vec<BeliefParticle> {
@@ -948,7 +985,7 @@ mod tests {
     }
 
     #[test]
-    fn accepted_trade_decision_is_sensitive_to_rejuvenated_tail_mass() {
+    fn accepted_trade_score_is_sensitive_to_rejuvenated_tail_mass() {
         let main = accepted_trade_world([0, 1, 0, 0, 2]);
         let tail = accepted_trade_world([1, 1, 0, 0, 1]);
         let bayesian = solve_exact_belief(
@@ -979,7 +1016,25 @@ mod tests {
         );
 
         assert_eq!(bayesian.chosen, Some(Action::ConfirmTrade { partner: 1 }));
-        assert_eq!(rejuvenated.chosen, Some(Action::CancelTrade));
+        assert_eq!(
+            rejuvenated.chosen,
+            Some(Action::ConfirmTrade { partner: 1 })
+        );
+        let margin = |result: &super::ExactDecisionResult| {
+            let score = |action: &Action| {
+                let candidate = result
+                    .actions
+                    .iter()
+                    .find(|candidate| &candidate.action == action)
+                    .expect("the exhaustive final trade choice contains both actions");
+                exact_action_comparator_score(candidate.decision_score, candidate.lower_score)
+            };
+            score(&Action::ConfirmTrade { partner: 1 }) - score(&Action::CancelTrade)
+        };
+        assert!(
+            margin(&rejuvenated) + 1e-6 < margin(&bayesian),
+            "more adverse posterior tail mass must reduce the confidence in accepting the trade"
+        );
     }
 
     #[test]

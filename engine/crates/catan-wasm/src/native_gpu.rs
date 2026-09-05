@@ -9,6 +9,8 @@ use colonist_catan_search::{
     posterior_immediate_threat_weight, safer_end_turn_alternative, shared_root_candidates,
     solve_belief_current_turn_timed, solve_exact_belief_excluding_controlled,
 };
+use colonist_catan_search::{road_intent, rollout_cutoff_margin};
+use super::road_intent_output;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -73,6 +75,8 @@ struct AggregatedRoot {
     terminal_variance: f32,
     victory_margin: f32,
     victory_margin_variance: f32,
+    strategic_margin: f32,
+    strategic_margin_variance: f32,
     mean_turn: f32,
     candidate_vp: f32,
     candidate_vp_variance: f32,
@@ -89,6 +93,8 @@ struct RootSampleMoments {
     turn_sum: f64,
     margin_sum: f64,
     margin_square_sum: f64,
+    strategic_margin_sum: f64,
+    strategic_margin_square_sum: f64,
     candidate_vp_sum: f64,
     candidate_vp_square_sum: f64,
     opponent_vp_sum: f64,
@@ -110,6 +116,8 @@ impl RootSampleMoments {
         self.turn_sum += f64::from(stat.mean_turn) * valid_f64;
         self.margin_sum += f64::from(stat.mean_victory_margin()) * valid_f64;
         self.margin_square_sum += f64::from(stat.mean_victory_margin_squared) * valid_f64;
+        self.strategic_margin_sum += f64::from(stat.mean_strategic_margin) * valid_f64;
+        self.strategic_margin_square_sum += f64::from(stat.mean_strategic_margin_squared) * valid_f64;
         self.candidate_vp_sum += f64::from(stat.mean_victory_points) * valid_f64;
         self.candidate_vp_square_sum += f64::from(stat.mean_victory_points_squared) * valid_f64;
         self.opponent_vp_sum += f64::from(stat.mean_best_opponent_victory_points) * valid_f64;
@@ -260,6 +268,8 @@ fn aggregate_root(
     let legal_turn = samples.turn_sum as f32 / valid_f32;
     let legal_margin = samples.margin_sum as f32 / valid_f32;
     let legal_margin_second = samples.margin_square_sum as f32 / valid_f32;
+    let legal_strategic = samples.strategic_margin_sum as f32 / valid_f32;
+    let legal_strategic_second = samples.strategic_margin_square_sum as f32 / valid_f32;
     let legal_candidate_vp = samples.candidate_vp_sum as f32 / valid_f32;
     let legal_candidate_vp_second = samples.candidate_vp_square_sum as f32 / valid_f32;
     let legal_opponent_vp = samples.opponent_vp_sum as f32 / valid_f32;
@@ -270,6 +280,8 @@ fn aggregate_root(
     let mut terminal_second = candidate.legal_weight * legal_terminal_second;
     let mut victory_margin = candidate.legal_weight * legal_margin;
     let mut victory_margin_second = candidate.legal_weight * legal_margin_second;
+    let mut strategic_margin = candidate.legal_weight * legal_strategic;
+    let mut strategic_second = candidate.legal_weight * legal_strategic_second;
     let mut mean_turn = candidate.legal_weight * legal_turn;
     let mut candidate_vp = candidate.legal_weight * legal_candidate_vp;
     let mut candidate_vp_second = candidate.legal_weight * legal_candidate_vp_second;
@@ -293,6 +305,9 @@ fn aggregate_root(
         terminal_second += terminal * terminal * weight;
         victory_margin += margin * weight;
         victory_margin_second += margin * margin * weight;
+        let strategic = rollout_cutoff_margin(&particle.state, actor);
+        strategic_margin += strategic * weight;
+        strategic_second += strategic * strategic * weight;
         mean_turn += turn * weight;
         candidate_vp += own_vp * weight;
         candidate_vp_second += own_vp * own_vp * weight;
@@ -312,6 +327,8 @@ fn aggregate_root(
         terminal_variance: variance(terminal_outcome, terminal_second),
         victory_margin,
         victory_margin_variance: variance(victory_margin, victory_margin_second),
+        strategic_margin,
+        strategic_margin_variance: variance(strategic_margin, strategic_second),
         mean_turn,
         candidate_vp,
         candidate_vp_variance: variance(candidate_vp, candidate_vp_second),
@@ -323,6 +340,7 @@ fn aggregate_root(
 fn compare_roots(left: &AggregatedRoot, right: &AggregatedRoot) -> std::cmp::Ordering {
     left.terminal_outcome
         .total_cmp(&right.terminal_outcome)
+        .then_with(|| left.strategic_margin.total_cmp(&right.strategic_margin))
         .then_with(|| left.victory_margin.total_cmp(&right.victory_margin))
         .then_with(|| right.mean_turn.total_cmp(&left.mean_turn))
         .then_with(|| left.prior.total_cmp(&right.prior))
@@ -332,9 +350,10 @@ fn compare_escalated_point_estimates(
     left: &AggregatedRoot,
     right: &AggregatedRoot,
 ) -> std::cmp::Ordering {
-    left.victory_margin
-        .total_cmp(&right.victory_margin)
+    left.strategic_margin
+        .total_cmp(&right.strategic_margin)
         .then_with(|| left.terminal_outcome.total_cmp(&right.terminal_outcome))
+        .then_with(|| left.victory_margin.total_cmp(&right.victory_margin))
         .then_with(|| right.mean_turn.total_cmp(&left.mean_turn))
         .then_with(|| left.prior.total_cmp(&right.prior))
 }
@@ -363,7 +382,7 @@ fn escalated_root_order(indices: &[usize], roots: &[AggregatedRoot]) -> Vec<usiz
         .filter(|index| is_terminal_contender(*index))
         .map(|index| {
             let root = &roots[index];
-            root.victory_margin - confidence_width(root.victory_margin_variance, root.samples)
+            root.strategic_margin - confidence_width(root.strategic_margin_variance, root.samples)
         })
         .max_by(f32::total_cmp)
         .expect("terminal contender set is non-empty");
@@ -372,7 +391,7 @@ fn escalated_root_order(indices: &[usize], roots: &[AggregatedRoot]) -> Vec<usiz
             return false;
         }
         let root = &roots[index];
-        root.victory_margin + confidence_width(root.victory_margin_variance, root.samples) + 1e-6
+        root.strategic_margin + confidence_width(root.strategic_margin_variance, root.samples) + 1e-6
             >= best_margin_lower
     };
     let tier = |index: usize| {
@@ -428,8 +447,8 @@ fn racing_contenders(active: &[usize], roots: &[AggregatedRoot]) -> Vec<usize> {
     let best_root = &roots[best];
     let best_terminal_lower = best_root.terminal_outcome
         - confidence_width(best_root.terminal_variance, best_root.samples);
-    let best_margin_lower = best_root.victory_margin
-        - confidence_width(best_root.victory_margin_variance, best_root.samples);
+    let best_margin_lower = best_root.strategic_margin
+        - confidence_width(best_root.strategic_margin_variance, best_root.samples);
     let mut contenders = active
         .iter()
         .copied()
@@ -446,35 +465,14 @@ fn racing_contenders(active: &[usize], roots: &[AggregatedRoot]) -> Vec<usize> {
             if !terminal_overlap {
                 return true;
             }
-            root.victory_margin
-                + confidence_width(root.victory_margin_variance, root.samples)
+            root.strategic_margin
+                + confidence_width(root.strategic_margin_variance, root.samples)
                 + 1e-6
                 >= best_margin_lower
         })
         .collect::<Vec<_>>();
     if !contenders.contains(&best) {
         contenders.push(best);
-    }
-    if contenders.len() > 2 {
-        contenders.sort_by(|left, right| {
-            let left_root = &roots[*left];
-            let right_root = &roots[*right];
-            let left_terminal = left_root.terminal_outcome
-                - confidence_width(left_root.terminal_variance, left_root.samples);
-            let right_terminal = right_root.terminal_outcome
-                - confidence_width(right_root.terminal_variance, right_root.samples);
-            right_terminal
-                .total_cmp(&left_terminal)
-                .then_with(|| {
-                    let left_margin = left_root.victory_margin
-                        - confidence_width(left_root.victory_margin_variance, left_root.samples);
-                    let right_margin = right_root.victory_margin
-                        - confidence_width(right_root.victory_margin_variance, right_root.samples);
-                    right_margin.total_cmp(&left_margin)
-                })
-                .then_with(|| right_root.prior.total_cmp(&left_root.prior))
-        });
-        contenders.truncate(contenders.len().div_ceil(2).max(2));
     }
     contenders
 }
@@ -483,8 +481,7 @@ fn horizon_escalation_schedule(initial_horizon: usize) -> Vec<usize> {
     let mut horizons = Vec::with_capacity(HORIZON_ESCALATION_MAX_STAGES);
     let mut next = initial_horizon
         .saturating_mul(2)
-        .max(HORIZON_ESCALATION_MIN_STEPS)
-        .min(HORIZON_ESCALATION_MAX_STEPS);
+        .clamp(HORIZON_ESCALATION_MIN_STEPS, HORIZON_ESCALATION_MAX_STEPS);
     while horizons.len() < HORIZON_ESCALATION_MAX_STAGES {
         if horizons.last().copied() == Some(next) {
             break;
@@ -511,6 +508,24 @@ fn horizon_escalation_trigger(
         * (1.0 - winner.terminal_rate.clamp(0.0, 1.0));
     (unresolved_cut_mass + 1e-6 >= HORIZON_ESCALATION_MIN_UNRESOLVED_CUT_MASS)
         .then_some(unresolved_cut_mass)
+}
+
+fn general_escalation_plan(
+    winner: usize, final_order: &[usize], roots: &[AggregatedRoot],
+) -> Option<(&'static str, f32, Vec<usize>)> {
+    let winner_root = &roots[winner];
+    let unresolved = final_order.iter().copied().any(|index| {
+        if index == winner { return false; }
+        let other = &roots[index];
+        winner_root.terminal_rate.max(other.terminal_rate) <= 0.10
+            && (winner_root.strategic_margin - other.strategic_margin).abs()
+                <= confidence_width(winner_root.strategic_margin_variance, winner_root.samples)
+                    + confidence_width(other.strategic_margin_variance, other.samples)
+    });
+    if !unresolved { return None; }
+    // Compare survivors at one common deeper horizon. Deadline checks bound
+    // work; no unrelated action is labelled a road-cut exposure.
+    Some(("sparse-terminal-overlapping-strategic-cutoff", 0.0, final_order.to_vec()))
 }
 
 fn horizon_escalation_contenders(
@@ -985,6 +1000,11 @@ impl NativeGpuSearchEngine {
                     .is_empty();
                 RootCausalEvidenceOutput {
                     action: action(candidate.action.clone()),
+                    road_intent: match candidate.action {
+                        Action::BuildRoad { edge } | Action::PlaceRoad { edge } =>
+                            Some(road_intent_output(road_intent(&particles[0].state, edge, actor))),
+                        _ => None,
+                    },
                     promotion_reason: impact
                         .and_then(|impact| impact.promotion)
                         .map(root_promotion_reason),
@@ -1284,17 +1304,15 @@ impl NativeGpuSearchEngine {
             .sum::<usize>();
         let mut total_executed_rollouts = moments.iter().map(|moment| moment.samples).sum::<u32>();
 
-        if let Some(fragility) = fragility_assessments
-            .iter()
+        let escalation_plan = fragility_assessments.iter()
             .find(|assessment| assessment.action == chosen_root.action)
-            && let Some(unresolved_cut_mass) = horizon_escalation_trigger(&chosen_root, fragility)
-        {
-            let escalation_indices = horizon_escalation_contenders(
-                shallow_chosen_index,
-                &shallow_final_root_order,
-                &retained,
-                fragility,
-            );
+            .and_then(|fragility| horizon_escalation_trigger(&chosen_root, fragility).map(|mass| (
+                "fragile-award-low-terminal-completion", mass,
+                horizon_escalation_contenders(shallow_chosen_index, &shallow_final_root_order, &retained, fragility),
+            )))
+            .or_else(|| general_escalation_plan(shallow_chosen_index, &shallow_final_root_order, &shallow_aggregated));
+        if let Some((reason, unresolved_cut_mass, escalation_indices)) = escalation_plan {
+
             let escalation_samples_per_root =
                 (rollout_budget / escalation_indices.len().max(1) / 4).clamp(
                     HORIZON_ESCALATION_MIN_SAMPLES_PER_ROOT,
@@ -1438,7 +1456,7 @@ impl NativeGpuSearchEngine {
             }
 
             horizon_escalation = Some(HorizonEscalationOutput {
-                reason: "fragile-award-low-terminal-completion",
+                reason,
                 provisional_winner: action(shallow_aggregated[shallow_chosen_index].action.clone()),
                 initial_horizon: rollout_steps as u16,
                 unresolved_cut_mass,
@@ -1545,21 +1563,16 @@ impl NativeGpuSearchEngine {
                         ) <= 1e-6
                     })
                     .max_by(|left, right| {
-                        left.terminal_outcome
-                            .total_cmp(&right.terminal_outcome)
-                            .then_with(|| left.victory_margin.total_cmp(&right.victory_margin))
-                            .then_with(|| right.mean_turn.total_cmp(&left.mean_turn))
-                            .then_with(|| left.prior.total_cmp(&right.prior))
+                        compare_roots(left, right)
                     })
+                && escape.action != current
             {
-                if escape.action != current {
-                    safety_replacement = Some(ActionReplacementOutput {
-                        from: action(current),
-                        to: action(escape.action.clone()),
-                    });
-                    chosen = Some(escape.action.clone());
-                    authority = DecisionAuthority::SafetyOverride;
-                }
+                safety_replacement = Some(ActionReplacementOutput {
+                    from: action(current),
+                    to: action(escape.action.clone()),
+                });
+                chosen = Some(escape.action.clone());
+                authority = DecisionAuthority::SafetyOverride;
             }
         }
         if chosen == Some(Action::EndTurn)
@@ -1610,6 +1623,7 @@ impl NativeGpuSearchEngine {
                         confidence_width(aggregate.terminal_variance, aggregate.samples);
                     let margin_width =
                         confidence_width(aggregate.victory_margin_variance, aggregate.samples);
+                    let strategic_width = confidence_width(aggregate.strategic_margin_variance, aggregate.samples);
                     RetainedRootOutput {
                         action: action(candidate.action.clone()),
                         pre_truncation_rank: ranked
@@ -1639,6 +1653,11 @@ impl NativeGpuSearchEngine {
                         initial_victory_margin: (final_evaluation_horizons[index]
                             != rollout_steps as u16)
                             .then_some(shallow_aggregated[index].victory_margin),
+                        initial_strategic_margin: (final_evaluation_horizons[index] != rollout_steps as u16)
+                            .then_some(shallow_aggregated[index].strategic_margin),
+                        strategic_margin: Some(aggregate.strategic_margin),
+                        strategic_margin_lower_bound: Some(aggregate.strategic_margin - strategic_width),
+                        strategic_margin_upper_bound: Some(aggregate.strategic_margin + strategic_width),
                         terminal_outcome: Some(aggregate.terminal_outcome),
                         terminal_rate: Some(aggregate.terminal_rate),
                         terminal_lower_bound: Some(aggregate.terminal_outcome - terminal_width),

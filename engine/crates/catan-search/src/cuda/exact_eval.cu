@@ -30,7 +30,8 @@ typedef unsigned long long uint64_t;
 #define STATE_ROADS 170u
 #define STATE_PLAYERS 242u
 #define PLAYER_STRIDE 22u
-#define STATE_WORDS 330u
+#define STATE_DOMESTIC_TRADE_DISABLED 330u
+#define STATE_WORDS 331u
 
 #define TOPO_VERTEX_HEX_COUNTS 0u
 #define TOPO_VERTEX_HEXES 54u
@@ -460,9 +461,19 @@ static inline __device__ void dynamic_resource_weights(
         const float port_liquidity = ratios[resource] == 2u
             ? 1.18f
             : (ratios[resource] == 3u ? 1.08f : 1.0f);
+        const int closed_economy = (state[STATE_DOMESTIC_TRADE_DISABLED]
+            & (1u << player)) != 0u;
+        const float ratio_steps = ratios[resource] > 2u
+            ? (float)(ratios[resource] - 2u)
+            : 0.0f;
+        const float self_reliance = closed_economy
+                && production[resource] <= F32_EPSILON
+            ? 1.0f + ratio_steps * (resource < 4u ? 0.12f : 0.07f)
+            : 1.0f;
         const uint32_t surplus_cards = hand[resource] > 4u ? hand[resource] - 4u : 0u;
         weights[resource] = BASE_RESOURCE_WEIGHTS[resource] * scarcity
-            * bottleneck * port_liquidity / (1.0f + (float)surplus_cards * 0.10f);
+            * bottleneck * port_liquidity * self_reliance
+            / (1.0f + (float)surplus_cards * 0.10f);
     }
 }
 
@@ -725,6 +736,69 @@ static inline __device__ float acquisition_rate(
     return rate;
 }
 
+static inline __device__ int build_fundable_at_rolls(
+    const float production[5],
+    const uint32_t hand[5],
+    const uint32_t ratios[5],
+    const uint32_t cost[5],
+    float rolls
+) {
+    uint32_t missing_cards = 0u;
+    uint32_t maritime_capacity = 0u;
+    const float bounded_rolls = fmaxf(rolls, 0.0f);
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        const uint32_t produced = (uint32_t)floorf(
+            fmaxf(production[resource], 0.0f) * bounded_rolls / 36.0f
+        );
+        const uint32_t available = hand[resource] + produced;
+        const uint32_t reserved = available < cost[resource]
+            ? available
+            : cost[resource];
+        missing_cards += cost[resource] - reserved;
+        const uint32_t surplus = available - reserved;
+        const uint32_t ratio = ratios[resource] > 0u ? ratios[resource] : 1u;
+        maritime_capacity += surplus / ratio;
+    }
+    return maritime_capacity >= missing_cards;
+}
+
+static inline __device__ float build_eta_rolls(
+    const float production[5],
+    const uint32_t hand[5],
+    const uint32_t ratios[5],
+    const uint32_t cost[5]
+) {
+    if (build_fundable_at_rolls(production, hand, ratios, cost, 0.0f)) {
+        return 0.0f;
+    }
+    float total_production = 0.0f;
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        total_production += fmaxf(production[resource], 0.0f);
+    }
+    if (total_production <= F32_EPSILON) {
+        return EXACT_INFINITY;
+    }
+
+    float high = 18.0f;
+    while (high < 9216.0f
+        && !build_fundable_at_rolls(production, hand, ratios, cost, high)) {
+        high *= 2.0f;
+    }
+    if (!build_fundable_at_rolls(production, hand, ratios, cost, high)) {
+        return EXACT_INFINITY;
+    }
+    float low = 0.0f;
+    for (uint32_t iteration = 0u; iteration < 28u; ++iteration) {
+        const float mid = (low + high) * 0.5f;
+        if (build_fundable_at_rolls(production, hand, ratios, cost, mid)) {
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+    return high;
+}
+
 static inline __device__ float expansion_arrival_score(
     const uint32_t *state,
     uint32_t player,
@@ -739,22 +813,18 @@ static inline __device__ float expansion_arrival_score(
         1u,
         0u,
     };
-    uint32_t missing[5];
-    uint32_t missing_total = 0u;
+    uint32_t hand[5];
     for (uint32_t resource = 0u; resource < 5u; ++resource) {
-        const uint32_t hand = resource_count(state, player, resource);
-        missing[resource] = plan_cost[resource] > hand
-            ? plan_cost[resource] - hand
-            : 0u;
-        missing_total += missing[resource];
+        hand[resource] = resource_count(state, player, resource);
     }
-    if (missing_total == 0u) {
-        return turns_until_action(state, player);
-    }
-    float expected_rolls = 0.0f;
-    for (uint32_t resource = 0u; resource < 5u; ++resource) {
-        expected_rolls += (float)missing[resource] * 36.0f
-            / (acquisition_rate(production, ratios, resource) + 0.65f);
+    const float expected_rolls = build_eta_rolls(
+        production,
+        hand,
+        ratios,
+        plan_cost
+    );
+    if (expected_rolls >= EXACT_INFINITY * 0.5f) {
+        return EXACT_INFINITY;
     }
     const uint32_t count = state[STATE_NUM_PLAYERS] > 1u
         ? state[STATE_NUM_PLAYERS]
@@ -982,7 +1052,22 @@ static inline __device__ void expansion_option_value(
             current_production
         );
         const float road_cost = (float)distance * 1.45f;
-        const float candidate = survival * (site + 5.4f) / (1.0f + road_cost * 0.34f);
+        const float immediate_window = turns_until_action(state, player)
+            + (float)distance * 0.08f;
+        const float economic_delay = fmaxf(
+            arrivals[player][distance] - immediate_window,
+            0.0f
+        );
+        const uint32_t player_count = state[STATE_NUM_PLAYERS] > 0u
+            ? state[STATE_NUM_PLAYERS]
+            : 1u;
+        const float access_scale = fmaxf(18.0f / (float)player_count, 1.0f);
+        const float accessibility = arrivals[player][distance]
+            < EXACT_INFINITY * 0.5f
+            ? 1.0f / (1.0f + economic_delay / access_scale)
+            : 0.0f;
+        const float candidate = survival * accessibility * (site + 5.4f)
+            / (1.0f + road_cost * 0.34f);
         if (candidate > top[0]) {
             top[2] = top[1];
             top[1] = top[0];
@@ -1328,16 +1413,7 @@ static inline __device__ float expected_build_tempo(
         if (build_targets[kind] == 0u) {
             continue;
         }
-        uint32_t missing[5];
-        deficit(hand, kind, missing);
-        float eta = 0.0f;
-        for (uint32_t resource = 0u; resource < 5u; ++resource) {
-            if (missing[resource] == 0u) {
-                continue;
-            }
-            eta += (float)missing[resource] * 36.0f
-                / (acquisition_rate(production, ratios, resource) + 0.75f);
-        }
+        const float eta = build_eta_rolls(production, hand, ratios, BUILD_COSTS[kind]);
         best = fmaxf(best, BUILD_TEMPO_VALUE[kind] / (1.0f + eta / 18.0f));
     }
     return best;
@@ -1367,6 +1443,64 @@ static inline __device__ float speculative_road_penalty(
     const uint32_t excess = roads_built > supported ? roads_built - supported : 0u;
     const float excess_f = (float)excess;
     return excess_f * 0.48f + excess_f * excess_f * 0.035f;
+}
+
+static inline __device__ float conversion_efficiency(
+    const float production[5], const uint32_t ratios[5], const uint32_t cost[5]
+) {
+    uint32_t required = 0u, best_ratio = 0xffffffffu;
+    for (uint32_t r = 0; r < 5; ++r) {
+        required += cost[r];
+        if (production[r] > 0.0f && ratios[r] < best_ratio) best_ratio = ratios[r];
+    }
+    if (required == 0u) return 1.0f;
+    if (best_ratio == 0xffffffffu) return 0.0f;
+    uint32_t cards = 0u;
+    for (uint32_t r = 0; r < 5; ++r) cards += cost[r] * (production[r] > 0.0f ? 1u : best_ratio);
+    return (float)required / (float)(cards > required ? cards : required);
+}
+
+static inline __device__ float closed_economy_value(
+    const uint32_t *state, uint32_t player, const float production[5],
+    const uint32_t hand[5], const uint32_t ratios[5], const uint32_t targets[4]
+) {
+    uint32_t bank[5];
+    uint32_t others = 0u;
+    for (uint32_t p = 0; p < state[STATE_NUM_PLAYERS]; ++p) {
+        if (p != player) others += resource_total(state, p);
+    }
+    for (uint32_t r = 0; r < 5; ++r) {
+        const uint32_t outside = others + hand[r];
+        bank[r] = state[STATE_BANK_PUBLIC] != 0u ? state[STATE_BANK + r]
+            : (outside < 19u ? 19u - outside : 0u);
+    }
+    const uint32_t kinds[4] = {1u, 0u, 2u, 3u};
+    const float importance[4] = {1.35f, 0.80f, 0.95f, 0.85f};
+    float closure = 0.0f;
+    for (uint32_t k = 0; k < 4; ++k) {
+        if (!targets[kinds[k]]) continue;
+        uint32_t missing = 0u, capacity = 0u;
+        int available = 1;
+        for (uint32_t r = 0; r < 5; ++r) {
+            const uint32_t required = BUILD_COSTS[kinds[k]][r];
+            const uint32_t deficit = required > hand[r] ? required - hand[r] : 0u;
+            available &= deficit <= bank[r];
+            missing += deficit;
+            capacity += (hand[r] > required ? hand[r] - required : 0u) / ratios[r];
+        }
+        if (available && capacity >= missing) closure += importance[k] / (1.0f + (float)missing);
+    }
+    const uint32_t zero[5] = {0u, 0u, 0u, 0u, 0u};
+    const uint32_t independent_kinds[3] = {1u, 2u, 3u};
+    const float weights[3] = {0.65f, 0.20f, 0.15f};
+    float independence = 0.0f;
+    for (uint32_t k = 0; k < 3; ++k) {
+        const uint32_t *cost = BUILD_COSTS[independent_kinds[k]];
+        independence += weights[k] * conversion_efficiency(production, ratios, cost)
+            / (1.0f + build_eta_rolls(production, zero, ratios, cost) / 18.0f);
+    }
+    const int disabled = (state[STATE_DOMESTIC_TRADE_DISABLED] & (1u << player)) != 0u;
+    return closure * (disabled ? 0.10f : 0.035f) + independence * (disabled ? 0.18f : 0.055f);
 }
 
 static inline __device__ float strategic_utility(
@@ -1479,7 +1613,8 @@ static inline __device__ float strategic_utility(
         + development_utility(state, topology, player, expansion_value) * 0.72f
         + port_flexibility * 0.07f
         - expected_discard_loss(state, topology, player) * 2.4f
-        - speculative_road_penalty(state, player, road_acquire, road_retain);
+        - speculative_road_penalty(state, player, road_acquire, road_retain)
+        + closed_economy_value(state, player, production, hand, ratios, build_targets);
 }
 
 extern "C" __global__ void evaluate_batch_kernel(

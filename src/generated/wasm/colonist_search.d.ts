@@ -88,6 +88,7 @@ export interface WasmRetainedRoot {
   initialTerminalOutcome?: number;
   initialTerminalRate?: number;
   initialVictoryMargin?: number;
+  initialStrategicMargin?: number;
   terminalOutcome?: number;
   terminalRate?: number;
   terminalLowerBound?: number;
@@ -95,6 +96,9 @@ export interface WasmRetainedRoot {
   victoryMargin?: number;
   victoryMarginLowerBound?: number;
   victoryMarginUpperBound?: number;
+  strategicMargin?: number;
+  strategicMarginLowerBound?: number;
+  strategicMarginUpperBound?: number;
   meanTurn?: number;
 }
 
@@ -155,9 +159,21 @@ export interface WasmRoadCutContinuationAssessment {
   continuations: WasmRoadCutContinuationEvidence[];
 }
 
+export interface WasmRoadIntent {
+  targetVertex?: number;
+  roadsRemaining: number;
+  expectedRolls?: number;
+  survivalProbability: number;
+  targetValue: number;
+  portfolioValue: number;
+  frontierGain: number;
+  orderingScore: number;
+}
+
 export interface WasmRootCausalEvidence {
   action: WasmAction;
   promotionReason?: WasmRootPromotionReason;
+  roadIntent?: WasmRoadIntent;
   introducedRoadFragility?: WasmIntroducedRoadFragility;
   roadCutContinuation?: WasmRoadCutContinuationAssessment;
   admittedByPromotion: boolean;
@@ -172,7 +188,9 @@ export interface WasmRootCausalEvidence {
 }
 
 export interface WasmHorizonEscalation {
-  reason: "fragile-award-low-terminal-completion";
+  reason:
+    | "fragile-award-low-terminal-completion"
+    | "sparse-terminal-overlapping-strategic-cutoff";
   provisionalWinner: WasmAction;
   initialHorizon: number;
   unresolvedCutMass: number;

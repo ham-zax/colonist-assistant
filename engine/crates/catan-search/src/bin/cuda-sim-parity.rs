@@ -69,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let identity = engine.device_identity().clone();
     verify_end_turn_winner(&mut engine)?;
     engine.upload_states(&states)?;
-    let mut rng = SplitMix64::new(0x5eed_cafe_d15c_a11u64);
+    let mut rng = SplitMix64::new(0x05ee_dcaf_ed15_ca11_u64);
     let mut transitions = 0usize;
 
     for step in 0..STEPS {

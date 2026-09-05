@@ -410,6 +410,8 @@ struct RetainedRootOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     initial_victory_margin: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    initial_strategic_margin: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     terminal_outcome: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     terminal_rate: Option<f32>,
@@ -423,6 +425,12 @@ struct RetainedRootOutput {
     victory_margin_lower_bound: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     victory_margin_upper_bound: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strategic_margin: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strategic_margin_lower_bound: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strategic_margin_upper_bound: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mean_turn: Option<f32>,
 }
@@ -525,9 +533,26 @@ fn road_cut_continuation_output(
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct RoadIntentOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_vertex: Option<u8>,
+    roads_remaining: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_rolls: Option<f32>,
+    survival_probability: f32,
+    target_value: f32,
+    portfolio_value: f32,
+    frontier_gain: f32,
+    ordering_score: f32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RootCausalEvidenceOutput {
     action: ActionOutput,
     promotion_reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    road_intent: Option<RoadIntentOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     introduced_road_fragility: Option<IntroducedRoadFragilityOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1065,6 +1090,19 @@ fn replacement_output(replacement: (Action, Action)) -> ActionReplacementOutput 
     }
 }
 
+fn road_intent_output(intent: colonist_catan_search::RoadIntent) -> RoadIntentOutput {
+    RoadIntentOutput {
+        target_vertex: intent.target_vertex,
+        roads_remaining: intent.roads_remaining,
+        expected_rolls: intent.expected_rolls.is_finite().then_some(intent.expected_rolls),
+        survival_probability: intent.survival_probability,
+        target_value: intent.target_value,
+        portfolio_value: intent.portfolio_value,
+        frontier_gain: intent.frontier_gain,
+        ordering_score: intent.ordering_score(),
+    }
+}
+
 fn root_provenance_output(provenance: BeliefSearchProvenance) -> RootProvenanceOutput {
     RootProvenanceOutput {
         ranked_root_count: provenance.ranked_root_count,
@@ -1099,6 +1137,7 @@ fn root_provenance_output(provenance: BeliefSearchProvenance) -> RootProvenanceO
                 initial_terminal_outcome: None,
                 initial_terminal_rate: None,
                 initial_victory_margin: None,
+                initial_strategic_margin: None,
                 terminal_outcome: None,
                 terminal_rate: None,
                 terminal_lower_bound: None,
@@ -1106,6 +1145,9 @@ fn root_provenance_output(provenance: BeliefSearchProvenance) -> RootProvenanceO
                 victory_margin: None,
                 victory_margin_lower_bound: None,
                 victory_margin_upper_bound: None,
+                strategic_margin: None,
+                strategic_margin_lower_bound: None,
+                strategic_margin_upper_bound: None,
                 mean_turn: None,
             })
             .collect(),
@@ -1130,6 +1172,7 @@ fn root_provenance_output(provenance: BeliefSearchProvenance) -> RootProvenanceO
                 RootCausalEvidenceOutput {
                     action: action(evidence.action),
                     promotion_reason: evidence.promotion_reason.map(root_promotion_reason),
+                    road_intent: evidence.road_intent.map(road_intent_output),
                     introduced_road_fragility: has_introduced_fragility.then(|| {
                         introduced_road_fragility_output(&evidence.introduced_road_fragility)
                     }),
@@ -1939,10 +1982,10 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
                     let search = &mut forest[search_index];
                     search.reconfigure(group_config);
                     let report = if group.len() == 1 {
-                        search.search(&group[0].state)
+                        search.search_excluding(&group[0].state, &root_exclusions)
                     } else {
                         search
-                            .search_weighted_belief(&group)
+                            .search_weighted_belief_excluding(&group, &root_exclusions)
                             .map_err(|error| JsValue::from_str(&format!("{error:?}")))?
                     };
                     if selected

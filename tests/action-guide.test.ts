@@ -484,6 +484,135 @@ describe("action guide autopilot", () => {
     expect(confirmClicks).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    ["knight", "robber"],
+    ["road-building", "road"],
+  ] as const)(
+    "completes a committed %s workflow when Colonist enters its %s phase",
+    async (cardName, boardAction) => {
+      const card = document.createElement("div");
+      card.className = "cardContainer-fixture";
+      card.innerHTML = `<img src="card_${cardName === "road-building" ? "roadbuilding" : cardName}.fixture.svg">`;
+      const cardClicks = vi.fn();
+      card.addEventListener("click", cardClicks);
+      document.body.append(card);
+      const executions = vi.fn();
+
+      renderActionGuide(
+        {
+          kind: "development",
+          card: cardName,
+          label: `Play ${cardName}`,
+          signature: `play-${cardName}-direct-transition`,
+          confidence: 1,
+        },
+        {
+          highlight: true,
+          autonomous: true,
+          onExecution: executions,
+        },
+      );
+      await vi.advanceTimersByTimeAsync(260);
+
+      expect(cardClicks).toHaveBeenCalledOnce();
+      expect(activeWorkflowAction(boardAction)).toBeUndefined();
+      expect(executions).toHaveBeenCalledWith({
+        succeeded: true,
+        signature: `play-${cardName}-direct-transition`,
+      });
+
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(executions).not.toHaveBeenCalledWith(
+        expect.objectContaining({ succeeded: false }),
+      );
+    },
+  );
+
+  it("relinquishes Road Building when observed state enters road placement", async () => {
+    const card = document.createElement("div");
+    card.className = "cardContainer-fixture";
+    card.innerHTML = '<img src="card_roadbuilding.fixture.svg">';
+    const onExecution = vi.fn();
+    card.addEventListener("click", vi.fn());
+    document.body.append(card);
+
+    renderActionGuide(
+      {
+        kind: "development",
+        card: "road-building",
+        label: "Play road building",
+        signature: "road-building-direct-followup",
+        confidence: 1,
+      },
+      { highlight: true, autonomous: true, onExecution },
+    );
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(activeWorkflowAction("road")).toBeUndefined();
+    expect(onExecution).toHaveBeenCalledOnce();
+    expect(onExecution).toHaveBeenCalledWith({
+      succeeded: true,
+      signature: "road-building-direct-followup",
+    });
+  });
+
+  it.each([
+    ["knight", "road"],
+    ["road-building", "robber"],
+    ["monopoly", "road"],
+    ["year-of-plenty", "robber"],
+  ] as const)("does not report %s committed from the unrelated %s phase", async (cardName, phase) => {
+    const card = document.createElement("div");
+    card.className = "cardContainer-fixture";
+    card.innerHTML = `<img src="card_${cardName.replaceAll("-", "")}.fixture.svg">`;
+    document.body.append(card);
+    const executions = vi.fn();
+    renderActionGuide({
+      kind: "development", card: cardName, label: cardName,
+      signature: `wrong-phase-${cardName}`, confidence: 1,
+    }, { highlight: true, autonomous: true, onExecution: executions });
+    await vi.advanceTimersByTimeAsync(260);
+    expect(activeWorkflowAction(phase)).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(executions).not.toHaveBeenCalledWith(expect.objectContaining({ succeeded: true }));
+  });
+
+  it("does not infer a Knight commit before any card click was dispatched", async () => {
+    const card = document.createElement("div");
+    card.className = "cardContainer-fixture";
+    card.innerHTML = '<img src="card_knight.fixture.svg">';
+    const clicks = vi.fn();
+    card.addEventListener("click", clicks);
+    document.body.append(card);
+    const executions = vi.fn();
+    renderActionGuide({
+      kind: "development", card: "knight", label: "Knight",
+      signature: "undispatched-knight", confidence: 1,
+    }, { highlight: true, autonomous: true, autopilotDelayMs: 5_000, onExecution: executions });
+    expect(activeWorkflowAction("robber")).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(clicks).not.toHaveBeenCalled();
+    expect(executions).not.toHaveBeenCalled();
+  });
+
+  it("does not accept a matching development phase after ownership validation expires", async () => {
+    const card = document.createElement("div");
+    card.className = "cardContainer-fixture";
+    card.innerHTML = '<img src="card_knight.fixture.svg">';
+    document.body.append(card);
+    let current = true;
+    const executions = vi.fn();
+    renderActionGuide({
+      kind: "development", card: "knight", label: "Knight",
+      signature: "stale-knight-owner", confidence: 1,
+    }, { highlight: true, autonomous: true, validateContinuation: () => current, onExecution: executions });
+    await vi.advanceTimersByTimeAsync(260);
+    current = false;
+    expect(activeWorkflowAction("robber")).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(executions).not.toHaveBeenCalledWith(expect.objectContaining({ succeeded: true }));
+  });
+
   it("validates a development workflow after the card leaves the playable inventory", async () => {
     let firstClickLegal = true;
     const card = document.createElement("div");
@@ -934,6 +1063,10 @@ describe("action guide autopilot", () => {
       for (const [index, clicked] of clicks.entries()) {
         const button = document.createElement("div");
         button.className = "tradeButton-fixture";
+        button.setAttribute(
+          "aria-label",
+          ["Counter trade", "Decline trade", "Accept trade"][index]!,
+        );
         button.addEventListener("click", clicked);
         offer.append(button);
       }
@@ -1152,10 +1285,13 @@ describe("action guide autopilot", () => {
     offer.className = "tradeContainer-fixture";
     const counter = document.createElement("button");
     counter.className = "tradeButton-fixture";
+    counter.setAttribute("aria-label", "Counter trade");
     const decline = document.createElement("button");
     decline.className = "tradeButton-fixture";
+    decline.setAttribute("aria-label", "Decline trade");
     const accept = document.createElement("button");
     accept.className = "tradeButton-fixture";
+    accept.setAttribute("aria-label", "Accept trade");
     const clicks: string[] = [];
     counter.addEventListener("click", () => {
       clicks.push("counter");
@@ -1330,6 +1466,225 @@ describe("action guide autopilot", () => {
     });
     expect(laterRenderExecution).not.toHaveBeenCalled();
     expect(postSendRefreshes).toBeGreaterThanOrEqual(2);
+  });
+
+  it("uses the visible bank-trade inventory when a hidden stale tree shares its id", async () => {
+    const open = document.createElement("button");
+    open.id = "action-button-trade";
+    const clicks: string[] = [];
+    open.addEventListener("click", () => {
+      clicks.push("open");
+
+      const staleInventory = document.createElement("div");
+      staleInventory.id = "player-card-inventory";
+      staleInventory.style.display = "none";
+      staleInventory.innerHTML =
+        '<button data-card-enum="1" aria-disabled="true"><img src="card_lumber.svg"></button>';
+
+      const inventory = document.createElement("div");
+      inventory.id = "player-card-inventory";
+      const lumber = document.createElement("button");
+      lumber.dataset.cardEnum = "1";
+      lumber.innerHTML = '<img src="card_lumber.svg">';
+      inventory.append(lumber);
+
+      const staleOfferedProposal = document.createElement("div");
+      staleOfferedProposal.className = "proposalOfferedHalfContainer-stale";
+      staleOfferedProposal.style.display = "none";
+      staleOfferedProposal.innerHTML =
+        '<button data-card-enum="1"><span class="countBadge-stale">3</span><img src="card_lumber.svg"></button>';
+
+      const offeredProposal = document.createElement("div");
+      offeredProposal.className = "proposalOfferedHalfContainer-fixture";
+      let offered = 0;
+      lumber.addEventListener("click", () => {
+        offered += 1;
+        clicks.push(`give-lumber-${offered}`);
+        offeredProposal.innerHTML = `<button data-card-enum="1"><span class="countBadge-fixture">${offered}</span><img src="card_lumber.svg"></button>`;
+      });
+
+      const staleWanted = document.createElement("div");
+      staleWanted.className = "wantedCardSelectorContainer-stale";
+      staleWanted.style.display = "none";
+      staleWanted.innerHTML =
+        '<button data-card-enum="4" aria-disabled="true"><img src="card_grain.svg"></button>';
+      const staleWantedProposal = document.createElement("div");
+      staleWantedProposal.className = "proposalWantedHalfContainer-stale";
+      staleWantedProposal.style.display = "none";
+      staleWantedProposal.innerHTML =
+        '<button data-card-enum="4"><img src="card_grain.svg"></button>';
+
+      const wanted = document.createElement("div");
+      wanted.className = "wantedCardSelectorContainer-fixture";
+      const grain = document.createElement("button");
+      grain.dataset.cardEnum = "4";
+      grain.innerHTML = '<img src="card_grain.svg">';
+      wanted.append(grain);
+      const wantedProposal = document.createElement("div");
+      wantedProposal.className = "proposalWantedHalfContainer-fixture";
+      grain.addEventListener("click", () => {
+        clicks.push("get-grain");
+        wantedProposal.innerHTML =
+          '<button data-card-enum="4"><img src="card_grain.svg"></button>';
+      });
+
+      const submit = document.createElement("button");
+      submit.id = "action-button-trade-bank";
+      submit.addEventListener("click", () => {
+        clicks.push("send-bank");
+        inventory.remove();
+        wanted.remove();
+        offeredProposal.remove();
+        wantedProposal.remove();
+        submit.remove();
+      });
+      document.body.append(
+        staleInventory,
+        inventory,
+        staleOfferedProposal,
+        offeredProposal,
+        staleWanted,
+        staleWantedProposal,
+        wanted,
+        wantedProposal,
+        submit,
+      );
+    });
+    document.body.append(open);
+
+    const give = emptyResources();
+    give.lumber = 3;
+    const receive = emptyResources();
+    receive.grain = 1;
+    const executions = vi.fn();
+    renderActionGuide(
+      {
+        kind: "trade-builder",
+        mode: "bank",
+        give,
+        receive,
+        label: "Trade lumber for grain",
+        signature: "bank-trade-visible-tree",
+        confidence: 1,
+      },
+      {
+        highlight: true,
+        autonomous: true,
+        onExecution: executions,
+      },
+    );
+    await vi.advanceTimersByTimeAsync(4_500);
+
+    expect(clicks).toEqual([
+      "open",
+      "give-lumber-1",
+      "give-lumber-2",
+      "give-lumber-3",
+      "get-grain",
+      "send-bank",
+    ]);
+    expect(executions).toHaveBeenCalledWith({
+      succeeded: true,
+      signature: "bank-trade-visible-tree",
+    });
+  });
+
+  it("executes a repeated bank trade in a modal layout without legacy inventory IDs", async () => {
+    let submitted = false;
+    const open = document.createElement("button");
+    open.id = "action-button-trade";
+    const clicks: string[] = [];
+    open.addEventListener("click", () => {
+      clicks.push("open");
+      const modal = document.createElement("div");
+      modal.className = "bankTradePanel-fixture";
+      const available = document.createElement("div");
+      available.className = "bankTradeAvailableCards-fixture";
+      const lumber = document.createElement("button");
+      lumber.innerHTML = '<img src="card_lumber.svg">';
+      const offeredProposal = document.createElement("div");
+      offeredProposal.className = "proposalOfferedHalfContainer-fixture";
+      let lumberCount = 0;
+      lumber.addEventListener("click", () => {
+        lumberCount += 1;
+        clicks.push(`give-lumber-${lumberCount}`);
+        offeredProposal.innerHTML = Array.from(
+          { length: lumberCount },
+          () => '<button data-card-enum="1"><img src="card_lumber.svg"></button>',
+        ).join("");
+      });
+      available.append(lumber);
+
+      const bankChoices = document.createElement("div");
+      bankChoices.className = "bankTradeReceiveCards-fixture";
+      const grain = document.createElement("button");
+      grain.innerHTML = '<img src="card_grain.svg">';
+      const wantedProposal = document.createElement("div");
+      wantedProposal.className = "proposalWantedHalfContainer-fixture";
+      grain.addEventListener("click", () => {
+        clicks.push("get-grain");
+        wantedProposal.innerHTML =
+          '<button data-card-enum="4"><img src="card_grain.svg"></button>';
+      });
+      bankChoices.append(grain);
+
+      const submit = document.createElement("button");
+      submit.id = "action-button-trade-bank";
+      submit.disabled = true;
+      grain.addEventListener("click", () => { submit.disabled = lumberCount !== 3; });
+      submit.addEventListener("click", () => {
+        clicks.push("submit-bank");
+        submitted = true;
+        modal.remove();
+      });
+      modal.append(
+        available,
+        bankChoices,
+        offeredProposal,
+        wantedProposal,
+        submit,
+      );
+      document.body.append(modal);
+    });
+    document.body.append(open);
+
+    const give = emptyResources();
+    give.lumber = 3;
+    const receive = emptyResources();
+    receive.grain = 1;
+    const onExecution = vi.fn();
+    renderActionGuide(
+      {
+        kind: "trade-builder",
+        mode: "bank",
+        give,
+        receive,
+        label: "Trade 3 lumber for grain",
+        signature: "bank-trade-alternate-layout",
+        confidence: 1,
+      },
+      {
+        highlight: true,
+        autonomous: true,
+        validateTransactionCommit: () => submitted,
+        onExecution,
+      },
+    );
+
+    await vi.advanceTimersByTimeAsync(4_500);
+
+    expect(clicks).toEqual([
+      "open",
+      "give-lumber-1",
+      "give-lumber-2",
+      "give-lumber-3",
+      "get-grain",
+      "submit-bank",
+    ]);
+    expect(onExecution).toHaveBeenCalledWith({
+      succeeded: true,
+      signature: "bank-trade-alternate-layout",
+    });
   });
 
   it("retries an idempotent trade-panel control when Colonist drops the first click", async () => {

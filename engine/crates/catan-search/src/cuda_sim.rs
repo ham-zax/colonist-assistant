@@ -11,6 +11,8 @@ use cudarc::driver::{
 };
 use cudarc::nvrtc::Ptx;
 
+use crate::rollout_cutoff::ROLLOUT_CUTOFF_SCALE;
+
 const MAX_PLAYERS: usize = 4;
 const HEX_COUNT: usize = 19;
 const VERTEX_COUNT: usize = 54;
@@ -77,7 +79,7 @@ const ACTION_TAG: usize = 0;
 const ACTION_ARG0: usize = 1;
 const ACTION_WORDS: usize = 12;
 const SUMMARY_WORDS: usize = 7;
-const ROOT_STATS_WORDS: usize = 10;
+const ROOT_STATS_WORDS: usize = 12;
 const MATCHUP_PROFILE_WORDS: usize = 10;
 
 pub type CudaSimPolicyProfile = [u8; 5];
@@ -228,6 +230,8 @@ pub struct CudaSimRootActionStats {
     pub mean_victory_margin_squared: f32,
     pub mean_victory_points_squared: f32,
     pub mean_best_opponent_victory_points_squared: f32,
+    pub mean_strategic_margin: f32,
+    pub mean_strategic_margin_squared: f32,
 }
 
 impl CudaSimRootActionStats {
@@ -257,6 +261,10 @@ impl CudaSimRootActionStats {
         .max(0.0)
     }
 
+    pub fn strategic_margin_variance(&self) -> f32 {
+        (self.mean_strategic_margin_squared - self.mean_strategic_margin.powi(2)).max(0.0)
+    }
+
     pub fn net_terminal_variance(&self) -> f32 {
         (self.terminal_rate() - self.net_terminal_outcome().powi(2)).max(0.0)
     }
@@ -279,7 +287,8 @@ pub struct CudaSimRootSearchResult {
 
 impl CudaSimRootSearchResult {
     /// Picks one root per resident base state using an interpretable ordering:
-    /// terminal outcome first, then VP margin, then shorter mean game length.
+    /// terminal outcome first, then the parity-tested strategic cutoff, raw VP
+    /// margin, and finally shorter mean game length.
     pub fn best_actions(&self) -> Vec<Option<&CudaSimRootActionStats>> {
         self.rows
             .iter()
@@ -287,6 +296,10 @@ impl CudaSimRootSearchResult {
                 row.iter().max_by(|left, right| {
                     left.net_terminal_outcome()
                         .total_cmp(&right.net_terminal_outcome())
+                        .then_with(|| {
+                            left.mean_strategic_margin
+                                .total_cmp(&right.mean_strategic_margin)
+                        })
                         .then_with(|| {
                             left.mean_victory_margin()
                                 .total_cmp(&right.mean_victory_margin())
@@ -512,6 +525,16 @@ impl CudaSimEngine {
         let expand_roots_kernel = module.load_function("expand_root_rollouts_kernel")?;
         let reduce_roots_kernel = module.load_function("reduce_root_rollouts_kernel")?;
         let stream = context.default_stream();
+        let contract_kernel = module.load_function("simulation_contract_kernel")?;
+        let mut contract_device = stream.alloc_zeros::<u32>(4)?;
+        let mut arguments = stream.launch_builder(&contract_kernel);
+        arguments.arg(&mut contract_device);
+        unsafe { arguments.launch(LaunchConfig::for_num_elems(1))? };
+        let contract = stream.clone_dtoh(&contract_device)?;
+        stream.synchronize()?;
+        if contract != [2, STATE_WORDS as u32, ACTION_WORDS as u32, ROOT_STATS_WORDS as u32] {
+            return Err(CudaSimError::UnsupportedState("embedded CUDA artifact ABI does not match Rust; rebuild sim.ptx"));
+        }
         let topology_device = stream.clone_htod(&topology_host)?;
         let state_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY * STATE_WORDS)?;
         let action_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY * ACTION_WORDS)?;
@@ -921,6 +944,7 @@ impl CudaSimEngine {
     /// seed for each consecutive `games_per_seed_block` games. Strength
     /// campaigns use one block per seat rotation so board/chance luck is paired
     /// across candidate seats without changing chunk-independent game identity.
+    #[allow(clippy::too_many_arguments)]
     pub fn run_rotating_profile_chunk_with_seed_blocks(
         &mut self,
         states: &[GameState],
@@ -950,6 +974,7 @@ impl CudaSimEngine {
     /// search at every candidate decision while all opponent decisions and
     /// chance transitions use the resident GPU weighted policy. Root proposals,
     /// rollouts, reduction, selection, and application remain on device.
+    #[allow(clippy::too_many_arguments)]
     pub fn run_searched_candidate_chunk_with_seed_blocks(
         &mut self,
         states: &[GameState],
@@ -1171,6 +1196,7 @@ impl CudaSimEngine {
                     arguments.arg(&self.search_state_device);
                     arguments.arg(&self.search_status_device);
                     arguments.arg(&self.state_device);
+                    arguments.arg(&self.topology_device);
                     arguments.arg(&self.root_base_index_device);
                     arguments.arg(&mut self.root_stats_device);
                     arguments.arg(&rollout_stride);
@@ -1372,8 +1398,8 @@ impl CudaSimEngine {
         let mut result = Vec::with_capacity(count);
         for lane in 0..count {
             let mut words = [0u32; ACTION_WORDS];
-            for field in 0..ACTION_WORDS {
-                words[field] = self.action_host[field * count + lane];
+            for (field, word) in words.iter_mut().enumerate() {
+                *word = self.action_host[field * count + lane];
             }
             result.push(unpack_action_words(&words)?);
         }
@@ -1624,6 +1650,7 @@ impl CudaSimEngine {
                 arguments.arg(&self.search_state_device);
                 arguments.arg(&self.search_status_device);
                 arguments.arg(&self.state_device);
+                arguments.arg(&self.topology_device);
                 arguments.arg(&self.root_base_index_device);
                 arguments.arg(&mut self.root_stats_device);
                 arguments.arg(&stride);
@@ -1658,6 +1685,12 @@ impl CudaSimEngine {
                 mean_victory_margin_squared: stat(7, root) as f32 / valid as f32,
                 mean_victory_points_squared: stat(8, root) as f32 / valid as f32,
                 mean_best_opponent_victory_points_squared: stat(9, root) as f32 / valid as f32,
+                mean_strategic_margin: (stat(10, root) as i64) as f32
+                    / valid as f32
+                    / ROLLOUT_CUTOFF_SCALE as f32,
+                mean_strategic_margin_squared: stat(11, root) as f32
+                    / valid as f32
+                    / (ROLLOUT_CUTOFF_SCALE as f32 * ROLLOUT_CUTOFF_SCALE as f32),
             });
         }
         let rows = row_ranges
@@ -1721,8 +1754,8 @@ impl CudaSimEngine {
         let mut result = Vec::with_capacity(count);
         for lane in 0..count {
             let mut words = [0u32; STATE_WORDS];
-            for field in 0..STATE_WORDS {
-                words[field] = self.state_host[field * count + lane];
+            for (field, word) in words.iter_mut().enumerate() {
+                *word = self.state_host[field * count + lane];
             }
             result.push(CudaSimPackedState { words });
         }
@@ -2164,7 +2197,177 @@ fn building_code(building: Building) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use crate::rollout_cutoff::rollout_cutoff_margin;
+
     use super::*;
+
+    fn finish_setup(state: &mut GameState) {
+        while matches!(
+            state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        ) {
+            let action = state.legal_actions()[0].clone();
+            state.apply(&action).unwrap();
+        }
+    }
+
+    fn hidden_bank_worlds() -> (GameState, GameState) {
+        let mut grain_world = GameState::standard(71_003, 2);
+        finish_setup(&mut grain_world);
+        grain_world.phase = Phase::Main;
+        grain_world.current_player = 0;
+        grain_world.bank_is_public = false;
+        grain_world.player_trades_enabled = false;
+        grain_world.domestic_trade_disabled = 0b11;
+        grain_world.players.iter_mut().for_each(|player| player.resources = [0; 5]);
+        grain_world.bank = [19; 5];
+        grain_world.players[0].resources[Resource::Lumber.index()] = 4;
+        grain_world.bank[Resource::Lumber.index()] = 15;
+        grain_world.players[1].resources[Resource::Grain.index()] = 3;
+        grain_world.bank[Resource::Grain.index()] = 16;
+
+        let mut ore_world = grain_world.clone();
+        ore_world.players[1].resources = [0; 5];
+        ore_world.bank[Resource::Grain.index()] = 19;
+        ore_world.players[1].resources[Resource::Ore.index()] = 3;
+        ore_world.bank[Resource::Ore.index()] = 16;
+        assert_eq!(grain_world.observation_hash(0), ore_world.observation_hash(0));
+        grain_world.validate().unwrap();
+        ore_world.validate().unwrap();
+        (grain_world, ore_world)
+    }
+
+    fn generated_action_for_seed(
+        engine: &mut CudaSimEngine,
+        state: &GameState,
+        seed: u64,
+    ) -> Result<Action, CudaSimError> {
+        engine.upload_states(std::slice::from_ref(state))?;
+        engine.seed_rollout_rng(seed)?;
+        engine.generate_rollout_actions()?;
+        Ok(engine.download_generated_actions()?.remove(0))
+    }
+
+    #[test]
+    fn root_strategic_cutoff_matches_cpu_reference() -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = GameState::standard(71_001, 2);
+        finish_setup(&mut state);
+        state.phase = Phase::Main;
+        state.current_player = 0;
+        state.players.iter_mut().for_each(|player| player.resources = [0; 5]);
+        state.bank = [19; 5];
+        state.players[0].resources[Resource::Lumber.index()] = 4;
+        state.bank[Resource::Lumber.index()] = 15;
+        let actions = vec![
+            Action::MaritimeTrade {
+                give: Resource::Lumber,
+                receive: Resource::Grain,
+                ratio: 4,
+            },
+            Action::EndTurn,
+        ];
+        for action in &actions {
+            assert!(state.legal_actions().contains(action));
+        }
+
+        let mut engine = CudaSimEngine::new()?;
+        engine.upload_states(std::slice::from_ref(&state))?;
+        let result = engine.search_root_actions(std::slice::from_ref(&actions), 1, 0, 91_001)?;
+        for stat in &result.rows[0] {
+            let mut next = state.clone();
+            next.apply(&stat.action)?;
+            let expected = rollout_cutoff_margin(&next, 0);
+            assert!(
+                (stat.mean_strategic_margin - expected).abs()
+                    <= 1.0 / ROLLOUT_CUTOFF_SCALE as f32,
+                "CPU/GPU strategic cutoff mismatch for {:?}: gpu={} cpu={}",
+                stat.action,
+                stat.mean_strategic_margin,
+                expected,
+            );
+        }
+
+        let mut road_state = GameState::standard(1, 2);
+        finish_setup(&mut road_state);
+        road_state.phase = Phase::Main;
+        road_state.current_player = 0;
+        road_state
+            .players
+            .iter_mut()
+            .for_each(|player| player.resources = [0; 5]);
+        road_state.bank = [19; 5];
+        road_state.players[0].resources = [2, 2, 0, 0, 0];
+        road_state.bank = [17, 17, 19, 19, 19];
+        let complete_route = Action::BuildRoad { edge: 23 };
+        let local_decoy = Action::BuildRoad { edge: 12 };
+        let road_actions = vec![complete_route.clone(), local_decoy.clone()];
+        for action in &road_actions {
+            assert!(road_state.legal_actions().contains(action));
+        }
+        engine.upload_states(std::slice::from_ref(&road_state))?;
+        let road_result =
+            engine.search_root_actions(std::slice::from_ref(&road_actions), 1, 0, 91_003)?;
+        for stat in &road_result.rows[0] {
+            let mut next = road_state.clone();
+            next.apply(&stat.action)?;
+            let expected = rollout_cutoff_margin(&next, 0);
+            assert!(
+                (stat.mean_strategic_margin - expected).abs()
+                    <= 1.0 / ROLLOUT_CUTOFF_SCALE as f32,
+                "CPU/GPU road cutoff mismatch for {:?}: gpu={} cpu={}",
+                stat.action,
+                stat.mean_strategic_margin,
+                expected,
+            );
+        }
+        let margin = |action: &Action| {
+            road_result.rows[0]
+                .iter()
+                .find(|stat| &stat.action == action)
+                .expect("evaluated road root")
+                .mean_strategic_margin
+        };
+        assert!(margin(&complete_route) > margin(&local_decoy));
+        Ok(())
+    }
+
+    #[test]
+    fn hidden_bank_maritime_policy_is_observation_safe_and_available() -> Result<(), Box<dyn std::error::Error>> {
+        let (grain_world, ore_world) = hidden_bank_worlds();
+        let mut engine = CudaSimEngine::new()?;
+        let mut observed_maritime = false;
+        for seed in 1..=64 {
+            let left = generated_action_for_seed(&mut engine, &grain_world, seed)?;
+            let right = generated_action_for_seed(&mut engine, &ore_world, seed)?;
+            assert_eq!(left, right, "hidden bank identity changed the policy action at seed {seed}");
+            observed_maritime |= matches!(left, Action::MaritimeTrade { .. });
+        }
+        assert!(observed_maritime, "hidden-bank rollouts must retain self-controlled maritime play");
+        Ok(())
+    }
+
+    #[test]
+    fn hidden_bank_year_of_plenty_policy_is_observation_safe_and_available() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut grain_world, mut ore_world) = hidden_bank_worlds();
+        for state in [&mut grain_world, &mut ore_world] {
+            state.phase = Phase::PreRoll;
+            state.players[0].resources = [0; 5];
+            state.bank[Resource::Lumber.index()] = 19;
+            state.players[0].development[3] = 1;
+            state.players[0].bought_development[3] = 0;
+        }
+        assert_eq!(grain_world.observation_hash(0), ore_world.observation_hash(0));
+        let mut engine = CudaSimEngine::new()?;
+        let mut observed_yop = false;
+        for seed in 1..=64 {
+            let left = generated_action_for_seed(&mut engine, &grain_world, seed)?;
+            let right = generated_action_for_seed(&mut engine, &ore_world, seed)?;
+            assert_eq!(left, right, "hidden bank identity changed the YOP policy action at seed {seed}");
+            observed_yop |= matches!(left, Action::PlayYearOfPlenty { .. });
+        }
+        assert!(observed_yop, "hidden-bank rollouts must retain Year of Plenty play");
+        Ok(())
+    }
 
     #[test]
     fn bank_shortage_single_player_cpu_gpu_parity() -> Result<(), Box<dyn std::error::Error>> {

@@ -484,7 +484,7 @@ mod tests {
                 // Because of the hex cycle, even cutting far_vertex leaves a 5-edge hex path + extension = 6!
                 let after_len = base_len.saturating_sub(cut.road_loss);
                 assert!(after_len >= 5, "bypass keeps road length >= 5");
-                assert_eq!(cut.award_loss, false, "award is not lost due to bypass");
+                assert!(!cut.award_loss, "award is not lost due to bypass");
             }
         }
     }
