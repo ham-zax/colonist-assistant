@@ -16,6 +16,8 @@ import {
   stableMessageId,
 } from "./dom";
 import { isExtensionContextInvalidatedError } from "./extension-context";
+import { investigationRecorder } from "./investigation-recorder";
+import type { InvestigationKind } from "../core/investigation-log";
 import {
   appendPublicDiceRoll,
   cloneDiceHistoryState,
@@ -556,8 +558,40 @@ export class GameSession {
     this.gameKey = gameKey;
   }
 
+  private investigationDiceSummary(): Record<string, unknown> {
+    return {
+      provenance: this.diceHistory.provenance,
+      storedRolls: this.diceHistory.rolls.length,
+      coverage: this.diceHistory.coverage.ranges.slice(-12),
+      ambiguousLogIndices: this.diceHistory.ambiguousLogIndices.slice(-24),
+      conflictingLogIndices: this.diceHistory.conflictingLogIndices?.slice(-24) ?? [],
+      hasUnlocatedRollAmbiguity: this.diceHistory.hasUnlocatedRollAmbiguity,
+      hasUnreconciledSources: this.diceHistory.hasUnreconciledSources ?? false,
+      missingPrefixRolls: this.diceHistory.missingPrefixRolls,
+      gaps: this.diceHistory.gaps.slice(-12),
+      hasUnknownRollGap: this.diceHistory.hasUnknownRollGap,
+    };
+  }
+
+  private recordInvestigation(
+    kind: InvestigationKind,
+    data: Record<string, unknown>,
+  ): void {
+    investigationRecorder.record(kind, {
+      sessionId: this.id,
+      gameKey: this.gameKey,
+      ...data,
+    });
+  }
+
   async start(): Promise<void> {
     await this.restore();
+    this.recordInvestigation("restore", {
+      phase: "session-start",
+      events: this.events.length,
+      partialHistory: this.partialHistory,
+      ...this.investigationDiceSummary(),
+    });
     this.scan();
     this.observer = new MutationObserver(() => this.scan());
     this.observer.observe(this.root, {
@@ -692,6 +726,10 @@ export class GameSession {
     if (!gameKey || gameKey === this.gameKey) return;
     const hadGameKey = Boolean(this.gameKey);
     this.gameKey = gameKey;
+    investigationRecorder.setGame(gameKey);
+    this.recordInvestigation("system", {
+      phase: hadGameKey ? "game-key-rollover" : "game-key-attached",
+    });
     if (hadGameKey) {
       // Local identity belongs to the game generation just ended. Require the
       // bridge to resolve it again before canonicalizing any new "You" logs.
@@ -778,7 +816,14 @@ export class GameSession {
       return false;
     }
     if (snapshot.initialPlacement) {
-      return observeDiceSetupBoundary(this.diceHistory);
+      const changed = observeDiceSetupBoundary(this.diceHistory);
+      if (changed) {
+        this.recordInvestigation("dice", {
+          action: "setup-boundary-established",
+          ...this.investigationDiceSummary(),
+        });
+      }
+      return changed;
     }
     if (
       !snapshot.hasRolled ||
@@ -809,8 +854,25 @@ export class GameSession {
     ) {
       const ordinalRoll = this.diceHistory.rolls[rollOrdinal];
       if (ordinalRoll) {
-        if (ordinalRoll.actor === actor && ordinalRoll.total === snapshot.lastRoll) return false;
+        if (ordinalRoll.actor === actor && ordinalRoll.total === snapshot.lastRoll) {
+          this.recordInvestigation("dice", {
+            action: "board-roll-confirmed-by-indexed-history",
+            rollOrdinal,
+            actor,
+            total: snapshot.lastRoll,
+          });
+          return false;
+        }
         noteRollCapableLogAmbiguity(this.diceHistory, undefined);
+        this.recordInvestigation("dice", {
+          action: "board-roll-conflicts-with-indexed-history",
+          rollOrdinal,
+          actor,
+          total: snapshot.lastRoll,
+          indexedActor: ordinalRoll.actor,
+          indexedTotal: ordinalRoll.total,
+          ...this.investigationDiceSummary(),
+        });
         this.queueSave();
         this.onUpdate(this);
         return true;
@@ -819,8 +881,25 @@ export class GameSession {
     const existing = this.diceHistory.rolls.find((roll) =>
       roll.eventId.startsWith(`board-roll:${rollOrdinal}:`));
     if (existing) {
-      if (existing.actor === actor && existing.total === snapshot.lastRoll) return false;
+      if (existing.actor === actor && existing.total === snapshot.lastRoll) {
+        this.recordInvestigation("dice", {
+          action: "board-roll-duplicate",
+          rollOrdinal,
+          actor,
+          total: snapshot.lastRoll,
+        });
+        return false;
+      }
       noteRollCapableLogAmbiguity(this.diceHistory, undefined);
+      this.recordInvestigation("dice", {
+        action: "board-roll-conflict",
+        rollOrdinal,
+        actor,
+        total: snapshot.lastRoll,
+        existingActor: existing.actor,
+        existingTotal: existing.total,
+        ...this.investigationDiceSummary(),
+      });
       this.queueSave();
       this.onUpdate(this);
       return true;
@@ -832,6 +911,14 @@ export class GameSession {
     if (priorBoardTurns.some((prior) => prior > rollOrdinal)) {
       // A delayed bridge snapshot cannot append a historical turn at the tail.
       notePublicRollConflict(this.diceHistory, undefined);
+      this.recordInvestigation("dice", {
+        action: "delayed-board-roll-rejected",
+        rollOrdinal,
+        actor,
+        total: snapshot.lastRoll,
+        priorBoardTurns,
+        ...this.investigationDiceSummary(),
+      });
       this.queueSave();
       this.onUpdate(this);
       return true;
@@ -839,12 +926,23 @@ export class GameSession {
     const anchored =
       this.diceHistory.provenance === "complete-from-first-gameplay-roll" ||
       this.diceHistory.missingPrefixRolls !== undefined;
-    const expectedTurn = anchored
-      ? (this.diceHistory.missingPrefixRolls ?? 0) + this.diceHistory.rolls.length
-        + this.diceHistory.gaps.reduce((count, gap) => count + (gap.missingRolls ?? 0), 0)
-      : priorBoardTurns.length
-        ? Math.max(...priorBoardTurns) + 1
+    const indexedRollCount = this.diceHistory.rolls.filter(
+      (roll) => roll.logIndex !== undefined,
+    ).length;
+    const expectedTurn = priorBoardTurns.length
+      ? Math.max(...priorBoardTurns) + 1
+      : anchored
+        ? (this.diceHistory.missingPrefixRolls ?? 0) + indexedRollCount
+          + this.diceHistory.gaps.reduce((count, gap) => count + (gap.missingRolls ?? 0), 0)
         : rollOrdinal;
+    if (rollOrdinal > expectedTurn) {
+      this.recordInvestigation("dice", {
+        action: "board-roll-gap-inferred",
+        expectedTurn,
+        rollOrdinal,
+        missingRolls: rollOrdinal - expectedTurn,
+      });
+    }
     for (let missingTurn = expectedTurn; missingTurn < rollOrdinal; missingTurn += 1) {
       noteMissingPublicRoll(this.diceHistory);
     }
@@ -852,6 +950,14 @@ export class GameSession {
       actor,
       total: snapshot.lastRoll!,
       eventId,
+    });
+    this.recordInvestigation("dice", {
+      action: "board-roll-appended",
+      rollOrdinal,
+      actor,
+      total: snapshot.lastRoll,
+      expectedTurn,
+      ...this.investigationDiceSummary(),
     });
     this.queueSave();
     this.onUpdate(this);
@@ -982,18 +1088,42 @@ export class GameSession {
     let changed = recoveredMissingPrefix;
     let journalReplayRequired = false;
     for (const candidate of candidates) {
+      const previousPresentationId = this.seenElements.get(candidate.element);
       this.seenElements.set(candidate.element, candidate.id);
       if (this.seenIds.has(candidate.id)) continue;
       this.seenIds.add(candidate.id);
       const snapshot = snapshotMessage(candidate.element, language);
       if (!snapshot) continue;
+      this.recordInvestigation("dom", {
+        phase: "observed",
+        logIndex: candidate.logIndex,
+        presentation: previousPresentationId ? "rerender" : "first-render",
+        priorId: previousPresentationId,
+        id: candidate.id,
+        serialText: snapshot.serialText.slice(0, 500),
+        visibleText: snapshot.visibleText.slice(0, 500),
+        diceTokens: snapshot.serialText.match(/:die-[1-6]:/gu) ?? [],
+      });
       const parsed = parseLogSnapshot(snapshot);
       if (!parsed) {
         const classification = classifyUnmatchedLog(snapshot);
+        const rollCapable = unmatchedCanConcealGameplayRoll(snapshot, classification);
+        this.recordInvestigation("dom", {
+          phase: "unmatched",
+          logIndex: candidate.logIndex,
+          reason: classification.reason,
+          affectsIntegrity: classification.affectsIntegrity,
+          rollCapable,
+        });
         this.unmatchedCount += 1;
         if (classification.affectsIntegrity) this.unmatchedIntegrityCount += 1;
-        if (unmatchedCanConcealGameplayRoll(snapshot, classification)) {
+        if (rollCapable) {
           noteRollCapableLogAmbiguity(this.diceHistory, candidate.logIndex);
+          this.recordInvestigation("dice", {
+            action: "roll-capable-unmatched-ambiguity-added",
+            logIndex: candidate.logIndex,
+            ...this.investigationDiceSummary(),
+          });
         } else if (candidate.logIndex !== undefined) {
           observeLogCoverage(this.diceHistory, [candidate.logIndex]);
         }
@@ -1008,8 +1138,28 @@ export class GameSession {
         changed = true;
         continue;
       }
+      this.recordInvestigation("dom", {
+        phase: "parsed",
+        logIndex: candidate.logIndex,
+        eventType: parsed.event.type,
+        confidence: parsed.confidence,
+        ...(parsed.event.type === "roll"
+          ? {
+              player: parsed.event.player,
+              dice: parsed.event.dice,
+            }
+          : {}),
+      });
       if (candidate.logIndex !== undefined) {
+        const wasAmbiguous = this.diceHistory.ambiguousLogIndices.includes(candidate.logIndex);
         observeLogCoverage(this.diceHistory, [candidate.logIndex]);
+        if (wasAmbiguous && !this.diceHistory.ambiguousLogIndices.includes(candidate.logIndex)) {
+          this.recordInvestigation("dice", {
+            action: "indexed-ambiguity-cleared-by-rerender",
+            logIndex: candidate.logIndex,
+            ...this.investigationDiceSummary(),
+          });
+        }
       }
       const stored = canonicalizeEvent({
         ...parsed.event,
@@ -1033,6 +1183,15 @@ export class GameSession {
         // One server/log identity cannot own two semantic events. Retain the
         // first event for generic tracking and fail stochastic authority closed.
         notePublicRollConflict(this.diceHistory, stored.index);
+        this.recordInvestigation("dice", {
+          action: "indexed-event-conflict",
+          logIndex: stored.index,
+          previousType: existing.type,
+          nextType: stored.type,
+          previousRaw: existing.raw.slice(0, 300),
+          nextRaw: stored.raw.slice(0, 300),
+          ...this.investigationDiceSummary(),
+        });
         this.partialHistoryFromMissingPrefix = false;
         this.partialHistory = true;
         this.unmatchedCount += 1;
@@ -1055,13 +1214,32 @@ export class GameSession {
               eventId: stored.id,
               ...(stored.index !== undefined ? { logIndex: stored.index } : {}),
             });
+            this.recordInvestigation("dice", {
+              action: "indexed-roll-appended",
+              logIndex: stored.index,
+              actor: stored.player,
+              dice: stored.dice,
+              total: stored.dice[0] + stored.dice[1],
+              ...this.investigationDiceSummary(),
+            });
           } else if (stored.index !== undefined) {
             // A rendered roll row can hydrate its dice icons later. Keep exact
             // index uncertainty so that a later semantic rerender can resolve it
             // instead of permanently inventing a missing gameplay ordinal.
             noteRollCapableLogAmbiguity(this.diceHistory, stored.index);
+            this.recordInvestigation("dice", {
+              action: "indexed-roll-awaiting-dice-hydration",
+              logIndex: stored.index,
+              actor: stored.player,
+              ...this.investigationDiceSummary(),
+            });
           } else {
             noteMissingPublicRoll(this.diceHistory);
+            this.recordInvestigation("dice", {
+              action: "unindexed-roll-missing",
+              actor: stored.player,
+              ...this.investigationDiceSummary(),
+            });
           }
         } catch (error) {
           const isIndexedDiceConflict =
@@ -1071,6 +1249,14 @@ export class GameSession {
             error.message ===
               `Conflicting public dice evidence for log index ${stored.index}`;
           if (!isIndexedDiceConflict) throw error;
+          this.recordInvestigation("dice", {
+            action: "indexed-roll-conflict",
+            logIndex: stored.index,
+            actor: stored.player,
+            dice: stored.dice,
+            reason: error instanceof Error ? error.message : String(error),
+            ...this.investigationDiceSummary(),
+          });
           // The dice history now carries a sticky exact-index ambiguity. Do not
           // admit the contradictory rerender into generic tracker history, but
           // do persist/publish the stochastic authority downgrade.
@@ -1108,7 +1294,23 @@ export class GameSession {
       this.state = replayEvents(this.events);
     }
 
+    const boardSourceCount = this.diceHistory.rolls.filter((roll) =>
+      /^board-roll:\d+:/u.test(roll.eventId)).length;
+    const indexedSourceCount = this.diceHistory.rolls.filter((roll) =>
+      roll.logIndex !== undefined).length;
+    const reconciliationBefore = boardSourceCount && indexedSourceCount
+      ? this.investigationDiceSummary()
+      : undefined;
     reconcilePublicDiceSources(this.diceHistory);
+    if (reconciliationBefore) {
+      this.recordInvestigation("dice", {
+        action: "source-reconciliation",
+        boardSourceCount,
+        indexedSourceCount,
+        before: reconciliationBefore,
+        after: this.investigationDiceSummary(),
+      });
+    }
     if (this.initialPlacement && observeDiceSetupBoundary(this.diceHistory)) changed = true;
     if (changed) {
       if (this.storageSuppressed) {

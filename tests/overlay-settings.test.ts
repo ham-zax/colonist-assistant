@@ -149,6 +149,28 @@ describe("overlay settings interaction", () => {
     overlay.destroy();
   });
 
+  it("exposes investigation logging as an opt-in diagnostic with a separate export", () => {
+    const overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS },
+      { reset: vi.fn() },
+    );
+    const shadow = document
+      .querySelector<HTMLDivElement>("#colonist-assistant-root")!
+      .shadowRoot!;
+    shadow.querySelector<HTMLButtonElement>("button[data-view='settings']")!.click();
+
+    const toggle = shadow.querySelector<HTMLInputElement>(
+      "input[data-setting='investigationLog']",
+    );
+    expect(toggle).not.toBeNull();
+    expect(toggle?.checked).toBe(false);
+    expect(toggle?.closest("label")?.textContent).toMatch(/investigation log/i);
+    expect(
+      shadow.querySelector<HTMLElement>("[data-action='export-investigation']"),
+    ).not.toBeNull();
+    overlay.destroy();
+  });
+
   it("offers persistent 100%, 115%, and 130% interface sizes", () => {
     const overlay = new AssistantOverlay(
       { ...DEFAULT_SETTINGS },

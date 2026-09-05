@@ -17,6 +17,33 @@ afterEach(() => {
 });
 
 describe("assistant settings", () => {
+  it("keeps investigation logging disabled for existing settings that predate the toggle", async () => {
+    vi.stubGlobal("chrome", {
+      storage: {
+        sync: {
+          get: vi.fn().mockResolvedValue({
+            [SETTINGS_KEY]: {
+              enabled: true,
+              startCollapsed: false,
+              engine: "deep-search",
+              highlightNextAction: true,
+              disablePlayerTrades: false,
+              recordGame: false,
+              autonomousPrivateGames: false,
+              autopilotDelaySeconds: 0,
+              interfaceScale: 1.15,
+            },
+          }),
+          set: vi.fn().mockResolvedValue(undefined),
+        },
+      },
+    });
+
+    const settings = await readSettings();
+
+    expect(settings.investigationLog).toBe(false);
+  });
+
   it("keeps player trading enabled for existing settings that predate the checkbox", async () => {
     const set = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("chrome", {

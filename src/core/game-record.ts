@@ -308,7 +308,7 @@ export class GameRecordRecorder {
   private enqueueStorage(operation: () => Promise<void>): Promise<void> {
     const next = this.storageOperations.then(operation, operation);
     this.storageOperations = next.catch(() => undefined);
-    return next;
+    return this.storageOperations;
   }
 }
 

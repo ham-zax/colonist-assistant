@@ -778,12 +778,17 @@ export const buildLiveDecisionStochasticInput = (
   if (!canonicalPlayerOrder?.length) {
     throw new Error("Balanced Dice requires canonical engine player ordering");
   }
-  if (!state) {
+  let authoritativeState = state;
+  if (!authoritativeState && expectedRollCount === 0) {
+    authoritativeState = createDiceHistoryState();
+    observeDiceSetupBoundary(authoritativeState);
+  }
+  if (!authoritativeState) {
     throw new Error("Balanced Dice requires usable public reference-dice history");
   }
   if (expectedRollCount !== undefined) {
     const reconciled = reconcileLiveRollCountAuthority(
-      state,
+      authoritativeState,
       canonicalPlayerOrder,
       expectedRollCount,
     );
@@ -814,10 +819,10 @@ export const buildLiveDecisionStochasticInput = (
     }
     return stochastic;
   }
-  if (!referenceHistoryAvailable(state)) {
+  if (!referenceHistoryAvailable(authoritativeState)) {
     throw new Error("Balanced Dice requires usable public reference-dice history");
   }
-  return buildReferenceStochasticInput(state, canonicalPlayerOrder);
+  return buildReferenceStochasticInput(authoritativeState, canonicalPlayerOrder);
 };
 
 export const diceHistoryDigest = (state: DiceHistoryState): string =>

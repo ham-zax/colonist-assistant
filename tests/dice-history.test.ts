@@ -338,6 +338,19 @@ describe("public dice history", () => {
       provenance: "complete-from-first-gameplay-roll",
     });
     expect(
+      buildLiveDecisionStochasticInput(
+        "balanced",
+        undefined,
+        ["P0", "P1", "P2", "P3"],
+        0,
+      ),
+    ).toMatchObject({
+      model: "mref-colonist-linked-2024-v1",
+      rolls: [],
+      provenance: "complete-from-first-gameplay-roll",
+      missingPrefixRolls: 0,
+    });
+    expect(
       buildLiveDecisionStochasticInput("random", undefined, undefined),
     ).toEqual({ model: "m0-fair-iid-2d6-v1" });
     expect(

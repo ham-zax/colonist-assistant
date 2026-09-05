@@ -29,8 +29,6 @@ import {
 } from "../core/forced-action";
 import {
   buildLiveDecisionStochasticInput,
-  diceHistoryDigest,
-  MREF_COLONIST_LINKED_2024_V1,
   reconciledLivePublicRollAt,
   type PublicStochasticInput,
 } from "../core/dice-history";
@@ -135,6 +133,7 @@ import {
 } from "./action-guide";
 import { destroyWinOdds, renderWinOdds } from "./win-odds";
 import { DecisionWorkerClient } from "./decision-worker";
+import { investigationRecorder } from "./investigation-recorder";
 import { InteractionRenderGate } from "./render-gate";
 
 type ViewName = "advice" | "settings";
@@ -385,6 +384,7 @@ export class AssistantOverlay {
     robberObserved: boolean;
   };
   private actionGuideSignature = "";
+  private investigationBoardSignature = "";
 
   constructor(
     private settings: AssistantSettings,
@@ -443,6 +443,32 @@ export class AssistantOverlay {
   updateBoard(board?: BoardSnapshot): void {
     const previousBoard = this.board;
     let nextBoard = board;
+    if (board?.gameKey) investigationRecorder.setGame(board.gameKey);
+    if (board && investigationRecorder.isEnabled()) {
+      const signature = JSON.stringify([
+        board.gameKey,
+        board.turn,
+        board.gameplayRollCount,
+        board.currentPlayer,
+        board.hasRolled,
+        board.lastRoll,
+        board.initialPlacement,
+      ]);
+      if (signature !== this.investigationBoardSignature) {
+        this.investigationBoardSignature = signature;
+        investigationRecorder.record("board", {
+          gameKey: board.gameKey,
+          turn: board.turn,
+          gameplayRollCount: board.gameplayRollCount,
+          currentPlayer: board.currentPlayer,
+          hasRolled: board.hasRolled,
+          lastRoll: board.lastRoll,
+          initialPlacement: board.initialPlacement,
+          botOnlyGame: board.botOnlyGame,
+          diceMode: board.diceMode,
+        });
+      }
+    }
     this.updateLocalSevenProtocol(previousBoard, nextBoard);
     if (nextBoard) {
       const traceScope = nextBoard.gameKey ?? null;
@@ -885,6 +911,8 @@ export class AssistantOverlay {
 
   setSettings(settings: AssistantSettings): void {
     const wasRecording = this.settings.recordGame;
+    const investigationChanged =
+      settings.investigationLog !== this.settings.investigationLog;
     const engineChanged = settings.engine !== this.settings.engine;
     const interfaceScaleChanged =
       settings.interfaceScale !== this.settings.interfaceScale;
@@ -902,6 +930,7 @@ export class AssistantOverlay {
       this.winPredictions.reset();
     }
     this.settings = settings;
+    if (investigationChanged) investigationRecorder.setEnabled(settings.investigationLog);
     this.applyInterfaceScale();
     if (engineChanged) this.warmDecisionEngine();
     this.decisionTraces.setLegacyStorageEnabled(!settings.recordGame);
@@ -1038,6 +1067,10 @@ export class AssistantOverlay {
         void this.exportGameRecord();
         return;
       }
+      if (action === "export-investigation") {
+        investigationRecorder.download();
+        return;
+      }
       if (action === "retry-engine") {
         this.retryDecisionEngine();
         return;
@@ -1056,6 +1089,7 @@ export class AssistantOverlay {
           | "highlightNextAction"
           | "disablePlayerTrades"
           | "recordGame"
+          | "investigationLog"
           | "autonomousPrivateGames";
         this.applySettings({
           ...this.settings,
@@ -2571,6 +2605,55 @@ export class AssistantOverlay {
     };
   }
 
+  private unresolvedDiceEvidence(): unknown {
+    const history = this.session?.diceHistory;
+    if (!history) return null;
+    return {
+      rolls: history.rolls.map((roll) => [
+        roll.eventId,
+        roll.logIndex ?? null,
+        roll.actor,
+        roll.total,
+      ]),
+      ambiguousLogIndices: history.ambiguousLogIndices,
+      conflictingLogIndices: history.conflictingLogIndices ?? [],
+      hasUnlocatedRollAmbiguity: history.hasUnlocatedRollAmbiguity,
+      missingPrefixRolls: history.missingPrefixRolls ?? null,
+      gaps: history.gaps,
+    };
+  }
+
+  private decisionStochasticSignature(board: BoardSnapshot): unknown {
+    const history = this.session?.diceHistory;
+    const expected = board.gameplayRollCount;
+    const order = board.playerOrder;
+    if (!history || expected === undefined || !Number.isInteger(expected) || !order?.length) {
+      return null;
+    }
+    try {
+      const stochastic = buildLiveDecisionStochasticInput(
+        "balanced",
+        history,
+        order,
+        expected,
+      );
+      return {
+        model: stochastic.model,
+        playerOrder: order,
+        rolls: stochastic.rolls ?? [],
+        provenance: stochastic.provenance,
+        missingPrefixRolls: stochastic.missingPrefixRolls ?? null,
+        gaps: stochastic.gaps ?? [],
+      };
+    } catch {
+      return {
+        playerOrder: order,
+        expectedRollCount: expected,
+        evidence: this.unresolvedDiceEvidence(),
+      };
+    }
+  }
+
   private decisionSignature(
     state: TrackerState,
     board: BoardSnapshot,
@@ -2582,11 +2665,7 @@ export class AssistantOverlay {
       playerTradesEnabled: !this.settings.disablePlayerTrades,
       game: board.gameKey,
       ...(board.diceMode === "balanced" ? {
-        stochastic: {
-          model: MREF_COLONIST_LINKED_2024_V1,
-          history: this.session?.diceHistory ? diceHistoryDigest(this.session.diceHistory) : null,
-          playerOrder: board.playerOrder,
-        },
+        stochastic: this.decisionStochasticSignature(board),
       } : {}),
       trackerTurn: state.currentTurn.sequence,
       eventCount: state.eventCount,
@@ -2666,7 +2745,7 @@ export class AssistantOverlay {
       board.hasRolled,
       board.currentPlayer,
       board.lastRoll,
-      this.session?.diceHistory ? diceHistoryDigest(this.session.diceHistory) : null,
+      this.unresolvedDiceEvidence(),
     ]);
   }
 
@@ -2984,6 +3063,23 @@ export class AssistantOverlay {
       return;
     }
     try {
+      const history = this.session?.diceHistory;
+      investigationRecorder.record("decision", {
+        phase: "stochastic-input-attempt",
+        gameKey: decisionBoard.gameKey,
+        turn: decisionBoard.turn,
+        expectedRollCount: decisionBoard.gameplayRollCount,
+        currentPlayer: decisionBoard.currentPlayer,
+        hasRolled: decisionBoard.hasRolled,
+        lastRoll: decisionBoard.lastRoll,
+        provenance: history?.provenance,
+        storedRolls: history?.rolls.length ?? 0,
+        ambiguousLogIndices: history?.ambiguousLogIndices ?? [],
+        hasUnlocatedRollAmbiguity: history?.hasUnlocatedRollAmbiguity ?? false,
+        hasUnreconciledSources: history?.hasUnreconciledSources ?? false,
+        gaps: history?.gaps ?? [],
+        missingPrefixRolls: history?.missingPrefixRolls,
+      });
       const currentRoll =
         decisionBoard.hasRolled === true &&
         decisionBoard.currentPlayer &&
@@ -3005,10 +3101,38 @@ export class AssistantOverlay {
         decisionBoard.gameplayRollCount,
         currentRoll,
       );
+      investigationRecorder.record("decision", {
+        phase: "stochastic-input-accepted",
+        gameKey: decisionBoard.gameKey,
+        turn: decisionBoard.turn,
+        expectedRollCount: decisionBoard.gameplayRollCount,
+        model: stochastic.model,
+        provenance: stochastic.provenance,
+        rollCount: stochastic.rolls?.length ?? 0,
+        missingPrefixRolls: stochastic.missingPrefixRolls,
+        gaps: stochastic.gaps ?? [],
+      });
     } catch (error) {
       this.decisionWorker.reset();
       this.decisionEvidenceWait = this.stochasticEvidenceSignature(board);
       const reason = error instanceof Error ? error.message : "Balanced Dice stochastic evidence is unavailable";
+      const history = this.session?.diceHistory;
+      investigationRecorder.record("decision", {
+        phase: "stochastic-input-rejected",
+        gameKey: decisionBoard.gameKey,
+        turn: decisionBoard.turn,
+        expectedRollCount: decisionBoard.gameplayRollCount,
+        reason,
+        provenance: history?.provenance,
+        storedRolls: history?.rolls.length ?? 0,
+        ambiguousLogIndices: history?.ambiguousLogIndices ?? [],
+        conflictingLogIndices: history?.conflictingLogIndices ?? [],
+        hasUnlocatedRollAmbiguity: history?.hasUnlocatedRollAmbiguity ?? false,
+        hasUnreconciledSources: history?.hasUnreconciledSources ?? false,
+        coverage: history?.coverage.ranges ?? [],
+        gaps: history?.gaps ?? [],
+        missingPrefixRolls: history?.missingPrefixRolls,
+      });
       failDecisionRequest(`${reason}. ${this.diceEvidenceDetail()}`);
       return;
     }
@@ -5192,6 +5316,11 @@ export class AssistantOverlay {
         <i aria-hidden="true"></i>
       </label>
       <label class="settings-field">
+        <span><b>Investigation log</b><small>Capture bounded board, log-parser, dice-authority, restore, and decision transitions for debugging.</small></span>
+        <input type="checkbox" data-setting="investigationLog"${this.settings.investigationLog ? " checked" : ""}>
+        <i aria-hidden="true"></i>
+      </label>
+      <label class="settings-field">
         <span><b>Autopilot</b><small>Play recommended steps automatically in any Colonist game.</small></span>
         <input type="checkbox" data-setting="autonomousPrivateGames"${this.settings.autonomousPrivateGames ? " checked" : ""}>
         <i aria-hidden="true"></i>
@@ -5211,6 +5340,7 @@ export class AssistantOverlay {
       </div>
       ${builtAt ? `<div class="settings-version"><span>BUILT AT</span><strong>${escapeHtml(builtAt)}</strong></div>` : ""}
       <button class="reset-link" data-action="export-record">Export compact LLM record (.txt)</button>
+      <button class="reset-link" data-action="export-investigation">Export investigation log (.txt)</button>
       <button class="reset-link" data-action="reset">Reset this game session</button>
     </section>`;
   }

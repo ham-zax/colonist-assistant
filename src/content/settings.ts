@@ -34,6 +34,7 @@ export interface AssistantSettings {
   highlightNextAction: boolean;
   disablePlayerTrades: boolean;
   recordGame: boolean;
+  investigationLog: boolean;
   /** Legacy key name; enables autopilot in any Colonist game. */
   autonomousPrivateGames: boolean;
   autopilotDelaySeconds: AutopilotDelaySeconds;
@@ -52,6 +53,7 @@ export const DEFAULT_SETTINGS: AssistantSettings = {
   highlightNextAction: true,
   disablePlayerTrades: false,
   recordGame: false,
+  investigationLog: false,
   autonomousPrivateGames: false,
   autopilotDelaySeconds: 0,
   interfaceScale: 1.15,

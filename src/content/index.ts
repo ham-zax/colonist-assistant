@@ -12,6 +12,7 @@ import {
   type AssistantSettings,
 } from "./settings";
 import { clearCurrentGameStorage } from "../core/local-data";
+import { investigationRecorder } from "./investigation-recorder";
 
 const boot = async (): Promise<void> => {
   if (document.getElementById("colonist-assistant-root")) return;
@@ -29,6 +30,10 @@ const boot = async (): Promise<void> => {
     currentBoard?.localSeatDiagnostics?.identity.status === "resolved"
       ? currentBoard.myPlayer
       : undefined;
+  await investigationRecorder.initialize(
+    settings.investigationLog,
+    currentGameKey,
+  );
 
   let overlay: AssistantOverlay;
   const clearCurrentSession = async (): Promise<void> => {
@@ -59,6 +64,7 @@ const boot = async (): Promise<void> => {
       currentBoard = snapshot ?? readPublicBoardSnapshot();
       if (snapshot?.gameKey) {
         currentGameKey = snapshot.gameKey;
+        investigationRecorder.setGame(snapshot.gameKey);
         session?.setGameKey(snapshot.gameKey);
       }
       const resolvedMyPlayer =
@@ -148,6 +154,7 @@ const boot = async (): Promise<void> => {
         ...settings,
         ...(changes[SETTINGS_KEY].newValue as Partial<AssistantSettings>),
       };
+      investigationRecorder.setEnabled(settings.investigationLog);
       overlay.setSettings(settings);
       void attach();
     }
@@ -162,6 +169,7 @@ const boot = async (): Promise<void> => {
       window.clearInterval(poll);
       removeBoardBridge();
       session?.stop();
+      if (investigationRecorder.isEnabled()) void investigationRecorder.flush();
       overlay.destroy();
     },
     { once: true },
