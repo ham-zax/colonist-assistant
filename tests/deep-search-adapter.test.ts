@@ -985,7 +985,7 @@ describe("deep-search state adapter", () => {
     const response = analyzeWasm(built.request);
     const elapsed = performance.now() - started;
     expect(response.algorithm).toBe("maxn");
-    expect(response.engineRevision).toBe("deep-maxn-v11");
+    expect(response.engineRevision).toBe("deep-maxn-v12");
     expect([
       "exact-mandatory",
       "tactical-proven",

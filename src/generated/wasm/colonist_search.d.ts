@@ -31,6 +31,8 @@ export interface WasmSearchStages {
   attemptedDepth: number;
   evidenceEscalationTriggered: boolean;
   evidenceEscalationCompleted: boolean;
+  evidenceEscalationStrengthened: boolean;
+  evidenceEscalationBaselineNodes: number;
   evidenceEscalationNodes: number;
   evidenceEscalationMs: number;
 }

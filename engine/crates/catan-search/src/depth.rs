@@ -211,6 +211,8 @@ pub struct BeliefSearchStageTimings {
     pub attempted_depth: u8,
     pub evidence_escalation_triggered: bool,
     pub evidence_escalation_completed: bool,
+    pub evidence_escalation_strengthened: bool,
+    pub evidence_escalation_baseline_nodes: u32,
     pub evidence_escalation_nodes: u32,
     pub evidence_escalation_ms: u32,
 }
@@ -1047,6 +1049,22 @@ fn evidence_escalation_target_depth(next_target_depth: u8) -> u8 {
     next_target_depth.saturating_sub(1).max(1)
 }
 
+fn realized_root_evidence_strengthened(
+    baseline_root_nodes: &[u32],
+    rerun_root_nodes: &[u32],
+) -> bool {
+    baseline_root_nodes.len() == rerun_root_nodes.len()
+        && !baseline_root_nodes.is_empty()
+        && baseline_root_nodes
+            .iter()
+            .zip(rerun_root_nodes)
+            .all(|(baseline, rerun)| rerun >= baseline)
+        && baseline_root_nodes
+            .iter()
+            .zip(rerun_root_nodes)
+            .any(|(baseline, rerun)| rerun > baseline)
+}
+
 fn evaluate_after_forced_chance(state: &GameState, depth: u8) -> [f32; 4] {
     if depth >= 5 || state.node_kind() != NodeKind::Chance {
         return evaluate(state);
@@ -1709,12 +1727,16 @@ fn belief_search(
     let mut evidence_escalation_triggered = false;
     let mut evidence_escalation_pending = false;
     let mut evidence_escalation_completed = false;
+    let mut evidence_escalation_strengthened = false;
+    let mut evidence_escalation_baseline_nodes = 0u32;
+    let mut evidence_escalation_baseline_root_nodes = Vec::<u32>::new();
     let mut evidence_escalation_start_nodes = 0u32;
     let mut evidence_escalation_start_ms = 0u32;
     let mut evidence_escalation_nodes = 0u32;
     let mut evidence_escalation_elapsed_ms = 0u32;
+    let mut target_depth = 1u8;
 
-    for target_depth in 1..=maximum_depth {
+    while target_depth <= maximum_depth {
         let active_deadline = if evidence_escalation_pending {
             &hard_deadline
         } else {
@@ -1752,6 +1774,8 @@ fn belief_search(
         let mut wave_complete = true;
         let total_wave_cells = positive_particle_count as usize * root_actions.len().max(1);
         let mut completed_wave_cells = 0usize;
+        let wave_start_nodes = nodes;
+        let mut wave_root_nodes = vec![0u32; root_actions.len()];
 
         'particles: for particle in particles {
             let weight = particle.weight.max(0.0) / total_weight;
@@ -1825,6 +1849,8 @@ fn belief_search(
                     searcher.node_limit,
                 );
                 apply_action_friction(&mut candidate_value, &particle.state, action, observer);
+                wave_root_nodes[action_index] =
+                    wave_root_nodes[action_index].saturating_add(searcher.nodes);
                 nodes += searcher.nodes;
                 cutoffs += searcher.cutoffs;
                 wave_depth = wave_depth.max(searcher.deepest_depth);
@@ -1856,9 +1882,7 @@ fn belief_search(
             break;
         }
         let wave_winner = aggregate_winner(&wave);
-        aggregate = wave;
-        particles_searched = wave_particles;
-        depth = wave_depth;
+        let wave_realized_nodes = nodes.saturating_sub(wave_start_nodes);
 
         if evidence_escalation_pending {
             evidence_escalation_completed = true;
@@ -1866,8 +1890,23 @@ fn belief_search(
             evidence_escalation_elapsed_ms = hard_deadline
                 .elapsed_ms()
                 .saturating_sub(evidence_escalation_start_ms);
-            break;
+            evidence_escalation_strengthened = realized_root_evidence_strengthened(
+                &evidence_escalation_baseline_root_nodes,
+                &wave_root_nodes,
+            );
+            evidence_escalation_pending = false;
+            if evidence_escalation_strengthened {
+                aggregate = wave;
+                particles_searched = wave_particles;
+                depth = wave_depth;
+                break;
+            }
+            continue;
         }
+
+        aggregate = wave;
+        particles_searched = wave_particles;
+        depth = wave_depth;
         if target_depth == 1
             && should_escalate_binary_root_evidence(
                 node_budget_mode,
@@ -1879,9 +1918,12 @@ fn belief_search(
         {
             evidence_escalation_triggered = true;
             evidence_escalation_pending = true;
+            evidence_escalation_baseline_nodes = wave_realized_nodes;
+            evidence_escalation_baseline_root_nodes = wave_root_nodes;
             evidence_escalation_start_nodes = nodes;
             evidence_escalation_start_ms = hard_deadline.elapsed_ms();
         }
+        target_depth = target_depth.saturating_add(1);
     }
     let deep_waves_ms = elapsed_stage_ms(&hard_deadline, deep_waves_started);
     let mut actions = aggregate
@@ -1960,6 +2002,8 @@ fn belief_search(
             attempted_depth,
             evidence_escalation_triggered,
             evidence_escalation_completed,
+            evidence_escalation_strengthened,
+            evidence_escalation_baseline_nodes,
             evidence_escalation_nodes,
             evidence_escalation_ms: evidence_escalation_elapsed_ms,
         }),
@@ -4125,7 +4169,9 @@ mod tests {
         BeliefNodeBudgetMode, apply_action_friction, evidence_escalation_node_budget,
         evidence_escalation_target_depth, normalize_belief_root_priors, search_belief_maxn,
         search_belief_maxn_bounded, search_maxn, search_paranoid,
-        search_weighted_belief_maxn_bounded, search_weighted_belief_maxn_bounded_timed,
+        realized_root_evidence_strengthened, search_weighted_belief_maxn_bounded,
+        search_weighted_belief_maxn_bounded_timed,
+        search_weighted_belief_maxn_iterative_timed_excluding,
         should_escalate_binary_root_evidence,
     };
     use crate::mcts::BeliefParticle;
@@ -4175,6 +4221,107 @@ mod tests {
         ));
         assert_eq!(evidence_escalation_node_budget(8_000), 24_000);
         assert_eq!(evidence_escalation_target_depth(2), 1);
+    }
+
+    #[test]
+    fn evidence_escalation_requires_realized_per_root_dominance() {
+        assert!(!realized_root_evidence_strengthened(&[60, 63], &[60, 63]));
+        assert!(realized_root_evidence_strengthened(&[60, 63], &[61, 63]));
+        assert!(!realized_root_evidence_strengthened(&[60, 63], &[59, 100]));
+        assert!(!realized_root_evidence_strengthened(&[60, 63], &[120]));
+    }
+
+    fn binary_preroll_fixture(seed: u64) -> GameState {
+        let mut state = GameState::standard(seed, 3);
+        while matches!(
+            state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        ) {
+            let action = state.legal_actions()[0].clone();
+            state.apply(&action).unwrap();
+        }
+        state.phase = Phase::PreRoll;
+        state.current_player = 0;
+        state.turn = 5;
+        state.player_trades_enabled = false;
+        for player in 0..state.players.len() {
+            for resource in 0..5 {
+                let count = state.players[player].resources[resource];
+                state.players[player].resources[resource] = 0;
+                state.bank[resource] = state.bank[resource].saturating_add(count);
+            }
+        }
+        let knight = DevCard::Knight.index();
+        state.development_deck[knight] -= 1;
+        state.players[0].development[knight] += 1;
+        state.players[0].bought_development[knight] = 0;
+        state.players[0].played_development_this_turn = false;
+        state.validate().unwrap();
+        state
+    }
+
+    fn run_binary_preroll(
+        state: &GameState,
+        maximum_depth: u8,
+        nodes_per_depth_wave: u32,
+        time_budget_ms: u32,
+        evidence_escalation_ms: u32,
+    ) -> super::BeliefDepthResult {
+        search_weighted_belief_maxn_iterative_timed_excluding(
+            &[BeliefParticle {
+                state: state.clone(),
+                weight: 1.0,
+            }],
+            maximum_depth,
+            10,
+            nodes_per_depth_wave,
+            time_budget_ms,
+            evidence_escalation_ms,
+            &[],
+        )
+        .unwrap()
+    }
+
+    fn assert_saturated_escalation_resumes_iterative_depth(seed: u64) {
+        let state = binary_preroll_fixture(seed);
+        let shallow = run_binary_preroll(&state, 1, 8_000, 2_000, 0);
+        let wider_shallow = run_binary_preroll(&state, 1, 24_000, 4_500, 0);
+        assert_eq!(shallow.nodes, wider_shallow.nodes);
+        assert_eq!(shallow.actions.len(), wider_shallow.actions.len());
+        for (left, right) in shallow.actions.iter().zip(&wider_shallow.actions) {
+            assert_eq!(left.action, right.action);
+            assert_eq!(left.value, right.value);
+            assert_eq!(left.lower_confidence_value, right.lower_confidence_value);
+            assert_eq!(left.legal_weight, right.legal_weight);
+        }
+
+        let ordinary = run_binary_preroll(&state, 2, 8_000, 10_000, 0);
+        let escalated = run_binary_preroll(&state, 2, 8_000, 10_000, 2_500);
+        assert_eq!(
+            escalated.chosen, ordinary.chosen,
+            "a saturated same-depth rerun must not replace ordinary depth-2 authority"
+        );
+        assert!(
+            escalated.depth >= 2,
+            "the same-depth retry must not consume and skip the ordinary depth-2 iteration"
+        );
+        let timings = escalated.stage_timings.as_ref().unwrap();
+        assert!(timings.attempted_depth >= 2);
+        assert!(timings.evidence_escalation_triggered);
+        assert!(timings.evidence_escalation_completed);
+        assert!(!timings.evidence_escalation_strengthened);
+        assert_eq!(timings.evidence_escalation_baseline_nodes, shallow.nodes);
+        assert_eq!(timings.evidence_escalation_nodes, shallow.nodes);
+    }
+
+    #[test]
+    fn saturated_seed_22_escalation_resumes_iterative_depth() {
+        assert_saturated_escalation_resumes_iterative_depth(22);
+    }
+
+    #[test]
+    fn saturated_seed_25_escalation_resumes_iterative_depth() {
+        assert_saturated_escalation_resumes_iterative_depth(25);
     }
 
     fn advance_setup_and_roll(state: &mut GameState, rng: &mut SplitMix64) {

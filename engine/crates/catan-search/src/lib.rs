@@ -103,7 +103,7 @@ pub use trade_safety::{
     belief_domestic_trade_assessment, belief_domestic_trade_threat, domestic_trade_threat,
 };
 
-pub const ENGINE_REVISION: &str = "deep-maxn-v11";
+pub const ENGINE_REVISION: &str = "deep-maxn-v12";
 pub use depth::{
     BeliefDepthConfig, BeliefDepthResult, BeliefSearchProvenance, BeliefSearchStageTimings,
     DecisiveContinuationDiagnostic, DepthActionValue, DepthBeliefError, DepthSearchResult,

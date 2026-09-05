@@ -68,6 +68,8 @@ export interface DecisionTraceSearchStages {
   attemptedDepth: number;
   evidenceEscalationTriggered: boolean;
   evidenceEscalationCompleted: boolean;
+  evidenceEscalationStrengthened: boolean;
+  evidenceEscalationBaselineNodes: number;
   evidenceEscalationNodes: number;
   evidenceEscalationMs: number;
 }

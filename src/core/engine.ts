@@ -80,6 +80,8 @@ export interface DeepSearchStageTimings {
   attemptedDepth: number;
   evidenceEscalationTriggered: boolean;
   evidenceEscalationCompleted: boolean;
+  evidenceEscalationStrengthened: boolean;
+  evidenceEscalationBaselineNodes: number;
   evidenceEscalationNodes: number;
   evidenceEscalationMs: number;
 }
@@ -663,8 +665,13 @@ export const explainDeepSearchDecision = (
       );
     }
     if (stages.evidenceEscalationTriggered) {
+      const escalationOutcome = !stages.evidenceEscalationCompleted
+        ? "stopped before completion"
+        : stages.evidenceEscalationStrengthened
+          ? "completed with stronger same-depth evidence"
+          : "completed without stronger same-depth evidence; ordinary deepening resumed";
       evidence.push(
-        `Evidence escalation ${stages.evidenceEscalationCompleted ? "completed" : "stopped before completion"}: ${stages.evidenceEscalationNodes.toLocaleString()} additional nodes in ${stages.evidenceEscalationMs} ms after the binary floor/wave winner disagreement`,
+        `Evidence escalation ${escalationOutcome}: ${stages.evidenceEscalationBaselineNodes.toLocaleString()} baseline nodes, ${stages.evidenceEscalationNodes.toLocaleString()} rerun nodes in ${stages.evidenceEscalationMs} ms after the binary floor/wave winner disagreement`,
       );
     }
     evidence.push(

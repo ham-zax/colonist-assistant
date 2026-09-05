@@ -639,6 +639,8 @@ struct SearchStagesOutput {
     attempted_depth: u8,
     evidence_escalation_triggered: bool,
     evidence_escalation_completed: bool,
+    evidence_escalation_strengthened: bool,
+    evidence_escalation_baseline_nodes: u32,
     evidence_escalation_nodes: u32,
     evidence_escalation_ms: u32,
 }
@@ -656,6 +658,8 @@ impl From<BeliefSearchStageTimings> for SearchStagesOutput {
             attempted_depth: value.attempted_depth,
             evidence_escalation_triggered: value.evidence_escalation_triggered,
             evidence_escalation_completed: value.evidence_escalation_completed,
+            evidence_escalation_strengthened: value.evidence_escalation_strengthened,
+            evidence_escalation_baseline_nodes: value.evidence_escalation_baseline_nodes,
             evidence_escalation_nodes: value.evidence_escalation_nodes,
             evidence_escalation_ms: value.evidence_escalation_ms,
         }
