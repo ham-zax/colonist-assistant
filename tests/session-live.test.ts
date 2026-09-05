@@ -1099,6 +1099,63 @@ describe("live log session scanning", () => {
     session.stop();
   });
 
+  it("waits for the previous root's final save before restoring a replacement session", async () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const gameKey = "atomic-session-handoff";
+    const session = new GameSession(root, vi.fn(), gameKey);
+
+    await session.start();
+    await vi.waitFor(() =>
+      expect(localStorage.get(`colonistAssistantSession:${session.id}`)).toBeDefined(),
+    );
+    session.setInitialPlacement(true, gameKey);
+    session.setInitialPlacement(false, gameKey);
+    expect(
+      session.observeBoardDiceSnapshot({
+        gameKey,
+        botOnlyGame: true,
+        initialPlacement: false,
+        hasRolled: true,
+        lastRoll: 8,
+        currentPlayer: "Alice",
+        turn: 0,
+        gameplayRollCount: 1,
+      }),
+    ).toBe(true);
+
+    let releaseSave: (() => void) | undefined;
+    let markSaveStarted: (() => void) | undefined;
+    const saveStarted = new Promise<void>((resolve) => {
+      markSaveStarted = resolve;
+    });
+    beforeNextSet = () =>
+      new Promise<void>((resolve) => {
+        releaseSave = resolve;
+        markSaveStarted?.();
+      });
+
+    session.stop();
+    await saveStarted;
+
+    const restored = new GameSession(root, vi.fn(), gameKey);
+    let restoreFinished = false;
+    const restoring = restored.start().then(() => {
+      restoreFinished = true;
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(restoreFinished).toBe(false);
+
+    releaseSave?.();
+    await restoring;
+
+    expect(restored.diceHistory.rolls).toEqual([
+      expect.objectContaining({ actor: "Alice", total: 8 }),
+    ]);
+    expect(restored.diceHistory.provenance).toBe("complete-from-first-gameplay-roll");
+    restored.stop();
+  });
+
   it("does not let an in-flight save restore session evidence after reset", async () => {
     const root = document.createElement("div");
     const entry = message(0, "Alice rolled");

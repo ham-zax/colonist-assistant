@@ -1164,6 +1164,11 @@ export class GameSession {
     const key = sessionStorageKey(this.id);
     let result: Record<string, unknown>;
     try {
+      // Session roots can be replaced while a final save from the previous
+      // root is still queued. Preserve read-after-write ordering so a fresh
+      // session never restores an older generation and overwrites newer
+      // evidence with that stale snapshot.
+      await storageOperations;
       result = await chrome.storage.local.get(key);
     } catch (error) {
       if (isExtensionContextInvalidatedError(error)) return;

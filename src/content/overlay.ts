@@ -2359,7 +2359,7 @@ export class AssistantOverlay {
       return {
         // Validation and native failures also reach this path; never label
         // missing evidence or a GPU failure as a WebAssembly crash.
-        label: this.decisionEvidenceWait !== undefined ? "Dice history" : "Engine paused",
+        label: this.decisionEvidenceWait !== undefined ? "Dice history" : "Strategist error",
         detail: `${this.decisionRuntimeError} No other stochastic model or algorithm was substituted.`,
         state: "error",
       };

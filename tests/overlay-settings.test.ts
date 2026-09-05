@@ -210,7 +210,7 @@ describe("overlay settings interaction", () => {
     internals.render();
     const shadow = document.querySelector("#colonist-assistant-root")!.shadowRoot!;
     expect(shadow.textContent).toContain("Balanced Dice requires usable public reference-dice history");
-    expect(shadow.querySelector(".meta-engine-chip")?.textContent).toContain("ENGINE PAUSED");
+    expect(shadow.querySelector(".meta-engine-chip")?.textContent).toContain("STRATEGIST ERROR");
     expect(shadow.textContent).not.toContain("WASM ERROR");
     expect(shadow.querySelector(".cards-pane")).not.toBeNull();
     expect(shadow.querySelector("[data-action='retry-engine']")).not.toBeNull();
@@ -648,7 +648,7 @@ describe("overlay settings interaction", () => {
 
     const status = internals.renderEngineMetaChip();
     expect(status).toContain('role="status"');
-    expect(status).toContain("ENGINE PAUSED");
+    expect(status).toContain("STRATEGIST ERROR");
     expect(status).not.toContain("<button");
     overlay.destroy();
   });

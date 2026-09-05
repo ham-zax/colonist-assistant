@@ -6,6 +6,10 @@ import {
   type BoardAction,
 } from "../core/placement";
 import { observeColonistDiceMode } from "./dice-mode";
+import {
+  bumpManagerGeneration,
+  readManagerGeneration,
+} from "./game-generation";
 
 (() => {
   const SOURCE = "colonist-assistant-public-board";
@@ -72,7 +76,7 @@ import { observeColonistDiceMode } from "./dice-mode";
   let manager: Record<string, any> | undefined;
   let managerIdentity: Record<string, any> | undefined;
   let managerModuleId: string | undefined;
-  let managerGeneration = 1;
+  let managerGeneration = readManagerGeneration(sessionStorage);
   let managerResolutionSource:
     | "cached-module"
     | "module-scan"
@@ -164,7 +168,7 @@ import { observeColonistDiceMode } from "./dice-mode";
     candidate: Record<string, any>,
   ): Record<string, any> => {
     if (managerIdentity && managerIdentity !== candidate) {
-      managerGeneration += 1;
+      managerGeneration = bumpManagerGeneration(sessionStorage, managerGeneration);
       validatorExports = undefined;
     }
     managerIdentity = candidate;
@@ -1113,7 +1117,7 @@ import { observeColonistDiceMode } from "./dice-mode";
       completedTurns <= 1 &&
       placedPieces < previousLiveProgress.placedPieces
     ) {
-      managerGeneration += 1;
+      managerGeneration = bumpManagerGeneration(sessionStorage, managerGeneration);
       previousLiveProgress = undefined;
     }
     if (!isReplay) previousLiveProgress = { completedTurns, placedPieces };

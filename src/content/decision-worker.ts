@@ -26,23 +26,10 @@ import {
   isExtensionContextInvalidatedError,
 } from "./extension-context";
 
-const SLOW_DECISION_MS = 3_000;
-const OPENING_SLOW_DECISION_MS = 3_000;
-const OPENING_PONDER_SLOW_DECISION_MS = 5_000;
+const SLOW_DECISION_MS = 10_000;
 const HARD_DECISION_MS = 12_000;
 const HARD_DECISION_ERROR =
   "Strategist did not return before the 12-second safety limit";
-
-const slowDecisionThresholdMs = (
-  request: Pick<DecisionRequest, "board" | "engine">,
-): number => {
-  if (request.engine !== "deep-search" || !request.board.initialPlacement) {
-    return SLOW_DECISION_MS;
-  }
-  return request.board.isMyTurn
-    ? OPENING_SLOW_DECISION_MS
-    : OPENING_PONDER_SLOW_DECISION_MS;
-};
 
 export interface DecisionServiceStatus {
   runtime: "background-gpu" | "background-wasm" | "engine-error";
@@ -204,7 +191,7 @@ export class DecisionWorkerClient {
     this.active = request;
     if (request.waitedForActive) request.startCallback?.();
     const startedAt = performance.now();
-    const slowDecisionMs = slowDecisionThresholdMs(request);
+    const slowDecisionMs = SLOW_DECISION_MS;
     const message: DecisionMessage = {
       type: DECISION_MESSAGE_TYPE,
       id: request.id,
