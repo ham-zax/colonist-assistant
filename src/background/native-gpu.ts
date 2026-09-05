@@ -78,9 +78,9 @@ export class NativeGpuClient {
     if (this.statusValue && this.port) return this.statusValue;
     if (this.unavailable && !this.everReady) return undefined;
     if (this.fatalError) {
-      // A companion that was previously healthy must stay the selected
-      // Strategist backend. Retry the native connection, but never reinterpret
-      // a post-ready failure as permission to fall back to WASM.
+      // Retry a previously healthy companion. The background decision router
+      // decides whether a transport-only reconnect failure can safely preserve
+      // the same stochastic model and algorithm on CPU/WASM.
       this.fatalError = undefined;
       this.connectPromise = undefined;
     }

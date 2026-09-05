@@ -5070,7 +5070,7 @@ export class AssistantOverlay {
     }
     const warning =
       this.session?.partialHistory || state.warnings.length
-        ? `<div class="notice">${warningIcon()}<span>History is incomplete. Ranges stay conservative.</span></div>`
+        ? `<div class="notice">${warningIcon()}<span>Card-event history is incomplete. Opponent resource ranges stay conservative; Balanced-Dice history is tracked separately.</span></div>`
         : "";
     const user = this.userPlayer(state);
     const headings = RESOURCE_ORDER.map(

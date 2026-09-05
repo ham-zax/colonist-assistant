@@ -100,6 +100,30 @@ const errorDetail = (error: unknown, fallback: string): string => {
   return fallback;
 };
 
+const isNativeGpuTransportFailure = (error: unknown): boolean =>
+  /(?:native host has exited|native messaging host|gpu companion (?:is )?disconnected|gpu companion message could not be sent|disconnected port)/iu.test(
+    errorDetail(error, ""),
+  );
+
+const analyzeAfterNativeGpuTransportFailure = async (
+  message: DecisionMessage,
+  error: unknown,
+) => {
+  const detail = errorDetail(error, "Native GPU transport failed");
+  nativeGpu.release();
+  const analysis = await analyzeDecisionRequest(message);
+  const requestedStochasticModel =
+    message.stochastic?.model ?? M0_FAIR_IID_2D6_V1;
+  return {
+    ...analysis,
+    runtime: "background-wasm" as const,
+    runtimeReason:
+      requestedStochasticModel === MREF_COLONIST_LINKED_2024_V1
+        ? `Native GPU transport failed (${detail}); Mref preserved on CPU/WASM Deep MaxN for this decision`
+        : `Native GPU transport failed (${detail}); ${requestedStochasticModel} preserved on CPU/WASM Deep MaxN for this decision`,
+  };
+};
+
 const isDecisionMessage = (value: unknown): value is DecisionMessage => {
   if (!value || typeof value !== "object") return false;
   const message = value as Partial<DecisionMessage>;
@@ -172,19 +196,30 @@ chrome.runtime.onMessage.addListener(
     void (async () => {
       const nativeGpuEligible = shouldUseNativeGpu(message);
       if (nativeGpuEligible) {
-        const gpu = await nativeGpu.status();
+        let gpu;
+        try {
+          gpu = await nativeGpu.status();
+        } catch (error) {
+          if (!isNativeGpuTransportFailure(error)) throw error;
+          return analyzeAfterNativeGpuTransportFailure(message, error);
+        }
         if (gpu && nativeGpuSupportsStochasticModel(message.stochastic?.model, gpu.stochasticModels)) {
-          const analysis = await analyzeDecisionRequest(
-            message,
-            (request) =>
-              nativeGpu.analyze(withNativeGpuStrengthProfile(request), message.id),
-          );
-          return {
-            ...analysis,
-            runtime: "background-gpu" as const,
-            runtimeReason: `CUDA resident search on ${gpu.device.name}`,
-            ...(gpu.build ? { nativeGpuBuild: gpu.build } : {}),
-          };
+          try {
+            const analysis = await analyzeDecisionRequest(
+              message,
+              (request) =>
+                nativeGpu.analyze(withNativeGpuStrengthProfile(request), message.id),
+            );
+            return {
+              ...analysis,
+              runtime: "background-gpu" as const,
+              runtimeReason: `CUDA resident search on ${gpu.device.name}`,
+              ...(gpu.build ? { nativeGpuBuild: gpu.build } : {}),
+            };
+          } catch (error) {
+            if (!isNativeGpuTransportFailure(error)) throw error;
+            return analyzeAfterNativeGpuTransportFailure(message, error);
+          }
         }
       }
       if (message.engine === "weighted") nativeGpu.release();
