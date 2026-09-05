@@ -67,6 +67,8 @@ const isNearChatInput = (element: Element): boolean => {
 
 const GAME_TOKEN_PATTERN =
   /:(?:lumber|brick|wool|grain|ore|resource-back|dev-back|road|settlement|city|die-[1-6]|knight|monopoly|road-building|year-of-plenty):/;
+const GAME_LOG_STARTUP_PATTERN =
+  /^(?:happy settling!|bot is (?:selecting cards to discard|placing (?:a |an )?(?:road|settlement)) for\b)|\blist of commands:\s*\/help\b/iu;
 
 const gameLogScore = (container: Element): number => {
   let score = 0;
@@ -74,6 +76,7 @@ const gameLogScore = (container: Element): number => {
     const snapshot = snapshotMessage(entry, detectLanguage());
     if (!snapshot) continue;
     if (GAME_TOKEN_PATTERN.test(snapshot.serialText)) score += 3;
+    if (GAME_LOG_STARTUP_PATTERN.test(snapshot.visibleText)) score += 2;
     if (
       /\b(?:placed|built|rolled|received|got|bought|stole|discarded|gave bank|took from bank)\b/iu.test(
         snapshot.visibleText,
