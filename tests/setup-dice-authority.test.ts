@@ -92,6 +92,23 @@ describe("Balanced setup dice authority", () => {
     expect(session.partialHistory).toBe(false);
   });
 
+  it("does not mark startup history partial before the board bridge establishes setup", async () => {
+    const root = document.createElement("div");
+    root.append(message(2, "Alice placed a Settlement"));
+    document.body.append(root);
+    const session = new GameSession(root, vi.fn(), gameKey);
+    sessions.push(session);
+
+    await session.start();
+    expect(session.partialHistory).toBe(false);
+
+    session.setInitialPlacement(true, gameKey);
+    root.prepend(message(0, "Happy settling!"), message(1, "Alice joined the game"));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(session.partialHistory).toBe(false);
+  });
+
   it("marks setup history partial if the deferred log prefix never backfills before gameplay", async () => {
     const root = document.createElement("div");
     root.append(message(2, "Alice placed a Settlement"));

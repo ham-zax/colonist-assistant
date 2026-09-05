@@ -510,7 +510,10 @@ export class GameSession {
   private maxObservedLogIndex = -1;
   private disposed = false;
   private myPlayer?: string;
-  private initialPlacement = false;
+  // Undefined until the public board bridge has established whether this game
+  // is still in setup. Treating "not observed yet" as gameplay made a startup
+  // log that began above index zero permanently partial before setup hydrated.
+  private initialPlacement?: boolean;
   /**
    * A late-mounted virtualized log can begin above index zero during setup and
    * backfill its prefix a few frames later. Defer the generic partial-history
@@ -665,7 +668,7 @@ export class GameSession {
       // Local identity belongs to the game generation just ended. Require the
       // bridge to resolve it again before canonicalizing any new "You" logs.
       this.myPlayer = undefined;
-      this.initialPlacement = false;
+      this.initialPlacement = undefined;
       // A new game can reuse the same mounted log/session object. Start its
       // record clock before reset() synchronously publishes the empty state.
       this.startedAt = Date.now();
@@ -678,9 +681,10 @@ export class GameSession {
   }
 
   setInitialPlacement(active: boolean, gameKey?: string): void {
+    if (!gameKey || gameKey !== this.gameKey) return;
     const wasInitialPlacement = this.initialPlacement;
-    this.initialPlacement = Boolean(active && gameKey && gameKey === this.gameKey);
-    if (wasInitialPlacement && !this.initialPlacement && this.setupLogPrefixPending) {
+    this.initialPlacement = active;
+    if (wasInitialPlacement !== false && !active && this.setupLogPrefixPending) {
       // The setup log never backfilled index zero before gameplay began. Card
       // ranges may genuinely be missing setup evidence, so become conservative
       // only at this semantic boundary rather than during transient hydration.
@@ -691,7 +695,7 @@ export class GameSession {
         this.onUpdate(this);
       }
     }
-    if (this.observer && this.initialPlacement && observeDiceSetupBoundary(this.diceHistory)) {
+    if (this.observer && active && observeDiceSetupBoundary(this.diceHistory)) {
       this.queueSave();
       this.onUpdate(this);
     }
@@ -874,7 +878,7 @@ export class GameSession {
       candidates[0]!.index > 0 &&
       candidates.some((candidate) => candidate.element.hasAttribute("data-index"))
     ) {
-      if (this.initialPlacement && !this.partialHistory) {
+      if (this.initialPlacement !== false && !this.partialHistory) {
         this.setupLogPrefixPending = true;
       } else {
         this.partialHistory = true;
