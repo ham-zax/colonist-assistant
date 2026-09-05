@@ -530,9 +530,11 @@ const reconcileLiveRollCountAuthority = (
   expectedRollCount: number,
 ): DiceHistoryState | undefined => {
   if (!Number.isInteger(expectedRollCount) || expectedRollCount < 0) return undefined;
+  const occupiedAmbiguousLogIndex = state.ambiguousLogIndices.some((index) =>
+    state.rolls.some((roll) => roll.logIndex === index),
+  );
   if (
-    state.ambiguousLogIndices.length > 0 ||
-    state.hasUnlocatedRollAmbiguity ||
+    occupiedAmbiguousLogIndex ||
     (state.conflictingLogIndices?.length ?? 0) > 0
   ) {
     return undefined;
@@ -644,9 +646,11 @@ const reconcileLiveRollCountAuthority = (
   const bounds = indexedOrdinalBounds();
 
   // A complete board sequence is independently sufficient public authority in
-  // bot games. The virtualized DOM log may lag or omit harmless presentation
-  // rows; require its observed roll sequence to be a compatible subsequence,
-  // but do not let generic log sparsity invalidate complete board roll evidence.
+  // bot games. The virtualized DOM log may lag, omit harmless presentation
+  // rows, or expose parser-only roll-capable ambiguity. Require every concrete
+  // indexed roll to remain a compatible subsequence, but do not let unresolved
+  // non-roll DOM presentation rows invalidate complete board roll evidence.
+  // Occupied ambiguous indexes and explicit conflicts were rejected above.
   if (
     byOrdinal.size === expectedRollCount &&
     Array.from({ length: expectedRollCount }, (_, ordinal) => byOrdinal.has(ordinal)).every(Boolean)
@@ -687,6 +691,12 @@ const reconcileLiveRollCountAuthority = (
     return complete;
   }
 
+  if (
+    state.ambiguousLogIndices.length > 0 ||
+    state.hasUnlocatedRollAmbiguity
+  ) {
+    return undefined;
+  }
   if (!bounds || bounds.earliest.some((ordinal, index) => ordinal !== bounds.latest[index])) {
     return undefined;
   }

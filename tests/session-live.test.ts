@@ -901,6 +901,59 @@ describe("live log session scanning", () => {
     session.stop();
   });
 
+  it("keeps production bot/system status rows out of dice ambiguity", async () => {
+    const notices = [
+      "Bot is selecting where to place Robber for hamzax",
+      "hamzax has disconnected. A bot will take over next turn unless hamzax reconnects.",
+      "You are the last player remaining. You will be awarded the win in 100 seconds if your opponent does not reconnect.",
+      "hamzax has reconnected",
+    ];
+    const root = document.createElement("div");
+    notices.forEach((text, index) => root.append(message(43 + index, text)));
+    document.body.append(root);
+    const session = new GameSession(root, vi.fn(), "production-status-game");
+
+    await session.start();
+
+    expect(session.events).toEqual([]);
+    expect(session.unmatchedIntegrityCount).toBe(0);
+    expect(session.diceHistory.ambiguousLogIndices).toEqual([]);
+    expect(session.unmatchedSamples).toEqual(
+      expect.arrayContaining(
+        notices.map((sample) =>
+          expect.objectContaining({ affectsIntegrity: false, sample }),
+        ),
+      ),
+    );
+    session.stop();
+  });
+
+  it("does not turn an unknown non-roll status into dice ambiguity", async () => {
+    const root = document.createElement("div");
+    root.append(message(43, "Colonist emitted a new harmless-looking status"));
+    document.body.append(root);
+    const session = new GameSession(root, vi.fn(), "unknown-status-game");
+
+    await session.start();
+
+    expect(session.unmatchedIntegrityCount).toBe(1);
+    expect(session.diceHistory.ambiguousLogIndices).toEqual([]);
+    session.stop();
+  });
+
+  it("keeps a roll-shaped unknown fail-closed for Balanced Dice", async () => {
+    const root = document.createElement("div");
+    root.append(message(43, "Dice result for Alice :die-3: :die-5:"));
+    document.body.append(root);
+    const session = new GameSession(root, vi.fn(), "unknown-roll-game");
+
+    await session.start();
+
+    expect(session.unmatchedIntegrityCount).toBe(1);
+    expect(session.diceHistory.ambiguousLogIndices).toEqual([43]);
+    session.stop();
+  });
+
   it("recognizes Friendly Robber status messages without failing integrity", async () => {
     const notices = [
       "Friendly Robber is active, tiles available to block are limited",

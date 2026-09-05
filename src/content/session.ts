@@ -105,10 +105,15 @@ const classifyUnmatchedLog = (
     return { reason: "known-bank-shortage-notice", affectsIntegrity: false };
   }
   const normalized = snapshot.serialText.replace(/\s+/gu, " ").trim();
-  if (/^happy settling!|\blist of commands:\s*\/help\b/iu.test(normalized)) {
+  if (
+    /^happy settling!|\blist of commands:\s*\/help\b/iu.test(normalized) ||
+    /\bhas disconnected\. a bot will take over next turn unless .+ reconnects\.?$/iu.test(normalized) ||
+    /\bhas reconnected\.?$/iu.test(normalized) ||
+    /^you are the last player remaining\. you will be awarded the win in \d+ seconds if your opponent does not reconnect\.?$/iu.test(normalized)
+  ) {
     return { reason: "known-ignored-system-message", affectsIntegrity: false };
   }
-  if (/^bot is (?:selecting cards to discard|selecting who to rob|placing (?:a |an )?(?:road|settlement)) for\b/iu.test(normalized) && !/:die-[1-6]:/u.test(normalized)) {
+  if (/^bot is (?:selecting cards to discard|selecting who to rob|selecting where to place robber|placing (?:a |an )?(?:road|settlement)) for\b/iu.test(normalized) && !/:die-[1-6]:/u.test(normalized)) {
     return { reason: "known-ignored-bot-status", affectsIntegrity: false };
   }
   if (
@@ -149,9 +154,18 @@ const classifyUnmatchedLog = (
   return { reason: "unrecognized-log-format", affectsIntegrity: true };
 };
 
+const isGameStartBoundaryText = (value: string): boolean =>
+  /^happy settling!(?:\s|$)/iu.test(value.replace(/\s+/gu, " ").trim());
+
 const unmatchedCanConcealGameplayRoll = (
+  snapshot: Parameters<typeof parseLogSnapshot>[0],
   classification: ReturnType<typeof classifyUnmatchedLog>,
-): boolean => classification.reason === "unrecognized-log-format";
+): boolean =>
+  classification.reason === "unrecognized-log-format" &&
+  (/:die-[1-6]:/u.test(snapshot.serialText) ||
+    /\b(?:rolled|rolling|roll|dice)\b/iu.test(
+      `${snapshot.visibleText} ${snapshot.serialText}`,
+    ));
 
 const validStoredLogIndex = (value: number | undefined): value is number =>
   value !== undefined && Number.isInteger(value) && value >= 0;
@@ -694,6 +708,29 @@ export class GameSession {
     this.queueSave();
   }
 
+  private acceptGameStartBoundary(): boolean {
+    if (this.setupLogPrefixEnd === undefined) return false;
+    const firstIndexedEvent = this.events
+      .filter((event) => validStoredLogIndex(event.index))
+      .sort((left, right) => left.index! - right.index!)[0];
+    const provesCompletePrefix =
+      this.setupLogPrefixEnd === 0 ||
+      (
+        this.setupLogPrefixEnd === 1 &&
+        firstIndexedEvent?.index === 2 &&
+        firstIndexedEvent.type === "spend" &&
+        firstIndexedEvent.reason === "settlement"
+      );
+    if (!provesCompletePrefix) return false;
+    this.setupLogPrefixPending = false;
+    this.setupLogPrefixEnd = undefined;
+    if (this.partialHistoryFromMissingPrefix) {
+      this.partialHistoryFromMissingPrefix = false;
+      this.partialHistory = false;
+    }
+    return true;
+  }
+
   setInitialPlacement(active: boolean, gameKey?: string): void {
     if (!gameKey || gameKey !== this.gameKey) return;
     const wasInitialPlacement = this.initialPlacement;
@@ -955,10 +992,17 @@ export class GameSession {
         const classification = classifyUnmatchedLog(snapshot);
         this.unmatchedCount += 1;
         if (classification.affectsIntegrity) this.unmatchedIntegrityCount += 1;
-        if (unmatchedCanConcealGameplayRoll(classification)) {
+        if (unmatchedCanConcealGameplayRoll(snapshot, classification)) {
           noteRollCapableLogAmbiguity(this.diceHistory, candidate.logIndex);
         } else if (candidate.logIndex !== undefined) {
           observeLogCoverage(this.diceHistory, [candidate.logIndex]);
+        }
+        if (
+          candidate.logIndex === 0 &&
+          isGameStartBoundaryText(snapshot.serialText) &&
+          this.acceptGameStartBoundary()
+        ) {
+          changed = true;
         }
         this.recordUnmatched(snapshot.serialText, snapshot.index, classification);
         changed = true;
@@ -1225,6 +1269,13 @@ export class GameSession {
         ...sample,
         affectsIntegrity: sample.affectsIntegrity ?? sample.reason === "unrecognized-log-format",
       }));
+    if (
+      this.unmatchedSamples.some(
+        (sample) => sample.firstLogIndex === 0 && isGameStartBoundaryText(sample.sample),
+      )
+    ) {
+      this.acceptGameStartBoundary();
+    }
     // Reclassify retained legacy misses that the current parser now proves are
     // harmless/redundant. Exact covered indexes can clear parser ambiguity,
     // never occupied-roll conflicts.

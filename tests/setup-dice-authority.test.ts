@@ -26,6 +26,17 @@ const message = (index: number, text: string): HTMLDivElement => {
   row.textContent = text;
   return row;
 };
+const placement = (
+  index: number,
+  actor: string,
+  kind: "road" | "settlement",
+): HTMLDivElement => {
+  const row = message(index, `${actor} placed a `);
+  const image = document.createElement("img");
+  image.alt = kind;
+  row.append(image);
+  return row;
+};
 const roll = (index: number, actor: string, left: number, right: number): HTMLDivElement => {
   const row = message(index, `${actor} rolled`);
   for (const value of [left, right]) {
@@ -92,9 +103,9 @@ describe("Balanced setup dice authority", () => {
     expect(session.partialHistory).toBe(false);
   });
 
-  it("clears a setup-prefix partial when index zero backfills just after gameplay begins", async () => {
+  it("clears a setup-prefix partial when the real game-start boundary backfills", async () => {
     const root = document.createElement("div");
-    root.append(message(2, "Alice placed a Settlement"));
+    root.append(placement(2, "Alice", "settlement"));
     const session = sessionFor(root);
     await session.start();
     expect(session.partialHistory).toBe(false);
@@ -102,15 +113,15 @@ describe("Balanced setup dice authority", () => {
     session.setInitialPlacement(false, gameKey);
     expect(session.partialHistory).toBe(true);
 
-    root.prepend(message(0, "Happy settling!"), message(1, "Alice joined the game"));
+    root.prepend(message(0, "Happy settling!"));
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
     expect(session.partialHistory).toBe(false);
   });
 
-  it("restores deferred setup-prefix authority and clears it only after the full prefix backfills", async () => {
+  it("restores a production-shaped setup prefix and heals it from the game-start boundary", async () => {
     const root = document.createElement("div");
-    root.append(message(3, "Alice placed a Road"));
+    root.append(placement(2, "Alice", "settlement"));
     const session = sessionFor(root);
     await session.start();
     session.setInitialPlacement(false, gameKey);
@@ -119,7 +130,7 @@ describe("Balanced setup dice authority", () => {
     await vi.waitFor(() =>
       expect(storage.get(`colonistAssistantSession:${session.id}`)).toMatchObject({
         partialHistory: true,
-        setupLogPrefixEnd: 2,
+        setupLogPrefixEnd: 1,
         partialHistoryFromMissingPrefix: true,
       }));
     session.stop();
@@ -129,11 +140,7 @@ describe("Balanced setup dice authority", () => {
     await restored.start();
     expect(restored.partialHistory).toBe(true);
 
-    root.prepend(
-      message(0, "Happy settling!"),
-      message(1, "Alice joined the game"),
-      message(2, "Alice placed a Settlement"),
-    );
+    root.prepend(message(0, "Happy settling!"));
     await vi.waitFor(() => expect(restored.partialHistory).toBe(false));
   });
 

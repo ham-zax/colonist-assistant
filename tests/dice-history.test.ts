@@ -143,6 +143,73 @@ describe("public dice history", () => {
     });
   });
 
+  it("keeps complete bot board authority despite parser-only DOM ambiguity", () => {
+    const state = createDiceHistoryState();
+    const players = ["P0", "P1"];
+    const logIndexes = [0, 2, 4, 7, 9, 12, 15, 18, 21, 24, 27, 30];
+    observeLogCoverage(state, [
+      ...Array.from({ length: 29 }, (_, index) => index),
+      30,
+      31,
+      32,
+      34,
+      35,
+      36,
+      37,
+      38,
+      40,
+      41,
+      42,
+      43,
+    ]);
+    for (let ordinal = 0; ordinal < 12; ordinal += 1) {
+      const actor = players[ordinal % players.length]!;
+      const total = 2 + (ordinal % 11);
+      appendPublicDiceRoll(state, {
+        eventId: `board-roll:${ordinal}:${actor}`,
+        actor,
+        total,
+      });
+      appendPublicDiceRoll(
+        state,
+        roll(`log-roll-${ordinal}`, actor, total, logIndexes[ordinal]!),
+      );
+    }
+    noteRollCapableLogAmbiguity(state, 83);
+    noteRollCapableLogAmbiguity(state, 84);
+
+    expect(state.rolls).toHaveLength(24);
+    expect(state.provenance).toBe("gapped");
+    expect(
+      buildLiveDecisionStochasticInput("balanced", state, players, 12),
+    ).toMatchObject({
+      model: "mref-colonist-linked-2024-v1",
+      provenance: "complete-from-first-gameplay-roll",
+      rolls: Array.from({ length: 12 }, (_, ordinal) => ({
+        ordinal,
+        actor: ordinal % 2,
+        total: 2 + (ordinal % 11),
+      })),
+    });
+  });
+
+  it("still fails closed on a concrete indexed contradiction with complete board authority", () => {
+    const state = createDiceHistoryState();
+    appendPublicDiceRoll(state, {
+      eventId: "board-roll:0:P0",
+      actor: "P0",
+      total: 8,
+    });
+    appendPublicDiceRoll(state, roll("log-roll", "P0", 8, 3));
+    expect(() =>
+      appendPublicDiceRoll(state, roll("contradictory-rerender", "P0", 9, 3)),
+    ).toThrow(/log index 3/);
+
+    expect(() =>
+      buildLiveDecisionStochasticInput("balanced", state, ["P0"], 1),
+    ).toThrow(/does not reconcile with public turn progress/);
+  });
+
   it("reconstructs a uniquely located internal roll miss from public turn progress", () => {
     const state = createDiceHistoryState();
     observeLogCoverage(state, [0, 2]);
