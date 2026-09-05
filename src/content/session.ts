@@ -24,6 +24,7 @@ import {
   noteMissingPublicRoll,
   noteRollCapableLogAmbiguity,
   observeLogCoverage,
+  observeDiceSetupBoundary,
   restoreDiceHistoryState,
   serializeDiceHistoryState,
   type DiceHistoryState,
@@ -101,7 +102,7 @@ const classifyUnmatchedLog = (
   if (/^happy settling!|\blist of commands:\s*\/help\b/iu.test(normalized)) {
     return { reason: "known-ignored-system-message", affectsIntegrity: false };
   }
-  if (/^bot is selecting cards to discard for\b/iu.test(normalized)) {
+  if (/^bot is (?:selecting cards to discard|placing (?:a |an )?(?:road|settlement)) for\b/iu.test(normalized) && !/:die-[1-6]:/u.test(normalized)) {
     return { reason: "known-ignored-bot-status", affectsIntegrity: false };
   }
   if (
@@ -368,6 +369,7 @@ export class GameSession {
   private syntheticSequence = 0;
   private disposed = false;
   private myPlayer?: string;
+  private initialPlacement = false;
   private storageGeneration = 0;
   private storageSuppressed = false;
   private pruneSessionHistory = true;
@@ -495,6 +497,7 @@ export class GameSession {
       // Local identity belongs to the game generation just ended. Require the
       // bridge to resolve it again before canonicalizing any new "You" logs.
       this.myPlayer = undefined;
+      this.initialPlacement = false;
       // A new game can reuse the same mounted log/session object. Start its
       // record clock before reset() synchronously publishes the empty state.
       this.startedAt = Date.now();
@@ -504,6 +507,14 @@ export class GameSession {
       return;
     }
     this.queueSave();
+  }
+
+  setInitialPlacement(active: boolean, gameKey?: string): void {
+    this.initialPlacement = Boolean(active && gameKey && gameKey === this.gameKey);
+    if (this.observer && this.initialPlacement && observeDiceSetupBoundary(this.diceHistory)) {
+      this.queueSave();
+      this.onUpdate(this);
+    }
   }
 
   setMyPlayer(myPlayer?: string): void {
@@ -639,6 +650,7 @@ export class GameSession {
       changed = true;
     }
 
+    if (this.initialPlacement && observeDiceSetupBoundary(this.diceHistory)) changed = true;
     if (changed) {
       if (this.storageSuppressed) {
         this.storageSuppressed = false;
@@ -771,6 +783,20 @@ export class GameSession {
         ...sample,
         affectsIntegrity: sample.affectsIntegrity ?? sample.reason === "unrecognized-log-format",
       }));
+    // Reclassify only retained, now-recognized bot placement notices. Exact
+    // covered indexes can clear parser ambiguity, never occupied-roll conflicts.
+    for (const sample of this.unmatchedSamples) {
+      if (sample.reason !== "unrecognized-log-format") continue;
+      const classification = classifyUnmatchedLog({
+        serialText: sample.sample, visibleText: sample.sample, language: "en",
+      });
+      if (classification.reason !== "known-ignored-bot-status") continue;
+      if (sample.affectsIntegrity) {
+        this.unmatchedIntegrityCount = Math.max(0, this.unmatchedIntegrityCount - sample.count);
+      }
+      Object.assign(sample, classification);
+      observeLogCoverage(this.diceHistory, [sample.firstLogIndex, sample.lastLogIndex].filter(validStoredLogIndex));
+    }
     this.state = replayEvents(stored.events);
     for (const id of stored.seenIds) this.seenIds.add(id);
   }

@@ -21,6 +21,7 @@ const boot = async (): Promise<void> => {
   let currentGameKey: string | undefined;
   let currentMyPlayer: string | undefined;
   const initialBoard = readPublicBoardSnapshot();
+  let currentInitialPlacement = Boolean(initialBoard?.initialPlacement);
   currentGameKey = initialBoard?.gameKey;
   currentMyPlayer =
     initialBoard?.localSeatDiagnostics?.identity.status === "resolved"
@@ -52,6 +53,8 @@ const boot = async (): Promise<void> => {
         : undefined;
     currentMyPlayer = resolvedMyPlayer;
     session?.setMyPlayer(resolvedMyPlayer);
+    currentInitialPlacement = Boolean(snapshot?.initialPlacement);
+    session?.setInitialPlacement(currentInitialPlacement, snapshot?.gameKey);
     overlay.updateBoard(snapshot ?? readPublicBoardSnapshot());
   });
 
@@ -92,6 +95,7 @@ const boot = async (): Promise<void> => {
       currentGameKey,
     );
     session = next;
+    next.setInitialPlacement(currentInitialPlacement, currentGameKey);
     await next.start();
     next.setMyPlayer(currentMyPlayer);
   };
