@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { DecisionTrace } from "../src/core/decision-trace";
 import {
   CompactGameBuilder,
+  formatCompactGameRecord,
   normalizeCompactRecordIntegrity,
 } from "../src/core/llm-record";
 import type { BoardSnapshot, DiceMode } from "../src/core/placement";
@@ -97,6 +98,7 @@ describe("compact LLM game record", () => {
     const record = new CompactGameBuilder().apply(
       {
         ...captureBase,
+        assistant: { ...captureBase.assistant, extensionBuild: "main@recording-check" },
         diceHistory,
         decisions: [],
       },
@@ -109,6 +111,34 @@ describe("compact LLM game record", () => {
     });
     expect(record.diceHistory?.digest).toMatch(/^[0-9a-f]{16}$/u);
     expect(record.events).toEqual([]);
+    const exported = formatCompactGameRecord(record);
+    const historyLine = exported.split("\n").find((line) => line.startsWith("@diceHistory="));
+    expect(historyLine).toBeDefined();
+    expect(JSON.parse(historyLine!.slice("@diceHistory=".length))).toEqual(record.diceHistory);
+    expect(exported).toContain('"extensionBuild":"main@recording-check"');
+    expect(exported).toContain("@status=recording");
+  });
+
+  it("exports persisted dice uncertainty after resuming a partial recording", () => {
+    const history = createDiceHistoryState();
+    observeLogCoverage(history, [0, 1]);
+    appendPublicDiceRoll(history, {
+      actor: "Alice", total: 8, dice: [3, 5], eventId: "roll-0", logIndex: 0,
+    });
+    expect(() => appendPublicDiceRoll(history, {
+      actor: "Alice", total: 9, dice: [4, 5], eventId: "conflict-0", logIndex: 0,
+    })).toThrow(/Conflicting public dice evidence/);
+    const first = new CompactGameBuilder().apply({
+      ...captureBase, diceHistory: history, decisions: [], partialHistory: true,
+    }, false);
+    const resumed = new CompactGameBuilder(structuredClone(first)).current!;
+    const line = formatCompactGameRecord(resumed).split("\n")
+      .find((value) => value.startsWith("@diceHistory="));
+    expect(line).toBeDefined();
+    expect(JSON.parse(line!.slice("@diceHistory=".length))).toMatchObject({
+      ambiguousLogIndices: [0], provenance: "gapped", hasUnknownRollGap: true,
+      rolls: [expect.objectContaining({ actor: "Alice", total: 8 })],
+    });
   });
 
   it("records requested and effective stochastic identity on decisions", () => {

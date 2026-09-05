@@ -109,6 +109,8 @@ export interface CompactGameRecord {
   unmatchedIntegrityCount: number;
   diceHistory?: StoredDiceHistoryState & { digest: string };
   assistant: {
+    /** Manifest build identity of the extension making the latest capture. */
+    extensionBuild?: string;
     engine: string;
     disablePlayerTrades: boolean;
     autopilot: boolean;
@@ -2188,6 +2190,9 @@ export const formatCompactGameRecord = (record: CompactGameRecord): string => {
     `@aliases=${JSON.stringify(record.aliases)}`,
     `@assistant=${JSON.stringify(record.assistant)}`,
     `@meta=${JSON.stringify(record.meta)}`,
+    ...(record.diceHistory
+      ? [`@diceHistory=${JSON.stringify(record.diceHistory)}`]
+      : []),
   ];
   const section = (name: string, columns: readonly string[], rows: CompactRow[]) => {
     if (!rows.length) return;
