@@ -15,6 +15,11 @@ import {
 } from "../src/core/tracker";
 import type { GameSession } from "../src/content/session";
 import { emptyResources } from "../src/core/resources";
+import {
+  appendPublicDiceRoll,
+  createDiceHistoryState,
+  observeLogCoverage,
+} from "../src/core/dice-history";
 
 let sendMessage = vi.fn();
 
@@ -895,6 +900,75 @@ describe("overlay settings interaction", () => {
     expect(advice).toContain("Calculating the next action");
     expect(advice).not.toContain("Send a counteroffer");
     overlay.destroy();
+  });
+
+  it("revokes an in-flight Mref result when dice authority becomes ambiguous", async () => {
+    const tracker = reduceTracker(createTrackerState(), { type: "discover", player: "Alice" });
+    const history = createDiceHistoryState();
+    observeLogCoverage(history, [0]);
+    appendPublicDiceRoll(history, {
+      actor: "Alice", total: 8, dice: [3, 5], eventId: "roll-0", logIndex: 0,
+    });
+    const overlay = new AssistantOverlay({ ...DEFAULT_SETTINGS }, { reset: vi.fn() });
+    await Promise.resolve();
+    const internals = overlay as unknown as {
+      board: Parameters<AssistantOverlay["updateBoard"]>[0];
+      session: { diceHistory: typeof history };
+      decisionKey: string;
+      decisionAnalysis: unknown;
+      decisionRuntimeError: string;
+      decisionWorker: { active?: unknown };
+      render: () => void;
+      scheduleDecisionAnalysis: (state: typeof tracker, player: string) => void;
+    };
+    vi.spyOn(internals, "render").mockImplementation(() => undefined);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    internals.session = { diceHistory: history };
+    internals.board = {
+      hexes: [], vertices: [], edges: [],
+      diceMode: "balanced", gameKey: "stochastic-revocation-game",
+      myPlayer: "Alice", currentPlayer: "Alice", playerOrder: ["Alice"],
+      isMyTurn: true, hasRolled: true, action: "none",
+      localSeatDiagnostics: {
+        seatSource: "gameController.myColor+currentUserId+gameUserStates",
+        identity: {
+          status: "resolved", reason: "cross-checked",
+          source: "controller+account-user-id+store-roster",
+          currentUserIdAvailable: true, currentUserMatchColors: [1],
+          myColor: 1, currentUserColor: 1,
+        },
+      },
+    };
+    let finishDecision: (() => void) | undefined;
+    sendMessage.mockClear();
+    sendMessage.mockImplementation((message: { id: number; type: string; stochastic?: unknown }) => {
+      if (message.stochastic) {
+        return new Promise((resolve) => {
+          finishDecision = () => resolve({
+            id: message.id,
+            analysis: { engine: "deep-search", runtime: "background-wasm", players: [] },
+          });
+        });
+      }
+      return Promise.resolve({ id: message.id });
+    });
+    try {
+      internals.scheduleDecisionAnalysis(tracker, "Alice");
+      expect(finishDecision).toBeDefined();
+      const originalKey = internals.decisionKey;
+      expect(() => appendPublicDiceRoll(history, {
+        actor: "Alice", total: 9, dice: [4, 5], eventId: "conflict-0", logIndex: 0,
+      })).toThrow(/Conflicting public dice evidence/);
+      internals.scheduleDecisionAnalysis(tracker, "Alice");
+      expect(internals.decisionRuntimeError).toMatch(/usable public reference-dice history/);
+      finishDecision!();
+      await vi.waitFor(() => expect(internals.decisionWorker.active).toBeUndefined());
+      expect(internals.decisionAnalysis).toBeUndefined();
+      expect(internals.decisionRuntimeError).toMatch(/usable public reference-dice history/);
+      expect(internals.decisionKey).not.toBe(originalKey);
+    } finally {
+      overlay.destroy();
+    }
   });
 
   it("reuses the completed deep target for the placement-modal continuation", async () => {
