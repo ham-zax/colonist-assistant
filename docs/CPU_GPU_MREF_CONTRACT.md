@@ -9,8 +9,12 @@ The engineering reference is commit
 
 The user authorized GPU implementation against this pinned candidate before
 independent acceptance. This is a **reference pin**, not a claim that R6 passed.
-Independent review is deferred. The canonical checkout's separate uncommitted
-work is not part of this reference.
+Independent GPU review subsequently passed the exact range
+`950c1ae9af224f802ad266f268fe7c2f9ff2fe38..7023af989d7590df36bb078cb9971fb0ac32859d`.
+The integration is now on canonical `main`. Commit `cfcdf1b6a9d3c6558955819be8b7c8b3f6e95849`
+adds retained legacy-roll conflict reconciliation and revokes in-flight decisions
+when stochastic authority changes. Those ingestion repairs do not change the
+pinned engine mathematics; their R6 acceptance remains separate from GPU review.
 
 This integration does not change `catan-core` dice mathematics, CPU search policy,
 `deep-maxn-v12`, or the public-history belief construction algorithm. Future

@@ -1,0 +1,107 @@
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { AssistantOverlay } from "../src/content/overlay";
+import { DEFAULT_SETTINGS } from "../src/content/settings";
+import { createTrackerState, reduceTracker } from "../src/core/tracker";
+import { appendPublicDiceRoll, createDiceHistoryState, observeLogCoverage } from "../src/core/dice-history";
+import type { BoardSnapshot } from "../src/core/placement";
+
+let overlay: AssistantOverlay | undefined;
+afterEach(() => {
+  overlay?.destroy();
+  overlay = undefined;
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  document.body.replaceChildren();
+});
+
+describe("live stochastic evidence recovery", () => {
+  it("does not expose a heuristic click while the authoritative engine is paused", async () => {
+    vi.stubGlobal("chrome", {
+      runtime: {
+        getURL: (path: string) => `chrome-extension://fixture/${path}`,
+        getManifest: () => ({ version: "0.9.1" }),
+        sendMessage: async (message: { id: number }) => ({ id: message.id, runtime: "background-gpu", engineRevision: "deep-maxn-v12", initializationMs: 1 }),
+      },
+      storage: { local: { get: async () => ({}), set: async () => {}, remove: async () => {} }, sync: { set: async () => {} } },
+    });
+    overlay = new AssistantOverlay({ ...DEFAULT_SETTINGS }, { reset: vi.fn() });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const internals = overlay as unknown as {
+      board: BoardSnapshot;
+      decisionRuntimeError: string;
+      scheduleDecisionAnalysis: () => void;
+      nextClick: () => unknown;
+      render: () => void;
+    };
+    vi.spyOn(internals, "scheduleDecisionAnalysis").mockImplementation(() => {});
+    const nextClick = vi.spyOn(internals, "nextClick");
+    internals.board = {
+      hexes: [], vertices: [], edges: [], diceMode: "balanced", gameKey: "paused-evidence",
+      myPlayer: "Alice", currentPlayer: "Alice", playerOrder: ["Alice", "Bob"],
+      isMyTurn: true, hasRolled: true, action: "none",
+      localSeatDiagnostics: {
+        seatSource: "gameController.myColor+currentUserId+gameUserStates",
+        identity: { status: "resolved", reason: "cross-checked", source: "controller+account-user-id+store-roster", currentUserIdAvailable: true, currentUserMatchColors: [1], myColor: 1, currentUserColor: 1 },
+      },
+    };
+    internals.decisionRuntimeError = "Balanced Dice requires usable public reference-dice history";
+    internals.render();
+    expect(nextClick).not.toHaveBeenCalled();
+    const shadow = document.querySelector("#colonist-assistant-root")!.shadowRoot!;
+    expect(shadow.querySelector(".board-marker")).toBeNull();
+    expect(shadow.textContent).toContain("Balanced Dice requires usable public reference-dice history");
+  });
+
+  it("resumes when missing startup evidence arrives without retrying unchanged evidence", async () => {
+    const sendMessage = vi.fn(async (message: { id: number; stochastic?: unknown }) =>
+      message.stochastic
+        ? { id: message.id, analysis: { engine: "deep-search", runtime: "background-gpu", players: [] } }
+        : { id: message.id, runtime: "background-gpu", engineRevision: "deep-maxn-v12", initializationMs: 1 });
+    vi.stubGlobal("chrome", {
+      runtime: { getURL: (path: string) => `chrome-extension://fixture/${path}`, getManifest: () => ({ version: "0.9.1" }), sendMessage },
+      storage: { local: { get: async () => ({}), set: async () => {}, remove: async () => {} }, sync: { set: async () => {} } },
+    });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    let tracker = reduceTracker(createTrackerState(), { type: "discover", player: "Alice" });
+    tracker = reduceTracker(tracker, { type: "discover", player: "Bob" });
+    const history = createDiceHistoryState();
+    overlay = new AssistantOverlay({ ...DEFAULT_SETTINGS }, { reset: vi.fn() });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const internals = overlay as unknown as {
+      board: BoardSnapshot;
+      session: { diceHistory: typeof history };
+      decisionRuntimeError: string;
+      decisionAnalysis?: unknown;
+      scheduleDecisionAnalysis: (state: typeof tracker, player: string) => void;
+      render: () => void;
+    };
+    vi.spyOn(internals, "render").mockImplementation(() => {});
+    internals.session = { diceHistory: history };
+    internals.board = {
+      hexes: [], vertices: [], edges: [], diceMode: "balanced", gameKey: "startup-evidence",
+      myPlayer: "Alice", currentPlayer: "Alice", playerOrder: ["Alice", "Bob"],
+      isMyTurn: true, hasRolled: true, action: "none",
+      localSeatDiagnostics: {
+        seatSource: "gameController.myColor+currentUserId+gameUserStates",
+        identity: { status: "resolved", reason: "cross-checked", source: "controller+account-user-id+store-roster", currentUserIdAvailable: true, currentUserMatchColors: [1], myColor: 1, currentUserColor: 1 },
+      },
+    };
+    sendMessage.mockClear();
+    internals.scheduleDecisionAnalysis(tracker, "Alice");
+    expect(internals.decisionRuntimeError).toMatch(/usable public reference-dice history/);
+    expect(sendMessage).not.toHaveBeenCalled();
+    internals.scheduleDecisionAnalysis(tracker, "Alice");
+    expect(sendMessage).not.toHaveBeenCalled();
+
+    observeLogCoverage(history, [0]);
+    appendPublicDiceRoll(history, { actor: "Alice", total: 8, dice: [3, 5], eventId: "first-roll", logIndex: 0 });
+    internals.scheduleDecisionAnalysis(tracker, "Alice");
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledOnce());
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      stochastic: expect.objectContaining({ model: "mref-colonist-linked-2024-v1" }),
+    }));
+    await vi.waitFor(() => expect(internals.decisionAnalysis).toBeDefined());
+    expect(internals.decisionRuntimeError).toBe("");
+  });
+});

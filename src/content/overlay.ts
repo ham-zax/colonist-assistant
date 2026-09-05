@@ -136,7 +136,7 @@ import { destroyWinOdds, renderWinOdds } from "./win-odds";
 import { DecisionWorkerClient } from "./decision-worker";
 import { InteractionRenderGate } from "./render-gate";
 
-type ViewName = "advice" | "cards" | "settings";
+type ViewName = "advice" | "settings";
 
 const STRATEGIST_LABEL = "Strategist ★";
 const WEIGHTED_LABEL = "Weighted";
@@ -360,6 +360,8 @@ export class AssistantOverlay {
   private decisionRuntime?: DecisionRuntime;
   private decisionRuntimeDetail = "Connecting to the packaged search engine.";
   private decisionRuntimeError = "";
+  /** Evidence failures retry only when their public input changes, not every render. */
+  private decisionEvidenceWait?: string;
   private decisionContextInvalidated = false;
   private decisionWaitingForPreviousSearch = false;
   private lastRejectedDomesticTrade?: DomesticTradeState;
@@ -419,6 +421,7 @@ export class AssistantOverlay {
           `${status.detail}${status.initializationMs !== undefined ? ` in ${Math.max(1, Math.round(status.initializationMs))} ms` : ""}.`;
       } else {
         this.decisionRuntime = undefined;
+        this.decisionEvidenceWait = undefined;
         this.decisionRuntimeError = status.detail;
         if (status.detail === EXTENSION_CONTEXT_RELOAD_MESSAGE) {
           this.decisionContextInvalidated = true;
@@ -1365,6 +1368,7 @@ export class AssistantOverlay {
 
   private retryDecisionEngine(): void {
     if (this.decisionContextInvalidated) return;
+    this.decisionEvidenceWait = undefined;
     this.decisionAnalysis = undefined;
     this.decisionPendingKey = "";
     this.decisionSlowKey = "";
@@ -1513,7 +1517,7 @@ export class AssistantOverlay {
           this.board?.action,
           this.board?.robberVictimSelection,
         );
-    const next = localIdentityResolved
+    const next = localIdentityResolved && !this.decisionRuntimeError && !this.decisionContextInvalidated
       ? workflow ?? this.nextClick(state, spatial, report)
       : undefined;
     const marker =
@@ -1529,12 +1533,12 @@ export class AssistantOverlay {
         ? this.renderBoardMarker(spatial.action, spatial.recommendation)
         : "";
     const advice = this.renderAdvice(state, spatial, report, next);
-    const panel =
-      this.activeView === "advice"
-        ? advice
-        : this.activeView === "cards"
-          ? this.renderCards(state, displayedWinAnalysis)
-          : this.renderSettings();
+    const panel = this.activeView === "settings"
+      ? this.renderSettings()
+      : `<div class="overview">
+          <section class="advice-pane" aria-label="Current advice">${advice}</section>
+          <section class="cards-pane" aria-label="Table cards">${this.renderCards(state, displayedWinAnalysis)}</section>
+        </div>`;
     mount.innerHTML = `
       ${marker}
       <section class="assistant ${this.collapsed ? "collapsed" : ""}" aria-label="Colonist Assistant">
@@ -1542,10 +1546,6 @@ export class AssistantOverlay {
           <span class="brand-mark">${assistantMark()}</span>
           <span class="product-name">Colonist Assistant</span>
           <span class="status ${ready ? "live" : ""}"><i></i>${ready ? (this.settings.recordGame ? "LIVE · REC" : "LIVE") : "WAITING"}</span>
-          <div class="segmented-control" role="group" aria-label="Assistant views">
-            <button class="segment ${this.activeView === "advice" ? "active" : ""}" data-action="view" data-view="advice" aria-pressed="${this.activeView === "advice"}">Advice</button>
-            <button class="segment ${this.activeView === "cards" ? "active" : ""}" data-action="view" data-view="cards" aria-pressed="${this.activeView === "cards"}">Cards</button>
-          </div>
           <button class="icon-button ${this.activeView === "settings" ? "active" : ""}" data-action="view" data-view="settings" aria-pressed="${this.activeView === "settings"}" aria-label="${this.activeView === "settings" ? "Back to your advice" : "Open assistant settings"}" title="${this.activeView === "settings" ? "Your advice" : "Settings"}">${settingsIcon()}</button>
           <button class="icon-button" data-action="collapse" aria-label="${this.collapsed ? "Expand assistant" : "Collapse assistant"}" title="${this.collapsed ? "Expand" : "Collapse"}">${collapseIcon(this.collapsed)}</button>
         </header>
@@ -2328,8 +2328,10 @@ export class AssistantOverlay {
     }
     if (this.decisionRuntimeError) {
       return {
-        label: "WASM error",
-        detail: `${this.decisionRuntimeError} Retry Strategist when ready. No other algorithm was substituted.`,
+        // Validation and native failures also reach this path; never label
+        // missing evidence or a GPU failure as a WebAssembly crash.
+        label: this.decisionEvidenceWait !== undefined ? "Dice history" : "Engine paused",
+        detail: `${this.decisionRuntimeError} No other stochastic model or algorithm was substituted.`,
         state: "error",
       };
     }
@@ -2626,6 +2628,23 @@ export class AssistantOverlay {
     });
   }
 
+  private stochasticEvidenceSignature(board: BoardSnapshot): string {
+    return JSON.stringify([
+      board.gameKey,
+      board.diceMode,
+      board.playerOrder,
+      this.session?.diceHistory ? diceHistoryDigest(this.session.diceHistory) : null,
+    ]);
+  }
+
+  private diceEvidenceDetail(): string {
+    const history = this.session?.diceHistory;
+    if (!history) return "The public game log is still attaching; analysis resumes when usable evidence arrives";
+    const ranges = history.coverage.ranges.slice(0, 4).map(([start, end]) => `${start}-${end}`).join(",") || "none";
+    const ambiguous = history.ambiguousLogIndices.slice(0, 8).join(",") || "none";
+    return `Dice evidence: ${history.provenance}; ${history.rolls.length} observed roll${history.rolls.length === 1 ? "" : "s"}; log coverage ${ranges}; ambiguous indexes ${ambiguous}; unlocated ambiguity ${history.hasUnlocatedRollAmbiguity ? "yes" : "no"}; missing prefix rolls ${history.missingPrefixRolls ?? "not established"}. Analysis resumes when usable evidence arrives. Export the record if this persists; resetting midgame cannot recover missing rolls`;
+  }
+
   private scheduleDecisionAnalysis(
     state: TrackerState | undefined,
     player: string | undefined,
@@ -2683,7 +2702,15 @@ export class AssistantOverlay {
       this.decisionPendingKey = "";
       this.decisionSlowKey = "";
       this.decisionWaitingForPreviousSearch = false;
-      return;
+      if (
+        this.decisionEvidenceWait === undefined ||
+        this.decisionEvidenceWait === this.stochasticEvidenceSignature(board)
+      ) return;
+      // A board snapshot can precede log attachment, parsing, or seat mapping.
+      // Re-run the same fail-closed constructor after that evidence changes.
+      // Runtime/transport failures still require an explicit retry.
+      this.decisionEvidenceWait = undefined;
+      this.decisionRuntimeError = "";
     }
     if (
       board.initialPlacement &&
@@ -2832,7 +2859,8 @@ export class AssistantOverlay {
       this.decisionRuntimeError = displayedDetail;
       this.decisionRuntimeDetail = displayedDetail;
       this.decisionTraces.failure(traceKey, displayedDetail);
-      console.error(
+      const reportFailure = this.decisionEvidenceWait !== undefined ? console.warn : console.error;
+      reportFailure(
         `[Colonist Assistant] Strategist failed: ${displayedDetail}`,
         {
           key,
@@ -2845,6 +2873,7 @@ export class AssistantOverlay {
       this.render();
     };
     let stochastic: PublicStochasticInput;
+    this.decisionEvidenceWait = undefined;
     try {
       stochastic = buildLiveDecisionStochasticInput(
         decisionBoard.diceMode,
@@ -2853,11 +2882,9 @@ export class AssistantOverlay {
       );
     } catch (error) {
       this.decisionWorker.reset();
-      failDecisionRequest(
-        error instanceof Error
-          ? error.message
-          : "Balanced Dice stochastic evidence is unavailable",
-      );
+      this.decisionEvidenceWait = this.stochasticEvidenceSignature(board);
+      const reason = error instanceof Error ? error.message : "Balanced Dice stochastic evidence is unavailable";
+      failDecisionRequest(`${reason}. ${this.diceEvidenceDetail()}`);
       return;
     }
     const requestDisposition = this.decisionWorker.request(
@@ -4106,6 +4133,7 @@ export class AssistantOverlay {
       isWasmDecisionEngine(this.settings.engine)
     ) {
       const reloadRequired = this.decisionContextInvalidated;
+      const awaitingEvidence = this.decisionEvidenceWait !== undefined;
       const detail = reloadRequired
         ? EXTENSION_CONTEXT_RELOAD_MESSAGE
         : this.decisionRuntimeError;
@@ -4113,12 +4141,15 @@ export class AssistantOverlay {
         <div class="decision-meta"><span>STRATEGIST PAUSED</span>${this.renderEngineMetaChip()}</div>
         <div class="decision-command">
           <span class="command-art">${assistantMark()}</span>
-          <h1>${reloadRequired ? "Reload this Colonist tab" : "Waiting for a valid engine result"}</h1>
+          <h1>${reloadRequired ? "Reload this Colonist tab" : awaitingEvidence ? "Waiting for public dice evidence" : "Waiting for a valid engine result"}</h1>
         </div>
-        <p class="why">${escapeHtml(detail)}. No heuristic recommendation or autonomous action can replace the failed decision.</p>
+        <p class="why">${awaitingEvidence
+          ? "Balanced Dice needs a verified public roll history. Analysis will resume automatically when the missing evidence is resolved."
+          : `${escapeHtml(detail)}. No autonomous action will run until this is resolved.`}</p>
+        ${awaitingEvidence ? `<details class="more"><summary>Dice-history diagnostic</summary><p>${escapeHtml(detail)}.</p><p>No fair-IID fallback is used. The exported record preserves this uncertainty.</p></details>` : ""}
         ${reloadRequired
           ? `<div class="board-confirm pending"><i></i><span>Reload the tab to reconnect this content script</span></div>`
-          : `<div class="board-confirm pending"><i></i><span>Strategist is paused after a transient failure</span></div><button class="reset-link" type="button" data-action="retry-engine">Retry Strategist</button>`}
+          : `<div class="board-confirm pending"><i></i><span>No automatic action until this error is resolved</span></div><button class="reset-link" type="button" data-action="retry-engine">Retry Strategist</button>`}
       </section>`;
     }
     const discard = this.discardRecommendation(state);
@@ -4940,12 +4971,16 @@ export class AssistantOverlay {
     const model = displayedWinAnalysis
       ? `<div class="model-strip"><span>${escapeHtml(displayedWinAnalysis.model)}</span><b>${displayedWinAnalysis.simulations ? `${displayedWinAnalysis.simulations} ROLLOUTS` : "DETERMINISTIC"}</b></div>`
       : "";
-    return `${warning}${model}
-      <header class="cards-heading"><h1>Table cards</h1></header>
+    const detailsOpen = this.shadow.querySelector<HTMLDetailsElement>(".dice-details")?.open;
+    return `${warning}
+      <header class="cards-heading"><h2>Table cards</h2><span>PUBLIC EVIDENCE</span></header>
       <div class="matrix-head"><span>PLAYER</span>${headings}<span>Σ</span></div>
       <section class="player-matrix" aria-label="Tracked player resources">${rows}${bankRow}</section>
-      ${this.renderDiceDistribution(state)}
-      <button class="reset-link" data-action="reset">Reset this session</button>`;
+      <details class="dice-details"${detailsOpen ? " open" : ""}>
+        <summary>Dice &amp; model details</summary>
+        ${this.renderDiceDistribution(state)}
+        ${model}
+      </details>`;
   }
 
   private renderDiceDistribution(state: TrackerState): string {

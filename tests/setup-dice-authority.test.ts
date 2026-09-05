@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GameSession } from "../src/content/session";
-import { buildLiveDecisionStochasticInput } from "../src/core/dice-history";
+import { buildLiveDecisionStochasticInput, noteMissingPublicRoll } from "../src/core/dice-history";
 
 const storage = new Map<string, unknown>();
 const sessions: GameSession[] = [];
@@ -87,6 +87,16 @@ describe("Balanced setup dice authority", () => {
     await vi.waitFor(() => expect(session.diceHistory.ambiguousLogIndices).toEqual([1]));
     session.setInitialPlacement(true, gameKey);
     expect(() => construct(session)).toThrow(/usable public reference-dice history/);
+  });
+
+  it("does not erase a known missing gameplay roll under a stale setup snapshot", async () => {
+    const session = sessionFor(document.createElement("div"));
+    await session.start();
+    noteMissingPublicRoll(session.diceHistory);
+    expect(session.diceHistory.missingPrefixRolls).toBe(1);
+    session.setInitialPlacement(true, gameKey);
+    expect(session.diceHistory.missingPrefixRolls).toBe(1);
+    expect(session.diceHistory.provenance).not.toBe("complete-from-first-gameplay-roll");
   });
 
   it("recovers the persisted harmless bot-placement miss captured in the live setup", async () => {

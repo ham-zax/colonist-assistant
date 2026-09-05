@@ -29,6 +29,18 @@ Install from the
 
 ## What it does
 
+Advice and the live card table share one screen. Expand **Dice & model details**
+for roll statistics; settings remain separate. Turn on **Record game** before
+playing, then use **Export compact LLM record (.txt)** even during an unfinished
+game. The export includes the extension build, dice history and uncertainty,
+and available per-decision engine, native-build, and execution diagnostics.
+
+A **Dice history** pause is an evidence guard, not a WASM crash. The assistant
+retries when the public roll history or seat mapping changes, but never replaces
+Balanced Dice with IID dice. Expand the diagnostic to see coverage and ambiguity.
+For a fresh test, reload the extension and refresh the game tab before starting
+a new game. Resetting halfway through a game cannot establish missing rolls.
+
 - Tracks exact public gains, spends, trades, and known transfers.
 - Maintains possible opponent hands after unknown steals and discards.
 - Reconciles those beliefs with exact own cards, public hand totals, and

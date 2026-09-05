@@ -138,7 +138,8 @@ export const createDiceHistoryState = (): DiceHistoryState => ({
 /** A same-game setup observation proves that no gameplay roll precedes this boundary. */
 export const observeDiceSetupBoundary = (state: DiceHistoryState): boolean => {
   // Never erase observed rolls, contradictions, or unresolved parser evidence.
-  if (state.rolls.length || state.gaps.length || state.ambiguousLogIndices.length || state.hasUnlocatedRollAmbiguity) return false;
+  if (state.rolls.length || state.gaps.length || state.ambiguousLogIndices.length ||
+      state.hasUnlocatedRollAmbiguity || (state.missingPrefixRolls ?? 0) > 0) return false;
   if (state.missingPrefixRolls === 0 && state.coverage.ranges.length <= 1) return false;
   const last = state.coverage.ranges.at(-1)?.[1];
   // The authoritative setup phase proves this entire prefix is roll-free;

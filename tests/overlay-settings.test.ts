@@ -180,7 +180,7 @@ describe("overlay settings interaction", () => {
     overlay.destroy();
   });
 
-  it("exposes Advice and Cards as pressed view buttons", () => {
+  it("keeps advice and table cards on one screen and restores both after settings", () => {
     const overlay = new AssistantOverlay(
       { ...DEFAULT_SETTINGS },
       { reset: vi.fn() },
@@ -188,31 +188,32 @@ describe("overlay settings interaction", () => {
     const shadow = document
       .querySelector<HTMLDivElement>("#colonist-assistant-root")!
       .shadowRoot!;
-    const views = shadow.querySelector<HTMLElement>(
-      "[role='group'][aria-label='Assistant views']",
-    );
-    const advice = views?.querySelector<HTMLButtonElement>(
-      "button[data-view='advice']",
-    );
-    const cards = views?.querySelector<HTMLButtonElement>(
-      "button[data-view='cards']",
-    );
+    expect(shadow.querySelector(".advice-pane")).not.toBeNull();
+    expect(shadow.querySelector(".cards-pane")).not.toBeNull();
+    expect(shadow.querySelector("button[data-view='cards']")).toBeNull();
+    shadow.querySelector<HTMLButtonElement>("button[data-view='settings']")!.click();
+    expect(shadow.querySelector(".settings-panel")).not.toBeNull();
+    shadow.querySelector<HTMLButtonElement>("button[data-view='settings']")!.click();
+    expect(shadow.querySelector(".advice-pane")).not.toBeNull();
+    expect(shadow.querySelector(".cards-pane")).not.toBeNull();
+    overlay.destroy();
+  });
 
-    expect(advice?.getAttribute("aria-pressed")).toBe("true");
-    expect(cards?.getAttribute("aria-pressed")).toBe("false");
-
-    cards?.click();
-
-    expect(
-      shadow
-        .querySelector<HTMLButtonElement>("button[data-view='advice']")
-        ?.getAttribute("aria-pressed"),
-    ).toBe("false");
-    expect(
-      shadow
-        .querySelector<HTMLButtonElement>("button[data-view='cards']")
-        ?.getAttribute("aria-pressed"),
-    ).toBe("true");
+  it("shows the actual decision error without mislabeling a validation failure as WASM", async () => {
+    const overlay = new AssistantOverlay({ ...DEFAULT_SETTINGS }, { reset: vi.fn() });
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalled());
+    const internals = overlay as unknown as {
+      decisionRuntimeError: string;
+      render: () => void;
+    };
+    internals.decisionRuntimeError = "Balanced Dice requires usable public reference-dice history";
+    internals.render();
+    const shadow = document.querySelector("#colonist-assistant-root")!.shadowRoot!;
+    expect(shadow.textContent).toContain("Balanced Dice requires usable public reference-dice history");
+    expect(shadow.querySelector(".meta-engine-chip")?.textContent).toContain("ENGINE PAUSED");
+    expect(shadow.textContent).not.toContain("WASM ERROR");
+    expect(shadow.querySelector(".cards-pane")).not.toBeNull();
+    expect(shadow.querySelector("[data-action='retry-engine']")).not.toBeNull();
     overlay.destroy();
   });
 
@@ -245,9 +246,9 @@ describe("overlay settings interaction", () => {
       .querySelector<HTMLDivElement>("#colonist-assistant-root")!
       .shadowRoot!;
 
-    shadow
-      .querySelector<HTMLElement>("[data-action='view'][data-view='cards']")!
-      .click();
+    const details = shadow.querySelector<HTMLDetailsElement>(".dice-details");
+    expect(details?.open).toBe(false);
+    details!.open = true;
 
     const chart = shadow.querySelector<HTMLElement>(
       "[aria-label='Observed dice roll distribution']",
@@ -255,11 +256,10 @@ describe("overlay settings interaction", () => {
     const cardsHeading = shadow.querySelector<HTMLElement>(".cards-heading");
     const seven = chart?.querySelector<HTMLElement>("[data-dice-total='7']");
     const eight = chart?.querySelector<HTMLElement>("[data-dice-total='8']");
-    expect(cardsHeading?.textContent?.trim()).toBe("Table cards");
+    expect(cardsHeading?.querySelector("h2")?.textContent?.trim()).toBe("Table cards");
     expect(cardsHeading?.querySelector("p")).toBeNull();
-    expect(chart?.previousElementSibling?.classList.contains("player-matrix")).toBe(
-      true,
-    );
+    expect(details?.previousElementSibling?.classList.contains("player-matrix")).toBe(true);
+    expect(chart?.parentElement).toBe(details);
     expect(seven?.getAttribute("aria-label")).toBe(
       "7 rolled 2 times; 0.5 expected after 3 rolls",
     );
@@ -648,7 +648,7 @@ describe("overlay settings interaction", () => {
 
     const status = internals.renderEngineMetaChip();
     expect(status).toContain('role="status"');
-    expect(status).toContain("WASM ERROR");
+    expect(status).toContain("ENGINE PAUSED");
     expect(status).not.toContain("<button");
     overlay.destroy();
   });
@@ -900,6 +900,67 @@ describe("overlay settings interaction", () => {
     expect(advice).toContain("Calculating the next action");
     expect(advice).not.toContain("Send a counteroffer");
     overlay.destroy();
+  });
+
+  it("resumes a Balanced decision only after public evidence becomes usable", async () => {
+    const tracker = reduceTracker(createTrackerState(), { type: "discover", player: "Alice" });
+    const history = createDiceHistoryState();
+    const overlay = new AssistantOverlay({ ...DEFAULT_SETTINGS }, { reset: vi.fn() });
+    await Promise.resolve();
+    const internals = overlay as unknown as {
+      board: Parameters<AssistantOverlay["updateBoard"]>[0];
+      session?: { diceHistory: typeof history };
+      decisionRuntimeError: string;
+      render: () => void;
+      scheduleDecisionAnalysis: (state: typeof tracker, player: string) => void;
+    };
+    vi.spyOn(internals, "render").mockImplementation(() => undefined);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    internals.board = {
+      hexes: [], vertices: [], edges: [], diceMode: "balanced", gameKey: "startup-race",
+      myPlayer: "Alice", currentPlayer: "Alice", playerOrder: ["Alice", "Bob"],
+      isMyTurn: true, hasRolled: true, action: "none",
+      localSeatDiagnostics: {
+        seatSource: "gameController.myColor+currentUserId+gameUserStates",
+        identity: {
+          status: "resolved", reason: "cross-checked",
+          source: "controller+account-user-id+store-roster",
+          currentUserIdAvailable: true, currentUserMatchColors: [1],
+          myColor: 1, currentUserColor: 1,
+        },
+      },
+    };
+    const requests = () => sendMessage.mock.calls.filter(([message]) => message.stochastic);
+    sendMessage.mockClear();
+    sendMessage.mockImplementation((message: { id: number }) =>
+      Promise.resolve({ id: message.id, analysis: { engine: "deep-search", runtime: "background-wasm", players: [] } }),
+    );
+    try {
+      // The board can arrive before attach()/GameSession.start() completes.
+      internals.scheduleDecisionAnalysis(tracker, "Alice");
+      expect(internals.decisionRuntimeError).toMatch(/usable public reference-dice history/);
+      expect(requests()).toHaveLength(0);
+      internals.session = { diceHistory: history };
+      internals.scheduleDecisionAnalysis(tracker, "Alice");
+      expect(requests()).toHaveLength(0);
+      expect(internals.decisionRuntimeError).toMatch(/usable public reference-dice history/);
+      // An unrelated board update must not turn invalid history into M0.
+      internals.board.turn = 2;
+      internals.scheduleDecisionAnalysis(tracker, "Alice");
+      expect(requests()).toHaveLength(0);
+      observeLogCoverage(history, [0]);
+      appendPublicDiceRoll(history, {
+        actor: "Alice", total: 8, dice: [3, 5], eventId: "startup-roll", logIndex: 0,
+      });
+      internals.scheduleDecisionAnalysis(tracker, "Alice");
+      expect(requests()).toHaveLength(1);
+      expect(requests()[0]![0].stochastic.model).toBe("mref-colonist-linked-2024-v1");
+      expect(internals.decisionRuntimeError).toBe("");
+      await Promise.resolve();
+    } finally {
+      overlay.destroy();
+    }
   });
 
   it("revokes an in-flight Mref result when dice authority becomes ambiguous", async () => {

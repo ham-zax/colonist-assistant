@@ -76,6 +76,7 @@ export const OVERLAY_STYLES = `
     align-items: center;
     gap: 6px;
     padding: 0 8px;
+    margin-left: auto;
     color: var(--ca-quiet);
     font-size: 11px;
     font-weight: 700;
@@ -89,40 +90,6 @@ export const OVERLAY_STYLES = `
     background: currentColor;
   }
   .status.live { color: var(--ca-accent); }
-  .segmented-control {
-    display: inline-flex;
-    align-items: center;
-    padding: 2px;
-    border: 1px solid var(--ca-line);
-    border-radius: 6px;
-    background: var(--ca-bg);
-    margin-left: auto;
-    margin-right: 4px;
-    flex-shrink: 0;
-  }
-  .segment {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    height: 26px;
-    padding: 0 9px;
-    border: 0;
-    border-radius: 4px;
-    color: var(--ca-copy);
-    background: transparent;
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: .03em;
-    cursor: pointer;
-    transition: background-color .15s ease, color .15s ease;
-  }
-  .segment:hover { color: var(--ca-ink); }
-  .segment.active {
-    color: var(--ca-ink);
-    background: var(--ca-raised);
-    box-shadow: 0 1px 3px rgba(0, 0, 0, .3);
-  }
-  .assistant.collapsed .segmented-control { display: none; }
   .meta-engine-chip {
     display: inline-flex;
     align-items: center;
@@ -652,7 +619,7 @@ export const OVERLAY_STYLES = `
     align-items: center;
     padding: 0 14px;
   }
-  .cards-heading h1 {
+  .cards-heading h2 {
     margin: 0;
     font-size: 16px;
     line-height: 1.2;
@@ -660,7 +627,7 @@ export const OVERLAY_STYLES = `
   .matrix-head,
   .matrix-row {
     display: grid;
-    grid-template-columns: minmax(88px, 1fr) repeat(5, 36px) 39px;
+    grid-template-columns: minmax(72px, 1.65fr) repeat(5, minmax(24px, 1fr)) minmax(30px, .85fr);
     align-items: center;
   }
   .matrix-head {
@@ -1065,13 +1032,50 @@ export const OVERLAY_STYLES = `
   .empty h1 { max-width: 300px; margin: 0; font-size: 23px; line-height: 1.05; }
   .empty p { max-width: 300px; margin: 8px 0 0; color: var(--ca-copy); font-size: 12.5px; }
   .compact-empty { min-height: 190px; }
+  /* Keep the card ledger visible even when an error or explanation is long. */
+  .overview {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    max-height: calc(var(--ca-interface-max-height, min(72vh, 650px)) - 56px);
+  }
+  .advice-pane {
+    flex: 1 1 auto;
+    min-height: 110px;
+    overflow: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--ca-line-strong) var(--ca-raised);
+  }
+  .cards-pane { flex: 0 0 auto; }
+  .overview .decision { padding: 13px 14px 14px; }
+  .overview .decision-meta { margin-bottom: 9px; }
+  .overview .decision h1 { font-size: 23px; }
+  .overview .why { margin: 9px 0 11px; overflow-wrap: anywhere; }
+  .overview .empty { min-height: 130px; padding: 18px 14px; }
+  .overview .empty-mark { display: none; }
+  .overview .empty h1 { font-size: 21px; }
+  .overview .cards-heading { min-height: 36px; justify-content: space-between; gap: 8px; }
+  .cards-heading > span { color: var(--ca-quiet); font-size: 10px; letter-spacing: .045em; }
+  .overview .matrix-row { min-height: 44px; }
+  .overview .matrix-head { min-height: 30px; }
+  .dice-details { border-bottom: 1px solid var(--ca-line); }
+  .dice-details > summary {
+    padding: 10px 14px;
+    color: var(--ca-copy);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .dice-details > summary:hover { color: var(--ca-accent); }
+  .dice-details[open] > summary { color: var(--ca-accent); }
+  .dice-details .dice-distribution { border-top: 1px solid var(--ca-line); }
   @media (max-width: 700px) {
     .assistant {
       width: var(--ca-interface-width, calc(100vw - 16px));
     }
     .status { display: none; }
+    .topbar .product-name { flex: 1; }
     .matrix-head,
-    .matrix-row { grid-template-columns: minmax(82px, 1fr) repeat(5, 34px) 37px; }
+    .matrix-row { grid-template-columns: minmax(68px, 1.65fr) repeat(5, minmax(22px, 1fr)) minmax(26px, .85fr); }
   }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation: none !important; transition: none !important; }
