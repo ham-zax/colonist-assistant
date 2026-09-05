@@ -136,6 +136,71 @@ const unmatchedCanConcealGameplayRoll = (
   classification: ReturnType<typeof classifyUnmatchedLog>,
 ): boolean => classification.reason === "unrecognized-log-format";
 
+const validStoredLogIndex = (value: number | undefined): value is number =>
+  value !== undefined && Number.isInteger(value) && value >= 0;
+
+const legacyDiceAmbiguityEvidence = (
+  stored: RestorableSession,
+): { ambiguousLogIndices: number[]; hasUnlocatedRollAmbiguity: boolean } => {
+  const ambiguous = new Set<number>();
+  let retainedIntegrityCount = 0;
+  let hasUnlocatedRollAmbiguity = false;
+
+  for (const sample of stored.unmatchedSamples ?? []) {
+    if (sample.reason !== "unrecognized-log-format") continue;
+    const count =
+      Number.isInteger(sample.count) && sample.count > 0 ? sample.count : 1;
+    retainedIntegrityCount += count;
+
+    const first = validStoredLogIndex(sample.firstLogIndex)
+      ? sample.firstLogIndex
+      : undefined;
+    const last = validStoredLogIndex(sample.lastLogIndex)
+      ? sample.lastLogIndex
+      : undefined;
+    if (first !== undefined) ambiguous.add(first);
+    if (last !== undefined) ambiguous.add(last);
+
+    const fullyLocated =
+      count === 1
+        ? first !== undefined && last !== undefined && first === last
+        : count === 2 && first !== undefined && last !== undefined;
+    if (!fullyLocated) hasUnlocatedRollAmbiguity = true;
+  }
+
+  const storedIntegrityCount =
+    stored.unmatchedIntegrityCount !== undefined &&
+    Number.isInteger(stored.unmatchedIntegrityCount) &&
+    stored.unmatchedIntegrityCount > 0
+      ? stored.unmatchedIntegrityCount
+      : 0;
+  if (storedIntegrityCount > retainedIntegrityCount) {
+    hasUnlocatedRollAmbiguity = true;
+  }
+
+  return {
+    ambiguousLogIndices: [...ambiguous].sort((left, right) => left - right),
+    hasUnlocatedRollAmbiguity,
+  };
+};
+
+const restoreSchema4DiceHistory = (stored: StoredSession): DiceHistoryState => {
+  if (
+    Object.prototype.hasOwnProperty.call(
+      stored.diceHistory,
+      "ambiguousLogIndices",
+    )
+  ) {
+    return restoreDiceHistoryState(stored.diceHistory);
+  }
+  const legacy = legacyDiceAmbiguityEvidence(stored);
+  return restoreDiceHistoryState({
+    ...stored.diceHistory,
+    ambiguousLogIndices: legacy.ambiguousLogIndices,
+    hasUnlocatedRollAmbiguity: legacy.hasUnlocatedRollAmbiguity,
+  });
+};
+
 const MAX_SEEN_IDS = 2600;
 const MAX_UNMATCHED_SAMPLES = 24;
 const MAX_UNMATCHED_SAMPLE_CHARS = 220;
@@ -510,20 +575,35 @@ export class GameSession {
         timestamp: Date.now(),
         raw: snapshot.serialText,
       } as StoredEvent, this.myPlayer);
-      this.events.push(stored);
       if (stored.type === "roll") {
-        if (stored.dice) {
-          appendPublicDiceRoll(this.diceHistory, {
-            actor: stored.player,
-            total: stored.dice[0] + stored.dice[1],
-            dice: [...stored.dice] as [number, number],
-            eventId: stored.id,
-            ...(stored.index !== undefined ? { logIndex: stored.index } : {}),
-          });
-        } else {
-          noteMissingPublicRoll(this.diceHistory);
+        try {
+          if (stored.dice) {
+            appendPublicDiceRoll(this.diceHistory, {
+              actor: stored.player,
+              total: stored.dice[0] + stored.dice[1],
+              dice: [...stored.dice] as [number, number],
+              eventId: stored.id,
+              ...(stored.index !== undefined ? { logIndex: stored.index } : {}),
+            });
+          } else {
+            noteMissingPublicRoll(this.diceHistory);
+          }
+        } catch (error) {
+          const isIndexedDiceConflict =
+            stored.index !== undefined &&
+            this.diceHistory.ambiguousLogIndices.includes(stored.index) &&
+            error instanceof Error &&
+            error.message ===
+              `Conflicting public dice evidence for log index ${stored.index}`;
+          if (!isIndexedDiceConflict) throw error;
+          // The dice history now carries a sticky exact-index ambiguity. Do not
+          // admit the contradictory rerender into generic tracker history, but
+          // do persist/publish the stochastic authority downgrade.
+          changed = true;
+          continue;
         }
       }
+      this.events.push(stored);
       this.state = reduceTracker(this.state, stored, stored);
       changed = true;
     }
@@ -610,15 +690,21 @@ export class GameSession {
         noteMissingPublicRoll(history);
       }
     }
+    const legacy = legacyDiceAmbiguityEvidence(stored);
+    const migrated = restoreDiceHistoryState({
+      ...serializeDiceHistoryState(history),
+      ambiguousLogIndices: legacy.ambiguousLogIndices,
+      hasUnlocatedRollAmbiguity: legacy.hasUnlocatedRollAmbiguity,
+    });
     // A schema-3 partial session never proves a complete dice prefix merely
     // because its retained parsed events happen to begin at log index zero.
     if (
       stored.partialHistory &&
-      history.provenance === "complete-from-first-gameplay-roll"
+      migrated.provenance === "complete-from-first-gameplay-roll"
     ) {
-      history.provenance = "unknown";
+      migrated.provenance = "unknown";
     }
-    return history;
+    return migrated;
   }
 
   private async restore(): Promise<void> {
@@ -645,7 +731,7 @@ export class GameSession {
     this.partialHistory = stored.partialHistory;
     this.diceHistory =
       stored.schema === 4
-        ? restoreDiceHistoryState(stored.diceHistory)
+        ? restoreSchema4DiceHistory(stored)
         : this.migrateLegacyDiceHistory(stored);
     this.unmatchedCount = stored.unmatchedCount;
     this.unmatchedIntegrityCount =

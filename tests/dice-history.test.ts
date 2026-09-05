@@ -56,22 +56,39 @@ describe("public dice history", () => {
     });
   });
 
-  it("fails closed on conflicting semantic dice evidence at one stable log index", () => {
+  it("keeps conflicting same-index dice evidence sticky and unavailable to Balanced decisions", () => {
     const state = createDiceHistoryState();
-    observeLogCoverage(state, [4]);
+    observeLogCoverage(state, [0]);
     appendPublicDiceRoll(state, {
-      ...roll("presentation-a", "P0", 8, 4),
+      ...roll("presentation-a", "P0", 8, 0),
       dice: [3, 5],
     });
+    expect(
+      buildLiveDecisionStochasticInput("balanced", state, ["P0"]),
+    ).toMatchObject({ model: "mref-colonist-linked-2024-v1" });
 
     expect(() =>
       appendPublicDiceRoll(state, {
-        ...roll("presentation-b", "P0", 9, 4),
+        ...roll("presentation-b", "P0", 9, 0),
         dice: [4, 5],
       }),
-    ).toThrow(/log index 4/);
+    ).toThrow(/log index 0/);
     expect(state.rolls).toHaveLength(1);
     expect(state.rolls[0]?.total).toBe(8);
+    expect(state.ambiguousLogIndices).toEqual([0]);
+    expect(state.provenance).toBe("gapped");
+    expect(state.hasUnknownRollGap).toBe(true);
+    expect(() =>
+      buildLiveDecisionStochasticInput("balanced", state, ["P0"]),
+    ).toThrow(/usable public reference-dice history/);
+
+    observeLogCoverage(state, [0]);
+    appendPublicDiceRoll(state, {
+      ...roll("presentation-c", "P0", 8, 0),
+      dice: [3, 5],
+    });
+    expect(state.ambiguousLogIndices).toEqual([0]);
+    expect(state.provenance).toBe("gapped");
   });
 
   it("marks coverage complete when indexed observation is continuous from zero", () => {
@@ -152,6 +169,7 @@ describe("public dice history", () => {
 
     const restored = restoreDiceHistoryState(serializeDiceHistoryState(state));
     expect(restored.ambiguousLogIndices).toEqual([1]);
+    expect(restored.hasUnlocatedRollAmbiguity).toBe(false);
     expect(restored.provenance).toBe("gapped");
 
     observeLogCoverage(restored, [1]);

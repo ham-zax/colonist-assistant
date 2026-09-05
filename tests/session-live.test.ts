@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { GameSession } from "../src/content/session";
+import { buildLiveDecisionStochasticInput } from "../src/core/dice-history";
 import { parseBankShortageNotice } from "../src/core/parser";
 
 const localStorage = new Map<string, unknown>();
@@ -125,6 +126,65 @@ describe("live log session scanning", () => {
       total: 8,
       logIndex: 1,
     });
+    expect(
+      buildLiveDecisionStochasticInput("balanced", session.diceHistory, ["Alice"]),
+    ).toMatchObject({ model: "mref-colonist-linked-2024-v1" });
+    session.stop();
+  });
+
+  it("keeps same-index contradictory dice semantics out of Mref authority across later matching rerenders", async () => {
+    const root = document.createElement("div");
+    const entry = diceMessage(1, "Alice", 3, 5);
+    root.append(message(0, "Happy settling!"), entry);
+    document.body.append(root);
+    const session = new GameSession(root, vi.fn(), "dice-conflict-rerender-game");
+
+    await session.start();
+    expect(
+      buildLiveDecisionStochasticInput("balanced", session.diceHistory, ["Alice"]),
+    ).toMatchObject({ model: "mref-colonist-linked-2024-v1" });
+
+    const conflicting = diceMessage(1, "Alice", 4, 5);
+    conflicting.firstChild!.nodeValue = "Alice rolled differently";
+    entry.replaceWith(conflicting);
+    await vi.waitFor(() => {
+      expect(session.diceHistory.ambiguousLogIndices).toEqual([1]);
+    });
+
+    expect(session.diceHistory.rolls).toHaveLength(1);
+    expect(session.diceHistory.rolls[0]).toMatchObject({
+      actor: "Alice",
+      total: 8,
+      dice: [3, 5],
+      logIndex: 1,
+    });
+    expect(session.diceHistory.provenance).toBe("gapped");
+    expect(session.diceHistory.hasUnknownRollGap).toBe(true);
+    expect(() =>
+      buildLiveDecisionStochasticInput("balanced", session.diceHistory, ["Alice"]),
+    ).toThrow(/usable public reference-dice history/);
+    await vi.waitFor(() => {
+      expect(localStorage.get(`colonistAssistantSession:${session.id}`)).toMatchObject({
+        diceHistory: {
+          ambiguousLogIndices: [1],
+          provenance: "gapped",
+        },
+      });
+    });
+
+    const matching = diceMessage(1, "Alice", 3, 5);
+    matching.firstChild!.nodeValue = "Alice rolled again";
+    conflicting.replaceWith(matching);
+    await vi.waitFor(() => {
+      expect(session.events.filter((event) => event.type === "roll")).toHaveLength(2);
+    });
+
+    expect(session.diceHistory.rolls).toHaveLength(1);
+    expect(session.diceHistory.ambiguousLogIndices).toEqual([1]);
+    expect(session.diceHistory.provenance).toBe("gapped");
+    expect(() =>
+      buildLiveDecisionStochasticInput("balanced", session.diceHistory, ["Alice"]),
+    ).toThrow(/usable public reference-dice history/);
     session.stop();
   });
 
@@ -215,6 +275,140 @@ describe("live log session scanning", () => {
     second.stop();
   });
 
+  it("reconstructs parent schema 4 indexed integrity ambiguity before restoring Balanced authority", async () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const session = new GameSession(root, vi.fn(), "legacy-schema4-indexed-ambiguity");
+    localStorage.set(`colonistAssistantSession:${session.id}`, {
+      schema: 4,
+      id: session.id,
+      page: `${location.origin}${location.pathname}${location.search}`,
+      gameKey: "legacy-schema4-indexed-ambiguity",
+      startedAt: 1,
+      updatedAt: 2,
+      events: [
+        {
+          type: "roll",
+          player: "Alice",
+          dice: [3, 5],
+          id: "legacy-roll-0",
+          index: 0,
+          timestamp: 2,
+          raw: "Alice rolled :die-3: :die-5:",
+        },
+      ],
+      seenIds: ["legacy-roll-0"],
+      partialHistory: false,
+      diceHistory: {
+        rolls: [
+          {
+            actor: "Alice",
+            total: 8,
+            dice: [3, 5],
+            eventId: "legacy-roll-0",
+            logIndex: 0,
+          },
+        ],
+        provenance: "complete-from-first-gameplay-roll",
+        coverage: { ranges: [[0, 1]] },
+        gaps: [],
+        hasUnknownRollGap: false,
+      },
+      unmatchedCount: 1,
+      unmatchedIntegrityCount: 1,
+      unmatchedSamples: [
+        {
+          signature: "legacy-unknown-1",
+          count: 1,
+          firstSeenAt: 2,
+          lastSeenAt: 2,
+          firstLogIndex: 1,
+          lastLogIndex: 1,
+          reason: "unrecognized-log-format",
+          affectsIntegrity: true,
+          sample: "Alice cast the dice and the table reported eight",
+        },
+      ],
+    });
+
+    await session.start();
+
+    expect(session.diceHistory.ambiguousLogIndices).toEqual([1]);
+    expect(session.diceHistory.hasUnlocatedRollAmbiguity).toBe(false);
+    expect(session.diceHistory.provenance).toBe("gapped");
+    expect(() =>
+      buildLiveDecisionStochasticInput("balanced", session.diceHistory, ["Alice"]),
+    ).toThrow(/usable public reference-dice history/);
+    session.stop();
+  });
+
+  it("keeps legacy integrity evidence unavailable when retained samples cannot locate every ambiguous index", async () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const session = new GameSession(root, vi.fn(), "legacy-schema4-unlocated-ambiguity");
+    localStorage.set(`colonistAssistantSession:${session.id}`, {
+      schema: 4,
+      id: session.id,
+      page: `${location.origin}${location.pathname}${location.search}`,
+      gameKey: "legacy-schema4-unlocated-ambiguity",
+      startedAt: 1,
+      updatedAt: 2,
+      events: [
+        {
+          type: "roll",
+          player: "Alice",
+          dice: [3, 5],
+          id: "legacy-roll-0",
+          index: 0,
+          timestamp: 2,
+          raw: "Alice rolled :die-3: :die-5:",
+        },
+      ],
+      seenIds: ["legacy-roll-0"],
+      partialHistory: false,
+      diceHistory: {
+        rolls: [
+          {
+            actor: "Alice",
+            total: 8,
+            dice: [3, 5],
+            eventId: "legacy-roll-0",
+            logIndex: 0,
+          },
+        ],
+        provenance: "complete-from-first-gameplay-roll",
+        coverage: { ranges: [[0, 3]] },
+        gaps: [],
+        hasUnknownRollGap: false,
+      },
+      unmatchedCount: 3,
+      unmatchedIntegrityCount: 3,
+      unmatchedSamples: [
+        {
+          signature: "legacy-repeated-unknown",
+          count: 3,
+          firstSeenAt: 2,
+          lastSeenAt: 4,
+          firstLogIndex: 1,
+          lastLogIndex: 3,
+          reason: "unrecognized-log-format",
+          affectsIntegrity: true,
+          sample: "Alice cast the dice in an unknown format",
+        },
+      ],
+    });
+
+    await session.start();
+
+    expect(session.diceHistory.ambiguousLogIndices).toEqual([1, 3]);
+    expect(session.diceHistory.hasUnlocatedRollAmbiguity).toBe(true);
+    expect(session.diceHistory.provenance).toBe("gapped");
+    expect(() =>
+      buildLiveDecisionStochasticInput("balanced", session.diceHistory, ["Alice"]),
+    ).toThrow(/usable public reference-dice history/);
+    session.stop();
+  });
+
   it("migrates schema 3 roll evidence conservatively without inferring completeness", async () => {
     const root = document.createElement("div");
     document.body.append(root);
@@ -249,6 +443,195 @@ describe("live log session scanning", () => {
     expect(session.diceHistory.missingPrefixRolls).toBeUndefined();
     session.stop();
   });
+
+  it("carries trailing schema 3 integrity ambiguity into dice authority", async () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const session = new GameSession(root, vi.fn(), "legacy-schema3-trailing-ambiguity");
+    localStorage.set(`colonistAssistantSession:${session.id}`, {
+      schema: 3,
+      id: session.id,
+      page: `${location.origin}${location.pathname}${location.search}`,
+      gameKey: "legacy-schema3-trailing-ambiguity",
+      startedAt: 1,
+      updatedAt: 2,
+      events: [
+        {
+          type: "roll",
+          player: "Alice",
+          dice: [3, 5],
+          id: "legacy-roll-0",
+          index: 0,
+          timestamp: 2,
+          raw: "Alice rolled :die-3: :die-5:",
+        },
+      ],
+      seenIds: ["legacy-roll-0"],
+      partialHistory: false,
+      unmatchedCount: 1,
+      unmatchedIntegrityCount: 1,
+      unmatchedSamples: [
+        {
+          signature: "legacy-schema3-unknown-1",
+          count: 1,
+          firstSeenAt: 3,
+          lastSeenAt: 3,
+          firstLogIndex: 1,
+          lastLogIndex: 1,
+          reason: "unrecognized-log-format",
+          affectsIntegrity: true,
+          sample: "Alice cast the dice in an unknown format",
+        },
+      ],
+    });
+
+    await session.start();
+
+    expect(session.diceHistory.ambiguousLogIndices).toEqual([1]);
+    expect(session.diceHistory.hasUnlocatedRollAmbiguity).toBe(false);
+    expect(session.diceHistory.provenance).toBe("gapped");
+    expect(() =>
+      buildLiveDecisionStochasticInput("balanced", session.diceHistory, ["Alice"]),
+    ).toThrow(/usable public reference-dice history/);
+    session.stop();
+  });
+
+  it("does not poison parent schema 4 dice completeness from known harmless unmatched messages", async () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const session = new GameSession(root, vi.fn(), "legacy-schema4-harmless-unmatched");
+    localStorage.set(`colonistAssistantSession:${session.id}`, {
+      schema: 4,
+      id: session.id,
+      page: `${location.origin}${location.pathname}${location.search}`,
+      gameKey: "legacy-schema4-harmless-unmatched",
+      startedAt: 1,
+      updatedAt: 2,
+      events: [
+        {
+          type: "roll",
+          player: "Alice",
+          dice: [3, 5],
+          id: "legacy-roll-0",
+          index: 0,
+          timestamp: 2,
+          raw: "Alice rolled :die-3: :die-5:",
+        },
+      ],
+      seenIds: ["legacy-roll-0"],
+      partialHistory: false,
+      diceHistory: {
+        rolls: [
+          {
+            actor: "Alice",
+            total: 8,
+            dice: [3, 5],
+            eventId: "legacy-roll-0",
+            logIndex: 0,
+          },
+        ],
+        provenance: "complete-from-first-gameplay-roll",
+        coverage: { ranges: [[0, 1]] },
+        gaps: [],
+        hasUnknownRollGap: false,
+      },
+      unmatchedCount: 1,
+      unmatchedIntegrityCount: 0,
+      unmatchedSamples: [
+        {
+          signature: "legacy-happy-settling",
+          count: 1,
+          firstSeenAt: 3,
+          lastSeenAt: 3,
+          firstLogIndex: 1,
+          lastLogIndex: 1,
+          reason: "known-ignored-system-message",
+          affectsIntegrity: false,
+          sample: "Happy settling!",
+        },
+      ],
+    });
+
+    await session.start();
+
+    expect(session.diceHistory.ambiguousLogIndices).toEqual([]);
+    expect(session.diceHistory.hasUnlocatedRollAmbiguity).toBe(false);
+    expect(session.diceHistory.provenance).toBe("complete-from-first-gameplay-roll");
+    expect(
+      buildLiveDecisionStochasticInput("balanced", session.diceHistory, ["Alice"]),
+    ).toMatchObject({ model: "mref-colonist-linked-2024-v1" });
+    session.stop();
+  });
+
+  it("trusts current schema 4 explicit ambiguity markers instead of replaying historical unmatched counters", async () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const session = new GameSession(root, vi.fn(), "current-schema4-explicit-ambiguity-marker");
+    localStorage.set(`colonistAssistantSession:${session.id}`, {
+      schema: 4,
+      id: session.id,
+      page: `${location.origin}${location.pathname}${location.search}`,
+      gameKey: "current-schema4-explicit-ambiguity-marker",
+      startedAt: 1,
+      updatedAt: 2,
+      events: [
+        {
+          type: "roll",
+          player: "Alice",
+          dice: [3, 5],
+          id: "current-roll-0",
+          index: 0,
+          timestamp: 2,
+          raw: "Alice rolled :die-3: :die-5:",
+        },
+      ],
+      seenIds: ["current-roll-0"],
+      partialHistory: false,
+      diceHistory: {
+        rolls: [
+          {
+            actor: "Alice",
+            total: 8,
+            dice: [3, 5],
+            eventId: "current-roll-0",
+            logIndex: 0,
+          },
+        ],
+        provenance: "complete-from-first-gameplay-roll",
+        coverage: { ranges: [[0, 1]] },
+        ambiguousLogIndices: [],
+        hasUnlocatedRollAmbiguity: false,
+        gaps: [],
+        hasUnknownRollGap: false,
+      },
+      unmatchedCount: 1,
+      unmatchedIntegrityCount: 1,
+      unmatchedSamples: [
+        {
+          signature: "resolved-current-unknown",
+          count: 1,
+          firstSeenAt: 2,
+          lastSeenAt: 2,
+          firstLogIndex: 1,
+          lastLogIndex: 1,
+          reason: "unrecognized-log-format",
+          affectsIntegrity: true,
+          sample: "Previously unresolved rendering at index one",
+        },
+      ],
+    });
+
+    await session.start();
+
+    expect(session.diceHistory.ambiguousLogIndices).toEqual([]);
+    expect(session.diceHistory.hasUnlocatedRollAmbiguity).toBe(false);
+    expect(session.diceHistory.provenance).toBe("complete-from-first-gameplay-roll");
+    expect(
+      buildLiveDecisionStochasticInput("balanced", session.diceHistory, ["Alice"]),
+    ).toMatchObject({ model: "mref-colonist-linked-2024-v1" });
+    session.stop();
+  });
+
   it("recognizes a Colonist bank-shortage notice without failing integrity", async () => {
     const text =
       "Not enough wool for all players. 2 are left, and 3 were needed.";

@@ -43,8 +43,10 @@ export interface DiceHistoryState {
   rolls: PublicDiceRoll[];
   provenance: DiceHistoryProvenance;
   coverage: DiceLogCoverage;
-  /** Indexed log entries whose unparsed semantics could conceal a gameplay roll. */
+  /** Indexed log entries whose unresolved semantics could conceal contradictory gameplay-roll evidence. */
   ambiguousLogIndices: number[];
+  /** Legacy integrity evidence that cannot be assigned to exact log indexes. */
+  hasUnlocatedRollAmbiguity: boolean;
   /** Independently established missing gameplay-roll count before rolls[0]. */
   missingPrefixRolls?: number;
   /** Missing gameplay-roll intervals. Omitted missingRolls means the gap length is unknown. */
@@ -68,6 +70,7 @@ export interface StoredDiceHistoryState {
   provenance: DiceHistoryProvenance;
   coverage: DiceLogCoverage;
   ambiguousLogIndices?: number[];
+  hasUnlocatedRollAmbiguity?: boolean;
   missingPrefixRolls?: number;
   gaps: DiceHistoryGap[];
   hasUnknownRollGap: boolean;
@@ -82,7 +85,8 @@ const refreshProvenance = (state: DiceHistoryState): void => {
   const explicitUnknownGap = state.gaps.some(
     (gap) => gap.missingRolls === undefined,
   );
-  const parserAmbiguity = state.ambiguousLogIndices.length > 0;
+  const parserAmbiguity =
+    state.ambiguousLogIndices.length > 0 || state.hasUnlocatedRollAmbiguity;
   state.hasUnknownRollGap = coverageGap || explicitUnknownGap || parserAmbiguity;
   if (coverageGap || state.gaps.length > 0 || parserAmbiguity) {
     state.provenance = "gapped";
@@ -120,9 +124,22 @@ export const createDiceHistoryState = (): DiceHistoryState => ({
   provenance: "unknown",
   coverage: { ranges: [] },
   ambiguousLogIndices: [],
+  hasUnlocatedRollAmbiguity: false,
   gaps: [],
   hasUnknownRollGap: false,
 });
+
+const markAmbiguousLogIndex = (
+  state: DiceHistoryState,
+  logIndex: number,
+): void => {
+  if (!validIndex(logIndex)) return;
+  if (!state.ambiguousLogIndices.includes(logIndex)) {
+    state.ambiguousLogIndices.push(logIndex);
+    state.ambiguousLogIndices.sort((left, right) => left - right);
+  }
+  refreshProvenance(state);
+};
 
 export const observeLogCoverage = (
   state: DiceHistoryState,
@@ -131,8 +148,13 @@ export const observeLogCoverage = (
   const observed = indices.filter(validIndex);
   if (observed.length) {
     const resolved = new Set(observed);
+    const occupiedRollIndices = new Set(
+      state.rolls.flatMap((roll) =>
+        roll.logIndex === undefined ? [] : [roll.logIndex],
+      ),
+    );
     state.ambiguousLogIndices = state.ambiguousLogIndices.filter(
-      (index) => !resolved.has(index),
+      (index) => !resolved.has(index) || occupiedRollIndices.has(index),
     );
   }
   const ranges = [
@@ -149,11 +171,7 @@ export const noteRollCapableLogAmbiguity = (
 ): void => {
   if (!validIndex(logIndex)) return;
   if (state.rolls.some((roll) => roll.logIndex === logIndex)) return;
-  if (!state.ambiguousLogIndices.includes(logIndex)) {
-    state.ambiguousLogIndices.push(logIndex);
-    state.ambiguousLogIndices.sort((left, right) => left - right);
-  }
-  refreshProvenance(state);
+  markAmbiguousLogIndex(state, logIndex);
 };
 
 const validateRoll = (roll: PublicDiceRoll): void => {
@@ -230,6 +248,7 @@ export const appendPublicDiceRoll = (
         indexed.total !== roll.total ||
         diceConflict
       ) {
+        markAmbiguousLogIndex(state, roll.logIndex);
         throw new Error(
           `Conflicting public dice evidence for log index ${roll.logIndex}`,
         );
@@ -274,6 +293,7 @@ export const cloneDiceHistoryState = (
   provenance: state.provenance,
   coverage: { ranges: state.coverage.ranges.map(([start, end]) => [start, end]) },
   ambiguousLogIndices: [...state.ambiguousLogIndices],
+  hasUnlocatedRollAmbiguity: state.hasUnlocatedRollAmbiguity,
   ...(state.missingPrefixRolls !== undefined
     ? { missingPrefixRolls: state.missingPrefixRolls }
     : {}),
@@ -293,6 +313,7 @@ export const restoreDiceHistoryState = (
   restored.ambiguousLogIndices = [
     ...new Set((stored.ambiguousLogIndices ?? []).filter(validIndex)),
   ].sort((left, right) => left - right);
+  restored.hasUnlocatedRollAmbiguity = stored.hasUnlocatedRollAmbiguity === true;
   restored.missingPrefixRolls =
     stored.missingPrefixRolls !== undefined && validIndex(stored.missingPrefixRolls)
       ? stored.missingPrefixRolls
@@ -405,6 +426,9 @@ export const diceHistoryDigest = (state: DiceHistoryState): string =>
       coverage: state.coverage.ranges,
       ...(state.ambiguousLogIndices.length
         ? { ambiguousLogIndices: state.ambiguousLogIndices }
+        : {}),
+      ...(state.hasUnlocatedRollAmbiguity
+        ? { hasUnlocatedRollAmbiguity: true }
         : {}),
       hasUnknownRollGap: state.hasUnknownRollGap,
       missingPrefixRolls: state.missingPrefixRolls ?? null,
