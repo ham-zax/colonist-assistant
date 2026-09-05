@@ -2658,22 +2658,36 @@ export class AssistantOverlay {
       expected === undefined ||
       expected < 0 ||
       !order?.length ||
-      !board.currentPlayer ||
-      history.rolls.length !== expected + 1
+      !board.currentPlayer
     ) {
       return false;
     }
-    const latest = history.rolls.at(-1);
-    const expectedActor = order[expected % order.length];
-    if (!latest || latest.actor !== expectedActor || latest.actor !== board.currentPlayer) {
-      return false;
-    }
+    const expectedActorIndex = expected % order.length;
+    if (order[expectedActorIndex] !== board.currentPlayer) return false;
+
     try {
-      // Prove that the only mismatch is a board snapshot exactly one current
-      // roll behind the already-rendered public log. Any ambiguity/conflict
-      // still fails closed in the normal constructor below.
-      buildLiveDecisionStochasticInput("balanced", history, order, expected + 1);
-      return true;
+      // If the current board count already reconciles, there is no skew to wait on.
+      buildLiveDecisionStochasticInput("balanced", history, order, expected);
+      return false;
+    } catch {
+      // Continue only if exactly one additional public gameplay roll produces a
+      // coherent Mref history. Raw history length is not meaningful here because
+      // the same roll may be present from both board and DOM authorities.
+    }
+
+    try {
+      const next = buildLiveDecisionStochasticInput(
+        "balanced",
+        history,
+        order,
+        expected + 1,
+      );
+      const latest = next.rolls?.at(-1);
+      return Boolean(
+        latest &&
+        latest.ordinal === expected &&
+        latest.actor === expectedActorIndex,
+      );
     } catch {
       return false;
     }

@@ -168,6 +168,96 @@ describe("live stochastic evidence recovery", () => {
     }));
   });
 
+  it("waits for board catch-up when board and sparse DOM evidence both contain prior rolls", async () => {
+    const sendMessage = vi.fn(async (message: { id: number; stochastic?: unknown }) =>
+      message.stochastic
+        ? { id: message.id, analysis: { engine: "deep-search", runtime: "background-gpu", players: [] } }
+        : { id: message.id, runtime: "background-gpu", engineRevision: "deep-maxn-v12", initializationMs: 1 });
+    vi.stubGlobal("chrome", {
+      runtime: { getURL: (path: string) => `chrome-extension://fixture/${path}`, getManifest: () => ({ version: "0.9.1" }), sendMessage },
+      storage: { local: { get: async () => ({}), set: async () => {}, remove: async () => {} }, sync: { set: async () => {} } },
+    });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const players = ["hamzax", "Kalk", "Malti", "Avrit"];
+    let tracker = createTrackerState();
+    for (const player of players) tracker = reduceTracker(tracker, { type: "discover", player });
+    const history = createDiceHistoryState();
+    observeLogCoverage(history, [0, 1, 2, 15, 16, 18, 20, 22, 24]);
+    const totals = [6, 8, 9, 5] as const;
+    totals.forEach((total, ordinal) => {
+      appendPublicDiceRoll(history, {
+        actor: players[ordinal]!, total, eventId: `board-roll:${ordinal}:${players[ordinal]}`,
+      });
+      appendPublicDiceRoll(history, {
+        actor: players[ordinal]!, total, eventId: `log-${ordinal}`, logIndex: 15 + ordinal * 2,
+      });
+    });
+    appendPublicDiceRoll(history, {
+      actor: "hamzax", total: 10, eventId: "current-log", logIndex: 24,
+    });
+    expect(history.rolls).toHaveLength(9);
+
+    overlay = new AssistantOverlay({ ...DEFAULT_SETTINGS }, { reset: vi.fn() });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const internals = overlay as unknown as {
+      board: BoardSnapshot;
+      session: { diceHistory: typeof history };
+      decisionRuntimeError: string;
+      scheduleDecisionAnalysis: (state: typeof tracker, player: string) => void;
+      render: () => void;
+    };
+    vi.spyOn(internals, "render").mockImplementation(() => {});
+    internals.session = { diceHistory: history };
+    internals.board = {
+      hexes: [], vertices: [], edges: [], diceMode: "balanced", gameKey: "mixed-roll-race",
+      myPlayer: "hamzax", currentPlayer: "hamzax", playerOrder: players,
+      isMyTurn: true, hasRolled: false, gameplayRollCount: 4, action: "none",
+      localSeatDiagnostics: {
+        seatSource: "gameController.myColor+currentUserId+gameUserStates",
+        identity: { status: "resolved", reason: "cross-checked", source: "controller+account-user-id+store-roster", currentUserIdAvailable: true, currentUserMatchColors: [1], myColor: 1, currentUserColor: 1 },
+      },
+    };
+    sendMessage.mockClear();
+
+    internals.scheduleDecisionAnalysis(tracker, "hamzax");
+
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(consoleError).not.toHaveBeenCalled();
+    expect(consoleWarn).not.toHaveBeenCalled();
+    expect(internals.decisionRuntimeError).toMatch(/waiting for the board.*catch up/i);
+
+    // The board bridge can publish the same current roll into the session
+    // before overlay.updateBoard applies that snapshot. The overlay still sees
+    // count 4 while the mixed history now has ten raw source observations.
+    appendPublicDiceRoll(history, {
+      actor: "hamzax", total: 10, eventId: "board-roll:4:hamzax",
+    });
+    expect(history.rolls).toHaveLength(10);
+    internals.scheduleDecisionAnalysis(tracker, "hamzax");
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(consoleError).not.toHaveBeenCalled();
+    expect(consoleWarn).not.toHaveBeenCalled();
+    expect(internals.decisionRuntimeError).toMatch(/waiting for the board.*catch up/i);
+
+    internals.board = { ...internals.board, hasRolled: true, gameplayRollCount: 5 };
+    internals.scheduleDecisionAnalysis(tracker, "hamzax");
+
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledOnce());
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      stochastic: expect.objectContaining({
+        model: "mref-colonist-linked-2024-v1",
+        rolls: [
+          { ordinal: 0, actor: 0, total: 6 },
+          { ordinal: 1, actor: 1, total: 8 },
+          { ordinal: 2, actor: 2, total: 9 },
+          { ordinal: 3, actor: 3, total: 5 },
+          { ordinal: 4, actor: 0, total: 10 },
+        ],
+      }),
+    }));
+  });
+
   it("resumes when missing startup evidence arrives without retrying unchanged evidence", async () => {
     const sendMessage = vi.fn(async (message: { id: number; stochastic?: unknown }) =>
       message.stochastic
