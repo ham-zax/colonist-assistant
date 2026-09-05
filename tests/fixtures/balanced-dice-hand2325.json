@@ -1,0 +1,661 @@
+{
+  "schema": "balanced-dice-hand2325/1",
+  "sourceRecording": {
+    "file": "colonist-evidence-hand2325-1-2026-09-04T10-41-53-871Z (1).txt",
+    "sha256": "e542827c9aefb35f47db836c50455db4076bc8fabe17b1cd4d0b0ce8efe107a4"
+  },
+  "modelDisclaimer": "mref-colonist-linked-2024-v1 is the named linked/public reference controller hypothesis; it is not a claim about Colonist's current live server algorithm or hidden server state.",
+  "players": [
+    {
+      "alias": "P0",
+      "publicName": "Bhaskar9980"
+    },
+    {
+      "alias": "P1",
+      "publicName": "hamzax"
+    }
+  ],
+  "states": {
+    "D29": {
+      "turnCutoff": 27,
+      "stateIdentity": "d2:1zb22u:ua2f68:3ct",
+      "rootPlayer": "P1",
+      "hiddenBank": {
+        "publicVisibility": "hidden",
+        "recordedValue": "~"
+      },
+      "friendlyRobber": true,
+      "victoryTarget": 15,
+      "rootDomesticTradeDisabled": true,
+      "resourceBeliefIdentity": "B16",
+      "m0Seed": 4215863924,
+      "publicHistory": {
+        "provenance": "complete-from-first-gameplay-roll",
+        "rolls": [
+          {
+            "ordinal": 0,
+            "actor": 0,
+            "total": 6
+          },
+          {
+            "ordinal": 1,
+            "actor": 1,
+            "total": 6
+          },
+          {
+            "ordinal": 2,
+            "actor": 0,
+            "total": 4
+          },
+          {
+            "ordinal": 3,
+            "actor": 1,
+            "total": 9
+          },
+          {
+            "ordinal": 4,
+            "actor": 0,
+            "total": 11
+          },
+          {
+            "ordinal": 5,
+            "actor": 1,
+            "total": 8
+          },
+          {
+            "ordinal": 6,
+            "actor": 0,
+            "total": 5
+          },
+          {
+            "ordinal": 7,
+            "actor": 1,
+            "total": 8
+          },
+          {
+            "ordinal": 8,
+            "actor": 0,
+            "total": 8
+          },
+          {
+            "ordinal": 9,
+            "actor": 1,
+            "total": 12
+          },
+          {
+            "ordinal": 10,
+            "actor": 0,
+            "total": 2
+          },
+          {
+            "ordinal": 11,
+            "actor": 1,
+            "total": 3
+          },
+          {
+            "ordinal": 12,
+            "actor": 0,
+            "total": 7
+          },
+          {
+            "ordinal": 13,
+            "actor": 1,
+            "total": 5
+          },
+          {
+            "ordinal": 14,
+            "actor": 0,
+            "total": 7
+          },
+          {
+            "ordinal": 15,
+            "actor": 1,
+            "total": 6
+          },
+          {
+            "ordinal": 16,
+            "actor": 0,
+            "total": 9
+          },
+          {
+            "ordinal": 17,
+            "actor": 1,
+            "total": 4
+          },
+          {
+            "ordinal": 18,
+            "actor": 0,
+            "total": 10
+          },
+          {
+            "ordinal": 19,
+            "actor": 1,
+            "total": 8
+          },
+          {
+            "ordinal": 20,
+            "actor": 0,
+            "total": 11
+          },
+          {
+            "ordinal": 21,
+            "actor": 1,
+            "total": 6
+          },
+          {
+            "ordinal": 22,
+            "actor": 0,
+            "total": 10
+          },
+          {
+            "ordinal": 23,
+            "actor": 1,
+            "total": 7
+          }
+        ],
+        "rollCount": 24,
+        "digest": "0ffa6470ef86e200"
+      },
+      "stochasticIdentity": {
+        "m0Model": "m0-fair-iid-2d6-v1",
+        "referenceModel": "mref-colonist-linked-2024-v1",
+        "beliefPolicy": "public-history-belief-v1"
+      },
+      "referenceController": {
+        "remainingCounts": [
+          0,
+          1,
+          1,
+          2,
+          1,
+          3,
+          1,
+          2,
+          1,
+          0,
+          0
+        ],
+        "cardsLeft": 12,
+        "recentTotals": [
+          8,
+          11,
+          6,
+          10,
+          7
+        ],
+        "initializedPlayerMask": 3,
+        "sevenCounts": [
+          2,
+          1,
+          0,
+          0
+        ],
+        "sevenStreakOwner": 1,
+        "sevenStreakCount": 1
+      },
+      "stochasticBeliefDigest": "7704bdc4f73c84a2",
+      "stochasticBeliefParticleCount": 1,
+      "m0Regression": {
+        "action": "3:1 Lumber -> Grain",
+        "authority": "deep-maxn",
+        "evidenceEscalation": "none"
+      },
+      "mrefSeed": 2919303411,
+      "mrefResult": {
+        "chosen": {
+          "kind": "maritime-trade",
+          "first": 3,
+          "resource": 0,
+          "otherResource": 3
+        },
+        "authority": "deep-maxn",
+        "stochasticModel": "mref-colonist-linked-2024-v1",
+        "beliefPolicy": "public-history-belief-v1",
+        "diceHistoryProvenance": "complete-from-first-gameplay-roll",
+        "publicHistoryDigest": "0ffa6470ef86e200",
+        "stochasticBeliefDigest": "7704bdc4f73c84a2",
+        "stochasticBeliefParticleCount": 1
+      }
+    },
+    "D31": {
+      "turnCutoff": 29,
+      "stateIdentity": "d2:2t2t2z:xmzq8r:3p3",
+      "rootPlayer": "P1",
+      "hiddenBank": {
+        "publicVisibility": "hidden",
+        "recordedValue": "~"
+      },
+      "friendlyRobber": true,
+      "victoryTarget": 15,
+      "rootDomesticTradeDisabled": true,
+      "resourceBeliefIdentity": "B18",
+      "m0Seed": 872288473,
+      "publicHistory": {
+        "provenance": "complete-from-first-gameplay-roll",
+        "rolls": [
+          {
+            "ordinal": 0,
+            "actor": 0,
+            "total": 6
+          },
+          {
+            "ordinal": 1,
+            "actor": 1,
+            "total": 6
+          },
+          {
+            "ordinal": 2,
+            "actor": 0,
+            "total": 4
+          },
+          {
+            "ordinal": 3,
+            "actor": 1,
+            "total": 9
+          },
+          {
+            "ordinal": 4,
+            "actor": 0,
+            "total": 11
+          },
+          {
+            "ordinal": 5,
+            "actor": 1,
+            "total": 8
+          },
+          {
+            "ordinal": 6,
+            "actor": 0,
+            "total": 5
+          },
+          {
+            "ordinal": 7,
+            "actor": 1,
+            "total": 8
+          },
+          {
+            "ordinal": 8,
+            "actor": 0,
+            "total": 8
+          },
+          {
+            "ordinal": 9,
+            "actor": 1,
+            "total": 12
+          },
+          {
+            "ordinal": 10,
+            "actor": 0,
+            "total": 2
+          },
+          {
+            "ordinal": 11,
+            "actor": 1,
+            "total": 3
+          },
+          {
+            "ordinal": 12,
+            "actor": 0,
+            "total": 7
+          },
+          {
+            "ordinal": 13,
+            "actor": 1,
+            "total": 5
+          },
+          {
+            "ordinal": 14,
+            "actor": 0,
+            "total": 7
+          },
+          {
+            "ordinal": 15,
+            "actor": 1,
+            "total": 6
+          },
+          {
+            "ordinal": 16,
+            "actor": 0,
+            "total": 9
+          },
+          {
+            "ordinal": 17,
+            "actor": 1,
+            "total": 4
+          },
+          {
+            "ordinal": 18,
+            "actor": 0,
+            "total": 10
+          },
+          {
+            "ordinal": 19,
+            "actor": 1,
+            "total": 8
+          },
+          {
+            "ordinal": 20,
+            "actor": 0,
+            "total": 11
+          },
+          {
+            "ordinal": 21,
+            "actor": 1,
+            "total": 6
+          },
+          {
+            "ordinal": 22,
+            "actor": 0,
+            "total": 10
+          },
+          {
+            "ordinal": 23,
+            "actor": 1,
+            "total": 7
+          },
+          {
+            "ordinal": 24,
+            "actor": 0,
+            "total": 10
+          },
+          {
+            "ordinal": 25,
+            "actor": 1,
+            "total": 7
+          }
+        ],
+        "rollCount": 26,
+        "digest": "20414cd45454da74"
+      },
+      "stochasticIdentity": {
+        "m0Model": "m0-fair-iid-2d6-v1",
+        "referenceModel": "mref-colonist-linked-2024-v1",
+        "beliefPolicy": "public-history-belief-v1"
+      },
+      "referenceController": {
+        "remainingCounts": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          5,
+          5,
+          4,
+          2,
+          2,
+          1
+        ],
+        "cardsLeft": 34,
+        "recentTotals": [
+          6,
+          10,
+          7,
+          10,
+          7
+        ],
+        "initializedPlayerMask": 3,
+        "sevenCounts": [
+          2,
+          2,
+          0,
+          0
+        ],
+        "sevenStreakOwner": 1,
+        "sevenStreakCount": 2
+      },
+      "stochasticBeliefDigest": "a778ba82c75580ee",
+      "stochasticBeliefParticleCount": 1,
+      "m0Regression": {
+        "action": "Roll",
+        "authority": "deep-maxn",
+        "evidenceEscalation": "triggered/completed/strengthened",
+        "baselineRealizedNodes": 7984,
+        "escalationNodes": 23149,
+        "totalNodes": 31133,
+        "deadline": false,
+        "exactKnightFamily": {
+          "selected": "h:-2,0 -> P0",
+          "selectedComparator": 13.0667858,
+          "strongestChallenger": "h:0,2 -> P0",
+          "challengerComparator": 8.3313026
+        }
+      },
+      "mrefSeed": 2765118848,
+      "mrefResult": {
+        "chosen": {
+          "kind": "play-knight",
+          "first": 2,
+          "player": 0
+        },
+        "authority": "exact-family",
+        "stochasticModel": "mref-colonist-linked-2024-v1",
+        "beliefPolicy": "public-history-belief-v1",
+        "diceHistoryProvenance": "complete-from-first-gameplay-roll",
+        "publicHistoryDigest": "20414cd45454da74",
+        "stochasticBeliefDigest": "a778ba82c75580ee",
+        "stochasticBeliefParticleCount": 1
+      }
+    },
+    "D34": {
+      "turnCutoff": 31,
+      "stateIdentity": "d2:1ekmff4:mxbbeq:38a",
+      "rootPlayer": "P1",
+      "hiddenBank": {
+        "publicVisibility": "hidden",
+        "recordedValue": "~"
+      },
+      "friendlyRobber": true,
+      "victoryTarget": 15,
+      "rootDomesticTradeDisabled": true,
+      "resourceBeliefIdentity": "B20",
+      "m0Seed": 3040454875,
+      "publicHistory": {
+        "provenance": "complete-from-first-gameplay-roll",
+        "rolls": [
+          {
+            "ordinal": 0,
+            "actor": 0,
+            "total": 6
+          },
+          {
+            "ordinal": 1,
+            "actor": 1,
+            "total": 6
+          },
+          {
+            "ordinal": 2,
+            "actor": 0,
+            "total": 4
+          },
+          {
+            "ordinal": 3,
+            "actor": 1,
+            "total": 9
+          },
+          {
+            "ordinal": 4,
+            "actor": 0,
+            "total": 11
+          },
+          {
+            "ordinal": 5,
+            "actor": 1,
+            "total": 8
+          },
+          {
+            "ordinal": 6,
+            "actor": 0,
+            "total": 5
+          },
+          {
+            "ordinal": 7,
+            "actor": 1,
+            "total": 8
+          },
+          {
+            "ordinal": 8,
+            "actor": 0,
+            "total": 8
+          },
+          {
+            "ordinal": 9,
+            "actor": 1,
+            "total": 12
+          },
+          {
+            "ordinal": 10,
+            "actor": 0,
+            "total": 2
+          },
+          {
+            "ordinal": 11,
+            "actor": 1,
+            "total": 3
+          },
+          {
+            "ordinal": 12,
+            "actor": 0,
+            "total": 7
+          },
+          {
+            "ordinal": 13,
+            "actor": 1,
+            "total": 5
+          },
+          {
+            "ordinal": 14,
+            "actor": 0,
+            "total": 7
+          },
+          {
+            "ordinal": 15,
+            "actor": 1,
+            "total": 6
+          },
+          {
+            "ordinal": 16,
+            "actor": 0,
+            "total": 9
+          },
+          {
+            "ordinal": 17,
+            "actor": 1,
+            "total": 4
+          },
+          {
+            "ordinal": 18,
+            "actor": 0,
+            "total": 10
+          },
+          {
+            "ordinal": 19,
+            "actor": 1,
+            "total": 8
+          },
+          {
+            "ordinal": 20,
+            "actor": 0,
+            "total": 11
+          },
+          {
+            "ordinal": 21,
+            "actor": 1,
+            "total": 6
+          },
+          {
+            "ordinal": 22,
+            "actor": 0,
+            "total": 10
+          },
+          {
+            "ordinal": 23,
+            "actor": 1,
+            "total": 7
+          },
+          {
+            "ordinal": 24,
+            "actor": 0,
+            "total": 10
+          },
+          {
+            "ordinal": 25,
+            "actor": 1,
+            "total": 7
+          },
+          {
+            "ordinal": 26,
+            "actor": 0,
+            "total": 9
+          },
+          {
+            "ordinal": 27,
+            "actor": 1,
+            "total": 5
+          }
+        ],
+        "rollCount": 28,
+        "digest": "8fad2f42d72b176a"
+      },
+      "stochasticIdentity": {
+        "m0Model": "m0-fair-iid-2d6-v1",
+        "referenceModel": "mref-colonist-linked-2024-v1",
+        "beliefPolicy": "public-history-belief-v1"
+      },
+      "referenceController": {
+        "remainingCounts": [
+          1,
+          2,
+          3,
+          3,
+          5,
+          5,
+          5,
+          3,
+          2,
+          2,
+          1
+        ],
+        "cardsLeft": 32,
+        "recentTotals": [
+          7,
+          10,
+          7,
+          9,
+          5
+        ],
+        "initializedPlayerMask": 3,
+        "sevenCounts": [
+          2,
+          2,
+          0,
+          0
+        ],
+        "sevenStreakOwner": 1,
+        "sevenStreakCount": 2
+      },
+      "stochasticBeliefDigest": "219a3d55e524628e",
+      "stochasticBeliefParticleCount": 1,
+      "m0Regression": {
+        "action": "Knight h:1,1 -> P0",
+        "authority": "exact-family",
+        "evidenceEscalation": "none"
+      },
+      "mrefSeed": 430837553,
+      "mrefResult": {
+        "chosen": {
+          "kind": "play-knight",
+          "first": 7,
+          "player": 0
+        },
+        "authority": "exact-family",
+        "stochasticModel": "mref-colonist-linked-2024-v1",
+        "beliefPolicy": "public-history-belief-v1",
+        "diceHistoryProvenance": "complete-from-first-gameplay-roll",
+        "publicHistoryDigest": "8fad2f42d72b176a",
+        "stochasticBeliefDigest": "219a3d55e524628e",
+        "stochasticBeliefParticleCount": 1
+      }
+    }
+  }
+}

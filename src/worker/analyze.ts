@@ -6,6 +6,7 @@ import {
 } from "../core/engine";
 import type { BoardSnapshot } from "../core/placement";
 import type { TrackerState } from "../core/types";
+import type { PublicStochasticInput } from "../core/dice-history";
 import {
   analyzeDeepSearch,
   type DeepSearchExecutor,
@@ -19,6 +20,7 @@ export interface DecisionRequest {
   searchConstraints?: DecisionSearchConstraints;
   /** Live rule seam: false forbids player negotiation while preserving maritime trades. */
   playerTradesEnabled?: boolean;
+  stochastic?: PublicStochasticInput;
 }
 
 export const analyzeDecisionRequest = async (
@@ -41,5 +43,6 @@ export const analyzeDecisionRequest = async (
     request.playerTradesEnabled ?? true,
     request.engine,
     executor,
+    request.stochastic,
   );
 };

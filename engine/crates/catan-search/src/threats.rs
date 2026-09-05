@@ -175,7 +175,10 @@ fn road_cut_paths_in_world(
                 maritime_preparations_for_cost(&after_road, opponent, &SETTLEMENT_COST)
             {
                 let settlement_action = Action::BuildSettlement { vertex };
-                if !settlement_ready.legal_actions().contains(&settlement_action) {
+                if !settlement_ready
+                    .legal_actions()
+                    .contains(&settlement_action)
+                {
                     continue;
                 }
                 let mut after_settlement = settlement_ready;
@@ -183,8 +186,8 @@ fn road_cut_paths_in_world(
                     continue;
                 }
 
-                let road_loss = baseline_length
-                    .saturating_sub(after_settlement.longest_road_length(protected));
+                let road_loss =
+                    baseline_length.saturating_sub(after_settlement.longest_road_length(protected));
                 let award_loss = baseline_holder == Some(protected)
                     && after_settlement.longest_road_holder != Some(protected);
                 if road_loss > 0 || award_loss {
@@ -255,11 +258,7 @@ pub fn belief_road_cut_continuation_assessment<'a>(
                     .map(|path| path.maritime_trades)
                     .min()
                     .unwrap_or(0);
-                let maximum_road_loss = paths
-                    .iter()
-                    .map(|path| path.road_loss)
-                    .max()
-                    .unwrap_or(0);
+                let maximum_road_loss = paths.iter().map(|path| path.road_loss).max().unwrap_or(0);
                 let mut approach_edges = paths.iter().map(|path| path.edge).collect::<Vec<_>>();
                 approach_edges.sort_unstable();
                 approach_edges.dedup();
@@ -285,8 +284,7 @@ pub fn belief_road_cut_continuation_assessment<'a>(
                 if group_award_loss {
                     evidence.award_loss_posterior += weight;
                 }
-                evidence.maximum_road_loss =
-                    evidence.maximum_road_loss.max(maximum_road_loss);
+                evidence.maximum_road_loss = evidence.maximum_road_loss.max(maximum_road_loss);
                 evidence.approach_edges.extend(approach_edges);
                 evidence.approach_edges.sort_unstable();
                 evidence.approach_edges.dedup();
@@ -390,15 +388,15 @@ fn chance_tail_win_probability(state: &GameState, opponent: u8) -> f32 {
     let actions = state.legal_actions();
     let total_weight = actions
         .iter()
-        .map(|action| state.chance_weight(action) as u32)
-        .sum::<u32>();
+        .map(|action| state.chance_weight(action))
+        .sum::<u64>();
     if total_weight == 0 {
         return 0.0;
     }
     let winning_weight = actions
         .into_iter()
         .filter_map(|action| {
-            let weight = state.chance_weight(&action) as u32;
+            let weight = state.chance_weight(&action);
             if weight == 0 {
                 return None;
             }
@@ -408,7 +406,7 @@ fn chance_tail_win_probability(state: &GameState, opponent: u8) -> f32 {
             }
             (direct_win_after_progress(&next, opponent)).then_some(weight)
         })
-        .sum::<u32>();
+        .sum::<u64>();
     winning_weight as f32 / total_weight as f32
 }
 
@@ -439,10 +437,7 @@ pub(crate) fn progress_threat_kind(action: &Action) -> Option<OpponentThreatKind
     }
 }
 
-fn best_progress_threat(
-    state: &GameState,
-    opponent: u8,
-) -> Option<(OpponentThreatKind, f32)> {
+fn best_progress_threat(state: &GameState, opponent: u8) -> Option<(OpponentThreatKind, f32)> {
     let probe = main_phase_for(state, opponent);
     probe
         .legal_actions()

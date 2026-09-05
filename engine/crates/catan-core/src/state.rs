@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::types::{CITY_COST, DEVELOPMENT_COST, ROAD_COST, SETTLEMENT_COST};
 use crate::{
     Action, Board, Building, DevCard, DiceMode, NodeKind, Phase, PlayerState, Port, Resource,
-    ResourceHand, SplitMix64, TradeOffer,
+    ResourceHand, SplitMix64, StochasticState, TradeOffer,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,6 +28,7 @@ pub enum RuleError {
     InvalidRobber,
     InvalidVictim,
     InvalidTrade,
+    InvalidStochasticState,
 }
 
 impl fmt::Display for RuleError {
@@ -57,8 +58,12 @@ pub struct GameState {
     pub phase: Phase,
     pub turn: u16,
     pub last_roll: u8,
-    /// Observed game dice setting. E2 metadata only; chance behavior remains fair i.i.d. 2d6.
+    /// Observed Colonist dice setting. This remains public metadata and does not
+    /// itself select stochastic behavior.
     pub dice_mode: DiceMode,
+    /// Explicit stochastic game-model state. The default M0 variant is behavior-
+    /// and hash-compatible with the accepted v12 fair-i.i.d. implementation.
+    pub stochastic: StochasticState,
     pub victory_target: u8,
     pub card_discard_limit: u8,
     pub friendly_robber: bool,
@@ -111,6 +116,7 @@ impl GameState {
             turn: 0,
             last_roll: 0,
             dice_mode: DiceMode::Unknown,
+            stochastic: StochasticState::m0(),
             victory_target,
             card_discard_limit: 7,
             friendly_robber: false,
@@ -220,14 +226,23 @@ impl GameState {
         }
     }
 
-    pub fn chance_weight(&self, action: &Action) -> u16 {
+    pub fn chance_weight(&self, action: &Action) -> u64 {
         match (self.phase, action) {
             (Phase::RollChance, Action::ResolveRoll { value }) => {
-                const DICE_WEIGHTS: [u16; 13] = [0, 0, 1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1];
-                DICE_WEIGHTS.get(*value as usize).copied().unwrap_or(0)
+                const DICE_WEIGHTS: [u64; 13] = [0, 0, 1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1];
+                if let Some(distribution) =
+                    self.stochastic.reference_distribution(self.current_player)
+                {
+                    (2..=12)
+                        .position(|candidate| candidate == *value)
+                        .and_then(|index| distribution.get(index).copied())
+                        .unwrap_or(0)
+                } else {
+                    DICE_WEIGHTS.get(*value as usize).copied().unwrap_or(0)
+                }
             }
             (Phase::DevelopmentChance, Action::ResolveDevelopment { card }) => {
-                self.development_deck[card.index()] as u16
+                self.development_deck[card.index()] as u64
             }
             (
                 Phase::ResolveSteal { victim },
@@ -236,27 +251,44 @@ impl GameState {
                     resource,
                 },
             ) if victim == *action_victim => {
-                self.players[victim as usize].resources[resource.index()] as u16
+                self.players[victim as usize].resources[resource.index()] as u64
             }
             _ => 0,
         }
+    }
+
+    pub fn chance_distribution(&self) -> Vec<(Action, u64)> {
+        if self.node_kind() != NodeKind::Chance {
+            return Vec::new();
+        }
+        self.legal_actions()
+            .into_iter()
+            .map(|action| {
+                let weight = self.chance_weight(&action);
+                (action, weight)
+            })
+            .collect()
     }
 
     pub fn sample_chance(&self, rng: &mut SplitMix64) -> Option<Action> {
         if self.node_kind() != NodeKind::Chance {
             return None;
         }
-        let actions = self.legal_actions();
-        let total = actions
-            .iter()
-            .map(|action| self.chance_weight(action) as usize)
-            .sum::<usize>();
+        let distribution = self.chance_distribution();
+        let total = distribution.iter().map(|(_, weight)| *weight).sum::<u64>();
         if total == 0 {
             return None;
         }
-        let mut target = rng.range(total);
-        for action in actions {
-            let weight = self.chance_weight(&action) as usize;
+        // Preserve the accepted v12 sampling sequence for all existing M0
+        // chance nodes. M_ref uses the same weights as enumeration, but its
+        // fixed mass is 2^32 and therefore must not pass through usize on wasm32.
+        let mut target =
+            if self.stochastic.reference_belief().is_some() && self.phase == Phase::RollChance {
+                rng.next_u64() % total
+            } else {
+                rng.range(total as usize) as u64
+            };
+        for (action, weight) in distribution {
             if target < weight {
                 return Some(action);
             }
@@ -568,6 +600,29 @@ impl GameState {
                 .map(|player| player + 1)
                 .unwrap_or(0),
         );
+        // M0 is deliberately omitted so accepted Deep-MaxN v12 hashes and
+        // semantic seeds remain byte-for-byte compatible. Behaviorful M_ref
+        // states receive a domain-separated stochastic identity suffix.
+        if self.stochastic.reference_belief().is_some() {
+            byte(&mut hash, 0x53);
+            byte(&mut hash, 0x54);
+            byte(&mut hash, 0x4f);
+            byte(&mut hash, 0x43);
+            byte(&mut hash, 0x48);
+            for value in self.stochastic.model().as_str().as_bytes() {
+                byte(&mut hash, *value);
+            }
+            byte(&mut hash, 0xff);
+            if let Some(policy) = self.stochastic.belief_policy() {
+                for value in policy.as_str().as_bytes() {
+                    byte(&mut hash, *value);
+                }
+            }
+            byte(&mut hash, 0xfe);
+            for value in self.stochastic.digest().to_le_bytes() {
+                byte(&mut hash, value);
+            }
+        }
         hash
     }
 
@@ -832,6 +887,9 @@ impl GameState {
         if self.phase != Phase::PreRoll {
             return Err(RuleError::WrongPhase);
         }
+        self.stochastic
+            .prepare_roll(self.current_player)
+            .map_err(|_| RuleError::InvalidStochasticState)?;
         self.phase = Phase::RollChance;
         Ok(())
     }
@@ -843,6 +901,9 @@ impl GameState {
         if !(2..=12).contains(&value) {
             return Err(RuleError::InvalidRoll);
         }
+        self.stochastic
+            .resolve_roll(self.current_player, value)
+            .map_err(|_| RuleError::InvalidStochasticState)?;
         self.last_roll = value;
         if value == 7 {
             self.discard_remaining = [0; 4];
@@ -2810,7 +2871,7 @@ mod tests {
                 .legal_actions()
                 .iter()
                 .map(|action| state.chance_weight(action))
-                .sum::<u16>(),
+                .sum::<u64>(),
             36
         );
 
@@ -2880,7 +2941,7 @@ mod tests {
                 .legal_actions()
                 .iter()
                 .map(|action| state.chance_weight(action))
-                .sum::<u16>(),
+                .sum::<u64>(),
             25
         );
         state

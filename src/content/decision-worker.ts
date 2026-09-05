@@ -7,6 +7,10 @@ import type {
 import type { BoardSnapshot } from "../core/placement";
 import type { TrackerState } from "../core/types";
 import {
+  M0_FAIR_IID_2D6_V1,
+  type PublicStochasticInput,
+} from "../core/dice-history";
+import {
   DECISION_CANCEL_MESSAGE_TYPE,
   DECISION_MESSAGE_TYPE,
   DECISION_STATUS_MESSAGE_TYPE,
@@ -151,6 +155,7 @@ export class DecisionWorkerClient {
     searchConstraints?: DecisionSearchConstraints,
     playerTradesEnabled = true,
     startCallback?: () => void,
+    stochastic: PublicStochasticInput = { model: M0_FAIR_IID_2D6_V1 },
   ): DecisionRequestDisposition {
     if (this.destroyed) return "destroyed";
     if (this.contextInvalidated) return "context-invalidated";
@@ -184,6 +189,7 @@ export class DecisionWorkerClient {
       ...(startCallback ? { startCallback } : {}),
       ...(searchConstraints ? { searchConstraints } : {}),
       playerTradesEnabled,
+      stochastic,
       waitedForActive,
     };
     this.desiredKey = key;
@@ -210,6 +216,7 @@ export class DecisionWorkerClient {
         ? { searchConstraints: request.searchConstraints }
         : {}),
       playerTradesEnabled: request.playerTradesEnabled ?? true,
+      stochastic: request.stochastic ?? { model: M0_FAIR_IID_2D6_V1 },
     };
     const slowTimer = globalThis.setTimeout(() => {
       const elapsedMs = performance.now() - startedAt;

@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import { parsePublicBoardMessage } from "../src/content/board";
 import { observeColonistDiceMode } from "../src/page/dice-mode";
+import {
+  NATIVE_GPU_STOCHASTIC_MODEL,
+  nativeGpuSupportsStochasticModel,
+} from "../src/background/native-gpu";
 
 const bridgeMessage = (payload: Record<string, unknown>) => ({
   source: "colonist-assistant-public-board",
@@ -15,6 +19,12 @@ const bridgeMessage = (payload: Record<string, unknown>) => ({
 });
 
 describe("Colonist dice-mode boundary", () => {
+  it("keeps current native GPU stochastic capability M0-only", () => {
+    expect(NATIVE_GPU_STOCHASTIC_MODEL).toBe("m0-fair-iid-2d6-v1");
+    expect(nativeGpuSupportsStochasticModel(undefined)).toBe(true);
+    expect(nativeGpuSupportsStochasticModel("m0-fair-iid-2d6-v1")).toBe(true);
+    expect(nativeGpuSupportsStochasticModel("mref-colonist-linked-2024-v1")).toBe(false);
+  });
   it("maps the shipped numeric diceSetting contract without defaulting missing state to Random", () => {
     const absentSettings: { diceSetting?: unknown } = {};
 

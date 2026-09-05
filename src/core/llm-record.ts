@@ -3,6 +3,13 @@ import type { DeepSearchAction } from "./engine";
 import type { BoardSnapshot, DiceMode } from "./placement";
 import { RESOURCE_ORDER, type ResourceVector } from "./resources";
 import type { StoredEvent } from "./types";
+import {
+  diceHistoryDigest,
+  M0_FAIR_IID_2D6_V1,
+  serializeDiceHistoryState,
+  type DiceHistoryState,
+  type StoredDiceHistoryState,
+} from "./dice-history";
 
 export const RECORD_RESOURCE_ORDER = [...RESOURCE_ORDER] as const;
 export const RECORD_DEVELOPMENT_ORDER = [
@@ -100,6 +107,7 @@ export interface CompactGameRecord {
   partialHistory: boolean;
   unmatchedCount: number;
   unmatchedIntegrityCount: number;
+  diceHistory?: StoredDiceHistoryState & { digest: string };
   assistant: {
     engine: string;
     disablePlayerTrades: boolean;
@@ -170,6 +178,7 @@ export interface CompactGameCapture {
   partialHistory: boolean;
   unmatchedCount: number;
   unmatchedIntegrityCount?: number;
+  diceHistory?: DiceHistoryState;
   unmatchedSamples?: Array<{
     signature: string;
     count: number;
@@ -698,7 +707,15 @@ const migrateCompactRecordContracts = (record: CompactGameRecord): void => {
       record.decisions,
       previousDecisionColumns,
       current.decisionColumns,
-      (column, row) => (column === "lifecycle" ? lifecycleFromLegacyRow(row) : NA),
+      (column, row) => {
+        if (column === "lifecycle") return lifecycleFromLegacyRow(row);
+        if (column === "requestedStochasticModel" || column === "stochasticModel") {
+          return previousCell(row, "chanceModel") === "fair-iid-2d6"
+            ? M0_FAIR_IID_2D6_V1
+            : "unknown";
+        }
+        return NA;
+      },
     );
   }
   const previousRootColumns = record.contracts.rootColumns;
@@ -820,6 +837,13 @@ const contracts = (): CompactRecordContracts => ({
     "model",
     "runtimeReason",
     "engineRevision",
+    "requestedStochasticModel",
+    "stochasticModel",
+    "beliefPolicy",
+    "diceHistoryProvenance",
+    "publicHistoryDigest",
+    "stochasticBeliefDigest",
+    "stochasticBeliefParticles",
     "hostGitSha",
     "hostDirty",
     "hostBuiltAtUnixMs",
@@ -1193,6 +1217,14 @@ export class CompactGameBuilder {
         unmatchedCount: input.unmatchedCount,
         unmatchedIntegrityCount:
           input.unmatchedIntegrityCount ?? input.unmatchedCount,
+        ...(input.diceHistory
+          ? {
+              diceHistory: {
+                ...serializeDiceHistoryState(input.diceHistory),
+                digest: diceHistoryDigest(input.diceHistory),
+              },
+            }
+          : {}),
         assistant: { ...input.assistant },
         aliases: aliasing.aliases,
         contracts: contracts(),
@@ -1228,6 +1260,12 @@ export class CompactGameBuilder {
       existing.unmatchedCount = input.unmatchedCount;
       existing.unmatchedIntegrityCount =
         input.unmatchedIntegrityCount ?? input.unmatchedCount;
+      if (input.diceHistory) {
+        existing.diceHistory = {
+          ...serializeDiceHistoryState(input.diceHistory),
+          digest: diceHistoryDigest(input.diceHistory),
+        };
+      }
       existing.assistant = { ...input.assistant };
       if (input.gameKey) existing.gameKey = input.gameKey;
     }
@@ -1702,6 +1740,11 @@ export class CompactGameBuilder {
         ? searchOriginRow[0]
         : searchOriginState ?? NA
       : NA;
+    const legacyFairModel =
+      trace.chanceModel === "fair-iid-2d6" ? M0_FAIR_IID_2D6_V1 : undefined;
+    const requestedStochasticModel =
+      trace.requestedStochasticModel ?? trace.stochasticModel ?? legacyFairModel ?? "unknown";
+    const stochasticModel = trace.stochasticModel ?? legacyFairModel ?? "unknown";
     const row: CompactRow = [
       id,
       Math.max(0, trace.recordedAt - record.startedAt),
@@ -1733,6 +1776,13 @@ export class CompactGameBuilder {
       trace.decisionModel ?? NA,
       trace.runtimeReason ?? NA,
       trace.engineRevision ?? NA,
+      requestedStochasticModel,
+      stochasticModel,
+      trace.beliefPolicy ?? NA,
+      trace.diceHistoryProvenance ?? NA,
+      trace.publicHistoryDigest ?? NA,
+      trace.stochasticBeliefDigest ?? NA,
+      trace.stochasticBeliefParticleCount ?? null,
       trace.nativeGpuBuild?.gitSha ?? NA,
       trace.nativeGpuBuild?.dirty ?? null,
       trace.nativeGpuBuild?.builtAtUnixMs ?? null,

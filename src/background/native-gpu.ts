@@ -1,9 +1,13 @@
 import type { NativeGpuBuildIdentity } from "../core/engine";
 import type { WasmSearchResponse } from "../generated/wasm/colonist_search.js";
+import { M0_FAIR_IID_2D6_V1 } from "../core/dice-history";
 
 export const NATIVE_GPU_HOST = "io.colonist_assistant.gpu";
 export const NATIVE_GPU_PROTOCOL_VERSION = 6;
 export const NATIVE_GPU_STATE_SCHEMA_VERSION = 3;
+export const NATIVE_GPU_STOCHASTIC_MODEL = M0_FAIR_IID_2D6_V1;
+export const nativeGpuSupportsStochasticModel = (model: string | undefined): boolean =>
+  (model ?? M0_FAIR_IID_2D6_V1) === NATIVE_GPU_STOCHASTIC_MODEL;
 const EXPECTED_ENGINE_REVISION = "deep-maxn-v12";
 
 export interface NativeGpuStatus {

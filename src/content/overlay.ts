@@ -1399,6 +1399,7 @@ export class AssistantOverlay {
       unmatchedCount: this.session.unmatchedCount,
       unmatchedIntegrityCount: this.session.unmatchedIntegrityCount,
       unmatchedSamples: this.session.unmatchedSamples.map((sample) => ({ ...sample })),
+      diceHistory: this.session.diceHistory,
       playerOrder: [...this.session.state.playerOrder],
       assistant: {
         engine: this.settings.engine,

@@ -12,6 +12,12 @@ import {
   seedPublicResourceWorlds,
 } from "../src/core/tracker";
 import {
+  M0_FAIR_IID_2D6_V1,
+  MREF_COLONIST_LINKED_2024_V1,
+  PUBLIC_HISTORY_BELIEF_V1,
+  type PublicStochasticInput,
+} from "../src/core/dice-history";
+import {
   buildDeepSearchRequest,
   selectRepresentativeWorlds,
 } from "../src/worker/deep-search";
@@ -229,6 +235,91 @@ describe("deep-search state adapter", () => {
     expect(built.map(({ request }) => request.state.diceMode)).toEqual(modes);
     expect(new Set(built.map(({ request }) => request.seed)).size).toBe(1);
     expect(built[3]?.request.state).not.toHaveProperty("diceModeRaw");
+  });
+
+  it("preserves the v12 M0 seed while serializing M_ref as public stochastic input", () => {
+    const explicitM0: PublicStochasticInput = { model: M0_FAIR_IID_2D6_V1 };
+    const reference: PublicStochasticInput = {
+      model: MREF_COLONIST_LINKED_2024_V1,
+      beliefPolicy: PUBLIC_HISTORY_BELIEF_V1,
+      playerMapping: ["You", "Rival"],
+      rolls: [
+        { ordinal: 0, actor: 0, total: 8 },
+        { ordinal: 1, actor: 1, total: 6 },
+      ],
+      provenance: "complete-from-first-gameplay-roll",
+      diceHistoryDigest: "public-history-test",
+    };
+    const legacy = buildDeepSearchRequest(state, board, "You", {}, true, 24).request as any;
+    const m0 = buildDeepSearchRequest(
+      state,
+      board,
+      "You",
+      {},
+      true,
+      24,
+      explicitM0,
+    ).request as any;
+    const mref = buildDeepSearchRequest(
+      state,
+      board,
+      "You",
+      {},
+      true,
+      24,
+      reference,
+    ).request as any;
+
+    expect(m0.seed).toBe(legacy.seed);
+    expect(m0).not.toHaveProperty("stochastic");
+    expect(mref.seed).not.toBe(legacy.seed);
+    expect(mref.stochastic).toEqual(reference);
+    expect(mref.state.worlds.length).toBeLessThanOrEqual(24);
+    expect(mref.state.worlds.every((world: any) => !("stochastic" in world))).toBe(true);
+  });
+
+  it("executes M_ref deterministically in WASM and fails closed on unknown provenance", async () => {
+    const bytes = await readFile(
+      new URL(
+        "../src/generated/wasm/colonist_search_bg.wasm",
+        import.meta.url,
+      ),
+    );
+    await initWasm({ module_or_path: bytes });
+    const reference: PublicStochasticInput = {
+      model: MREF_COLONIST_LINKED_2024_V1,
+      beliefPolicy: PUBLIC_HISTORY_BELIEF_V1,
+      playerMapping: ["You", "Rival"],
+      rolls: [
+        { ordinal: 0, actor: 0, total: 8 },
+        { ordinal: 1, actor: 1, total: 6 },
+      ],
+      provenance: "complete-from-first-gameplay-roll",
+      diceHistoryDigest: "mref-wasm-history",
+    };
+    const built = buildDeepSearchRequest(
+      state,
+      board,
+      "You",
+      {},
+      true,
+      24,
+      reference,
+    );
+    const first = analyzeWasm(built.request);
+    const second = analyzeWasm(built.request);
+
+    expect(first.stochasticModel).toBe(MREF_COLONIST_LINKED_2024_V1);
+    expect(first.beliefPolicy).toBe(PUBLIC_HISTORY_BELIEF_V1);
+    expect(first.diceHistoryProvenance).toBe("complete-from-first-gameplay-roll");
+    expect(first.publicHistoryDigest).toBe("mref-wasm-history");
+    expect(first.stochasticBeliefParticleCount).toBe(1);
+    expect(second.stochasticBeliefDigest).toBe(first.stochasticBeliefDigest);
+    expect(second.chosen).toEqual(first.chosen);
+
+    const unavailable = structuredClone(built.request) as any;
+    unavailable.stochastic.provenance = "unknown";
+    expect(() => analyzeWasm(unavailable)).toThrow(/reference stochastic history unavailable/);
   });
 
   it("preserves exact resource worlds and weights when no lossy sample is needed", () => {

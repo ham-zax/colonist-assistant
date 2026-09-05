@@ -362,15 +362,15 @@ fn reachable_tactical_threats(
         let actions = state.legal_actions();
         let total_weight = actions
             .iter()
-            .map(|action| state.chance_weight(action) as u32)
-            .sum::<u32>();
+            .map(|action| state.chance_weight(action))
+            .sum::<u64>();
         if total_weight == 0 {
             return TacticalThreats::default();
         }
 
         let mut threats = TacticalThreats::default();
         for action in actions {
-            let weight = state.chance_weight(&action) as u32;
+            let weight = state.chance_weight(&action);
             if weight == 0 {
                 continue;
             }

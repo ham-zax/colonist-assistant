@@ -134,12 +134,12 @@ fn choose_action(state: &GameState, actions: &[Action], rng: &mut SplitMix64) ->
     if matches!(state.node_kind(), NodeKind::Chance) {
         let total = actions
             .iter()
-            .map(|action| u64::from(state.chance_weight(action)))
+            .map(|action| state.chance_weight(action))
             .sum::<u64>();
         if total > 0 {
             let mut target = rng.next_u64() % total;
             for (index, action) in actions.iter().enumerate() {
-                let weight = u64::from(state.chance_weight(action));
+                let weight = state.chance_weight(action);
                 if target < weight {
                     return index;
                 }

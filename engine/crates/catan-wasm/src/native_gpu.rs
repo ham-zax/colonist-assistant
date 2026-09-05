@@ -1,3 +1,4 @@
+use super::road_intent_output;
 use colonist_catan_core::{Action, GameState};
 use colonist_catan_search::{
     ActionStats, BeliefParticle, CudaSimEngine, CudaSimError, CudaSimRootActionStats,
@@ -5,13 +6,12 @@ use colonist_catan_search::{
     IntroducedRoadFragility, RoadCutContinuationAssessment, SearchReport, SearchStatistics,
     actor_proposal_actions, admit_promoted_roots, apply_closeout_root_impacts,
     belief_domestic_trade_assessment, belief_road_cut_continuation_assessment,
-    belief_root_closeout_plans,
-    compute_spatial_root_impacts, exact_family_for_action, forced_loss_weight,
-    posterior_immediate_threat_weight, safer_end_turn_alternative, shared_root_candidates,
-    solve_belief_current_turn_timed, solve_exact_belief_excluding_controlled,
+    belief_root_closeout_plans, compute_spatial_root_impacts, exact_family_for_action,
+    forced_loss_weight, posterior_immediate_threat_weight, safer_end_turn_alternative,
+    shared_root_candidates, solve_belief_current_turn_timed,
+    solve_exact_belief_excluding_controlled,
 };
 use colonist_catan_search::{road_intent, rollout_cutoff_margin};
-use super::road_intent_output;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -21,7 +21,7 @@ use super::{
     RetainedRootOutput, RootCausalEvidenceOutput, RootProvenanceOutput, action,
     basic_response_diagnostics, domestic_trade_threat_label, effective_particle_count,
     exact_family_label, exact_mandatory_report_controlled, game_states,
-    introduced_road_fragility_output, response, road_cut_continuation_output,
+    introduced_road_fragility_output, resolve_stochastic, response, road_cut_continuation_output,
     root_exclusion_actions, root_promotion_reason, weighted_policy_report_for_actions_controlled,
 };
 
@@ -130,7 +130,8 @@ impl RootSampleMoments {
         self.margin_sum += f64::from(stat.mean_victory_margin()) * valid_f64;
         self.margin_square_sum += f64::from(stat.mean_victory_margin_squared) * valid_f64;
         self.strategic_margin_sum += f64::from(stat.mean_strategic_margin) * valid_f64;
-        self.strategic_margin_square_sum += f64::from(stat.mean_strategic_margin_squared) * valid_f64;
+        self.strategic_margin_square_sum +=
+            f64::from(stat.mean_strategic_margin_squared) * valid_f64;
         self.candidate_vp_sum += f64::from(stat.mean_victory_points) * valid_f64;
         self.candidate_vp_square_sum += f64::from(stat.mean_victory_points_squared) * valid_f64;
         self.opponent_vp_sum += f64::from(stat.mean_best_opponent_victory_points) * valid_f64;
@@ -404,7 +405,9 @@ fn escalated_root_order(indices: &[usize], roots: &[AggregatedRoot]) -> Vec<usiz
             return false;
         }
         let root = &roots[index];
-        root.strategic_margin + confidence_width(root.strategic_margin_variance, root.samples) + 1e-6
+        root.strategic_margin
+            + confidence_width(root.strategic_margin_variance, root.samples)
+            + 1e-6
             >= best_margin_lower
     };
     let tier = |index: usize| {
@@ -524,21 +527,31 @@ fn horizon_escalation_trigger(
 }
 
 fn general_escalation_plan(
-    winner: usize, final_order: &[usize], roots: &[AggregatedRoot],
+    winner: usize,
+    final_order: &[usize],
+    roots: &[AggregatedRoot],
 ) -> Option<(&'static str, f32, Vec<usize>)> {
     let winner_root = &roots[winner];
     let unresolved = final_order.iter().copied().any(|index| {
-        if index == winner { return false; }
+        if index == winner {
+            return false;
+        }
         let other = &roots[index];
         winner_root.terminal_rate.max(other.terminal_rate) <= 0.10
             && (winner_root.strategic_margin - other.strategic_margin).abs()
                 <= confidence_width(winner_root.strategic_margin_variance, winner_root.samples)
                     + confidence_width(other.strategic_margin_variance, other.samples)
     });
-    if !unresolved { return None; }
+    if !unresolved {
+        return None;
+    }
     // Compare survivors at one common deeper horizon. Deadline checks bound
     // work; no unrelated action is labelled a road-cut exposure.
-    Some(("sparse-terminal-overlapping-strategic-cutoff", 0.0, final_order.to_vec()))
+    Some((
+        "sparse-terminal-overlapping-strategic-cutoff",
+        0.0,
+        final_order.to_vec(),
+    ))
 }
 
 fn horizon_escalation_contenders(
@@ -626,7 +639,17 @@ impl NativeGpuSearchEngine {
             return Err("GPU native search cancelled".into());
         }
 
-        let particles = game_states(request.state, request.last_rejected_trade)?;
+        let stochastic = resolve_stochastic(&request)?;
+        if stochastic.state.reference_belief().is_some() {
+            return Err(
+                "GPU native search supports only m0-fair-iid-2d6-v1 stochastic semantics".into(),
+            );
+        }
+        let particles = game_states(
+            request.state,
+            request.last_rejected_trade,
+            stochastic.state.clone(),
+        )?;
         if particles.is_empty() {
             return Err("GPU native search received no belief particles".into());
         }
@@ -646,6 +669,7 @@ impl NativeGpuSearchEngine {
                         DecisionAuthority::ExactMandatory,
                         effort,
                     ),
+                    &stochastic,
                 ))
                 .map_err(|error| error.to_string());
             }
@@ -709,6 +733,7 @@ impl NativeGpuSearchEngine {
                     DecisionAuthority::TacticalProven,
                     effort,
                 ),
+                &stochastic,
             ))
             .map_err(|error| error.to_string());
         }
@@ -1021,8 +1046,9 @@ impl NativeGpuSearchEngine {
                 RootCausalEvidenceOutput {
                     action: action(candidate.action.clone()),
                     road_intent: match candidate.action {
-                        Action::BuildRoad { edge } | Action::PlaceRoad { edge } =>
-                            Some(road_intent_output(road_intent(&particles[0].state, edge, actor))),
+                        Action::BuildRoad { edge } | Action::PlaceRoad { edge } => Some(
+                            road_intent_output(road_intent(&particles[0].state, edge, actor)),
+                        ),
                         _ => None,
                     },
                     promotion_reason: impact
@@ -1324,15 +1350,31 @@ impl NativeGpuSearchEngine {
             .sum::<usize>();
         let mut total_executed_rollouts = moments.iter().map(|moment| moment.samples).sum::<u32>();
 
-        let escalation_plan = fragility_assessments.iter()
+        let escalation_plan = fragility_assessments
+            .iter()
             .find(|assessment| assessment.action == chosen_root.action)
-            .and_then(|fragility| horizon_escalation_trigger(&chosen_root, fragility).map(|mass| (
-                "fragile-award-low-terminal-completion", mass,
-                horizon_escalation_contenders(shallow_chosen_index, &shallow_final_root_order, &retained, fragility),
-            )))
-            .or_else(|| general_escalation_plan(shallow_chosen_index, &shallow_final_root_order, &shallow_aggregated));
+            .and_then(|fragility| {
+                horizon_escalation_trigger(&chosen_root, fragility).map(|mass| {
+                    (
+                        "fragile-award-low-terminal-completion",
+                        mass,
+                        horizon_escalation_contenders(
+                            shallow_chosen_index,
+                            &shallow_final_root_order,
+                            &retained,
+                            fragility,
+                        ),
+                    )
+                })
+            })
+            .or_else(|| {
+                general_escalation_plan(
+                    shallow_chosen_index,
+                    &shallow_final_root_order,
+                    &shallow_aggregated,
+                )
+            });
         if let Some((reason, unresolved_cut_mass, escalation_indices)) = escalation_plan {
-
             let escalation_samples_per_root =
                 (rollout_budget / escalation_indices.len().max(1) / 4).clamp(
                     HORIZON_ESCALATION_MIN_SAMPLES_PER_ROOT,
@@ -1582,9 +1624,7 @@ impl NativeGpuSearchEngine {
                             &candidate.action,
                         ) <= 1e-6
                     })
-                    .max_by(|left, right| {
-                        compare_roots(left, right)
-                    })
+                    .max_by(|left, right| compare_roots(left, right))
                 && escape.action != current
             {
                 safety_replacement = Some(ActionReplacementOutput {
@@ -1643,7 +1683,8 @@ impl NativeGpuSearchEngine {
                         confidence_width(aggregate.terminal_variance, aggregate.samples);
                     let margin_width =
                         confidence_width(aggregate.victory_margin_variance, aggregate.samples);
-                    let strategic_width = confidence_width(aggregate.strategic_margin_variance, aggregate.samples);
+                    let strategic_width =
+                        confidence_width(aggregate.strategic_margin_variance, aggregate.samples);
                     RetainedRootOutput {
                         action: action(candidate.action.clone()),
                         pre_truncation_rank: ranked
@@ -1673,11 +1714,16 @@ impl NativeGpuSearchEngine {
                         initial_victory_margin: (final_evaluation_horizons[index]
                             != rollout_steps as u16)
                             .then_some(shallow_aggregated[index].victory_margin),
-                        initial_strategic_margin: (final_evaluation_horizons[index] != rollout_steps as u16)
+                        initial_strategic_margin: (final_evaluation_horizons[index]
+                            != rollout_steps as u16)
                             .then_some(shallow_aggregated[index].strategic_margin),
                         strategic_margin: Some(aggregate.strategic_margin),
-                        strategic_margin_lower_bound: Some(aggregate.strategic_margin - strategic_width),
-                        strategic_margin_upper_bound: Some(aggregate.strategic_margin + strategic_width),
+                        strategic_margin_lower_bound: Some(
+                            aggregate.strategic_margin - strategic_width,
+                        ),
+                        strategic_margin_upper_bound: Some(
+                            aggregate.strategic_margin + strategic_width,
+                        ),
                         terminal_outcome: Some(aggregate.terminal_outcome),
                         terminal_rate: Some(aggregate.terminal_rate),
                         terminal_lower_bound: Some(aggregate.terminal_outcome - terminal_width),
@@ -1734,6 +1780,7 @@ impl NativeGpuSearchEngine {
             GPU_ALGORITHM,
             authority,
             diagnostics,
+            &stochastic,
         ))
         .map_err(|error| error.to_string())
     }

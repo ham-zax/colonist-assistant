@@ -2,7 +2,15 @@ import {
   analyzeDecisionRequest,
 } from "../worker/analyze";
 import { warmDeepSearchEngine } from "../worker/deep-search";
-import { NativeGpuClient } from "./native-gpu";
+import {
+  NativeGpuClient,
+  NATIVE_GPU_STOCHASTIC_MODEL,
+  nativeGpuSupportsStochasticModel,
+} from "./native-gpu";
+import {
+  M0_FAIR_IID_2D6_V1,
+  MREF_COLONIST_LINKED_2024_V1,
+} from "../core/dice-history";
 import {
   DECISION_CANCEL_MESSAGE_TYPE,
   DECISION_MESSAGE_TYPE,
@@ -75,7 +83,8 @@ const hasPendingIncomingTrade = (message: DecisionMessage): boolean =>
     ),
   );
 
-const shouldUseNativeGpu = (message: DecisionMessage): boolean =>
+export const shouldUseNativeGpu = (message: DecisionMessage): boolean =>
+  nativeGpuSupportsStochasticModel(message.stochastic?.model) &&
   message.engine === "deep-search" &&
   !message.board.initialPlacement &&
   (Boolean(message.board.isMyTurn) || hasPendingIncomingTrade(message));
@@ -184,16 +193,20 @@ chrome.runtime.onMessage.addListener(
       const runtime = analysis.deepSearch
         ? ("background-wasm" as const)
         : ("background-rollout" as const);
+      const requestedStochasticModel =
+        message.stochastic?.model ?? M0_FAIR_IID_2D6_V1;
       const runtimeReason =
         analysis.runtimeReason ??
         (runtime === "background-wasm"
-          ? message.engine === "deep-search" && message.board.initialPlacement
-            ? "Dedicated opening solver runs on WASM/CPU"
-            : nativeGpuEligible
-              ? "Native GPU unavailable; using WASM Deep MaxN"
-              : message.engine === "weighted"
-                ? "Weighted mode runs on WASM"
-                : undefined
+          ? requestedStochasticModel === MREF_COLONIST_LINKED_2024_V1
+            ? `CPU reference stochastic execution; native GPU supports ${NATIVE_GPU_STOCHASTIC_MODEL} only`
+            : message.engine === "deep-search" && message.board.initialPlacement
+              ? "Dedicated opening solver runs on WASM/CPU"
+              : nativeGpuEligible
+                ? "Native GPU unavailable; using WASM Deep MaxN"
+                : message.engine === "weighted"
+                  ? "Weighted mode runs on WASM"
+                  : undefined
           : undefined);
       return {
         ...analysis,

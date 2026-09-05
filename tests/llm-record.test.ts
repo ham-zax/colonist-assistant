@@ -7,6 +7,11 @@ import {
 } from "../src/core/llm-record";
 import type { BoardSnapshot, DiceMode } from "../src/core/placement";
 import type { ResourceVector } from "../src/core/resources";
+import {
+  appendPublicDiceRoll,
+  createDiceHistoryState,
+  observeLogCoverage,
+} from "../src/core/dice-history";
 
 const resources = (
   lumber: number,
@@ -79,6 +84,83 @@ const encodedDisplay = (
 };
 
 describe("compact LLM game record", () => {
+  it("persists dedicated public dice history independently of compact event rows", () => {
+    const diceHistory = createDiceHistoryState();
+    observeLogCoverage(diceHistory, [0, 1]);
+    appendPublicDiceRoll(diceHistory, {
+      actor: "Alice",
+      total: 8,
+      dice: [3, 5],
+      eventId: "roll-0",
+      logIndex: 0,
+    });
+    const record = new CompactGameBuilder().apply(
+      {
+        ...captureBase,
+        diceHistory,
+        decisions: [],
+      },
+      false,
+    );
+
+    expect(record.diceHistory).toMatchObject({
+      provenance: "complete-from-first-gameplay-roll",
+      rolls: [expect.objectContaining({ actor: "Alice", total: 8 })],
+    });
+    expect(record.diceHistory?.digest).toMatch(/^[0-9a-f]{16}$/u);
+    expect(record.events).toEqual([]);
+  });
+
+  it("records requested and effective stochastic identity on decisions", () => {
+    const decision: DecisionTrace = {
+      ...trace("mref-state", { kind: "turn-control", control: "end" }),
+      chanceModel: "fair-iid-2d6",
+      requestedStochasticModel: "mref-colonist-linked-2024-v1",
+      stochasticModel: "mref-colonist-linked-2024-v1",
+      beliefPolicy: "public-history-belief-v1",
+      diceHistoryProvenance: "complete-from-first-gameplay-roll",
+      publicHistoryDigest: "history-digest",
+      stochasticBeliefDigest: "belief-digest",
+      stochasticBeliefParticleCount: 1,
+    };
+    const record = new CompactGameBuilder().apply(
+      { ...captureBase, decisions: [decision] },
+      false,
+    );
+    const columns = record.contracts.decisionColumns;
+    const row = record.decisions[0]!;
+    const cell = (column: string) => row[columns.indexOf(column)];
+
+    expect(cell("requestedStochasticModel")).toBe("mref-colonist-linked-2024-v1");
+    expect(cell("stochasticModel")).toBe("mref-colonist-linked-2024-v1");
+    expect(cell("beliefPolicy")).toBe("public-history-belief-v1");
+    expect(cell("diceHistoryProvenance")).toBe("complete-from-first-gameplay-roll");
+    expect(cell("publicHistoryDigest")).toBe("history-digest");
+    expect(cell("stochasticBeliefDigest")).toBe("belief-digest");
+    expect(cell("stochasticBeliefParticles")).toBe(1);
+  });
+
+  it("maps explicit legacy fair-iid decision evidence to M0 and leaves unproven identity unknown", () => {
+    const fairLegacy: DecisionTrace = {
+      ...trace("fair-legacy", { kind: "turn-control", control: "end" }),
+      chanceModel: "fair-iid-2d6",
+    };
+    const unknownLegacy = trace("unknown-legacy", { kind: "turn-control", control: "end" });
+    const record = new CompactGameBuilder().apply(
+      { ...captureBase, decisions: [fairLegacy, unknownLegacy] },
+      false,
+    );
+    const columns = record.contracts.decisionColumns;
+    const stateColumn = columns.indexOf("state");
+    const modelColumn = columns.indexOf("stochasticModel");
+    const requestedColumn = columns.indexOf("requestedStochasticModel");
+    const rows = Object.fromEntries(record.decisions.map((row) => [row[stateColumn], row]));
+
+    expect(rows["fair-legacy"]?.[modelColumn]).toBe("m0-fair-iid-2d6-v1");
+    expect(rows["fair-legacy"]?.[requestedColumn]).toBe("m0-fair-iid-2d6-v1");
+    expect(rows["unknown-legacy"]?.[modelColumn]).toBe("unknown");
+    expect(rows["unknown-legacy"]?.[requestedColumn]).toBe("unknown");
+  });
   it("records canonical dice mode and forensic unsupported raw evidence", () => {
     for (const [diceMode, raw] of [
       ["random", undefined],
@@ -97,6 +179,49 @@ describe("compact LLM game record", () => {
       expect(record.meta.diceMode).toBe(diceMode);
       expect(record.meta.diceModeRaw).toBe(raw);
     }
+  });
+
+  it("migrates an explicit legacy fair-iid compact decision to M0", () => {
+    const current = new CompactGameBuilder().apply(
+      {
+        ...captureBase,
+        decisions: [
+          {
+            ...trace("legacy-fair-compact", { kind: "turn-control", control: "end" }),
+            chanceModel: "fair-iid-2d6",
+          },
+        ],
+      },
+      false,
+    );
+    const legacy = structuredClone(current);
+    const currentColumns = [...legacy.contracts.decisionColumns];
+    const removed = new Set([
+      "requestedStochasticModel",
+      "stochasticModel",
+      "beliefPolicy",
+      "diceHistoryProvenance",
+      "publicHistoryDigest",
+      "stochasticBeliefDigest",
+      "stochasticBeliefParticles",
+    ]);
+    const legacyColumns = currentColumns.filter((column) => !removed.has(column));
+    const engineRevisionIndex = legacyColumns.indexOf("engineRevision");
+    legacyColumns.splice(engineRevisionIndex + 1, 0, "chanceModel");
+    legacy.decisions = legacy.decisions.map((row) =>
+      legacyColumns.map((column) =>
+        column === "chanceModel" ? "fair-iid-2d6" : row[currentColumns.indexOf(column)]!,
+      ),
+    );
+    legacy.contracts = { ...legacy.contracts, decisionColumns: legacyColumns };
+
+    const normalized = normalizeCompactRecordIntegrity(legacy);
+    const columns = normalized.contracts.decisionColumns;
+    const row = normalized.decisions[0]!;
+    expect(row[columns.indexOf("requestedStochasticModel")]).toBe(
+      "m0-fair-iid-2d6-v1",
+    );
+    expect(row[columns.indexOf("stochasticModel")]).toBe("m0-fair-iid-2d6-v1");
   });
 
   it("normalizes legacy evidence without dice mode to Unknown", () => {

@@ -251,14 +251,14 @@ fn progressed_state(board_seed: u64, players: u8, steps: usize, action_seed: u64
 fn weighted_action(state: &GameState, actions: &[Action], rng: &mut SplitMix64) -> Action {
     let total = actions
         .iter()
-        .map(|action| u64::from(state.chance_weight(action)))
+        .map(|action| state.chance_weight(action))
         .sum::<u64>();
     if total == 0 {
         return actions[rng.range(actions.len())].clone();
     }
     let mut target = rng.next_u64() % total;
     for action in actions {
-        let weight = u64::from(state.chance_weight(action));
+        let weight = state.chance_weight(action);
         if target < weight {
             return action.clone();
         }

@@ -81,6 +81,84 @@ describe("decision service client", () => {
     client.destroy();
   });
 
+  it("sends explicit M0 stochastic authority for ordinary live decisions", async () => {
+    const analysis: DecisionAnalysis = {
+      engine: "deep-search",
+      players: [],
+      actionScores: { road: 0, settlement: 0, city: 0, development: 0 },
+      simulations: 1,
+      model: "test",
+    };
+    const sendMessage = vi.fn(async (message: { id: number }) => ({
+      id: message.id,
+      analysis,
+    }));
+    vi.stubGlobal("chrome", { runtime: { sendMessage } });
+    const client = new DecisionWorkerClient();
+
+    client.request(
+      "ordinary-m0",
+      {} as TrackerState,
+      {} as BoardSnapshot,
+      "You",
+      "deep-search",
+      vi.fn(),
+    );
+
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledOnce());
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stochastic: { model: "m0-fair-iid-2d6-v1" },
+      }),
+    );
+    client.destroy();
+  });
+
+  it("preserves an explicit M_ref validation request for background CPU routing", async () => {
+    const analysis: DecisionAnalysis = {
+      engine: "deep-search",
+      players: [],
+      actionScores: { road: 0, settlement: 0, city: 0, development: 0 },
+      simulations: 1,
+      model: "test",
+    };
+    const sendMessage = vi.fn(async (message: { id: number }) => ({
+      id: message.id,
+      analysis,
+    }));
+    vi.stubGlobal("chrome", { runtime: { sendMessage } });
+    const client = new DecisionWorkerClient();
+    const stochastic = {
+      model: "mref-colonist-linked-2024-v1" as const,
+      beliefPolicy: "public-history-belief-v1" as const,
+      playerMapping: ["You", "Rival"],
+      rolls: [{ ordinal: 0, actor: 0, total: 8 }],
+      provenance: "complete-from-first-gameplay-roll" as const,
+      diceHistoryDigest: "history",
+    };
+
+    client.request(
+      "reference-validation",
+      {} as TrackerState,
+      {} as BoardSnapshot,
+      "You",
+      "deep-search",
+      vi.fn(),
+      undefined,
+      undefined,
+      undefined,
+      true,
+      undefined,
+      stochastic,
+    );
+
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledOnce());
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ stochastic }),
+    );
+    client.destroy();
+  });
+
   it("sends the player-trade legality setting to the background decision service", async () => {
     const analysis: DecisionAnalysis = {
       engine: "deep-search",

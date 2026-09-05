@@ -30,6 +30,14 @@ import type {
   DecisionSearchConstraints,
 } from "../core/engine";
 import { isFullySpecifiedTrade } from "../core/trade-guard";
+import {
+  M0_FAIR_IID_2D6_V1,
+  MREF_COLONIST_LINKED_2024_V1,
+  PUBLIC_HISTORY_BELIEF_V1,
+  type DiceHistoryProvenance,
+  type PublicStochasticInput,
+  type StochasticModelId,
+} from "../core/dice-history";
 
 const RESOURCE_CODE = new Map<Resource, number>(
   RESOURCE_ORDER.map((resource, index) => [resource, index]),
@@ -49,6 +57,24 @@ const LIVE_WASM_EVIDENCE_ESCALATION_MS = 2_500;
 const LIVE_WASM_TRADE_DECISION_TIME_MS = 1_500;
 const LIVE_WASM_OPENING_DECISION_TIME_MS = 2_500;
 const LIVE_WASM_PONDER_DECISION_TIME_MS = 3_000;
+
+const effectiveStochasticModel = (value: string | undefined): StochasticModelId => {
+  if (value === undefined || value === M0_FAIR_IID_2D6_V1 || value === "fair-iid-2d6") {
+    return M0_FAIR_IID_2D6_V1;
+  }
+  if (value === MREF_COLONIST_LINKED_2024_V1) return MREF_COLONIST_LINKED_2024_V1;
+  throw new Error(`WASM returned unsupported stochastic model: ${value}`);
+};
+
+const diceHistoryProvenance = (
+  value: string | undefined,
+): DiceHistoryProvenance | undefined =>
+  value === "complete-from-first-gameplay-roll" ||
+  value === "gap-free-suffix" ||
+  value === "gapped" ||
+  value === "unknown"
+    ? value
+    : undefined;
 
 export type DeepSearchExecutor = (
   request: unknown,
@@ -1054,6 +1080,7 @@ export const buildDeepSearchRequest = (
   searchConstraints: DecisionSearchConstraints = {},
   playerTradesEnabled = true,
   particleLimit = MAX_INTERACTIVE_PARTICLES,
+  stochastic?: PublicStochasticInput,
 ) => {
   const players = playerNames(state, board);
   if (players.length < 2 || players.length > 4) {
@@ -1259,7 +1286,7 @@ export const buildDeepSearchRequest = (
       })(),
     };
   });
-  const signature = JSON.stringify({
+  const baseSignature = JSON.stringify({
     game: board.gameKey,
     event: state.eventCount,
     turn: state.currentTurn.sequence,
@@ -1275,6 +1302,13 @@ export const buildDeepSearchRequest = (
     })),
     searchConstraints,
   });
+  const requestedStochasticModel = stochastic?.model ?? M0_FAIR_IID_2D6_V1;
+  // M0 must retain the exact accepted v12 seed. Only behaviorful M_ref gets a
+  // domain-separated public stochastic identity suffix.
+  const signature =
+    requestedStochasticModel === MREF_COLONIST_LINKED_2024_V1
+      ? `${baseSignature}|stochastic:${JSON.stringify(stochastic)}`
+      : baseSignature;
   const seed = hashString(signature);
   const lastOwnRoll = state.recentEvents
     .map((event) => event.type === "roll" && event.player === rootPlayer)
@@ -1566,6 +1600,9 @@ export const buildDeepSearchRequest = (
       depth: 5,
       branchCap: 10,
       ponder: false,
+      ...(requestedStochasticModel === MREF_COLONIST_LINKED_2024_V1 && stochastic
+        ? { stochastic }
+        : {}),
       ...(searchConstraints.lastRejectedTrade
         ? {
             lastRejectedTrade: {
@@ -1596,6 +1633,7 @@ export const analyzeDeepSearch = async (
   playerTradesEnabled = true,
   engine: DecisionEngine = "deep-search",
   executor?: DeepSearchExecutor,
+  stochastic?: PublicStochasticInput,
 ): Promise<DecisionAnalysis> => {
   if (!executor) await ensureWasm();
   const { request, players, root } = buildDeepSearchRequest(
@@ -1604,6 +1642,8 @@ export const analyzeDeepSearch = async (
     rootPlayer,
     searchConstraints,
     playerTradesEnabled,
+    MAX_INTERACTIVE_PARTICLES,
+    stochastic,
   );
   request.mode = engine === "weighted" ? "weighted" : "maxn";
   if (board.initialPlacement) {
@@ -1700,10 +1740,27 @@ export const analyzeDeepSearch = async (
           evidenceEscalationMs:
             response.effectiveEffort.cpu.evidenceEscalationMs ?? 0,
         };
+  const requestedStochasticModel = stochastic?.model ?? M0_FAIR_IID_2D6_V1;
+  const stochasticModel = effectiveStochasticModel(response.stochasticModel);
   const search: DeepSearchResult = {
     engineRevision: response.engineRevision,
     diceMode: board.diceMode,
     chanceModel: "fair-iid-2d6",
+    requestedStochasticModel,
+    stochasticModel,
+    ...(response.beliefPolicy === PUBLIC_HISTORY_BELIEF_V1
+      ? { beliefPolicy: PUBLIC_HISTORY_BELIEF_V1 }
+      : {}),
+    ...(diceHistoryProvenance(response.diceHistoryProvenance)
+      ? { diceHistoryProvenance: diceHistoryProvenance(response.diceHistoryProvenance) }
+      : {}),
+    ...(response.publicHistoryDigest
+      ? { publicHistoryDigest: response.publicHistoryDigest }
+      : {}),
+    ...(response.stochasticBeliefDigest
+      ? { stochasticBeliefDigest: response.stochasticBeliefDigest }
+      : {}),
+    stochasticBeliefParticleCount: response.stochasticBeliefParticleCount ?? 1,
     rootIndex: root,
     learnedModelVersion: response.learnedModelVersion,
     tradeModelVersion: response.tradeModelVersion,

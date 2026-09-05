@@ -101,7 +101,9 @@ pub fn admit_promoted_roots(
     cap: usize,
 ) -> Vec<(Action, f32)> {
     let cap = cap.max(1);
-    let has_end_turn = ranked.iter().any(|(action, _)| matches!(action, Action::EndTurn));
+    let has_end_turn = ranked
+        .iter()
+        .any(|(action, _)| matches!(action, Action::EndTurn));
 
     let mut canonical_blockers = Vec::<(Action, f32)>::new();
     for (action, residual_loss) in mandatory_blockers {
@@ -126,7 +128,9 @@ pub fn admit_promoted_roots(
 
     let mut canonical_spatial = Vec::new();
     for action in spatial_promotions {
-        if !canonical_blockers.iter().any(|(candidate, _)| candidate == action)
+        if !canonical_blockers
+            .iter()
+            .any(|(candidate, _)| candidate == action)
             && !canonical_spatial.contains(action)
             && ranked.iter().any(|(candidate, _)| candidate == action)
         {
@@ -208,10 +212,11 @@ fn same_belief_state(left: &GameState, right: &GameState) -> bool {
 }
 
 /// Losslessly merge particles whose behaviorally relevant game states are equal.
-/// E2 dice mode is observation metadata and deliberately does not split belief
-/// identity until a later stochastic model makes it transition-relevant. State
-/// hashes are only a lookup accelerator; equality is checked before mass is
-/// combined, so a hash collision cannot merge distinct worlds.
+/// Observed dice mode remains behavior-inert metadata. The orthogonal stochastic
+/// model/belief is part of `GameState`, so M_ref states split identity whenever
+/// their controller belief differs while M0 retains the accepted v12 behavior.
+/// State hashes are only a lookup accelerator; equality is checked before mass
+/// is combined, so a hash collision cannot merge distinct worlds.
 pub fn coalesce_identical_particles(particles: &[BeliefParticle]) -> Vec<BeliefParticle> {
     let mut coalesced = Vec::<BeliefParticle>::new();
     for particle in particles {
@@ -472,7 +477,8 @@ pub fn select_experimental_strategic_particles(
 #[cfg(test)]
 mod tests {
     use colonist_catan_core::{
-        Action, CITY_COST, DevCard, DiceMode, GameState, Resource, SETTLEMENT_COST,
+        Action, CITY_COST, DevCard, DiceHistoryProvenance, DiceMode, GameState,
+        PublicRollObservation, Resource, SETTLEMENT_COST, StochasticBelief, StochasticState,
     };
 
     use super::{
@@ -504,6 +510,72 @@ mod tests {
 
         assert_eq!(coalesced.len(), 1);
         assert!((coalesced[0].weight - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn mref_belief_state_splits_belief_identity() {
+        let history = |total| {
+            [PublicRollObservation {
+                ordinal: 0,
+                actor: 0,
+                total,
+            }]
+        };
+        let belief = |total| {
+            StochasticBelief::from_public_history(
+                3,
+                &history(total),
+                &DiceHistoryProvenance::CompleteFromFirstGameplayRoll,
+                7,
+            )
+            .unwrap()
+        };
+        let mut first = GameState::standard(76, 3);
+        first.stochastic = StochasticState::reference(belief(8));
+        let mut second = first.clone();
+        second.stochastic = StochasticState::reference(belief(6));
+
+        assert_ne!(first.state_hash(), second.state_hash());
+        assert_eq!(
+            coalesce_identical_particles(&[
+                BeliefParticle {
+                    state: first,
+                    weight: 0.5
+                },
+                BeliefParticle {
+                    state: second,
+                    weight: 0.5
+                },
+            ])
+            .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn hidden_resource_worlds_do_not_change_public_stochastic_belief() {
+        let belief = StochasticBelief::from_public_history(
+            3,
+            &[PublicRollObservation {
+                ordinal: 0,
+                actor: 0,
+                total: 8,
+            }],
+            &DiceHistoryProvenance::CompleteFromFirstGameplayRoll,
+            11,
+        )
+        .unwrap();
+        let mut first = GameState::standard(76, 3);
+        first.stochastic = StochasticState::reference(belief);
+        let mut second = first.clone();
+        second.players[1].resources[Resource::Ore.index()] =
+            second.players[1].resources[Resource::Ore.index()].saturating_add(1);
+
+        assert_eq!(first.stochastic.digest(), second.stochastic.digest());
+        assert_eq!(
+            first.stochastic.reference_belief(),
+            second.stochastic.reference_belief()
+        );
     }
 
     #[test]
@@ -757,7 +829,9 @@ mod tests {
 
         assert_eq!(admitted.len(), 4);
         assert!(
-            admitted.iter().any(|(a, _)| *a == Action::BuildSettlement { vertex: 20 }),
+            admitted
+                .iter()
+                .any(|(a, _)| *a == Action::BuildSettlement { vertex: 20 }),
             "promoted action must be admitted despite low prior"
         );
         assert!(
@@ -824,10 +898,7 @@ mod tests {
 
     #[test]
     fn mandatory_blocker_outranks_end_turn_at_width_one() {
-        let ranked = vec![
-            (Action::EndTurn, 0.9),
-            (Action::BuildRoad { edge: 1 }, 0.1),
-        ];
+        let ranked = vec![(Action::EndTurn, 0.9), (Action::BuildRoad { edge: 1 }, 0.1)];
         let blockers = vec![(Action::BuildRoad { edge: 1 }, 0.0)];
 
         let admitted = admit_promoted_roots(&ranked, &blockers, &[], 1);

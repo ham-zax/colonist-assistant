@@ -15,6 +15,11 @@ import type {
   NativeGpuBuildIdentity,
 } from "./engine";
 import type { TrackerState } from "./types";
+import type {
+  DiceHistoryProvenance,
+  StochasticBeliefPolicyId,
+  StochasticModelId,
+} from "./dice-history";
 
 export type DecisionActionSource =
   | DecisionAuthority
@@ -157,6 +162,13 @@ export interface DecisionTrace {
   engineRevision?: string;
   diceMode?: BoardSnapshot["diceMode"];
   chanceModel?: "fair-iid-2d6";
+  requestedStochasticModel?: StochasticModelId;
+  stochasticModel?: StochasticModelId;
+  beliefPolicy?: StochasticBeliefPolicyId;
+  diceHistoryProvenance?: DiceHistoryProvenance;
+  publicHistoryDigest?: string;
+  stochasticBeliefDigest?: string;
+  stochasticBeliefParticleCount?: number;
   nativeGpuBuild?: NativeGpuBuildIdentity;
   algorithm?: string;
   effectiveSearchEffort?: DeepSearchEffectiveEffort;
@@ -451,6 +463,14 @@ export class DecisionTraceRecorder {
     trace.engineRevision = analysis.deepSearch?.engineRevision;
     trace.diceMode = analysis.deepSearch?.diceMode;
     trace.chanceModel = analysis.deepSearch?.chanceModel;
+    trace.requestedStochasticModel = analysis.deepSearch?.requestedStochasticModel;
+    trace.stochasticModel = analysis.deepSearch?.stochasticModel;
+    trace.beliefPolicy = analysis.deepSearch?.beliefPolicy;
+    trace.diceHistoryProvenance = analysis.deepSearch?.diceHistoryProvenance;
+    trace.publicHistoryDigest = analysis.deepSearch?.publicHistoryDigest;
+    trace.stochasticBeliefDigest = analysis.deepSearch?.stochasticBeliefDigest;
+    trace.stochasticBeliefParticleCount =
+      analysis.deepSearch?.stochasticBeliefParticleCount;
     trace.nativeGpuBuild = analysis.nativeGpuBuild
       ? structuredClone(analysis.nativeGpuBuild)
       : undefined;

@@ -16,6 +16,16 @@ import {
   stableMessageId,
 } from "./dom";
 import { isExtensionContextInvalidatedError } from "./extension-context";
+import {
+  appendPublicDiceRoll,
+  createDiceHistoryState,
+  noteMissingPublicRoll,
+  observeLogCoverage,
+  restoreDiceHistoryState,
+  serializeDiceHistoryState,
+  type DiceHistoryState,
+  type StoredDiceHistoryState,
+} from "../core/dice-history";
 
 export type UnmatchedLogReason =
   | "known-bank-shortage-notice"
@@ -40,7 +50,7 @@ export interface UnmatchedLogSample {
   sample: string;
 }
 
-interface StoredSession {
+interface StoredSessionV3 {
   schema: 3;
   id: string;
   page: string;
@@ -54,6 +64,13 @@ interface StoredSession {
   unmatchedIntegrityCount?: number;
   unmatchedSamples?: UnmatchedLogSample[];
 }
+
+interface StoredSession extends Omit<StoredSessionV3, "schema"> {
+  schema: 4;
+  diceHistory: StoredDiceHistoryState;
+}
+
+type RestorableSession = StoredSessionV3 | StoredSession;
 
 export interface SessionSummary {
   active: boolean;
@@ -210,6 +227,7 @@ export class GameSession {
   state: TrackerState = createTrackerState();
   events: StoredEvent[] = [];
   partialHistory = false;
+  diceHistory: DiceHistoryState = createDiceHistoryState();
   unmatchedCount = 0;
   unmatchedIntegrityCount = 0;
   unmatchedSamples: UnmatchedLogSample[] = [];
@@ -309,6 +327,7 @@ export class GameSession {
     this.state = createTrackerState();
     this.events = [];
     this.partialHistory = false;
+    this.diceHistory = createDiceHistoryState();
     this.unmatchedCount = 0;
     this.unmatchedIntegrityCount = 0;
     this.unmatchedSamples = [];
@@ -336,6 +355,7 @@ export class GameSession {
     this.state = createTrackerState();
     this.events = [];
     this.partialHistory = false;
+    this.diceHistory = createDiceHistoryState();
     this.unmatchedCount = 0;
     this.unmatchedIntegrityCount = 0;
     this.unmatchedSamples = [];
@@ -376,11 +396,15 @@ export class GameSession {
     const canonical = this.events.map((event) =>
       canonicalizeEvent(event, normalized),
     );
-    const changed = canonical.some(
-      (event, index) => event !== this.events[index],
+    const canonicalDice = this.diceHistory.rolls.map((roll) =>
+      roll.actor === "You" ? { ...roll, actor: normalized } : roll,
     );
+    const changed =
+      canonical.some((event, index) => event !== this.events[index]) ||
+      canonicalDice.some((roll, index) => roll !== this.diceHistory.rolls[index]);
     if (!changed) return;
     this.events = canonical;
+    this.diceHistory.rolls = canonicalDice;
     this.state = replayEvents(this.events);
     this.queueSave();
     this.onUpdate(this);
@@ -391,7 +415,12 @@ export class GameSession {
     const language = detectLanguage();
     const elements = findMessageElements(this.root);
     const occurrence = new Map<string, number>();
-    const candidates: Array<{ element: Element; id: string; index: number }> = [];
+    const candidates: Array<{
+      element: Element;
+      id: string;
+      index: number;
+      logIndex?: number;
+    }> = [];
 
     for (const element of elements) {
       const snapshot = snapshotMessage(element, language);
@@ -404,7 +433,12 @@ export class GameSession {
         id = `message:${base}:${ordinal}`;
       }
       if (!force && this.seenElements.get(element) === id) continue;
-      candidates.push({ element, id, index: snapshot.index ?? this.syntheticSequence++ });
+      candidates.push({
+        element,
+        id,
+        index: snapshot.index ?? this.syntheticSequence++,
+        ...(snapshot.index !== undefined ? { logIndex: snapshot.index } : {}),
+      });
     }
 
     candidates.sort((left, right) => left.index - right.index);
@@ -421,12 +455,19 @@ export class GameSession {
       this.state = createTrackerState();
       this.events = [];
       this.partialHistory = false;
+      this.diceHistory = createDiceHistoryState();
       this.unmatchedCount = 0;
       this.unmatchedIntegrityCount = 0;
       this.unmatchedSamples = [];
       this.startedAt = Date.now();
       this.seenIds.clear();
     }
+    observeLogCoverage(
+      this.diceHistory,
+      candidates.flatMap((candidate) =>
+        candidate.logIndex === undefined ? [] : [candidate.logIndex],
+      ),
+    );
     if (
       !this.events.length &&
       candidates.length &&
@@ -460,6 +501,19 @@ export class GameSession {
         raw: snapshot.serialText,
       } as StoredEvent, this.myPlayer);
       this.events.push(stored);
+      if (stored.type === "roll") {
+        if (stored.dice) {
+          appendPublicDiceRoll(this.diceHistory, {
+            actor: stored.player,
+            total: stored.dice[0] + stored.dice[1],
+            dice: [...stored.dice] as [number, number],
+            eventId: stored.id,
+            ...(stored.index !== undefined ? { logIndex: stored.index } : {}),
+          });
+        } else {
+          noteMissingPublicRoll(this.diceHistory);
+        }
+      }
       this.state = reduceTracker(this.state, stored, stored);
       changed = true;
     }
@@ -524,6 +578,39 @@ export class GameSession {
     });
   }
 
+  private migrateLegacyDiceHistory(stored: StoredSessionV3): DiceHistoryState {
+    const history = createDiceHistoryState();
+    observeLogCoverage(
+      history,
+      stored.events.flatMap((event) =>
+        event.index === undefined ? [] : [event.index],
+      ),
+    );
+    for (const event of stored.events) {
+      if (event.type !== "roll") continue;
+      if (event.dice) {
+        appendPublicDiceRoll(history, {
+          actor: event.player,
+          total: event.dice[0] + event.dice[1],
+          dice: [...event.dice] as [number, number],
+          eventId: event.id,
+          ...(event.index !== undefined ? { logIndex: event.index } : {}),
+        });
+      } else {
+        noteMissingPublicRoll(history);
+      }
+    }
+    // A schema-3 partial session never proves a complete dice prefix merely
+    // because its retained parsed events happen to begin at log index zero.
+    if (
+      stored.partialHistory &&
+      history.provenance === "complete-from-first-gameplay-roll"
+    ) {
+      history.provenance = "unknown";
+    }
+    return history;
+  }
+
   private async restore(): Promise<void> {
     const key = sessionStorageKey(this.id);
     let result: Record<string, unknown>;
@@ -533,13 +620,23 @@ export class GameSession {
       if (isExtensionContextInvalidatedError(error)) return;
       throw error;
     }
-    const stored = result[key] as StoredSession | undefined;
-    if (!stored || stored.schema !== 3 || stored.page !== pageIdentity()) return;
+    const stored = result[key] as RestorableSession | undefined;
+    if (
+      !stored ||
+      (stored.schema !== 3 && stored.schema !== 4) ||
+      stored.page !== pageIdentity()
+    ) {
+      return;
+    }
     if (this.gameKey && stored.gameKey && this.gameKey !== stored.gameKey) return;
     this.gameKey ??= stored.gameKey;
     this.startedAt = stored.startedAt;
     this.events = stored.events;
     this.partialHistory = stored.partialHistory;
+    this.diceHistory =
+      stored.schema === 4
+        ? restoreDiceHistoryState(stored.diceHistory)
+        : this.migrateLegacyDiceHistory(stored);
     this.unmatchedCount = stored.unmatchedCount;
     this.unmatchedIntegrityCount =
       stored.unmatchedIntegrityCount ??
@@ -569,7 +666,7 @@ export class GameSession {
     const shouldPruneHistory = this.pruneSessionHistory;
     const now = Date.now();
     const record: StoredSession = {
-      schema: 3,
+      schema: 4,
       id: this.id,
       page: pageIdentity(),
       ...(this.gameKey ? { gameKey: this.gameKey } : {}),
@@ -578,6 +675,7 @@ export class GameSession {
       events: this.events,
       seenIds: [...this.seenIds].slice(-MAX_SEEN_IDS),
       partialHistory: this.partialHistory,
+      diceHistory: serializeDiceHistoryState(this.diceHistory),
       unmatchedCount: this.unmatchedCount,
       unmatchedIntegrityCount: this.unmatchedIntegrityCount,
       unmatchedSamples: this.unmatchedSamples.map((sample) => ({ ...sample })),

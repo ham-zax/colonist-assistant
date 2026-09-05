@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use colonist_catan_core::{
-    Action, Building, DevCard, GameState, Phase, Resource, ResourceHand, ROAD_COST,
+    Action, Building, DevCard, GameState, Phase, ROAD_COST, Resource, ResourceHand,
     SETTLEMENT_COST, SyntheticBoardGenerator,
 };
 use serde::{Deserialize, Serialize};
@@ -72,7 +72,10 @@ impl TacticalActionSpec {
                 second: self.second_edge,
             },
             "play-year-of-plenty" => Action::PlayYearOfPlenty {
-                first: resource(self.resource.expect("resource required for play-year-of-plenty")),
+                first: resource(
+                    self.resource
+                        .expect("resource required for play-year-of-plenty"),
+                ),
                 second: resource(
                     self.second_resource
                         .expect("secondResource required for play-year-of-plenty"),
@@ -94,7 +97,9 @@ impl TacticalActionSpec {
                 ratio: self.ratio.expect("ratio required for maritime-trade"),
             },
             "offer-trade" => Action::OfferTrade {
-                recipients: self.recipients.expect("recipients required for offer-trade"),
+                recipients: self
+                    .recipients
+                    .expect("recipients required for offer-trade"),
                 give: self.give.expect("give required for offer-trade"),
                 receive: self.receive.expect("receive required for offer-trade"),
             },
@@ -398,8 +403,7 @@ pub fn default_corpus_path() -> PathBuf {
 pub fn load_tactical_corpus(path: &Path) -> Result<TacticalCorpus, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read corpus file {:?}: {e}", path))?;
-    serde_json::from_str(&content)
-        .map_err(|e| format!("failed to deserialize corpus JSON: {e}"))
+    serde_json::from_str(&content).map_err(|e| format!("failed to deserialize corpus JSON: {e}"))
 }
 
 fn rebalance_bank_from_hands(state: &mut GameState) -> Result<(), String> {
@@ -578,21 +582,25 @@ pub fn build_state(spec: &TacticalStateSpec) -> Result<GameState, String> {
 
     for road in &spec.roads {
         state.roads[road.edge as usize] = Some(road.player);
-        state.players[road.player as usize].roads_left =
-            state.players[road.player as usize].roads_left.saturating_sub(1);
+        state.players[road.player as usize].roads_left = state.players[road.player as usize]
+            .roads_left
+            .saturating_sub(1);
     }
 
     for bld in &spec.buildings {
         let building = match bld.kind.as_str() {
             "settlement" => {
-                state.players[bld.player as usize].settlements_left =
-                    state.players[bld.player as usize].settlements_left.saturating_sub(1);
+                state.players[bld.player as usize].settlements_left = state.players
+                    [bld.player as usize]
+                    .settlements_left
+                    .saturating_sub(1);
                 state.players[bld.player as usize].public_victory_points += 1;
                 Building::Settlement(bld.player)
             }
             "city" => {
-                state.players[bld.player as usize].cities_left =
-                    state.players[bld.player as usize].cities_left.saturating_sub(1);
+                state.players[bld.player as usize].cities_left = state.players[bld.player as usize]
+                    .cities_left
+                    .saturating_sub(1);
                 state.players[bld.player as usize].public_victory_points += 2;
                 Building::City(bld.player)
             }
@@ -705,7 +713,9 @@ fn shortest_route_distance(state: &GameState, player: u8, start: u8, goal: u8) -
             }
             let [a, b] = state.board.edges[e as usize].vertices;
             let next_v = if a == curr { b } else { a };
-            if state.buildings[next_v as usize].is_some_and(|bld| bld.player() != player && next_v != goal) {
+            if state.buildings[next_v as usize]
+                .is_some_and(|bld| bld.player() != player && next_v != goal)
+            {
                 continue;
             }
             let edge_cost = if owner == Some(player) { 0 } else { 1 };
@@ -732,7 +742,9 @@ pub fn verify_mechanical_consequence(scenario: &TacticalScenario) -> Result<(), 
         if let Some(forbidden) = &expect.forbidden_action {
             let forbidden = forbidden.to_action();
             if base.legal_actions().contains(&forbidden) {
-                return Err(format!("forbidden action is unexpectedly legal: {forbidden:?}"));
+                return Err(format!(
+                    "forbidden action is unexpectedly legal: {forbidden:?}"
+                ));
             }
         }
 
@@ -776,20 +788,27 @@ pub fn verify_mechanical_consequence(scenario: &TacticalScenario) -> Result<(), 
         }
         if let Some(expected) = expect.development_vp_chance {
             if next.phase != Phase::DevelopmentChance {
-                return Err("development VP chance requires BuyDevelopment to enter chance phase".into());
+                return Err(
+                    "development VP chance requires BuyDevelopment to enter chance phase".into(),
+                );
             }
             let actions = next.legal_actions();
             let total = actions
                 .iter()
-                .map(|action| next.chance_weight(action) as u32)
-                .sum::<u32>();
+                .map(|action| next.chance_weight(action))
+                .sum::<u64>();
             let vp = actions
                 .iter()
                 .filter(|action| {
-                    matches!(action, Action::ResolveDevelopment { card: DevCard::VictoryPoint })
+                    matches!(
+                        action,
+                        Action::ResolveDevelopment {
+                            card: DevCard::VictoryPoint
+                        }
+                    )
                 })
-                .map(|action| next.chance_weight(action) as u32)
-                .sum::<u32>();
+                .map(|action| next.chance_weight(action))
+                .sum::<u64>();
             let actual = if total == 0 {
                 0.0
             } else {
@@ -805,7 +824,9 @@ pub fn verify_mechanical_consequence(scenario: &TacticalScenario) -> Result<(), 
         if let Some(follow_up) = &expect.follow_up {
             let follow_up = follow_up.to_action();
             if !next.legal_actions().contains(&follow_up) {
-                return Err(format!("follow-up is not legal after action: {follow_up:?}"));
+                return Err(format!(
+                    "follow-up is not legal after action: {follow_up:?}"
+                ));
             }
             next.apply(&follow_up)
                 .map_err(|error| format!("follow-up {follow_up:?} failed: {error:?}"))?;
@@ -847,35 +868,50 @@ pub fn verify_mechanical_consequence(scenario: &TacticalScenario) -> Result<(), 
 
     let mut next = base.clone();
     if let Err(e) = next.apply(&best_action) {
-        return Err(format!("expected root action {:?} is illegal: {e:?}", best_action));
+        return Err(format!(
+            "expected root action {:?} is illegal: {e:?}",
+            best_action
+        ));
     }
 
     match scenario.declared_consequence.as_str() {
         "strips_longest_road" => {
             let rival = 1u8;
             if base.longest_road_holder != Some(rival) {
-                return Err(format!("base state does not have player {rival} holding longest road"));
+                return Err(format!(
+                    "base state does not have player {rival} holding longest road"
+                ));
             }
             if next.longest_road_holder == Some(rival) {
-                return Err(format!("next state still has player {rival} holding longest road"));
+                return Err(format!(
+                    "next state still has player {rival} holding longest road"
+                ));
             }
         }
         "transfers_longest_road" => {
             let actor = scenario.state.active_player;
             if base.longest_road_holder == Some(actor) {
-                return Err(format!("base state already has actor {actor} holding longest road"));
+                return Err(format!(
+                    "base state already has actor {actor} holding longest road"
+                ));
             }
             if next.longest_road_holder != Some(actor) {
-                return Err(format!("next state does not transfer longest road to actor {actor}"));
+                return Err(format!(
+                    "next state does not transfer longest road to actor {actor}"
+                ));
             }
         }
         "bypassed_cycle_retains_award" => {
             let rival = 1u8;
             if base.longest_road_holder != Some(rival) {
-                return Err(format!("base state does not have player {rival} holding longest road"));
+                return Err(format!(
+                    "base state does not have player {rival} holding longest road"
+                ));
             }
             if next.longest_road_holder != Some(rival) {
-                return Err(format!("cut on bypassed cycle unexpectedly stripped award from {rival}"));
+                return Err(format!(
+                    "cut on bypassed cycle unexpectedly stripped award from {rival}"
+                ));
             }
         }
         "preserves_expansion_lane" => {
@@ -884,7 +920,9 @@ pub fn verify_mechanical_consequence(scenario: &TacticalScenario) -> Result<(), 
                 return Err("preserves_expansion_lane requires a BuildRoad action".into());
             };
             if next.longest_road_holder != base.longest_road_holder {
-                return Err("expansion-lane control is confounded by a Longest Road transfer".into());
+                return Err(
+                    "expansion-lane control is confounded by a Longest Road transfer".into(),
+                );
             }
             let [a, b] = base.board.edges[edge as usize].vertices;
             // Identify the newly reached vertex that was not reachable before
@@ -895,14 +933,20 @@ pub fn verify_mechanical_consequence(scenario: &TacticalScenario) -> Result<(), 
             };
             // In base, target_vertex must not be reachable for settlement placement
             if player_can_settle_vertex(&base, actor, target_vertex) {
-                return Err(format!("base state already connects target vertex {target_vertex}"));
+                return Err(format!(
+                    "base state already connects target vertex {target_vertex}"
+                ));
             }
             // In next, target_vertex must be open and legally available for settlement
             if !settlement_vertex_open(&next, target_vertex as usize) {
-                return Err(format!("target vertex {target_vertex} is not open for settlement"));
+                return Err(format!(
+                    "target vertex {target_vertex} is not open for settlement"
+                ));
             }
             if !player_can_settle_vertex(&next, actor, target_vertex) {
-                return Err(format!("next state cannot connect a settlement on target vertex {target_vertex}"));
+                return Err(format!(
+                    "next state cannot connect a settlement on target vertex {target_vertex}"
+                ));
             }
             let settlement = Action::BuildSettlement {
                 vertex: target_vertex,
@@ -921,7 +965,9 @@ pub fn verify_mechanical_consequence(scenario: &TacticalScenario) -> Result<(), 
                 .ok_or_else(|| "detour_available requires a negative_control_root".to_string())?
                 .to_action();
             let Action::BuildRoad { edge: choke_edge } = neg_action else {
-                return Err("detour_available negative control must be a BuildRoad choke action".into());
+                return Err(
+                    "detour_available negative control must be a BuildRoad choke action".into(),
+                );
             };
             // Simulate blocking the apparent choke edge with actor's road
             let mut choked = base.clone();
@@ -940,7 +986,9 @@ pub fn verify_mechanical_consequence(scenario: &TacticalScenario) -> Result<(), 
 
             // The choke edge did not lengthen rival's route; a parallel detour of equal cost exists
             if d_choked > d_base {
-                return Err(format!("choke edge {choke_edge} increased distance from {d_base} to {d_choked}"));
+                return Err(format!(
+                    "choke edge {choke_edge} increased distance from {d_base} to {d_choked}"
+                ));
             }
         }
         "negative_control_vanity_branch" => {
@@ -952,12 +1000,17 @@ pub fn verify_mechanical_consequence(scenario: &TacticalScenario) -> Result<(), 
                 .to_action();
             let mut vanity_state = base.clone();
             if let Err(e) = vanity_state.apply(&neg_action) {
-                return Err(format!("vanity road action {:?} is illegal: {e:?}", neg_action));
+                return Err(format!(
+                    "vanity road action {:?} is illegal: {e:?}",
+                    neg_action
+                ));
             }
             if vanity_state.longest_road_length(actor) > base.longest_road_length(actor) {
                 return Err("vanity branch unexpectedly increased longest road length".into());
             }
-            if vanity_state.longest_road_holder == Some(actor) && base.longest_road_holder != Some(actor) {
+            if vanity_state.longest_road_holder == Some(actor)
+                && base.longest_road_holder != Some(actor)
+            {
                 return Err("vanity branch unexpectedly claimed longest road".into());
             }
         }
@@ -976,11 +1029,17 @@ mod tests {
     #[test]
     fn test_checked_in_corpus_passes_mechanical_g0() {
         let path = default_corpus_path();
-        let corpus = load_tactical_corpus(&path).expect("failed to load checked-in tactical corpus");
+        let corpus =
+            load_tactical_corpus(&path).expect("failed to load checked-in tactical corpus");
         assert_eq!(corpus.scenarios.len(), 26);
         for scenario in &corpus.scenarios {
             let res = verify_mechanical_consequence(scenario);
-            assert!(res.is_ok(), "scenario {} failed G0: {:?}", scenario.id, res.err());
+            assert!(
+                res.is_ok(),
+                "scenario {} failed G0: {:?}",
+                scenario.id,
+                res.err()
+            );
         }
     }
 }

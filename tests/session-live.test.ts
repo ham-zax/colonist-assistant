@@ -63,12 +63,106 @@ const message = (index: number, text: string): HTMLDivElement => {
   return element;
 };
 
+const diceMessage = (
+  index: number,
+  player: string,
+  left: number,
+  right: number,
+): HTMLDivElement => {
+  const element = message(index, `${player} rolled`);
+  for (const die of [left, right]) {
+    const image = document.createElement("img");
+    image.alt = `dice_white${die}`;
+    element.append(image);
+  }
+  return element;
+};
+
 const rollPlayers = (session: GameSession): string[] =>
   session.events.flatMap((event) =>
     event.type === "roll" ? [event.player] : [],
   );
 
 describe("live log session scanning", () => {
+  it("owns ordered public dice history and complete indexed provenance", async () => {
+    const root = document.createElement("div");
+    root.append(diceMessage(0, "Alice", 3, 5), diceMessage(1, "Bob", 6, 1));
+    document.body.append(root);
+    const session = new GameSession(root, vi.fn(), "dice-history-game");
+
+    await session.start();
+
+    expect(session.diceHistory.provenance).toBe("complete-from-first-gameplay-roll");
+    expect(session.diceHistory.rolls).toEqual([
+      expect.objectContaining({ actor: "Alice", total: 8, dice: [3, 5], logIndex: 0 }),
+      expect.objectContaining({ actor: "Bob", total: 7, dice: [6, 1], logIndex: 1 }),
+    ]);
+    session.stop();
+  });
+
+  it("persists schema 4 dice history independently and reconnects a contiguous suffix", async () => {
+    const firstRoot = document.createElement("div");
+    firstRoot.append(diceMessage(0, "Alice", 4, 4), diceMessage(1, "Bob", 3, 3));
+    document.body.append(firstRoot);
+    const first = new GameSession(firstRoot, vi.fn(), "dice-reconnect-game");
+    await first.start();
+    await vi.waitFor(() => {
+      expect(localStorage.get(`colonistAssistantSession:${first.id}`)).toMatchObject({
+        schema: 4,
+        diceHistory: {
+          provenance: "complete-from-first-gameplay-roll",
+        },
+      });
+    });
+    first.stop();
+    firstRoot.remove();
+
+    const secondRoot = document.createElement("div");
+    secondRoot.append(diceMessage(2, "Alice", 2, 5), diceMessage(3, "Bob", 5, 4));
+    document.body.append(secondRoot);
+    const second = new GameSession(secondRoot, vi.fn(), "dice-reconnect-game");
+    await second.start();
+
+    expect(second.diceHistory.provenance).toBe("complete-from-first-gameplay-roll");
+    expect(second.diceHistory.coverage.ranges).toEqual([[0, 3]]);
+    expect(second.diceHistory.rolls.map((roll) => roll.total)).toEqual([8, 6, 7, 9]);
+    second.stop();
+  });
+
+  it("migrates schema 3 roll evidence conservatively without inferring completeness", async () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const session = new GameSession(root, vi.fn(), "legacy-dice-game");
+    localStorage.set(`colonistAssistantSession:${session.id}`, {
+      schema: 3,
+      id: session.id,
+      page: `${location.origin}${location.pathname}${location.search}`,
+      gameKey: "legacy-dice-game",
+      startedAt: 1,
+      updatedAt: 2,
+      events: [
+        {
+          type: "roll",
+          player: "Alice",
+          dice: [3, 4],
+          id: "legacy-roll",
+          index: 9,
+          timestamp: 2,
+          raw: "Alice rolled :die-3: :die-4:",
+        },
+      ],
+      seenIds: ["legacy-roll"],
+      partialHistory: false,
+      unmatchedCount: 0,
+    });
+
+    await session.start();
+
+    expect(session.diceHistory.rolls.map((roll) => roll.total)).toEqual([7]);
+    expect(session.diceHistory.provenance).toBe("gap-free-suffix");
+    expect(session.diceHistory.missingPrefixRolls).toBeUndefined();
+    session.stop();
+  });
   it("recognizes a Colonist bank-shortage notice without failing integrity", async () => {
     const text =
       "Not enough wool for all players. 2 are left, and 3 were needed.";

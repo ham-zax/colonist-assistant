@@ -12,6 +12,11 @@ import {
   type ResourceVector,
 } from "./resources";
 import { NUMBER_PIPS, type BoardSnapshot, type DiceMode } from "./placement";
+import type {
+  DiceHistoryProvenance,
+  StochasticBeliefPolicyId,
+  StochasticModelId,
+} from "./dice-history";
 import { getPlayerEstimate } from "./tracker";
 import type { HandWorld, TrackerState } from "./types";
 import {
@@ -308,7 +313,15 @@ export interface DecisionSearchConstraints {
 export interface DeepSearchResult {
   engineRevision: string;
   diceMode: DiceMode;
+  /** Legacy spelling retained for additive evidence compatibility. */
   chanceModel: "fair-iid-2d6";
+  requestedStochasticModel: StochasticModelId;
+  stochasticModel: StochasticModelId;
+  beliefPolicy?: StochasticBeliefPolicyId;
+  diceHistoryProvenance?: DiceHistoryProvenance;
+  publicHistoryDigest?: string;
+  stochasticBeliefDigest?: string;
+  stochasticBeliefParticleCount: number;
   rootIndex: number;
   learnedModelVersion?: string;
   tradeModelVersion?: string;

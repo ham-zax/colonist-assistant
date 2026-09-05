@@ -6,8 +6,9 @@
 use std::cell::RefCell;
 
 use colonist_catan_core::{
-    Action, Board, Building, DiceMode, Edge, GameState, Phase, PlayerState, Port, Resource,
-    TradeOffer, Vertex,
+    Action, Board, Building, DiceHistoryProvenance, DiceMode, Edge, GameState, M0_FAIR_IID_2D6_V1,
+    MREF_COLONIST_LINKED_2024_V1, MissingRollGap, PUBLIC_HISTORY_BELIEF_V1, Phase, PlayerState,
+    Port, PublicRollObservation, Resource, StochasticBelief, StochasticState, TradeOffer, Vertex,
 };
 use colonist_catan_search::{
     ActionStats, BeliefParticle, BeliefSearchProvenance, BeliefSearchStageTimings,
@@ -117,6 +118,37 @@ enum DiceModeInput {
     Random,
     Balanced,
     Unsupported,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublicRollInput {
+    ordinal: u32,
+    actor: u8,
+    total: u8,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MissingRollGapInput {
+    after_ordinal: u32,
+    missing_rolls: Option<u32>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StochasticInput {
+    model: String,
+    belief_policy: Option<String>,
+    #[serde(default)]
+    player_mapping: Vec<String>,
+    #[serde(default)]
+    rolls: Vec<PublicRollInput>,
+    provenance: Option<String>,
+    missing_prefix_rolls: Option<u32>,
+    #[serde(default)]
+    gaps: Vec<MissingRollGapInput>,
+    dice_history_digest: Option<String>,
 }
 
 impl From<DiceModeInput> for DiceMode {
@@ -235,6 +267,10 @@ struct Request {
     depth: Option<u8>,
     branch_cap: Option<usize>,
     ponder: Option<bool>,
+    #[serde(default)]
+    stochastic: Option<StochasticInput>,
+    #[serde(default)]
+    chance_model: Option<String>,
 }
 
 impl Request {
@@ -267,12 +303,9 @@ impl Request {
                 max_depth: effort.cpu.max_depth.clamp(1, 6),
                 root_cap: effort.cpu.root_cap.clamp(2, 32),
                 nodes_per_depth_wave: effort.cpu.nodes_per_depth_wave.clamp(1_000, 250_000),
-                evidence_escalation_ms: effort
-                    .cpu
-                    .evidence_escalation_ms
-                    .and_then(|milliseconds| {
-                        (milliseconds > 0).then(|| milliseconds.clamp(1, 3_000))
-                    }),
+                evidence_escalation_ms: effort.cpu.evidence_escalation_ms.and_then(
+                    |milliseconds| (milliseconds > 0).then(|| milliseconds.clamp(1, 3_000)),
+                ),
             },
             gpu: GpuEffortInput {
                 root_cap: effort.gpu.root_cap.clamp(2, 24),
@@ -688,6 +721,12 @@ struct ResponseDiagnostics {
 #[serde(rename_all = "camelCase")]
 struct Response {
     engine_revision: &'static str,
+    stochastic_model: &'static str,
+    belief_policy: Option<&'static str>,
+    dice_history_provenance: Option<String>,
+    public_history_digest: Option<String>,
+    stochastic_belief_digest: Option<String>,
+    stochastic_belief_particle_count: usize,
     authority: DecisionAuthority,
     learned_model_version: &'static str,
     trade_model_version: &'static str,
@@ -762,6 +801,186 @@ fn phase(value: &str, parameter: Option<u8>) -> Result<Phase, String> {
     })
 }
 
+#[derive(Clone)]
+struct ResolvedStochastic {
+    state: StochasticState,
+    model: &'static str,
+    belief_policy: Option<&'static str>,
+    provenance: Option<String>,
+    public_history_digest: Option<String>,
+    belief_digest: Option<String>,
+    belief_particle_count: usize,
+}
+
+fn fnv64_byte(hash: &mut u64, value: u8) {
+    *hash ^= value as u64;
+    *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+}
+
+fn fnv64_bytes(hash: &mut u64, values: &[u8]) {
+    for value in values {
+        fnv64_byte(hash, *value);
+    }
+    fnv64_byte(hash, 0xff);
+}
+
+fn public_stochastic_hash(input: &StochasticInput, include_model: bool) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325;
+    if include_model {
+        fnv64_bytes(&mut hash, input.model.as_bytes());
+        fnv64_bytes(
+            &mut hash,
+            input.belief_policy.as_deref().unwrap_or("").as_bytes(),
+        );
+    }
+    for player in &input.player_mapping {
+        fnv64_bytes(&mut hash, player.as_bytes());
+    }
+    fnv64_bytes(
+        &mut hash,
+        input.provenance.as_deref().unwrap_or("unknown").as_bytes(),
+    );
+    for value in input.missing_prefix_rolls.unwrap_or(u32::MAX).to_le_bytes() {
+        fnv64_byte(&mut hash, value);
+    }
+    for roll in &input.rolls {
+        for value in roll.ordinal.to_le_bytes() {
+            fnv64_byte(&mut hash, value);
+        }
+        fnv64_byte(&mut hash, roll.actor);
+        fnv64_byte(&mut hash, roll.total);
+    }
+    for gap in &input.gaps {
+        for value in gap.after_ordinal.to_le_bytes() {
+            fnv64_byte(&mut hash, value);
+        }
+        for value in gap.missing_rolls.unwrap_or(u32::MAX).to_le_bytes() {
+            fnv64_byte(&mut hash, value);
+        }
+    }
+    hash
+}
+
+fn resolve_stochastic_input(
+    num_players: u8,
+    stochastic: Option<&StochasticInput>,
+    legacy_chance_model: Option<&str>,
+) -> Result<ResolvedStochastic, String> {
+    let Some(input) = stochastic else {
+        if let Some(legacy) = legacy_chance_model
+            && legacy != "fair-iid-2d6"
+            && legacy != M0_FAIR_IID_2D6_V1
+        {
+            return Err(format!("unsupported chance model: {legacy}"));
+        }
+        return Ok(ResolvedStochastic {
+            state: StochasticState::m0(),
+            model: M0_FAIR_IID_2D6_V1,
+            belief_policy: None,
+            provenance: None,
+            public_history_digest: None,
+            belief_digest: None,
+            belief_particle_count: 1,
+        });
+    };
+    if input.model == M0_FAIR_IID_2D6_V1 || input.model == "fair-iid-2d6" {
+        return Ok(ResolvedStochastic {
+            state: StochasticState::m0(),
+            model: M0_FAIR_IID_2D6_V1,
+            belief_policy: None,
+            provenance: None,
+            public_history_digest: None,
+            belief_digest: None,
+            belief_particle_count: 1,
+        });
+    }
+    if input.model != MREF_COLONIST_LINKED_2024_V1 {
+        return Err(format!("unsupported stochastic model: {}", input.model));
+    }
+    if input.belief_policy.as_deref() != Some(PUBLIC_HISTORY_BELIEF_V1) {
+        return Err(format!(
+            "{} requires belief policy {}",
+            MREF_COLONIST_LINKED_2024_V1, PUBLIC_HISTORY_BELIEF_V1
+        ));
+    }
+    if input.player_mapping.len() != num_players as usize
+        || input
+            .player_mapping
+            .iter()
+            .enumerate()
+            .any(|(index, player)| {
+                player.is_empty()
+                    || input.player_mapping[..index]
+                        .iter()
+                        .any(|previous| previous == player)
+            })
+    {
+        return Err("public stochastic player mapping is invalid".into());
+    }
+    let observations = input
+        .rolls
+        .iter()
+        .map(|roll| PublicRollObservation {
+            ordinal: roll.ordinal,
+            actor: roll.actor,
+            total: roll.total,
+        })
+        .collect::<Vec<_>>();
+    let gaps = input
+        .gaps
+        .iter()
+        .map(|gap| MissingRollGap {
+            after_ordinal: gap.after_ordinal,
+            missing_rolls: gap.missing_rolls,
+        })
+        .collect::<Vec<_>>();
+    let provenance_label = input.provenance.as_deref().unwrap_or("unknown");
+    let provenance = match provenance_label {
+        "complete-from-first-gameplay-roll" => DiceHistoryProvenance::CompleteFromFirstGameplayRoll,
+        "gap-free-suffix" => DiceHistoryProvenance::GapFreeSuffix {
+            missing_prefix_rolls: input.missing_prefix_rolls,
+        },
+        "gapped" => DiceHistoryProvenance::Gapped {
+            missing_prefix_rolls: input.missing_prefix_rolls,
+            gaps,
+        },
+        "unknown" => DiceHistoryProvenance::Unknown,
+        other => return Err(format!("unsupported dice-history provenance: {other}")),
+    };
+    let construction_seed = public_stochastic_hash(input, true);
+    let belief = StochasticBelief::from_public_history(
+        num_players,
+        &observations,
+        &provenance,
+        construction_seed,
+    )
+    .map_err(|error| error.to_string())?;
+    let belief_digest = format!("{:016x}", belief.digest());
+    let public_history_digest = input
+        .dice_history_digest
+        .clone()
+        .filter(|digest| !digest.is_empty())
+        .unwrap_or_else(|| format!("{:016x}", public_stochastic_hash(input, false)));
+    let belief_particle_count = belief.particle_count();
+    Ok(ResolvedStochastic {
+        state: StochasticState::reference(belief),
+        model: MREF_COLONIST_LINKED_2024_V1,
+        belief_policy: Some(PUBLIC_HISTORY_BELIEF_V1),
+        provenance: Some(provenance_label.to_owned()),
+        public_history_digest: Some(public_history_digest),
+        belief_digest: Some(belief_digest),
+        belief_particle_count,
+    })
+}
+
+fn resolve_stochastic(request: &Request) -> Result<ResolvedStochastic, String> {
+    resolve_stochastic_input(
+        request.state.players.len() as u8,
+        request.stochastic.as_ref(),
+        request.chance_model.as_deref(),
+    )
+}
+
 fn player(input: PlayerInput) -> PlayerState {
     PlayerState {
         resources: input.resources,
@@ -782,6 +1001,7 @@ fn player(input: PlayerInput) -> PlayerState {
 fn game_states(
     input: StateInput,
     last_rejected_trade: Option<RejectedTradeInput>,
+    stochastic: StochasticState,
 ) -> Result<Vec<BeliefParticle>, String> {
     let num_players = input.players.len() as u8;
     let board = Board {
@@ -909,6 +1129,7 @@ fn game_states(
             turn: input.turn,
             last_roll: input.last_roll,
             dice_mode: input.dice_mode.into(),
+            stochastic: stochastic.clone(),
             victory_target: input.victory_target,
             card_discard_limit: input.card_discard_limit.unwrap_or(7),
             friendly_robber: input.friendly_robber.unwrap_or(false),
@@ -1115,7 +1336,10 @@ fn road_intent_output(intent: colonist_catan_search::RoadIntent) -> RoadIntentOu
     RoadIntentOutput {
         target_vertex: intent.target_vertex,
         roads_remaining: intent.roads_remaining,
-        expected_rolls: intent.expected_rolls.is_finite().then_some(intent.expected_rolls),
+        expected_rolls: intent
+            .expected_rolls
+            .is_finite()
+            .then_some(intent.expected_rolls),
         survival_probability: intent.survival_probability,
         target_value: intent.target_value,
         portfolio_value: intent.portfolio_value,
@@ -1370,9 +1594,16 @@ fn response(
     algorithm: &'static str,
     authority: DecisionAuthority,
     diagnostics: ResponseDiagnostics,
+    stochastic: &ResolvedStochastic,
 ) -> Response {
     Response {
         engine_revision: ENGINE_REVISION,
+        stochastic_model: stochastic.model,
+        belief_policy: stochastic.belief_policy,
+        dice_history_provenance: stochastic.provenance.clone(),
+        public_history_digest: stochastic.public_history_digest.clone(),
+        stochastic_belief_digest: stochastic.belief_digest.clone(),
+        stochastic_belief_particle_count: stochastic.belief_particle_count,
         authority,
         learned_model_version: learned_model_version(),
         trade_model_version: learned_trade_model_version(),
@@ -1646,8 +1877,13 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
     let cpu_nodes_per_depth_wave = effort.cpu.nodes_per_depth_wave;
     let cpu_evidence_escalation_ms = effort.cpu.evidence_escalation_ms.unwrap_or(0);
     let decision_clock = DecisionClock::start(decision_time_ms);
-    let particles = game_states(request.state, request.last_rejected_trade)
-        .map_err(|error| JsValue::from_str(&error))?;
+    let stochastic = resolve_stochastic(&request).map_err(|error| JsValue::from_str(&error))?;
+    let particles = game_states(
+        request.state,
+        request.last_rejected_trade,
+        stochastic.state.clone(),
+    )
+    .map_err(|error| JsValue::from_str(&error))?;
     let root_exclusions = root_exclusion_actions(&request.root_exclusions, &particles[0].state)
         .map_err(|error| JsValue::from_str(&error))?;
     let algorithm = mode.label();
@@ -1667,6 +1903,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
                     DecisionAuthority::ExactMandatory,
                     effort,
                 ),
+                &stochastic,
             ))
             .map_err(|error| JsValue::from_str(&error.to_string()));
         }
@@ -1737,6 +1974,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
                         DecisionAuthority::TacticalProven,
                         effort,
                     ),
+                    &stochastic,
                 ))
                 .map_err(|error| JsValue::from_str(&error.to_string()));
             }
@@ -2032,7 +2270,76 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
         algorithm,
         authority,
         diagnostics,
+        &stochastic,
     ))
+    .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StochasticInspectionRequest {
+    num_players: u8,
+    stochastic: StochasticInput,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReferenceControllerSnapshot {
+    remaining_counts: [u8; 11],
+    cards_left: u8,
+    recent_totals: Vec<u8>,
+    initialized_player_mask: u8,
+    seven_counts: [u32; 4],
+    seven_streak_owner: Option<u8>,
+    seven_streak_count: u32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StochasticInspectionResponse {
+    stochastic_model: &'static str,
+    belief_policy: Option<&'static str>,
+    dice_history_provenance: Option<String>,
+    public_history_digest: Option<String>,
+    stochastic_belief_digest: Option<String>,
+    stochastic_belief_particle_count: usize,
+    controllers: Vec<ReferenceControllerSnapshot>,
+}
+
+#[wasm_bindgen]
+pub fn inspect_stochastic(request: JsValue) -> Result<JsValue, JsValue> {
+    let request: StochasticInspectionRequest = serde_wasm_bindgen::from_value(request)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let resolved = resolve_stochastic_input(request.num_players, Some(&request.stochastic), None)
+        .map_err(|error| JsValue::from_str(&error))?;
+    let controllers = resolved
+        .state
+        .reference_belief()
+        .map(|belief| {
+            belief
+                .particles()
+                .iter()
+                .map(|particle| ReferenceControllerSnapshot {
+                    remaining_counts: particle.controller.remaining_counts(),
+                    cards_left: particle.controller.cards_left(),
+                    recent_totals: particle.controller.recent_totals(),
+                    initialized_player_mask: particle.controller.initialized_player_mask(),
+                    seven_counts: particle.controller.seven_counts(),
+                    seven_streak_owner: particle.controller.seven_streak_owner(),
+                    seven_streak_count: particle.controller.seven_streak_count(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    serde_wasm_bindgen::to_value(&StochasticInspectionResponse {
+        stochastic_model: resolved.model,
+        belief_policy: resolved.belief_policy,
+        dice_history_provenance: resolved.provenance,
+        public_history_digest: resolved.public_history_digest,
+        stochastic_belief_digest: resolved.belief_digest,
+        stochastic_belief_particle_count: resolved.belief_particle_count,
+        controllers,
+    })
     .map_err(|error| JsValue::from_str(&error.to_string()))
 }
 

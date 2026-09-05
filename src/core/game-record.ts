@@ -196,6 +196,7 @@ export class GameRecordRecorder {
       ...(input.unmatchedSamples
         ? { unmatchedSamples: input.unmatchedSamples.map((sample) => ({ ...sample })) }
         : {}),
+      ...(input.diceHistory ? { diceHistory: structuredClone(input.diceHistory) } : {}),
       assistant: { ...input.assistant },
       events: structuredClone(input.events),
       // snapshotForRecord() already returns detached changed evidence,

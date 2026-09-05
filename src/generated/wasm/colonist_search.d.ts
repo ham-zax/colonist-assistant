@@ -235,6 +235,12 @@ export interface WasmAuthorityTrace {
 
 export interface WasmSearchResponse {
   engineRevision: string;
+  stochasticModel?: string;
+  beliefPolicy?: string;
+  diceHistoryProvenance?: string;
+  publicHistoryDigest?: string;
+  stochasticBeliefDigest?: string;
+  stochasticBeliefParticleCount?: number;
   authority: WasmDecisionAuthority;
   learnedModelVersion: string;
   tradeModelVersion: string;
@@ -266,6 +272,27 @@ export interface WasmSearchResponse {
 }
 
 export function analyze(request: unknown): WasmSearchResponse;
+export interface WasmReferenceControllerSnapshot {
+  remainingCounts: number[];
+  cardsLeft: number;
+  recentTotals: number[];
+  initializedPlayerMask: number;
+  sevenCounts: number[];
+  sevenStreakOwner?: number;
+  sevenStreakCount: number;
+}
+
+export interface WasmStochasticInspectionResponse {
+  stochasticModel: string;
+  beliefPolicy?: string;
+  diceHistoryProvenance?: string;
+  publicHistoryDigest?: string;
+  stochasticBeliefDigest?: string;
+  stochasticBeliefParticleCount: number;
+  controllers: WasmReferenceControllerSnapshot[];
+}
+
+export function inspect_stochastic(request: unknown): WasmStochasticInspectionResponse;
 export function engine_version(): string;
 export default function init(
   module:
