@@ -658,6 +658,273 @@ describe("action guide autopilot", () => {
     expect(resourceClicks).toHaveBeenCalledTimes(2);
   });
 
+  it("does not report Monopoly success when all DOM clicks dispatch without semantic commit", async () => {
+    const card = document.createElement("div");
+    card.className = "cardContainer-fixture";
+    card.innerHTML = '<img src="card_monopoly.fixture.svg">';
+    const clicks: string[] = [];
+    card.addEventListener("click", () => {
+      clicks.push("card");
+      const modal = document.createElement("div");
+      modal.className = "actionBox-fixture";
+      const confirmCard = document.createElement("button");
+      confirmCard.className = "confirmButton-fixture";
+      confirmCard.addEventListener("click", () => {
+        clicks.push("confirm-card");
+        const grain = document.createElement("button");
+        grain.innerHTML = '<img src="card_grain.svg">';
+        grain.addEventListener("click", () => clicks.push("grain"));
+        const confirmResource = document.createElement("button");
+        confirmResource.className = "confirmButton-fixture";
+        confirmResource.addEventListener("click", () => {
+          clicks.push("confirm-resource");
+          modal.remove();
+        });
+        modal.replaceChildren(grain, confirmResource);
+      });
+      modal.append(confirmCard);
+      document.body.append(modal);
+    });
+    document.body.append(card);
+    const executions = vi.fn();
+
+    renderActionGuide(
+      {
+        kind: "development",
+        card: "monopoly",
+        label: "Play monopoly",
+        signature: "monopoly-no-semantic-commit",
+        confidence: 1,
+        followupResources: ["grain"],
+      },
+      {
+        highlight: true,
+        autonomous: true,
+        validateContinuation: () => true,
+        onExecution: executions,
+      },
+    );
+
+    await vi.advanceTimersByTimeAsync(2_200);
+
+    expect(clicks).toEqual([
+      "card",
+      "confirm-card",
+      "grain",
+      "confirm-resource",
+    ]);
+    expect(executions).not.toHaveBeenCalledWith(
+      expect.objectContaining({ succeeded: true }),
+    );
+
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(executions).toHaveBeenCalledWith({
+      succeeded: false,
+      signature: "monopoly-no-semantic-commit",
+      reason: "Colonist did not commit the development card workflow",
+      diagnostic: { actionKind: "development" },
+    });
+  });
+
+  it("does not report Year of Plenty success when all DOM clicks dispatch without semantic commit", async () => {
+    const card = document.createElement("div");
+    card.className = "cardContainer-fixture";
+    card.innerHTML = '<img src="card_yearofplenty.fixture.svg">';
+    const clicks: string[] = [];
+    card.addEventListener("click", () => {
+      clicks.push("card");
+      const modal = document.createElement("div");
+      modal.className = "actionBox-fixture";
+      const confirmCard = document.createElement("button");
+      confirmCard.className = "confirmButton-fixture";
+      confirmCard.addEventListener("click", () => {
+        clicks.push("confirm-card");
+        const brick = document.createElement("button");
+        brick.innerHTML = '<img src="card_brick.svg">';
+        brick.addEventListener("click", () => clicks.push("brick"));
+        const confirmResources = document.createElement("button");
+        confirmResources.className = "confirmButton-fixture";
+        confirmResources.addEventListener("click", () => {
+          clicks.push("confirm-resources");
+          modal.remove();
+        });
+        modal.replaceChildren(brick, confirmResources);
+      });
+      modal.append(confirmCard);
+      document.body.append(modal);
+    });
+    document.body.append(card);
+    const executions = vi.fn();
+
+    renderActionGuide(
+      {
+        kind: "development",
+        card: "year-of-plenty",
+        label: "Play year of plenty",
+        signature: "yop-no-semantic-commit",
+        confidence: 1,
+        followupResources: ["brick", "brick"],
+      },
+      {
+        highlight: true,
+        autonomous: true,
+        validateContinuation: () => true,
+        onExecution: executions,
+      },
+    );
+
+    await vi.advanceTimersByTimeAsync(2_200);
+
+    expect(clicks).toEqual([
+      "card",
+      "confirm-card",
+      "brick",
+      "brick",
+      "confirm-resources",
+    ]);
+    expect(executions).not.toHaveBeenCalledWith(
+      expect.objectContaining({ succeeded: true }),
+    );
+
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(executions).toHaveBeenCalledWith({
+      succeeded: false,
+      signature: "yop-no-semantic-commit",
+      reason: "Colonist did not commit the development card workflow",
+      diagnostic: { actionKind: "development" },
+    });
+  });
+
+  it("reports Year of Plenty success only after the selected resource transfer is observed", async () => {
+    const card = document.createElement("div");
+    card.className = "cardContainer-fixture";
+    card.innerHTML = '<img src="card_yearofplenty.fixture.svg">';
+    const hand = emptyResources();
+    const baselineHand = { ...hand };
+    let cardCount = 1;
+    card.addEventListener("click", () => {
+      const modal = document.createElement("div");
+      modal.className = "actionBox-fixture";
+      const confirmCard = document.createElement("button");
+      confirmCard.className = "confirmButton-fixture";
+      confirmCard.addEventListener("click", () => {
+        const brick = document.createElement("button");
+        brick.innerHTML = '<img src="card_brick.svg">';
+        const confirmResources = document.createElement("button");
+        confirmResources.className = "confirmButton-fixture";
+        confirmResources.addEventListener("click", () => {
+          modal.remove();
+          window.setTimeout(() => {
+            cardCount = 0;
+            hand.brick += 2;
+          }, 1_200);
+        });
+        modal.replaceChildren(brick, confirmResources);
+      });
+      modal.append(confirmCard);
+      document.body.append(modal);
+    });
+    document.body.append(card);
+    const executions = vi.fn();
+
+    renderActionGuide(
+      {
+        kind: "development",
+        card: "year-of-plenty",
+        label: "Play year of plenty",
+        signature: "yop-semantic-commit",
+        confidence: 1,
+        followupResources: ["brick", "brick"],
+      },
+      {
+        highlight: true,
+        autonomous: true,
+        validateContinuation: () => true,
+        validateDevelopmentCommit: () =>
+          cardCount === 0 &&
+          hand.brick === baselineHand.brick + 2 &&
+          hand.lumber === baselineHand.lumber &&
+          hand.wool === baselineHand.wool &&
+          hand.grain === baselineHand.grain &&
+          hand.ore === baselineHand.ore,
+        onExecution: executions,
+      },
+    );
+
+    await vi.advanceTimersByTimeAsync(2_100);
+    expect(executions).not.toHaveBeenCalledWith(
+      expect.objectContaining({ succeeded: true }),
+    );
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(executions).toHaveBeenCalledWith({
+      succeeded: true,
+      signature: "yop-semantic-commit",
+    });
+  });
+
+  it.each([
+    ["with stolen cards", 3],
+    ["when zero cards are stolen", 0],
+  ] as const)(
+    "reports Monopoly success %s once the exact card is consumed",
+    async (_label, stolenCards) => {
+      const card = document.createElement("div");
+      card.className = "cardContainer-fixture";
+      card.innerHTML = '<img src="card_monopoly.fixture.svg">';
+      const hand = emptyResources();
+      let cardCount = 1;
+      card.addEventListener("click", () => {
+        const modal = document.createElement("div");
+        modal.className = "actionBox-fixture";
+        const confirmCard = document.createElement("button");
+        confirmCard.className = "confirmButton-fixture";
+        confirmCard.addEventListener("click", () => {
+          const grain = document.createElement("button");
+          grain.innerHTML = '<img src="card_grain.svg">';
+          const confirmResource = document.createElement("button");
+          confirmResource.className = "confirmButton-fixture";
+          confirmResource.addEventListener("click", () => {
+            cardCount = 0;
+            hand.grain += stolenCards;
+            modal.remove();
+          });
+          modal.replaceChildren(grain, confirmResource);
+        });
+        modal.append(confirmCard);
+        document.body.append(modal);
+      });
+      document.body.append(card);
+      const executions = vi.fn();
+
+      renderActionGuide(
+        {
+          kind: "development",
+          card: "monopoly",
+          label: "Play monopoly",
+          signature: `monopoly-semantic-commit-${stolenCards}`,
+          confidence: 1,
+          followupResources: ["grain"],
+        },
+        {
+          highlight: true,
+          autonomous: true,
+          validateContinuation: () => true,
+          validateDevelopmentCommit: () => cardCount === 0,
+          onExecution: executions,
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(2_400);
+
+      expect(hand.grain).toBe(stolenCards);
+      expect(executions).toHaveBeenCalledWith({
+        succeeded: true,
+        signature: `monopoly-semantic-commit-${stolenCards}`,
+      });
+    },
+  );
+
   it("keeps highlighting manual Year of Plenty picks in Colonist's action-box container", async () => {
     const card = document.createElement("div");
     card.className = "cardContainer-fixture";

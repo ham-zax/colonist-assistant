@@ -149,6 +149,10 @@ export interface ActionGuideOptions {
   /// clicked. The owner must observe the resulting outgoing offer or exact
   /// bank-hand transfer before the workflow may report success.
   validateTransactionCommit?: () => boolean;
+  /// Development-card workflows may exhaust every visible modal control before
+  /// the bridge publishes the card-specific semantic result. DOM exhaustion is
+  /// not success; the owner must observe the exact initiated card commit.
+  validateDevelopmentCommit?: () => boolean;
   /// Ordinary DOM controls can also be swallowed while Colonist replaces its
   /// React tree. When supplied, dispatch is only tentative until the owner
   /// observes the exact state mutation caused by this action.
@@ -2167,6 +2171,7 @@ const startWorkflow = (
   workflowAction = action;
   workflowOptions = options;
   const generation = workflowGeneration;
+  const developmentTransaction = action.kind === "development";
   const tradeTransaction =
     action.kind === "trade-builder" ||
     (action.kind === "trade" && action.verdict === "counter");
@@ -2228,6 +2233,18 @@ const startWorkflow = (
     const step = steps[index];
     if (!step) {
       const completedOptions = workflowOptions ?? options;
+      if (
+        developmentTransaction &&
+        !completedOptions.validateDevelopmentCommit?.()
+      ) {
+        if (attempts < 24) {
+          requestBoardRefresh();
+          later(() => run(index, attempts + 1), 140);
+        } else {
+          fail("Colonist did not commit the development card workflow");
+        }
+        return;
+      }
       if (
         tradeTransaction &&
         completedOptions.validateTransactionCommit &&
@@ -2770,6 +2787,9 @@ export const renderActionGuide = (
       validateTransactionCommit:
         workflowOptions?.validateTransactionCommit ??
         options.validateTransactionCommit,
+      validateDevelopmentCommit:
+        workflowOptions?.validateDevelopmentCommit ??
+        options.validateDevelopmentCommit,
     };
     if (activatingAutopilot && workflowCurrentElement) {
       const element = workflowCurrentElement;

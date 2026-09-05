@@ -1647,6 +1647,61 @@ export class AssistantOverlay {
       }
       return undefined;
     })();
+    const developmentCommit = (() => {
+      if (!next || next.kind !== "development") return undefined;
+      const baselineHand = this.board?.ownHand
+        ? { ...this.board.ownHand }
+        : undefined;
+      const baselineCardCount =
+        this.board?.ownDevelopmentCards?.cards[next.card];
+      const localPlayer = this.board?.myPlayer;
+      const baselinePlayedCount = localPlayer
+        ? this.board?.players?.[localPlayer]?.playedDevelopmentCards?.[next.card]
+        : undefined;
+      const expectedHand = baselineHand ? { ...baselineHand } : undefined;
+      if (next.card === "year-of-plenty" && expectedHand) {
+        for (const resource of next.followupResources ?? []) {
+          expectedHand[resource] += 1;
+        }
+      }
+      const directFollowup = developmentFollowupAction(next.card);
+      return (): boolean => {
+        const current = this.board;
+        if (!current || !stillInGuideGame()) return false;
+        if (directFollowup) return current.action === directFollowup;
+
+        const currentCardCount =
+          current.ownDevelopmentCards?.cards[next.card];
+        const currentPlayedCount = localPlayer
+          ? current.players?.[localPlayer]?.playedDevelopmentCards?.[next.card]
+          : undefined;
+        const cardConsumed = Boolean(
+          (
+            baselineCardCount !== undefined &&
+            currentCardCount !== undefined &&
+            currentCardCount === baselineCardCount - 1
+          ) ||
+          (
+            baselinePlayedCount !== undefined &&
+            currentPlayedCount !== undefined &&
+            currentPlayedCount === baselinePlayedCount + 1
+          ),
+        );
+        if (!cardConsumed) return false;
+        if (next.card === "monopoly") return true;
+        if (next.card !== "year-of-plenty") return false;
+        if (
+          next.followupResources?.length !== 2 ||
+          !expectedHand ||
+          !current.ownHand
+        ) {
+          return false;
+        }
+        return RESOURCE_ORDER.every(
+          (resource) => current.ownHand![resource] === expectedHand[resource],
+        );
+      };
+    })();
     const transactionCommit = (() => {
       if (
         !next ||
@@ -1737,6 +1792,9 @@ export class AssistantOverlay {
         Boolean(next && this.workflowContinuationStillLegal(next)),
       ...(transactionCommit
         ? { validateTransactionCommit: transactionCommit }
+        : {}),
+      ...(developmentCommit
+        ? { validateDevelopmentCommit: developmentCommit }
         : {}),
       ...(controlCommit
         ? {
