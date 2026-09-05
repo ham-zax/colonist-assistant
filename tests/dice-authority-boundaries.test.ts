@@ -155,6 +155,80 @@ describe("R6 stochastic authority lifecycle boundaries", () => {
     expect(() => construct(session)).toThrow(/usable public reference-dice history/);
   });
 
+  it.each([
+    { integrityVersion: undefined, player: "Bob", dice: [3, 5] },
+    { integrityVersion: undefined, player: "Alice", dice: [4, 5] },
+    { integrityVersion: 1, player: "Bob", dice: [3, 5] },
+    { integrityVersion: 1, player: "Alice", dice: [4, 5] },
+    { integrityVersion: 1, player: "Alice", dice: [2, 6] },
+  ])("reconciles retained conflicting rolls even with integrityVersion=$integrityVersion, $player $dice", async (conflict) => {
+    const session = createSession(document.createElement("div"));
+    const record = seedLegacy(session, 4);
+    const key = `colonistAssistantSession:${session.id}`;
+    storage.set(key, {
+      ...record,
+      events: [...record.events, {
+        ...record.events[0], id: "conflicting-render", player: conflict.player, dice: conflict.dice,
+      }],
+      unmatchedCount: 0, unmatchedIntegrityCount: 0, unmatchedSamples: [],
+      diceHistory: {
+        ...record.diceHistory, integrityVersion: conflict.integrityVersion,
+        ambiguousLogIndices: [], hasUnlocatedRollAmbiguity: false,
+      },
+    });
+    await session.start();
+    expect(session.diceHistory.rolls).toHaveLength(1);
+    expect(session.diceHistory.ambiguousLogIndices).toEqual([0]);
+    expect(() => construct(session)).toThrow(/usable public reference-dice history/);
+    await vi.waitFor(() => expect(storage.get(key)).toMatchObject({
+      diceHistory: { ambiguousLogIndices: [0] },
+    }));
+    session.stop();
+    const restored = createSession(document.createElement("div"));
+    await restored.start();
+    expect(() => construct(restored)).toThrow(/usable public reference-dice history/);
+  });
+
+  it("compares a retained roll against the independent ledger without rebuilding a truncated history", async () => {
+    const session = createSession(document.createElement("div"));
+    const record = seedLegacy(session, 4);
+    storage.set(`colonistAssistantSession:${session.id}`, {
+      ...record,
+      events: [{ ...record.events[0], id: "only-retained-render", dice: [4, 5] }],
+      partialHistory: true,
+      unmatchedCount: 0, unmatchedIntegrityCount: 0, unmatchedSamples: [],
+      diceHistory: {
+        ...record.diceHistory, integrityVersion: 1,
+        ambiguousLogIndices: [], hasUnlocatedRollAmbiguity: false,
+      },
+    });
+    await session.start();
+    expect(session.diceHistory.rolls.map((item) => item.total)).toEqual([8]);
+    expect(session.diceHistory.ambiguousLogIndices).toEqual([0]);
+    expect(() => construct(session)).toThrow(/usable public reference-dice history/);
+  });
+
+  it("keeps matching historical rerenders and truncated generic history compatible with the ledger", async () => {
+    const session = createSession(document.createElement("div"));
+    const record = seedLegacy(session, 4);
+    storage.set(`colonistAssistantSession:${session.id}`, {
+      ...record,
+      events: [record.events[0], { ...record.events[0], id: "matching-render" }],
+      partialHistory: true,
+      unmatchedCount: 0, unmatchedIntegrityCount: 0, unmatchedSamples: [],
+      diceHistory: {
+        ...record.diceHistory, integrityVersion: 1,
+        ambiguousLogIndices: [], hasUnlocatedRollAmbiguity: false,
+        rolls: [...record.diceHistory!.rolls, {
+          actor: "Bob", total: 7, dice: [3, 4], eventId: "ledger-only", logIndex: 1,
+        }],
+      },
+    });
+    await session.start();
+    expect(session.diceHistory.rolls.map((item) => item.total)).toEqual([8, 7]);
+    expect(construct(session).model).toBe("mref-colonist-linked-2024-v1");
+  });
+
   it.each(["scan", "reload"])("keeps a partial schema-3 prefix uncertain after %s", async (continuation) => {
     const root = document.createElement("div");
     const session = createSession(root);

@@ -18,6 +18,7 @@ import {
 import { isExtensionContextInvalidatedError } from "./extension-context";
 import {
   appendPublicDiceRoll,
+  cloneDiceHistoryState,
   createDiceHistoryState,
   DICE_HISTORY_INTEGRITY_VERSION,
   noteMissingPublicRoll,
@@ -193,14 +194,51 @@ const legacyDiceAmbiguityEvidence = (
   };
 };
 
+const reconcileRetainedDiceRolls = (
+  history: DiceHistoryState,
+  events: readonly StoredEvent[],
+): DiceHistoryState => {
+  // Audit all retained presentations against each other and the independent
+  // ledger. Generic events may be truncated, so never rebuild that ledger here.
+  const audit = cloneDiceHistoryState(history);
+  const conflicts = new Set<number>();
+  for (const event of events) {
+    if (event.type !== "roll" || !event.dice || !validStoredLogIndex(event.index)) continue;
+    try {
+      appendPublicDiceRoll(audit, {
+        actor: event.player,
+        total: event.dice[0] + event.dice[1],
+        dice: [...event.dice] as [number, number],
+        eventId: event.id,
+        logIndex: event.index,
+      });
+    } catch (error) {
+      if (!(error instanceof Error) ||
+          error.message !== `Conflicting public dice evidence for log index ${event.index}`) throw error;
+      conflicts.add(event.index);
+    }
+  }
+  if (!conflicts.size) return history;
+  return restoreDiceHistoryState({
+    ...serializeDiceHistoryState(history),
+    ambiguousLogIndices: [...history.ambiguousLogIndices, ...conflicts],
+    // Without a ledger observation the conflicting roll has no established
+    // stochastic ordinal. A subsequent presentation cannot repair that gap.
+    hasUnlocatedRollAmbiguity: history.hasUnlocatedRollAmbiguity ||
+      [...conflicts].some((index) => !history.rolls.some((roll) => roll.logIndex === index)),
+  });
+};
+
 const restoreSchema4DiceHistory = (stored: StoredSession): DiceHistoryState => {
   if (stored.diceHistory.integrityVersion === DICE_HISTORY_INTEGRITY_VERSION) {
-    return restoreDiceHistoryState(stored.diceHistory);
+    // Version 1 records can already contain an incorrectly certified legacy
+    // conflict. Always reconcile retained dice evidence, including this version.
+    return reconcileRetainedDiceRolls(restoreDiceHistoryState(stored.diceHistory), stored.events);
   }
   // Earlier repairs could re-save unsafe legacy history with both ambiguity
   // fields present. Field presence is not proof of conservative restoration.
   const legacy = legacyDiceAmbiguityEvidence(stored);
-  return restoreDiceHistoryState({
+  return reconcileRetainedDiceRolls(restoreDiceHistoryState({
     ...stored.diceHistory,
     ambiguousLogIndices: [
       ...(stored.diceHistory.ambiguousLogIndices ?? []),
@@ -210,7 +248,7 @@ const restoreSchema4DiceHistory = (stored: StoredSession): DiceHistoryState => {
       stored.diceHistory.hasUnlocatedRollAmbiguity === true ||
       legacy.hasUnlocatedRollAmbiguity ||
       stored.partialHistory,
-  });
+  }), stored.events);
 };
 
 const MAX_SEEN_IDS = 2600;

@@ -29,6 +29,8 @@ import {
 } from "../core/forced-action";
 import {
   buildLiveDecisionStochasticInput,
+  diceHistoryDigest,
+  MREF_COLONIST_LINKED_2024_V1,
   type PublicStochasticInput,
 } from "../core/dice-history";
 import {
@@ -2548,6 +2550,13 @@ export class AssistantOverlay {
       engine: this.settings.engine,
       playerTradesEnabled: !this.settings.disablePlayerTrades,
       game: board.gameKey,
+      ...(board.diceMode === "balanced" ? {
+        stochastic: {
+          model: MREF_COLONIST_LINKED_2024_V1,
+          history: this.session?.diceHistory ? diceHistoryDigest(this.session.diceHistory) : null,
+          playerOrder: board.playerOrder,
+        },
+      } : {}),
       trackerTurn: state.currentTurn.sequence,
       eventCount: state.eventCount,
       boardTurn: board.turn,
@@ -2843,6 +2852,7 @@ export class AssistantOverlay {
         decisionBoard.playerOrder,
       );
     } catch (error) {
+      this.decisionWorker.reset();
       failDecisionRequest(
         error instanceof Error
           ? error.message
