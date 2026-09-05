@@ -599,6 +599,7 @@ describe("live log session scanning", () => {
         ],
         provenance: "complete-from-first-gameplay-roll",
         coverage: { ranges: [[0, 1]] },
+        integrityVersion: 1,
         ambiguousLogIndices: [],
         hasUnlocatedRollAmbiguity: false,
         gaps: [],

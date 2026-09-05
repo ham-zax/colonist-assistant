@@ -19,6 +19,7 @@ import { isExtensionContextInvalidatedError } from "./extension-context";
 import {
   appendPublicDiceRoll,
   createDiceHistoryState,
+  DICE_HISTORY_INTEGRITY_VERSION,
   noteMissingPublicRoll,
   noteRollCapableLogAmbiguity,
   observeLogCoverage,
@@ -144,12 +145,14 @@ const legacyDiceAmbiguityEvidence = (
 ): { ambiguousLogIndices: number[]; hasUnlocatedRollAmbiguity: boolean } => {
   const ambiguous = new Set<number>();
   let retainedIntegrityCount = 0;
+  let retainedUnmatchedCount = 0;
   let hasUnlocatedRollAmbiguity = false;
 
   for (const sample of stored.unmatchedSamples ?? []) {
-    if (sample.reason !== "unrecognized-log-format") continue;
     const count =
       Number.isInteger(sample.count) && sample.count > 0 ? sample.count : 1;
+    retainedUnmatchedCount += count;
+    if (sample.reason !== "unrecognized-log-format") continue;
     retainedIntegrityCount += count;
 
     const first = validStoredLogIndex(sample.firstLogIndex)
@@ -174,7 +177,13 @@ const legacyDiceAmbiguityEvidence = (
     stored.unmatchedIntegrityCount > 0
       ? stored.unmatchedIntegrityCount
       : 0;
-  if (storedIntegrityCount > retainedIntegrityCount) {
+  if (
+    storedIntegrityCount > retainedIntegrityCount ||
+    (stored.unmatchedIntegrityCount === undefined &&
+      stored.unmatchedCount > retainedUnmatchedCount)
+  ) {
+    // Old writers may retain only the unmatched total. Missing diagnostics
+    // cannot certify that the unaccounted entries were harmless.
     hasUnlocatedRollAmbiguity = true;
   }
 
@@ -185,19 +194,22 @@ const legacyDiceAmbiguityEvidence = (
 };
 
 const restoreSchema4DiceHistory = (stored: StoredSession): DiceHistoryState => {
-  if (
-    Object.prototype.hasOwnProperty.call(
-      stored.diceHistory,
-      "ambiguousLogIndices",
-    )
-  ) {
+  if (stored.diceHistory.integrityVersion === DICE_HISTORY_INTEGRITY_VERSION) {
     return restoreDiceHistoryState(stored.diceHistory);
   }
+  // Earlier repairs could re-save unsafe legacy history with both ambiguity
+  // fields present. Field presence is not proof of conservative restoration.
   const legacy = legacyDiceAmbiguityEvidence(stored);
   return restoreDiceHistoryState({
     ...stored.diceHistory,
-    ambiguousLogIndices: legacy.ambiguousLogIndices,
-    hasUnlocatedRollAmbiguity: legacy.hasUnlocatedRollAmbiguity,
+    ambiguousLogIndices: [
+      ...(stored.diceHistory.ambiguousLogIndices ?? []),
+      ...legacy.ambiguousLogIndices,
+    ],
+    hasUnlocatedRollAmbiguity:
+      stored.diceHistory.hasUnlocatedRollAmbiguity === true ||
+      legacy.hasUnlocatedRollAmbiguity ||
+      stored.partialHistory,
   });
 };
 
@@ -513,26 +525,9 @@ export class GameSession {
     }
 
     candidates.sort((left, right) => left.index - right.index);
-    const currentFirstIds = candidates
-      .filter((candidate) => candidate.element.getAttribute("data-index") === "0")
-      .map((candidate) => candidate.id);
-    if (
-      this.events.length &&
-      currentFirstIds.length &&
-      currentFirstIds.every((id) => !this.seenIds.has(id))
-    ) {
-      this.storageGeneration += 1;
-      this.pruneSessionHistory = true;
-      this.state = createTrackerState();
-      this.events = [];
-      this.partialHistory = false;
-      this.diceHistory = createDiceHistoryState();
-      this.unmatchedCount = 0;
-      this.unmatchedIntegrityCount = 0;
-      this.unmatchedSamples = [];
-      this.startedAt = Date.now();
-      this.seenIds.clear();
-    }
+    // Presentation changes, including index zero, are not game identity.
+    // setGameKey() and explicit reset own history replacement; otherwise a
+    // rerender could erase both accepted rolls and unresolved conflicts.
     if (
       !this.events.length &&
       candidates.length &&
@@ -554,12 +549,10 @@ export class GameSession {
         const classification = classifyUnmatchedLog(snapshot);
         this.unmatchedCount += 1;
         if (classification.affectsIntegrity) this.unmatchedIntegrityCount += 1;
-        if (candidate.logIndex !== undefined) {
-          if (unmatchedCanConcealGameplayRoll(classification)) {
-            noteRollCapableLogAmbiguity(this.diceHistory, candidate.logIndex);
-          } else {
-            observeLogCoverage(this.diceHistory, [candidate.logIndex]);
-          }
+        if (unmatchedCanConcealGameplayRoll(classification)) {
+          noteRollCapableLogAmbiguity(this.diceHistory, candidate.logIndex);
+        } else if (candidate.logIndex !== undefined) {
+          observeLogCoverage(this.diceHistory, [candidate.logIndex]);
         }
         this.recordUnmatched(snapshot.serialText, snapshot.index, classification);
         changed = true;
@@ -691,20 +684,14 @@ export class GameSession {
       }
     }
     const legacy = legacyDiceAmbiguityEvidence(stored);
-    const migrated = restoreDiceHistoryState({
+    return restoreDiceHistoryState({
       ...serializeDiceHistoryState(history),
       ambiguousLogIndices: legacy.ambiguousLogIndices,
-      hasUnlocatedRollAmbiguity: legacy.hasUnlocatedRollAmbiguity,
+      // Persist the missing evidence, not just a derived provenance label that
+      // the next coverage update or schema-4 restore would overwrite.
+      hasUnlocatedRollAmbiguity:
+        legacy.hasUnlocatedRollAmbiguity || stored.partialHistory,
     });
-    // A schema-3 partial session never proves a complete dice prefix merely
-    // because its retained parsed events happen to begin at log index zero.
-    if (
-      stored.partialHistory &&
-      migrated.provenance === "complete-from-first-gameplay-roll"
-    ) {
-      migrated.provenance = "unknown";
-    }
-    return migrated;
   }
 
   private async restore(): Promise<void> {

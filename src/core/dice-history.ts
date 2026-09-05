@@ -18,6 +18,8 @@ export const M0_FAIR_IID_2D6_V1 = "m0-fair-iid-2d6-v1" as const;
 export const MREF_COLONIST_LINKED_2024_V1 =
   "mref-colonist-linked-2024-v1" as const;
 export const PUBLIC_HISTORY_BELIEF_V1 = "public-history-belief-v1" as const;
+/** Ingestion/migration rules, not the stochastic model or session schema. */
+export const DICE_HISTORY_INTEGRITY_VERSION = 1 as const;
 
 export type StochasticModelId =
   | typeof M0_FAIR_IID_2D6_V1
@@ -45,7 +47,7 @@ export interface DiceHistoryState {
   coverage: DiceLogCoverage;
   /** Indexed log entries whose unresolved semantics could conceal contradictory gameplay-roll evidence. */
   ambiguousLogIndices: number[];
-  /** Legacy integrity evidence that cannot be assigned to exact log indexes. */
+  /** Roll-capable uncertainty that cannot be assigned to exact log indexes. */
   hasUnlocatedRollAmbiguity: boolean;
   /** Independently established missing gameplay-roll count before rolls[0]. */
   missingPrefixRolls?: number;
@@ -66,6 +68,8 @@ export interface PublicStochasticInput {
 }
 
 export interface StoredDiceHistoryState {
+  /** Older writers cannot certify that all persisted uncertainty was reconciled. */
+  integrityVersion?: typeof DICE_HISTORY_INTEGRITY_VERSION;
   rolls: PublicDiceRoll[];
   provenance: DiceHistoryProvenance;
   coverage: DiceLogCoverage;
@@ -167,9 +171,13 @@ export const observeLogCoverage = (
 
 export const noteRollCapableLogAmbiguity = (
   state: DiceHistoryState,
-  logIndex: number,
+  logIndex: number | undefined,
 ): void => {
-  if (!validIndex(logIndex)) return;
+  if (logIndex === undefined || !validIndex(logIndex)) {
+    state.hasUnlocatedRollAmbiguity = true;
+    refreshProvenance(state);
+    return;
+  }
   if (state.rolls.some((roll) => roll.logIndex === logIndex)) return;
   markAmbiguousLogIndex(state, logIndex);
 };
@@ -303,7 +311,10 @@ export const cloneDiceHistoryState = (
 
 export const serializeDiceHistoryState = (
   state: DiceHistoryState,
-): StoredDiceHistoryState => cloneDiceHistoryState(state);
+): StoredDiceHistoryState => ({
+  ...cloneDiceHistoryState(state),
+  integrityVersion: DICE_HISTORY_INTEGRITY_VERSION,
+});
 
 export const restoreDiceHistoryState = (
   stored: StoredDiceHistoryState,
