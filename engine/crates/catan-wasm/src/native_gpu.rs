@@ -3,8 +3,9 @@ use colonist_catan_search::{
     ActionStats, BeliefParticle, CudaSimEngine, CudaSimError, CudaSimRootActionStats,
     DEVELOPMENT_EXACT_FAMILIES, ExactActionFamily, ExactDecisionResult, HARD_VETO_POSTERIOR,
     IntroducedRoadFragility, RoadCutContinuationAssessment, SearchReport, SearchStatistics,
-    admit_promoted_roots, apply_closeout_root_impacts, belief_domestic_trade_assessment,
-    belief_road_cut_continuation_assessment, belief_root_closeout_plans,
+    actor_proposal_actions, admit_promoted_roots, apply_closeout_root_impacts,
+    belief_domestic_trade_assessment, belief_road_cut_continuation_assessment,
+    belief_root_closeout_plans,
     compute_spatial_root_impacts, exact_family_for_action, forced_loss_weight,
     posterior_immediate_threat_weight, safer_end_turn_alternative, shared_root_candidates,
     solve_belief_current_turn_timed, solve_exact_belief_excluding_controlled,
@@ -60,6 +61,18 @@ struct RankedGpuRoot {
     action: Action,
     prior: f32,
     legal_weight: f32,
+}
+
+fn actor_gpu_root_candidates(
+    state: &GameState,
+    actor: u8,
+    root_exclusions: &[Action],
+) -> Vec<(Action, f32)> {
+    let proposals = actor_proposal_actions(state)
+        .into_iter()
+        .filter(|candidate| !root_exclusions.contains(candidate))
+        .collect::<Vec<_>>();
+    shared_root_candidates(state, actor, &proposals, proposals.len().max(1))
 }
 
 #[derive(Clone)]
@@ -733,9 +746,9 @@ impl NativeGpuSearchEngine {
             })
             .collect::<Vec<_>>();
 
-        // Root availability is part of the belief state. Do not intersect the
-        // particles: an action legal in only some hidden worlds must retain its
-        // posterior mass and a no-action baseline in unavailable worlds.
+        // Actor-facing roots come from the observation-safe proposal domain.
+        // Exact per-particle legality remains separate so hidden worlds may still
+        // determine transition success and the unavailable-world baseline.
         let mut legal_by_particle = Vec::<Vec<Action>>::with_capacity(particles.len());
         let mut ranked = Vec::<RankedGpuRoot>::new();
         for (particle, weight) in particles.iter().zip(weights.iter().copied()) {
@@ -749,20 +762,27 @@ impl NativeGpuSearchEngine {
                 .into_iter()
                 .filter(|candidate| !root_exclusions.contains(candidate))
                 .collect::<Vec<_>>();
-            let ordered =
-                shared_root_candidates(&particle.state, actor, &legal, legal.len().max(1));
+            let ordered = actor_gpu_root_candidates(&particle.state, actor, &root_exclusions);
+            let exact_legal_weight = |candidate: &Action| {
+                if legal.iter().any(|action| action == candidate) {
+                    weight
+                } else {
+                    0.0
+                }
+            };
             for (candidate, prior) in ordered {
+                let legal_weight = exact_legal_weight(&candidate);
                 if let Some(existing) = ranked
                     .iter_mut()
                     .find(|existing| existing.action == candidate)
                 {
                     existing.prior += prior * weight;
-                    existing.legal_weight += weight;
+                    existing.legal_weight += legal_weight;
                 } else {
                     ranked.push(RankedGpuRoot {
                         action: candidate,
                         prior: prior * weight,
-                        legal_weight: weight,
+                        legal_weight,
                     });
                 }
             }
@@ -1716,6 +1736,76 @@ impl NativeGpuSearchEngine {
             diagnostics,
         ))
         .map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod hidden_bank_tests {
+    use super::*;
+    use colonist_catan_core::{DevCard, Phase, Resource};
+
+    fn hidden_bank_observation_pair() -> (GameState, GameState) {
+        let mut left = GameState::standard(431, 3);
+        while matches!(left.phase, Phase::SetupSettlement | Phase::SetupRoad { .. }) {
+            let action = left.legal_actions()[0].clone();
+            left.apply(&action).unwrap();
+        }
+        left.phase = Phase::Main;
+        left.current_player = 0;
+        left.bank_is_public = false;
+        for player in &mut left.players {
+            player.resources = [0; 5];
+        }
+        left.bank = [19; 5];
+        left.players[0].resources[Resource::Lumber.index()] = 4;
+        left.bank[Resource::Lumber.index()] -= 4;
+        left.players[0].resources[Resource::Ore.index()] = 1;
+        left.bank[Resource::Ore.index()] -= 1;
+        left.players[1].resources[Resource::Ore.index()] = 18;
+        left.bank[Resource::Ore.index()] -= 18;
+        left.players[0].development[DevCard::YearOfPlenty.index()] += 1;
+        left.development_deck[DevCard::YearOfPlenty.index()] -= 1;
+
+        let mut right = left.clone();
+        right.players[1].resources[Resource::Ore.index()] -= 1;
+        right.players[1].resources[Resource::Brick.index()] += 1;
+        right.bank[Resource::Ore.index()] += 1;
+        right.bank[Resource::Brick.index()] -= 1;
+
+        left.validate().unwrap();
+        right.validate().unwrap();
+        assert_eq!(left.observation_hash(0), right.observation_hash(0));
+        (left, right)
+    }
+
+    #[test]
+    fn hidden_bank_native_gpu_root_domain_is_observation_safe() {
+        let (left, right) = hidden_bank_observation_pair();
+        let maritime = Action::MaritimeTrade {
+            give: Resource::Lumber,
+            receive: Resource::Ore,
+            ratio: left.trade_ratios(0)[Resource::Lumber.index()],
+        };
+        let year_of_plenty = Action::PlayYearOfPlenty {
+            first: Resource::Brick,
+            second: Resource::Ore,
+        };
+        assert!(!left.legal_actions().contains(&maritime));
+        assert!(right.legal_actions().contains(&maritime));
+        assert!(!left.legal_actions().contains(&year_of_plenty));
+        assert!(right.legal_actions().contains(&year_of_plenty));
+
+        let left_roots = actor_gpu_root_candidates(&left, 0, &[])
+            .into_iter()
+            .map(|(action, _)| action)
+            .collect::<Vec<_>>();
+        let right_roots = actor_gpu_root_candidates(&right, 0, &[])
+            .into_iter()
+            .map(|(action, _)| action)
+            .collect::<Vec<_>>();
+        assert_eq!(left_roots, right_roots);
+        assert!(!left_roots.contains(&maritime));
+        assert!(!left_roots.contains(&year_of_plenty));
     }
 }
 

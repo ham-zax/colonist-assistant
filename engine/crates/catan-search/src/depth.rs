@@ -17,8 +17,9 @@ use crate::opening::opening_adjusted_priors;
 use crate::opening::{OpeningConfig, solve_opening};
 use crate::planner::{TurnPlan, plan_adjusted_priors, plan_adjusted_priors_with_plans};
 use crate::policy::{
-    allocate_root_node_budgets, normalize_observed_priors, normalize_priors,
-    order_scored_with_state_quotas, rank_with_class_quotas, truncate_root_preserving_end_turn,
+    actor_proposal_actions, allocate_root_node_budgets, normalize_observed_priors,
+    normalize_priors, order_scored_with_state_quotas, rank_with_class_quotas,
+    truncate_root_preserving_end_turn,
 };
 use crate::root_impact::{
     IntroducedRoadFragility, RootPromotionReason, RootStrategicImpact, apply_closeout_root_impacts,
@@ -449,7 +450,7 @@ fn normalize_belief_root_priors_with_diagnostics(
         if weight <= 0.0 {
             continue;
         }
-        let legal = particle.state.legal_actions();
+        let legal = actor_proposal_actions(&particle.state);
         let mut ranked = normalize_priors(&particle.state, &legal, actor);
         let plans = plan_adjusted_priors_with_plans(
             &particle.state,
@@ -724,19 +725,19 @@ impl Searcher {
         if state.is_terminal() || depth >= self.maximum_depth || actions_in_turn >= 18 {
             return self.evaluate_cached(state);
         }
-        let actions = state.legal_actions();
-        if actions.is_empty() {
+        let exact_actions = state.legal_actions();
+        if exact_actions.is_empty() {
             return self.evaluate_cached(state);
         }
         match state.node_kind() {
             NodeKind::Terminal => self.evaluate_cached(state),
             NodeKind::Chance => {
-                let total = actions
+                let total = exact_actions
                     .iter()
                     .map(|action| state.chance_weight(action) as f32)
                     .sum::<f32>()
                     .max(f32::EPSILON);
-                let weighted_actions = actions
+                let weighted_actions = exact_actions
                     .into_iter()
                     .filter_map(|action| {
                         let weight = state.chance_weight(&action) as f32 / total;
@@ -786,19 +787,30 @@ impl Searcher {
                 expected
             }
             NodeKind::Decision { actor } => {
-                // Legality from the exact particle; candidate ordering from the
-                // acting player's observation only. Determinized MaxN still
-                // evaluates leaves with exact hands, but opponents no longer
-                // prioritize actions using third-party hidden identities.
+                // Belief recursion derives candidate availability and ordering
+                // from the acting player's information set. Exact particles
+                // remain authoritative for applying/evaluating the selected
+                // proposal. Perfect-information diagnostic search intentionally
+                // keeps the exact legal domain.
                 let remaining = subtree_limit.saturating_sub(self.nodes);
                 if remaining == 0 {
                     return self.evaluate_cached(state);
                 }
                 let observation_safe = self.observation_safe_recursive;
-                let mut ranked = if observation_safe {
-                    recursive_observation_policy(state, &actions, actor, self.branch_cap)
+                let proposal_actions;
+                let actions = if observation_safe {
+                    proposal_actions = actor_proposal_actions(state);
+                    proposal_actions.as_slice()
                 } else {
-                    let observed_ranked = normalize_observed_priors(state, &actions, actor);
+                    exact_actions.as_slice()
+                };
+                if actions.is_empty() {
+                    return self.evaluate_cached(state);
+                }
+                let mut ranked = if observation_safe {
+                    recursive_observation_policy(state, actions, actor, self.branch_cap)
+                } else {
+                    let observed_ranked = normalize_observed_priors(state, actions, actor);
                     let mut ranked = order_scored_with_state_quotas(
                         &state.observed_state(actor),
                         actor,
@@ -806,7 +818,7 @@ impl Searcher {
                     );
                     ranked = truncate_root_preserving_end_turn(ranked, self.branch_cap);
                     if ranked.is_empty() {
-                        ranked = rank_with_class_quotas(state, &actions, actor, self.branch_cap);
+                        ranked = rank_with_class_quotas(state, actions, actor, self.branch_cap);
                     }
                     ranked
                 };
@@ -4130,7 +4142,7 @@ mod tests {
     }
 
     #[test]
-    fn belief_root_rankings_include_actions_legal_only_in_later_hidden_worlds() {
+    fn belief_root_rankings_exclude_hidden_bank_only_maritime_actions() {
         let mut unavailable = GameState::standard(111, 4);
         advance_setup_and_roll(&mut unavailable, &mut SplitMix64::new(112));
         unavailable.phase = Phase::Main;
@@ -4175,24 +4187,23 @@ mod tests {
                 weight: 0.25,
             },
         ];
+        let ranked = normalize_belief_root_priors(&particles, 0, 1_000);
+        assert!(
+            !ranked.iter().any(|(candidate, _)| candidate == &target),
+            "hidden-bank-only maritime actions must never enter the actor-facing root domain",
+        );
+
         let report = search_weighted_belief_maxn_bounded(&particles, 2, 32, 4_000).unwrap();
-        let ranked = report
-            .provenance
-            .ranked_roots
-            .iter()
-            .find(|candidate| candidate.action == target)
-            .expect("belief root ranking must union actions across hidden worlds");
-        assert!(ranked.rank > 0);
-        if !report
-            .actions
-            .iter()
-            .any(|candidate| candidate.action == target)
-        {
-            assert!(report.provenance.pruned_roots.iter().any(|candidate| {
-                candidate.action == target
-                    && candidate.reason == super::RootPruneReason::BranchTruncated
-            }));
-        }
+        assert!(
+            !report
+                .provenance
+                .ranked_roots
+                .iter()
+                .any(|candidate| candidate.action == target),
+        );
+        assert!(
+            !report.actions.iter().any(|candidate| candidate.action == target),
+        );
     }
 
     #[test]

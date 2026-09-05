@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use colonist_catan_core::{Action, GameState, NodeKind, Phase};
 
 use crate::deadline::CooperativeDeadline;
+use crate::policy::actor_proposal_actions;
 
 #[derive(Clone, Debug)]
 pub struct TacticalResult {
@@ -20,6 +21,7 @@ struct Solver {
     maximum_nodes: u32,
     nodes: u32,
     aborted: bool,
+    observation_safe: bool,
     deadline: Option<CooperativeDeadline>,
     memo: HashMap<(u64, u8), (f32, Vec<Action>)>,
 }
@@ -45,21 +47,21 @@ impl Solver {
         if let Some(value) = self.memo.get(&(state.state_hash(), depth)) {
             return value.clone();
         }
-        let actions = state.legal_actions();
-        if actions.is_empty() {
+        let exact_actions = state.legal_actions();
+        if exact_actions.is_empty() {
             return (0.0, Vec::new());
         }
         let result = match state.node_kind() {
             NodeKind::Terminal => (0.0, Vec::new()),
             NodeKind::Chance => {
-                let total = actions
+                let total = exact_actions
                     .iter()
                     .map(|action| state.chance_weight(action) as f32)
                     .sum::<f32>();
                 let mut expected = 0.0;
                 let mut principal = Vec::new();
                 let mut principal_mass = -1.0;
-                for action in actions {
+                for action in exact_actions {
                     let weight = state.chance_weight(&action) as f32;
                     let mut next = state.clone();
                     next.apply(&action)
@@ -78,7 +80,12 @@ impl Solver {
                 let maximize = actor == self.root_player;
                 let mut best = if maximize { -1.0 } else { 2.0 };
                 let mut principal = Vec::new();
-                for action in actions {
+                let decision_actions = if self.observation_safe {
+                    actor_proposal_actions(state)
+                } else {
+                    exact_actions
+                };
+                for action in decision_actions {
                     if matches!(action, Action::EndTurn) {
                         continue;
                     }
@@ -115,6 +122,7 @@ fn solve_current_turn_with_deadline(
     state: &GameState,
     maximum_depth: u8,
     maximum_nodes: u32,
+    observation_safe: bool,
     deadline: Option<CooperativeDeadline>,
 ) -> TacticalResult {
     if !matches!(state.phase, Phase::PreRoll | Phase::Main) {
@@ -130,6 +138,7 @@ fn solve_current_turn_with_deadline(
         root_player: state.actor(),
         maximum_depth,
         maximum_nodes,
+        observation_safe,
         deadline,
         ..Solver::default()
     };
@@ -148,7 +157,7 @@ pub fn solve_current_turn(
     maximum_depth: u8,
     maximum_nodes: u32,
 ) -> TacticalResult {
-    solve_current_turn_with_deadline(state, maximum_depth, maximum_nodes, None)
+    solve_current_turn_with_deadline(state, maximum_depth, maximum_nodes, false, None)
 }
 
 /// A tactical line is called proven only when the same executable continuation
@@ -223,6 +232,7 @@ fn solve_belief_current_turn_with_deadline(
             state,
             maximum_depth,
             nodes_per_particle,
+            true,
             deadline.clone(),
         );
         expected += result.win_probability * weight;

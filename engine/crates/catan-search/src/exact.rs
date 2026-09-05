@@ -3,7 +3,7 @@ use colonist_catan_core::{Action, GameState, NodeKind, Phase};
 use crate::eval::{evaluate, public_strategic_utility, robber_denial, strategic_utility};
 use crate::mcts::BeliefParticle;
 use crate::planner::{TurnPlanConfig, plan_current_turn};
-use crate::policy::trade_acceptance_probability;
+use crate::policy::{actor_proposal_actions, trade_acceptance_probability};
 use crate::trade_safety::belief_domestic_trade_threat;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -482,19 +482,22 @@ where
         return None;
     }
     let actor = first.state.actor() as usize;
-    // Parameter legality can itself depend on hidden state (for example Year
-    // of Plenty with a non-public bank). Build the observable candidate union
-    // across the posterior and score every candidate over the full mass.
-    // Road Building can expose hundreds of parameter pairs. Recomputing the
-    // complete legal-action set once per candidate and particle made a single
-    // exact development-card decision take multiple seconds in WASM. Cache
-    // each world's legal family once and reuse it for both the candidate union
-    // and legality weighting.
+    // Candidate authority is observation-safe; exact hidden worlds remain
+    // authoritative only for transition legality and evaluation. Road Building
+    // can expose hundreds of parameter pairs, so cache both domains once per
+    // particle rather than regenerating them for every candidate.
+    let mut proposal_by_particle = Vec::with_capacity(particles.len());
     let mut legal_by_particle = Vec::with_capacity(particles.len());
     for particle in particles {
         if should_stop() {
             return None;
         }
+        proposal_by_particle.push(
+            actor_proposal_actions(&particle.state)
+                .into_iter()
+                .filter(|action| matches_family(&particle.state, action, family))
+                .collect::<Vec<_>>(),
+        );
         legal_by_particle.push(
             particle
                 .state
@@ -504,7 +507,7 @@ where
                 .collect::<Vec<_>>(),
         );
     }
-    let mut candidates = legal_by_particle
+    let mut candidates = proposal_by_particle
         .iter()
         .flat_map(|actions| actions.iter().cloned())
         .collect::<Vec<_>>();
@@ -939,7 +942,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_parameter_candidates_union_hidden_bank_worlds() {
+    fn exact_parameter_candidates_exclude_hidden_bank_only_year_of_plenty_actions() {
         let mut first = GameState::standard(39, 3);
         while matches!(
             first.phase,
@@ -950,17 +953,35 @@ mod tests {
         }
         first.phase = Phase::Main;
         first.current_player = 0;
-        first.players[0].development[3] = 1;
         first.bank_is_public = false;
-        first.bank = [18, 18, 18, 0, 1];
-        let first_count = first
-            .legal_actions()
-            .iter()
-            .filter(|action| matches!(action, Action::PlayYearOfPlenty { .. }))
-            .count();
+        for player in &mut first.players {
+            player.resources = [0; 5];
+        }
+        first.bank = [19; 5];
+        first.players[0].resources[Resource::Lumber.index()] = 4;
+        first.bank[Resource::Lumber.index()] -= 4;
+        first.players[0].resources[Resource::Ore.index()] = 1;
+        first.bank[Resource::Ore.index()] -= 1;
+        first.players[1].resources[Resource::Ore.index()] = 18;
+        first.bank[Resource::Ore.index()] -= 18;
+        first.players[0].development[3] += 1;
+        first.development_deck[3] -= 1;
+
         let mut second = first.clone();
-        second.bank = [18, 18, 18, 1, 0];
+        second.players[1].resources[Resource::Ore.index()] -= 1;
+        second.players[1].resources[Resource::Brick.index()] += 1;
+        second.bank[Resource::Ore.index()] += 1;
+        second.bank[Resource::Brick.index()] -= 1;
+        first.validate().unwrap();
+        second.validate().unwrap();
         assert_eq!(first.observation_hash(0), second.observation_hash(0));
+
+        let hidden_only = Action::PlayYearOfPlenty {
+            first: Resource::Brick,
+            second: Resource::Ore,
+        };
+        assert!(!first.legal_actions().contains(&hidden_only));
+        assert!(second.legal_actions().contains(&hidden_only));
 
         let result = solve_exact_belief(
             &[
@@ -975,12 +996,14 @@ mod tests {
             ],
             ExactActionFamily::YearOfPlenty,
         );
-        assert!(result.actions.len() > first_count);
+        assert!(
+            !result.actions.iter().any(|candidate| candidate.action == hidden_only),
+        );
         assert!(
             result
                 .actions
                 .iter()
-                .any(|candidate| candidate.legal_weight < 1.0),
+                .all(|candidate| candidate.legal_weight >= 1.0 - 1e-6),
         );
     }
 

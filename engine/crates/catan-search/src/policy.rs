@@ -1,5 +1,6 @@
 use colonist_catan_core::{Action, GameState, NodeKind, Resource, SplitMix64};
 
+use crate::economy::guaranteed_hidden_bank_lower_bound;
 use crate::eval::{
     RoadFrontierContext, RobberDenialContext, city_value, hand_transition_value,
     observed_marginal_development_value, prepare_road_frontier_context,
@@ -20,6 +21,37 @@ pub enum ActionClass {
     Trophy,
     HandSafety,
     EndTurn,
+}
+
+/// Actor-facing action proposal domain.
+///
+/// The rules engine deliberately exposes exact transition legality. Search policy
+/// must not turn a determinized hidden bank into information the actor can use to
+/// decide which actions exist. For the two bank-sensitive actor choices, retain
+/// only actions supported by the public bank or by the guaranteed hidden-bank
+/// lower bound. Exact particles still decide whether a selected proposal applies
+/// and how it evaluates.
+pub fn actor_proposal_actions(state: &GameState) -> Vec<Action> {
+    let actor = state.actor();
+    let bank = if state.bank_is_public {
+        state.bank
+    } else {
+        guaranteed_hidden_bank_lower_bound(state, actor)
+    };
+    state
+        .legal_actions()
+        .into_iter()
+        .filter(|action| match action {
+            Action::MaritimeTrade { receive, .. } => bank[receive.index()] > 0,
+            Action::PlayYearOfPlenty { first, second } if first == second => {
+                bank[first.index()] >= 2
+            }
+            Action::PlayYearOfPlenty { first, second } => {
+                bank[first.index()] > 0 && bank[second.index()] > 0
+            }
+            _ => true,
+        })
+        .collect()
 }
 
 pub fn action_class(action: &Action) -> ActionClass {
@@ -1005,14 +1037,92 @@ pub fn allocate_root_node_budgets(action_count: usize, total_nodes: u32) -> Vec<
 
 #[cfg(test)]
 mod tests {
-    use colonist_catan_core::{Action, GameState, Phase};
+    use colonist_catan_core::{Action, DevCard, GameState, Phase, Resource};
 
     use super::{
         action_prior, action_prior_nonwinning, action_prior_nonwinning_cached,
-        allocate_root_node_budgets, cheap_road_disruption, normalize_observed_priors,
-        normalize_priors, order_scored_with_state_quotas, policy_family, rank_with_class_quotas,
-        trade_acceptance_probability, truncate_root_preserving_end_turn,
+        actor_proposal_actions, allocate_root_node_budgets, cheap_road_disruption,
+        normalize_observed_priors, normalize_priors, order_scored_with_state_quotas,
+        policy_family, rank_with_class_quotas, trade_acceptance_probability,
+        truncate_root_preserving_end_turn,
     };
+
+    fn hidden_bank_observation_pair() -> (GameState, GameState) {
+        let mut left = GameState::standard(233, 3);
+        while matches!(left.phase, Phase::SetupSettlement | Phase::SetupRoad { .. }) {
+            let action = left.legal_actions()[0].clone();
+            left.apply(&action).unwrap();
+        }
+        left.phase = Phase::Main;
+        left.current_player = 0;
+        left.bank_is_public = false;
+        for player in &mut left.players {
+            player.resources = [0; 5];
+        }
+        left.bank = [19; 5];
+        left.players[0].resources[Resource::Lumber.index()] = 4;
+        left.bank[Resource::Lumber.index()] -= 4;
+        left.players[0].resources[Resource::Ore.index()] = 1;
+        left.bank[Resource::Ore.index()] -= 1;
+        left.players[1].resources[Resource::Ore.index()] = 18;
+        left.bank[Resource::Ore.index()] -= 18;
+        left.players[0].development[DevCard::YearOfPlenty.index()] += 1;
+        left.development_deck[DevCard::YearOfPlenty.index()] -= 1;
+
+        let mut right = left.clone();
+        right.players[1].resources[Resource::Ore.index()] -= 1;
+        right.players[1].resources[Resource::Brick.index()] += 1;
+        right.bank[Resource::Ore.index()] += 1;
+        right.bank[Resource::Brick.index()] -= 1;
+
+        left.validate().unwrap();
+        right.validate().unwrap();
+        assert_eq!(left.observation_hash(0), right.observation_hash(0));
+        (left, right)
+    }
+
+    #[test]
+    fn hidden_bank_maritime_proposal_domain_is_observation_safe() {
+        let (left, right) = hidden_bank_observation_pair();
+        let target = Action::MaritimeTrade {
+            give: Resource::Lumber,
+            receive: Resource::Ore,
+            ratio: left.trade_ratios(0)[Resource::Lumber.index()],
+        };
+        assert!(!left.legal_actions().contains(&target));
+        assert!(right.legal_actions().contains(&target));
+
+        let left_proposals = actor_proposal_actions(&left);
+        let right_proposals = actor_proposal_actions(&right);
+        assert_eq!(left_proposals, right_proposals);
+        assert!(!left_proposals.contains(&target));
+
+        let mut exact_unavailable = left.clone();
+        let mut exact_available = right.clone();
+        assert!(exact_unavailable.apply(&target).is_err());
+        assert!(exact_available.apply(&target).is_ok());
+    }
+
+    #[test]
+    fn hidden_bank_year_of_plenty_proposal_domain_is_observation_safe() {
+        let (left, right) = hidden_bank_observation_pair();
+        let target = Action::PlayYearOfPlenty {
+            first: Resource::Brick,
+            second: Resource::Ore,
+        };
+        assert!(!left.legal_actions().contains(&target));
+        assert!(right.legal_actions().contains(&target));
+
+        let left_proposals = actor_proposal_actions(&left);
+        let right_proposals = actor_proposal_actions(&right);
+        assert_eq!(left_proposals, right_proposals);
+        assert!(!left_proposals.contains(&target));
+
+        let mut exact_unavailable = left.clone();
+        let mut exact_available = right.clone();
+        assert!(exact_unavailable.apply(&target).is_err());
+        assert!(exact_available.apply(&target).is_ok());
+    }
 
     #[test]
     fn cached_road_prior_preserves_disruption_term() {

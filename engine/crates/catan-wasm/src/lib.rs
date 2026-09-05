@@ -1221,15 +1221,15 @@ where
     let state = &particles[0].state;
     let actor = state.actor();
     let observed = state.observed_state(actor);
+    let actor_domain = colonist_catan_search::actor_proposal_actions(state);
     let actions = if let Some(candidate_actions) = candidate_actions {
         candidate_actions
             .iter()
-            .filter(|action| !root_exclusions.contains(action))
+            .filter(|action| actor_domain.contains(action) && !root_exclusions.contains(action))
             .cloned()
             .collect::<Vec<_>>()
     } else {
-        observed
-            .legal_actions()
+        actor_domain
             .into_iter()
             .filter(|action| !root_exclusions.contains(action))
             .collect::<Vec<_>>()

@@ -9,7 +9,8 @@ use crate::exact::{
 use crate::opening::opening_adjusted_priors;
 use crate::planner::plan_adjusted_priors;
 use crate::policy::{
-    choose_rollout_action, normalize_observed_priors, order_scored_with_state_quotas,
+    actor_proposal_actions, choose_rollout_action, normalize_observed_priors,
+    order_scored_with_state_quotas,
 };
 use crate::tactical::{TacticalResult, solve_belief_current_turn, solve_current_turn};
 use crate::threats::forced_loss_weight;
@@ -31,6 +32,14 @@ fn information_identity(state: &GameState) -> u64 {
     match state.node_kind() {
         NodeKind::Decision { actor } => state.observation_hash(actor),
         NodeKind::Chance | NodeKind::Terminal => state.public_hash(),
+    }
+}
+
+fn decision_actions_for_mode(state: &GameState, information_set_mode: bool) -> Vec<Action> {
+    if information_set_mode {
+        actor_proposal_actions(state)
+    } else {
+        state.legal_actions()
     }
 }
 
@@ -701,8 +710,7 @@ impl Mcts {
     }
 
     fn prepare_root_priors(&mut self, state: &GameState) {
-        let legal = state
-            .legal_actions()
+        let legal = decision_actions_for_mode(state, self.information_set_mode)
             .into_iter()
             .filter(|action| !self.root_exclusions.contains(action))
             .collect::<Vec<_>>();
@@ -999,7 +1007,7 @@ impl Mcts {
                 NodeKind::Decision { actor } => {
                     self.statistics.deepest_decision_depth =
                         self.statistics.deepest_decision_depth.max(strategic_depth);
-                    let legal = state.legal_actions();
+                    let legal = decision_actions_for_mode(&state, self.information_set_mode);
                     if legal.is_empty() {
                         break;
                     }
@@ -1175,7 +1183,7 @@ impl Mcts {
             if state.turn.saturating_sub(starting_turn) >= target_turns {
                 break;
             }
-            let actions = state.legal_actions();
+            let actions = decision_actions_for_mode(state, self.information_set_mode);
             if actions.is_empty() {
                 break;
             }
@@ -1197,11 +1205,13 @@ impl Mcts {
 
 #[cfg(test)]
 mod tests {
-    use colonist_catan_core::{Action, GameState, NodeKind, Phase, Resource, SplitMix64};
+    use colonist_catan_core::{
+        Action, DevCard, GameState, NodeKind, Phase, Resource, SplitMix64,
+    };
 
     use super::{
-        ActionStats, BeliefError, BeliefParticle, Mcts, SearchConfig, progressive_width,
-        rank_root_actions, safer_end_turn_alternative,
+        ActionStats, BeliefError, BeliefParticle, Mcts, SearchConfig, decision_actions_for_mode,
+        progressive_width, rank_root_actions, safer_end_turn_alternative,
     };
 
     #[test]
@@ -1274,6 +1284,71 @@ mod tests {
                 state.apply(&steal).unwrap();
             }
         }
+    }
+
+    fn hidden_bank_observation_pair() -> (GameState, GameState) {
+        let mut left = GameState::standard(337, 3);
+        while matches!(
+            left.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        ) {
+            let action = left.legal_actions()[0].clone();
+            left.apply(&action).unwrap();
+        }
+        left.phase = Phase::Main;
+        left.current_player = 0;
+        left.bank_is_public = false;
+        for player in &mut left.players {
+            player.resources = [0; 5];
+        }
+        left.bank = [19; 5];
+        left.players[0].resources[Resource::Lumber.index()] = 4;
+        left.bank[Resource::Lumber.index()] -= 4;
+        left.players[0].resources[Resource::Ore.index()] = 1;
+        left.bank[Resource::Ore.index()] -= 1;
+        left.players[1].resources[Resource::Ore.index()] = 18;
+        left.bank[Resource::Ore.index()] -= 18;
+        left.players[0].development[DevCard::YearOfPlenty.index()] += 1;
+        left.development_deck[DevCard::YearOfPlenty.index()] -= 1;
+
+        let mut right = left.clone();
+        right.players[1].resources[Resource::Ore.index()] -= 1;
+        right.players[1].resources[Resource::Brick.index()] += 1;
+        right.bank[Resource::Ore.index()] += 1;
+        right.bank[Resource::Brick.index()] -= 1;
+
+        left.validate().unwrap();
+        right.validate().unwrap();
+        assert_eq!(left.observation_hash(0), right.observation_hash(0));
+        (left, right)
+    }
+
+    #[test]
+    fn information_set_action_domain_blocks_hidden_bank_rollout_candidates() {
+        let (left, right) = hidden_bank_observation_pair();
+        let maritime = Action::MaritimeTrade {
+            give: Resource::Lumber,
+            receive: Resource::Ore,
+            ratio: left.trade_ratios(0)[Resource::Lumber.index()],
+        };
+        let year_of_plenty = Action::PlayYearOfPlenty {
+            first: Resource::Brick,
+            second: Resource::Ore,
+        };
+        assert!(!left.legal_actions().contains(&maritime));
+        assert!(right.legal_actions().contains(&maritime));
+        assert!(!left.legal_actions().contains(&year_of_plenty));
+        assert!(right.legal_actions().contains(&year_of_plenty));
+
+        let left_proposals = decision_actions_for_mode(&left, true);
+        let right_proposals = decision_actions_for_mode(&right, true);
+        assert_eq!(left_proposals, right_proposals);
+        assert!(!left_proposals.contains(&maritime));
+        assert!(!left_proposals.contains(&year_of_plenty));
+
+        let exact_actions = decision_actions_for_mode(&right, false);
+        assert!(exact_actions.contains(&maritime));
+        assert!(exact_actions.contains(&year_of_plenty));
     }
 
     #[test]

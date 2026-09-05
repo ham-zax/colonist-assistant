@@ -65,8 +65,8 @@ pub use model::{
 pub use opening::{OpeningActionValue, OpeningConfig, OpeningReport, solve_opening};
 pub use planner::{TurnPlan, TurnPlanConfig, plan_current_turn};
 pub use policy::{
-    ActionClass, action_prior, allocate_root_node_budgets, choose_rollout_action,
-    trade_acceptance_probability,
+    ActionClass, action_prior, actor_proposal_actions, allocate_root_node_budgets,
+    choose_rollout_action, trade_acceptance_probability,
 };
 pub use rollout_cutoff::{
     ROLLOUT_CUTOFF_SCALE, rollout_cutoff_margin, rollout_cutoff_player_score,
