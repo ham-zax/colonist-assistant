@@ -60,6 +60,10 @@ interface PendingDecision extends DecisionRequest {
 
 export class DecisionWorkerClient {
   private nextId = 1;
+  // Cancellation is advisory across extension/background boundaries: an old
+  // response can still arrive after reset(). Generation tags make every such
+  // late result stale locally, so a previous board/reload state can never
+  // overwrite the strategist result for the current position.
   private generation = 1;
   private active?: PendingDecision;
   private queued?: PendingDecision;

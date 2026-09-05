@@ -49,6 +49,12 @@ const boot = async (): Promise<void> => {
   });
   overlay.setSettings(settings);
   overlay.updateBoard(currentBoard);
+  // Board ingestion can synchronously mutate the session (notably dice history),
+  // which calls onUpdate before updateBoard() has published the matching board
+  // snapshot. Without this tiny publication barrier the overlay can observe a
+  // new roll history paired with the previous board count and falsely diagnose
+  // a Balanced-Dice evidence mismatch. Publish the board first, then the queued
+  // session update from the same bridge callback.
   let boardPublicationActive = false;
   let pendingSessionUpdate: GameSession | undefined;
   const publishSessionUpdate = (updated: GameSession): void => {

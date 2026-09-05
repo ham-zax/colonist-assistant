@@ -67,6 +67,10 @@ const isNearChatInput = (element: Element): boolean => {
 
 const GAME_TOKEN_PATTERN =
   /:(?:lumber|brick|wool|grain|ore|resource-back|dev-back|road|settlement|city|die-[1-6]|knight|monopoly|road-building|year-of-plenty):/;
+// Colonist can mount several virtualized containers, including chat, before
+// ordinary gameplay tokens exist. During setup the real game log may contain
+// only startup/bot-status text, so root detection must recognize those rows or
+// we attach late (or to the wrong virtualizer) and miss setup history.
 const GAME_LOG_STARTUP_PATTERN =
   /^(?:happy settling!|bot is (?:selecting cards to discard|placing (?:a |an )?(?:road|settlement)) for\b)|\blist of commands:\s*\/help\b/iu;
 

@@ -343,6 +343,13 @@ export const appendPublicDiceRoll = (
  * A complete indexed prefix establishes the ordinal of each DOM roll. Only
  * then can board turn observations be merged without guessing from repeated
  * actor/total pairs. Gapped DOM evidence stays unavailable until it backfills.
+ *
+ * This durable/raw merge is intentionally more conservative than live decision
+ * reconciliation: generic Colonist log indexes include non-roll presentation
+ * rows and can remain sparse under virtualization. buildLiveDecisionStochasticInput()
+ * may prove a complete roll sequence from public gameplayRollCount + board
+ * ordinals without mutating this audit state. Do not weaken this function just
+ * to make persisted provenance look "complete" during a healthy live game.
  */
 export const reconcilePublicDiceSources = (state: DiceHistoryState): void => {
   const board = state.rolls.filter((roll) => /^board-roll:\d+:/u.test(roll.eventId));
@@ -779,6 +786,11 @@ export const buildLiveDecisionStochasticInput = (
     throw new Error("Balanced Dice requires canonical engine player ordering");
   }
   let authoritativeState = state;
+  // During snake-order setup there are legitimately zero gameplay rolls, and
+  // the log/session may not have attached yet. A public expected count of zero
+  // is therefore complete stochastic authority by itself. This exception is
+  // intentionally setup-only: for any positive expected count we stay
+  // fail-closed and require real public roll evidence.
   if (!authoritativeState && expectedRollCount === 0) {
     authoritativeState = createDiceHistoryState();
     observeDiceSetupBoundary(authoritativeState);

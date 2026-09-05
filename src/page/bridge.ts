@@ -1104,6 +1104,11 @@ import {
       vertices.filter((vertex: Record<string, any>) => vertex.building).length +
       edges.filter((edge: Record<string, any>) => edge.player).length;
     const completedTurns = Number(currentState.completedTurns ?? 0);
+    // Colonist's completedTurns includes both rounds of snake-order setup, so
+    // it is not a gameplay-roll ordinal. Mref history starts only after those
+    // 2*N placement turns; the currently-thrown die belongs to the next ordinal
+    // before completedTurns advances. Keep this semantic count separate from
+    // the UI turn counter.
     const setupTurnCount = 2 * playOrder.length;
     const gameplayRollCount = initialPlacement
       ? 0

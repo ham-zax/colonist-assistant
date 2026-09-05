@@ -2606,6 +2606,10 @@ export class AssistantOverlay {
   }
 
   private unresolvedDiceEvidence(): unknown {
+    // Retry wake-up evidence is deliberately narrower than the raw dice-history
+    // digest. Colonist can backfill harmless generic log coverage long after the
+    // physical rolls are known; coverage churn is presentation work, not a new
+    // stochastic position, and must not repeatedly restart the strategist.
     const history = this.session?.diceHistory;
     if (!history) return null;
     return {
@@ -2624,6 +2628,11 @@ export class AssistantOverlay {
   }
 
   private decisionStochasticSignature(board: BoardSnapshot): unknown {
+    // Search identity must follow the reconciled Mref position, not Colonist's
+    // DOM bookkeeping. Hashing raw coverage/source-reconciliation state used to
+    // change the decision key while a valid search was running, so delayed log
+    // hydration cancelled useful GPU/CPU work even though the canonical roll
+    // sequence had not changed.
     const history = this.session?.diceHistory;
     const expected = board.gameplayRollCount;
     const order = board.playerOrder;
@@ -2758,6 +2767,10 @@ export class AssistantOverlay {
   }
 
   private currentLogRollPrecedesBoardSnapshot(board: BoardSnapshot): boolean {
+    // A log row can occasionally publish the current roll before the page bridge
+    // publishes the corresponding board turn/count. Prove the skew is exactly
+    // one coherent gameplay roll and wait for the board; do not analyze a
+    // hybrid position or "fix" it by trusting raw history length.
     const history = this.session?.diceHistory;
     const expected = board.gameplayRollCount;
     const order = board.playerOrder;

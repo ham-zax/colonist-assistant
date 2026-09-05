@@ -307,6 +307,10 @@ export class GameRecordRecorder {
 
   private enqueueStorage(operation: () => Promise<void>): Promise<void> {
     const next = this.storageOperations.then(operation, operation);
+    // Reloading/updating an unpacked extension invalidates the old content
+    // script's chrome.storage context. Persistence is best-effort, so return the
+    // guarded queue promise itself; returning `next` leaked an unhandled
+    // "Extension context invalidated" rejection from fire-and-forget saves.
     this.storageOperations = next.catch(() => undefined);
     return this.storageOperations;
   }

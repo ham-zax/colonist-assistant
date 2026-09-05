@@ -105,6 +105,10 @@ const isNativeGpuTransportFailure = (error: unknown): boolean =>
     errorDetail(error, ""),
   );
 
+// This fallback is intentionally transport-only. If the native companion dies
+// or its port disconnects, preserve the user's selected deep-search algorithm
+// and stochastic model on CPU/WASM for this decision. Semantic/search errors are
+// not permission to silently substitute another model or policy.
 const analyzeAfterNativeGpuTransportFailure = async (
   message: DecisionMessage,
   error: unknown,

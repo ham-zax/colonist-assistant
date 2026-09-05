@@ -1,3 +1,8 @@
+// The Colonist manager object can be replaced for a new game while the URL/room
+// shape remains reusable, and an extension reload re-executes this page bridge.
+// Persist the manager generation in page sessionStorage so a reload does not
+// reset it to 1, reuse an old gameKey, and let a fresh content script restore or
+// overwrite state that belongs to the previous game generation.
 const MANAGER_GENERATION_STORAGE_KEY = "colonistAssistantManagerGeneration";
 
 const validGeneration = (value: unknown): value is number =>

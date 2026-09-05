@@ -46,6 +46,9 @@ export class InvestigationRecorder {
       }
     } catch (error) {
       if (isExtensionContextInvalidatedError(error)) {
+        // Chrome will not revive storage APIs inside an already-invalidated
+        // content-script context. Disable this recorder until the page gets a
+        // fresh extension context instead of scheduling repeated doomed writes.
         this.enabled = false;
         return;
       }
@@ -79,6 +82,10 @@ export class InvestigationRecorder {
   record(kind: InvestigationKind, data: Record<string, unknown>): void {
     if (!this.enabled) return;
     const discriminator = data.action ?? data.phase ?? "state";
+    // Keep dedupe intentionally narrow. Decision attempt/accepted/rejected rows
+    // are causal evidence even when payloads repeat; broad dedupe once hid real
+    // outcomes and made an investigation export look as if a decision vanished.
+    // Collapse only the two high-frequency idempotent dice diagnostics.
     const shouldDedupe = kind === "dice" &&
       (discriminator === "board-roll-duplicate" || discriminator === "source-reconciliation");
     if (shouldDedupe) {

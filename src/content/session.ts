@@ -159,6 +159,11 @@ const classifyUnmatchedLog = (
 const isGameStartBoundaryText = (value: string): boolean =>
   /^happy settling!(?:\s|$)/iu.test(value.replace(/\s+/gu, " ").trim());
 
+// Generic log-integrity uncertainty is not automatically dice uncertainty.
+// Colonist emits many presentation/status rows that our tracker may not model;
+// treating every unknown row as a possibly-missed roll caused sticky false
+// Balanced-Dice pauses. Only an unrecognized row with actual roll/dice evidence
+// is allowed to downgrade stochastic authority.
 const unmatchedCanConcealGameplayRoll = (
   snapshot: Parameters<typeof parseLogSnapshot>[0],
   classification: ReturnType<typeof classifyUnmatchedLog>,
@@ -747,6 +752,10 @@ export class GameSession {
   }
 
   private acceptGameStartBoundary(): boolean {
+    // Colonist can first expose setup from index 2, then hydrate the index-0
+    // "Happy settling!" banner later. Only the narrow shapes below prove that
+    // the provisional prefix miss contained no semantic tracker event. Never
+    // clear arbitrary partial history merely because index 0 eventually appears.
     if (this.setupLogPrefixEnd === undefined) return false;
     const firstIndexedEvent = this.events
       .filter((event) => validStoredLogIndex(event.index))
@@ -904,6 +913,12 @@ export class GameSession {
       this.onUpdate(this);
       return true;
     }
+    // The same physical roll can be present twice: once from the fast board
+    // bridge and later from the virtualized DOM log. Never use raw
+    // diceHistory.rolls.length as board progress. Once board ordinals exist they
+    // are authoritative; before that, indexed-roll count is only a bootstrap.
+    // This prevents duplicate sources from advancing expectedTurn and masking a
+    // genuinely skipped board ordinal.
     const priorBoardTurns = this.diceHistory.rolls.flatMap((roll) => {
       const matched = roll.eventId.match(/^board-roll:(\d+):/u);
       return matched ? [Number(matched[1])] : [];
