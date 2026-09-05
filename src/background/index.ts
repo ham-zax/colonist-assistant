@@ -4,7 +4,6 @@ import {
 import { warmDeepSearchEngine } from "../worker/deep-search";
 import {
   NativeGpuClient,
-  NATIVE_GPU_STOCHASTIC_MODEL,
   nativeGpuSupportsStochasticModel,
 } from "./native-gpu";
 import {
@@ -174,7 +173,7 @@ chrome.runtime.onMessage.addListener(
       const nativeGpuEligible = shouldUseNativeGpu(message);
       if (nativeGpuEligible) {
         const gpu = await nativeGpu.status();
-        if (gpu) {
+        if (gpu && nativeGpuSupportsStochasticModel(message.stochastic?.model, gpu.stochasticModels)) {
           const analysis = await analyzeDecisionRequest(
             message,
             (request) =>
@@ -199,7 +198,7 @@ chrome.runtime.onMessage.addListener(
         analysis.runtimeReason ??
         (runtime === "background-wasm"
           ? requestedStochasticModel === MREF_COLONIST_LINKED_2024_V1
-            ? `CPU reference stochastic execution; native GPU supports ${NATIVE_GPU_STOCHASTIC_MODEL} only`
+            ? "Mref preserved on CPU/WASM; no eligible Mref-capable native route for this decision"
             : message.engine === "deep-search" && message.board.initialPlacement
               ? "Dedicated opening solver runs on WASM/CPU"
               : nativeGpuEligible

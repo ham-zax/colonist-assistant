@@ -17,8 +17,8 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 CUDA = ROOT / "engine/crates/catan-search/src/cuda"
-SOURCES = ("sim.cu", "rollout_cutoff.cuh")
-OPTIONS = ("--gpu-architecture=compute_75", "--std=c++17", "--fmad=false")
+SOURCES = ("sim.cu", "rollout_cutoff.cuh", "mref.cuh")
+OPTIONS = ("--gpu-architecture=compute_75", "--std=c++17", "--fmad=false", "--device-int128")
 MARKER = "// colonist-sim-source-sha256: "
 
 
@@ -66,9 +66,10 @@ def compile_ptx() -> bytes:
             raise RuntimeError(f"{operation} failed with NVRTC status {code}")
 
     program = C.c_void_p()
-    headers = (C.c_char_p * 1)((CUDA / SOURCES[1]).read_bytes())
-    names = (C.c_char_p * 1)(SOURCES[1].encode())
-    checked(lib.nvrtcCreateProgram(C.byref(program), (CUDA / SOURCES[0]).read_bytes(), b"sim.cu", 1, headers, names), "create")
+    header_count = len(SOURCES) - 1
+    headers = (C.c_char_p * header_count)(*((CUDA / name).read_bytes() for name in SOURCES[1:]))
+    names = (C.c_char_p * header_count)(*(name.encode() for name in SOURCES[1:]))
+    checked(lib.nvrtcCreateProgram(C.byref(program), (CUDA / SOURCES[0]).read_bytes(), b"sim.cu", header_count, headers, names), "create")
     try:
         options = (C.c_char_p * len(OPTIONS))(*(option.encode() for option in OPTIONS))
         code = lib.nvrtcCompileProgram(program, len(options), options)

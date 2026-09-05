@@ -30,7 +30,7 @@ use wasm_bindgen::prelude::*;
 mod native_gpu;
 #[cfg(all(feature = "native-gpu", not(target_arch = "wasm32")))]
 pub use native_gpu::{
-    NATIVE_GPU_PROTOCOL_VERSION, NATIVE_GPU_STATE_SCHEMA_VERSION, NativeGpuDeviceIdentity,
+    NATIVE_GPU_PROTOCOL_VERSION, NATIVE_GPU_STATE_SCHEMA_VERSION, NATIVE_GPU_STOCHASTIC_MODELS, NativeGpuDeviceIdentity,
     NativeGpuSearchEngine,
 };
 

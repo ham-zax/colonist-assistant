@@ -5,10 +5,16 @@ games where all players agree to its use. It reads game data shown to the
 player, tracks known cards, keeps honest ranges for unknown cards, and marks
 one legal next step in the Colonist page.
 
-The decision engine runs locally as Rust and WebAssembly in the browser.
-Strategist ★ is the single user-facing decision authority. It combines exact
-local solvers, a bounded setup search, and observation-safe weighted-belief
-Deep MaxN. Experimental belief PUCT, UCT, and AlphaBeta remain diagnostic
+The decision engine runs locally in a native CUDA companion or as Rust and
+WebAssembly in the browser. Strategist ★ is the single user-facing decision
+authority. Eligible midgame decisions prefer the compatible native companion;
+CPU/WASM owns opening, opponent-turn pondering, and unavailable-backend fallback.
+Both backends preserve the requested stochastic model, including the named
+Balanced-Dice reference model when public evidence supports it. See the
+[CPU/GPU Mref contract and verification gates](docs/CPU_GPU_MREF_CONTRACT.md).
+The engine combines exact local solvers, bounded setup search, CUDA strategic
+rollouts, and observation-safe weighted-belief Deep MaxN. Experimental belief
+PUCT, UCT, and AlphaBeta remain diagnostic
 comparison policies in the native arena; replay tooling also exposes selected
 diagnostic search budgets. They are not selectable live engines.
 
@@ -50,7 +56,9 @@ your own shown resource cards, and bank counts when the room shows them.
 
 It does not read game chat, cookies, account tokens, network messages,
 opponents’ hidden cards, or hidden development cards. It does not use a
-server, ads, tracking, or usage reports. Game work stays in the browser.
+server, ads, tracking, or usage reports. Game computation stays on your computer;
+the optional native GPU companion receives local analysis requests from the
+extension.
 Chrome may sync settings through the user’s Google account when Chrome Sync is
 on.
 

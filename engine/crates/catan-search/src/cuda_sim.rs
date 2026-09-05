@@ -73,7 +73,12 @@ const STATE_PLAYERS: usize = STATE_ROADS + EDGE_COUNT;
 const PLAYER_STRIDE: usize = 28;
 const STATE_DOMESTIC_TRADE_DISABLED: usize = STATE_PLAYERS + MAX_PLAYERS * PLAYER_STRIDE;
 const STATE_DOMESTIC_TRADE_EMBARGOES: usize = STATE_DOMESTIC_TRADE_DISABLED + 1;
-const STATE_WORDS: usize = STATE_DOMESTIC_TRADE_EMBARGOES + 1;
+const STATE_DICE_MODEL: usize = STATE_DOMESTIC_TRADE_EMBARGOES + 1;
+const STATE_DICE_COUNT: usize = STATE_DICE_MODEL + 1;
+const STATE_DICE_PARTICLES: usize = STATE_DICE_COUNT + 1;
+const DICE_PARTICLE_WORDS: usize = 28;
+const MAX_DICE_PARTICLES: usize = colonist_catan_core::REFERENCE_PARTICLES;
+const STATE_WORDS: usize = STATE_DICE_PARTICLES + MAX_DICE_PARTICLES * DICE_PARTICLE_WORDS;
 
 const ACTION_TAG: usize = 0;
 const ACTION_ARG0: usize = 1;
@@ -456,6 +461,7 @@ pub struct CudaSimEngine {
     apply_candidate_kernel: CudaFunction,
     profile_kernel: CudaFunction,
     summary_kernel: CudaFunction,
+    dice_distribution_kernel: CudaFunction,
     expand_roots_kernel: CudaFunction,
     reduce_roots_kernel: CudaFunction,
     topology_device: CudaSlice<u32>,
@@ -522,6 +528,7 @@ impl CudaSimEngine {
         let apply_candidate_kernel = module.load_function("apply_candidate_actions_kernel")?;
         let profile_kernel = module.load_function("assign_rotating_profiles_kernel")?;
         let summary_kernel = module.load_function("summarize_games_kernel")?;
+        let dice_distribution_kernel = module.load_function("dice_distribution_kernel")?;
         let expand_roots_kernel = module.load_function("expand_root_rollouts_kernel")?;
         let reduce_roots_kernel = module.load_function("reduce_root_rollouts_kernel")?;
         let stream = context.default_stream();
@@ -532,7 +539,7 @@ impl CudaSimEngine {
         unsafe { arguments.launch(LaunchConfig::for_num_elems(1))? };
         let contract = stream.clone_dtoh(&contract_device)?;
         stream.synchronize()?;
-        if contract != [2, STATE_WORDS as u32, ACTION_WORDS as u32, ROOT_STATS_WORDS as u32] {
+        if contract != [3, STATE_WORDS as u32, ACTION_WORDS as u32, ROOT_STATS_WORDS as u32] {
             return Err(CudaSimError::UnsupportedState("embedded CUDA artifact ABI does not match Rust; rebuild sim.ptx"));
         }
         let topology_device = stream.clone_htod(&topology_host)?;
@@ -574,6 +581,7 @@ impl CudaSimEngine {
             apply_candidate_kernel,
             profile_kernel,
             summary_kernel,
+            dice_distribution_kernel,
             expand_roots_kernel,
             reduce_roots_kernel,
             topology_device,
@@ -623,6 +631,30 @@ impl CudaSimEngine {
 
     pub fn resident_states(&self) -> usize {
         self.resident_states
+    }
+
+    /// Read the resident chance law for exact CPU/GPU semantic comparison.
+    /// Non-roll phases return zeroes; M0 retains integer 2d6 weights.
+    pub fn dice_distributions(&self) -> Result<Vec<[u64; 11]>, CudaSimError> {
+        let count = self.resident_states;
+        if count == 0 { return Err(CudaSimError::NoResidentBatch); }
+        let stride = u32::try_from(count).map_err(|_| CudaSimError::BatchTooLarge)?;
+        let mut output = self.stream.alloc_zeros::<u64>(11 * count)?;
+        let mut arguments = self.stream.launch_builder(&self.dice_distribution_kernel);
+        arguments.arg(&self.state_device);
+        arguments.arg(&stride);
+        arguments.arg(&mut output);
+        arguments.arg(&stride);
+        // Mref uses more registers than the trivial contract probe. Match the
+        // resident simulator's block size, not cudarc's 1024-thread default.
+        let config = LaunchConfig {
+            grid_dim: (count.div_ceil(THREADS_PER_BLOCK) as u32, 1, 1),
+            block_dim: (THREADS_PER_BLOCK as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe { arguments.launch(config)? };
+        let words = self.stream.clone_dtoh(&output)?;
+        Ok((0..count).map(|lane| std::array::from_fn(|i| words[i * count + lane])).collect())
     }
 
     pub fn upload_states(&mut self, states: &[GameState]) -> Result<(), CudaSimError> {
@@ -2051,6 +2083,32 @@ fn pack_state_words(state: &GameState, words: &mut [u32; STATE_WORDS]) -> Result
         || board.edges.len() != EDGE_COUNT
     {
         return Err(CudaSimError::TopologyMismatch);
+    }
+    if let Some(belief) = state.stochastic.reference_belief() {
+        let particles = belief.particles();
+        if particles.is_empty() || particles.len() > MAX_DICE_PARTICLES {
+            return Err(CudaSimError::UnsupportedState("Mref posterior must contain 1..64 particles"));
+        }
+        words[STATE_DICE_MODEL] = 1;
+        words[STATE_DICE_COUNT] = particles.len() as u32;
+        for (index, particle) in particles.iter().enumerate() {
+            let base = STATE_DICE_PARTICLES + index * DICE_PARTICLE_WORDS;
+            let controller = &particle.controller;
+            words[base] = particle.mass as u32;
+            words[base + 1] = (particle.mass >> 32) as u32;
+            for (i, remaining) in controller.remaining_counts().into_iter().enumerate() {
+                words[base + 2 + i] = remaining as u32;
+            }
+            words[base + 13] = controller.cards_left() as u32;
+            let recent = controller.recent_totals();
+            for (i, total) in recent.iter().enumerate() { words[base + 14 + i] = *total as u32; }
+            words[base + 19] = recent.len() as u32;
+            words[base + 20] = controller.initialized_player_mask() as u32;
+            for (i, count) in controller.seven_counts().into_iter().enumerate() { words[base + 21 + i] = count; }
+            words[base + 25] = controller.seven_streak_owner().map_or(0, |actor| actor as u32 + 1);
+            words[base + 26] = controller.seven_streak_count();
+            words[base + 27] = controller.prepared_actor().map_or(0, |actor| actor as u32 + 1);
+        }
     }
     let (phase, phase_arg) = phase_words(state.phase);
     let (return_phase, return_arg) = phase_words(state.robber_return_phase);

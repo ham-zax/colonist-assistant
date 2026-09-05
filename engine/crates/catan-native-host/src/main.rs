@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}, mpsc};
 use std::thread;
 
 use colonist_catan_wasm::{
-    NATIVE_GPU_PROTOCOL_VERSION, NATIVE_GPU_STATE_SCHEMA_VERSION, NativeGpuSearchEngine,
+    NATIVE_GPU_PROTOCOL_VERSION, NATIVE_GPU_STATE_SCHEMA_VERSION, NATIVE_GPU_STOCHASTIC_MODELS, NativeGpuSearchEngine,
     engine_version,
 };
 use serde::Deserialize;
@@ -156,6 +156,7 @@ fn main() -> io::Result<()> {
                             "protocolVersion": NATIVE_GPU_PROTOCOL_VERSION,
                             "stateSchemaVersion": NATIVE_GPU_STATE_SCHEMA_VERSION,
                             "engineRevision": engine_version(),
+                            "stochasticModels": NATIVE_GPU_STOCHASTIC_MODELS,
                             "build": native_build_identity(),
                             "device": engine.device_identity(),
                         }),

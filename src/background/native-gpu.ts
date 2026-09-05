@@ -1,17 +1,25 @@
 import type { NativeGpuBuildIdentity } from "../core/engine";
 import type { WasmSearchResponse } from "../generated/wasm/colonist_search.js";
-import { M0_FAIR_IID_2D6_V1 } from "../core/dice-history";
+import { M0_FAIR_IID_2D6_V1, MREF_COLONIST_LINKED_2024_V1 } from "../core/dice-history";
 
 export const NATIVE_GPU_HOST = "io.colonist_assistant.gpu";
 export const NATIVE_GPU_PROTOCOL_VERSION = 6;
 export const NATIVE_GPU_STATE_SCHEMA_VERSION = 3;
-export const NATIVE_GPU_STOCHASTIC_MODEL = M0_FAIR_IID_2D6_V1;
-export const nativeGpuSupportsStochasticModel = (model: string | undefined): boolean =>
-  (model ?? M0_FAIR_IID_2D6_V1) === NATIVE_GPU_STOCHASTIC_MODEL;
+export const NATIVE_GPU_STOCHASTIC_MODELS: readonly string[] = [
+  M0_FAIR_IID_2D6_V1, MREF_COLONIST_LINKED_2024_V1,
+];
+export const nativeGpuSupportsStochasticModel = (
+  model: string | undefined,
+  advertisedModels: readonly string[] = NATIVE_GPU_STOCHASTIC_MODELS,
+): boolean => {
+  const effective = model === "fair-iid-2d6" ? M0_FAIR_IID_2D6_V1 : model ?? M0_FAIR_IID_2D6_V1;
+  return NATIVE_GPU_STOCHASTIC_MODELS.includes(effective) && advertisedModels.includes(effective);
+};
 const EXPECTED_ENGINE_REVISION = "deep-maxn-v12";
 
 export interface NativeGpuStatus {
   runtime: "gpu-native";
+  stochasticModels: readonly string[];
   engineRevision: string;
   build?: NativeGpuBuildIdentity;
   device: {
@@ -27,6 +35,7 @@ interface NativeGpuResponse {
   runtime?: "gpu-native";
   protocolVersion?: number;
   stateSchemaVersion?: number;
+  stochasticModels?: string[];
   engineRevision?: string;
   build?: NativeGpuBuildIdentity;
   device?: NativeGpuStatus["device"];
@@ -109,6 +118,10 @@ export class NativeGpuClient {
   async analyze(request: unknown, decisionId?: number): Promise<WasmSearchResponse> {
     const status = await this.status();
     if (!status) throw new Error("GPU companion is not installed");
+    const requestedModel = (request as { stochastic?: { model?: string } } | null)?.stochastic?.model;
+    if (!nativeGpuSupportsStochasticModel(requestedModel, status.stochasticModels)) {
+      throw new NativeGpuCompatibilityError(`GPU companion does not support stochastic model ${requestedModel}`);
+    }
     if (this.activeAnalyzeId !== undefined) {
       this.cancelAnalyze(this.activeAnalyzeId, "GPU search superseded by a newer decision");
     }
@@ -120,6 +133,10 @@ export class NativeGpuClient {
       if (result.error) throw new Error(result.error);
       if (!result.response) {
         throw new Error("GPU companion returned no search response");
+      }
+      if (requestedModel === MREF_COLONIST_LINKED_2024_V1 &&
+          result.response.stochasticModel !== MREF_COLONIST_LINKED_2024_V1) {
+        throw new NativeGpuCompatibilityError("GPU companion returned mismatched Mref stochastic authority");
       }
       return result.response;
     } finally {
@@ -170,8 +187,16 @@ export class NativeGpuClient {
       if (hello.build !== undefined && !isNativeGpuBuildIdentity(hello.build)) {
         throw new NativeGpuCompatibilityError("Native GPU build identity is invalid");
       }
+      if (hello.stochasticModels !== undefined &&
+          (!Array.isArray(hello.stochasticModels) ||
+           !hello.stochasticModels.every((model) => typeof model === "string"))) {
+        throw new NativeGpuCompatibilityError("Native GPU stochastic capabilities are invalid");
+      }
       const status: NativeGpuStatus = {
         runtime: hello.runtime,
+        // Protocol-6 companions predating Mref remain wire-compatible for M0.
+        // Missing capability evidence must never authorize Mref on that host.
+        stochasticModels: hello.stochasticModels ?? [M0_FAIR_IID_2D6_V1],
         engineRevision: hello.engineRevision,
         ...(hello.build ? { build: hello.build } : {}),
         device: hello.device,

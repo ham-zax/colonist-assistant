@@ -66,7 +66,10 @@ typedef unsigned long long uint64_t;
 #define PLAYER_STRIDE 28u
 #define STATE_DOMESTIC_TRADE_DISABLED 402u
 #define STATE_DOMESTIC_TRADE_EMBARGOES 403u
-#define STATE_WORDS 404u
+#define STATE_DICE_MODEL 404u
+#define STATE_DICE_COUNT 405u
+#define STATE_DICE_PARTICLES 406u
+#define STATE_WORDS (STATE_DICE_PARTICLES + 64u * 28u)
 
 #define PLAYER_RESOURCES 0u
 #define PLAYER_DEVELOPMENT 5u
@@ -168,6 +171,8 @@ static inline __device__ void state_set(
 ) {
     states[field * stride + lane] = value;
 }
+
+#include "mref.cuh"
 
 static inline __device__ uint32_t action_get(
     const uint32_t *actions,
@@ -3184,9 +3189,21 @@ static inline __device__ void generate_rollout_action_lane(
         }
         seen = total_weight > 0u ? 1u : 0u;
     } else if (phase == PHASE_ROLL_CHANCE) {
-        const uint32_t roll = rng_range(&rng, 6u) + rng_range(&rng, 6u) + 2u;
+        uint32_t roll = 0u;
+        if (state_get(states, stride, STATE_DICE_MODEL, lane)) {
+            uint64_t law[11];
+            mref_distribution(states, stride, lane, law);
+            uint64_t target = splitmix64_next(&rng) % MREF_MASS;
+            for (uint32_t i = 0; i < 11; ++i) {
+                if (target < law[i]) { roll = i + 2; break; }
+                target -= law[i];
+            }
+        } else {
+            // Preserve the legacy M0 random stream exactly.
+            roll = rng_range(&rng, 6u) + rng_range(&rng, 6u) + 2u;
+        }
         write_action(actions, stride, lane, ACTION_RESOLVE_ROLL, roll, 0u, 0u);
-        seen = 1u;
+        seen = roll >= 2u ? 1u : 0u;
     } else if (phase == PHASE_DISCARD) {
         const uint32_t player = state_get(states, stride, STATE_DISCARD_CURSOR, lane);
         const uint32_t required = state_get(states, stride, STATE_DISCARD_REMAINING + player, lane);
@@ -3853,6 +3870,11 @@ static inline __device__ void apply_transition_lane(
             status[lane] = STATUS_INVALID_PHASE;
             return;
         }
+        if (state_get(states, stride, STATE_DICE_MODEL, lane)
+            && !mref_prepare(states, stride, lane)) {
+            status[lane] = STATUS_INVALID_STATE;
+            return;
+        }
         state_set(states, stride, STATE_PHASE, lane, PHASE_ROLL_CHANCE);
         state_set(states, stride, STATE_PHASE_ARG, lane, 0u);
         return;
@@ -3865,6 +3887,11 @@ static inline __device__ void apply_transition_lane(
         }
         const uint32_t roll = action_get(actions, stride, ACTION_ARG0, lane);
         if (roll < 2u || roll > 12u) {
+            status[lane] = STATUS_INVALID_ACTION;
+            return;
+        }
+        if (state_get(states, stride, STATE_DICE_MODEL, lane)
+            && !mref_resolve(states, stride, lane, roll)) {
             status[lane] = STATUS_INVALID_ACTION;
             return;
         }
@@ -5114,7 +5141,7 @@ extern "C" __global__ void reduce_root_rollouts_kernel(
 
 // Checked before any resident state or reduction buffer is used by Rust.
 extern "C" __global__ void simulation_contract_kernel(uint32_t *out) {
-    out[0] = 2u;
+    out[0] = 3u;
     out[1] = STATE_WORDS;
     out[2] = ACTION_WORDS;
     out[3] = 12u;

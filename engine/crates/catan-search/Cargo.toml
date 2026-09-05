@@ -29,6 +29,11 @@ path = "src/bin/cuda-sim-generated-parity.rs"
 required-features = ["cuda-sim"]
 
 [[bin]]
+name = "cuda-sim-mref-parity"
+path = "src/bin/cuda-sim-mref-parity.rs"
+required-features = ["cuda-sim"]
+
+[[bin]]
 name = "cuda-sim-parity"
 path = "src/bin/cuda-sim-parity.rs"
 required-features = ["cuda-sim"]
