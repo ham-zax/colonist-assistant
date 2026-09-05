@@ -28,7 +28,12 @@ const withNativeGpuStrengthProfile = (request: unknown): unknown => {
     effort?: {
       decisionTimeMs: number;
       tactical: { maxDepth: number; nodeBudget: number };
-      cpu: { maxDepth: number; rootCap: number; nodesPerDepthWave: number };
+      cpu: {
+        maxDepth: number;
+        rootCap: number;
+        nodesPerDepthWave: number;
+        evidenceEscalationMs?: number;
+      };
       gpu: { rootCap: number; rolloutBudget: number; rolloutSteps: number };
     };
   };

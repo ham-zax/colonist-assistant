@@ -45,6 +45,7 @@ const DEVELOPMENT_TOTAL = [14, 5, 2, 2, 2] as const;
 const MAX_PARTICLES = 96;
 const MAX_INTERACTIVE_PARTICLES = 24;
 const LIVE_WASM_DECISION_TIME_MS = 2_000;
+const LIVE_WASM_EVIDENCE_ESCALATION_MS = 2_500;
 const LIVE_WASM_TRADE_DECISION_TIME_MS = 1_500;
 const LIVE_WASM_OPENING_DECISION_TIME_MS = 2_500;
 const LIVE_WASM_PONDER_DECISION_TIME_MS = 3_000;
@@ -1548,7 +1549,12 @@ export const buildDeepSearchRequest = (
       effort: {
         decisionTimeMs: LIVE_WASM_DECISION_TIME_MS,
         tactical: { maxDepth: 14, nodeBudget: 900 },
-        cpu: { maxDepth: 5, rootCap: 10, nodesPerDepthWave: 8_000 },
+        cpu: {
+          maxDepth: 5,
+          rootCap: 10,
+          nodesPerDepthWave: 8_000,
+          evidenceEscalationMs: LIVE_WASM_EVIDENCE_ESCALATION_MS,
+        },
         gpu: {
           rootCap: 8,
           rolloutBudget: players.length >= 3 ? 320 : 384,
@@ -1637,6 +1643,13 @@ export const analyzeDeepSearch = async (
   // remain available to offline tooling. Live WASM/native execution consumes
   // this explicit effort object so CPU nodes and GPU rollouts cannot be
   // mistaken for the same unit.
+  const evidenceEscalationMs =
+    engine === "deep-search" &&
+    board.isMyTurn &&
+    !board.initialPlacement &&
+    request.state.phase !== "trade-responses"
+      ? LIVE_WASM_EVIDENCE_ESCALATION_MS
+      : 0;
   request.effort = {
     decisionTimeMs: request.timeBudgetMs,
     tactical: {
@@ -1647,6 +1660,7 @@ export const analyzeDeepSearch = async (
       maxDepth: request.depth,
       rootCap: request.branchCap,
       nodesPerDepthWave: request.maxNodes,
+      evidenceEscalationMs,
     },
     gpu: {
       rootCap: request.branchCap,
@@ -1683,6 +1697,8 @@ export const analyzeDeepSearch = async (
           maxDepth: response.effectiveEffort.cpu.maxDepth,
           rootCap: response.effectiveEffort.cpu.rootCap,
           nodesPerDepthWave: response.effectiveEffort.cpu.nodesPerDepthWave,
+          evidenceEscalationMs:
+            response.effectiveEffort.cpu.evidenceEscalationMs ?? 0,
         };
   const search: DeepSearchResult = {
     engineRevision: response.engineRevision,

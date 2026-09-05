@@ -78,6 +78,10 @@ export interface DeepSearchStageTimings {
   deepWavesMs: number;
   floorComplete: boolean;
   attemptedDepth: number;
+  evidenceEscalationTriggered: boolean;
+  evidenceEscalationCompleted: boolean;
+  evidenceEscalationNodes: number;
+  evidenceEscalationMs: number;
 }
 
 export type DeepSearchEffectiveEffort =
@@ -89,6 +93,7 @@ export type DeepSearchEffectiveEffort =
       maxDepth: number;
       rootCap: number;
       nodesPerDepthWave: number;
+      evidenceEscalationMs: number;
     }
   | {
       backend: "gpu";
@@ -635,7 +640,7 @@ export const explainDeepSearchDecision = (
   const effort = search.effectiveSearchEffort;
   if (effort?.backend === "cpu") {
     evidence.push(
-      `CPU effort: ${effort.timeBudgetMs} ms, depth cap ${effort.maxDepth}, root cap ${effort.rootCap}, ${effort.nodesPerDepthWave.toLocaleString()} nodes per depth wave`,
+      `CPU effort: ${effort.timeBudgetMs} ms base${effort.evidenceEscalationMs > 0 ? ` + up to ${effort.evidenceEscalationMs} ms evidence reserve` : ""}, depth cap ${effort.maxDepth}, root cap ${effort.rootCap}, ${effort.nodesPerDepthWave.toLocaleString()} nodes per depth wave`,
     );
   } else if (effort?.backend === "gpu") {
     evidence.push(
@@ -655,6 +660,11 @@ export const explainDeepSearchDecision = (
     ) {
       evidence.push(
         `The deadline arrived while attempting depth ${stages.attemptedDepth}; the returned recommendation uses the last completed decision depth ${search.deepestDecisionDepth}`,
+      );
+    }
+    if (stages.evidenceEscalationTriggered) {
+      evidence.push(
+        `Evidence escalation ${stages.evidenceEscalationCompleted ? "completed" : "stopped before completion"}: ${stages.evidenceEscalationNodes.toLocaleString()} additional nodes in ${stages.evidenceEscalationMs} ms after the binary floor/wave winner disagreement`,
       );
     }
     evidence.push(

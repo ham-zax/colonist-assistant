@@ -66,6 +66,10 @@ export interface DecisionTraceSearchStages {
   deepWavesMs: number;
   floorComplete: boolean;
   attemptedDepth: number;
+  evidenceEscalationTriggered: boolean;
+  evidenceEscalationCompleted: boolean;
+  evidenceEscalationNodes: number;
+  evidenceEscalationMs: number;
 }
 
 export interface DecisionExecutionDiagnostic {

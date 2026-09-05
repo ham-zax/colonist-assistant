@@ -33,6 +33,12 @@ impl CooperativeDeadline {
         }
     }
 
+    pub(crate) fn with_budget_ms(&self, budget_ms: u32) -> Self {
+        let mut deadline = self.clone();
+        deadline.budget_ms = budget_ms;
+        deadline
+    }
+
     pub fn has_elapsed(&self) -> bool {
         if self.budget_ms == 0 {
             return false;

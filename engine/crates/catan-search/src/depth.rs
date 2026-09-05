@@ -209,6 +209,10 @@ pub struct BeliefSearchStageTimings {
     pub deep_waves_ms: u32,
     pub floor_complete: bool,
     pub attempted_depth: u8,
+    pub evidence_escalation_triggered: bool,
+    pub evidence_escalation_completed: bool,
+    pub evidence_escalation_nodes: u32,
+    pub evidence_escalation_ms: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -1012,10 +1016,35 @@ impl Searcher {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum BeliefNodeBudgetMode {
     Global,
     PerDepthWave,
+}
+
+const EVIDENCE_ESCALATION_NODE_MULTIPLIER: u32 = 3;
+
+fn should_escalate_binary_root_evidence(
+    node_budget_mode: BeliefNodeBudgetMode,
+    root_count: usize,
+    evidence_escalation_ms: u32,
+    floor_winner: Option<&Action>,
+    wave_winner: Option<&Action>,
+) -> bool {
+    node_budget_mode == BeliefNodeBudgetMode::PerDepthWave
+        && root_count == 2
+        && evidence_escalation_ms > 0
+        && floor_winner.is_some()
+        && wave_winner.is_some()
+        && floor_winner != wave_winner
+}
+
+fn evidence_escalation_node_budget(base_wave_nodes: u32) -> u32 {
+    base_wave_nodes.saturating_mul(EVIDENCE_ESCALATION_NODE_MULTIPLIER)
+}
+
+fn evidence_escalation_target_depth(next_target_depth: u8) -> u8 {
+    next_target_depth.saturating_sub(1).max(1)
 }
 
 fn evaluate_after_forced_chance(state: &GameState, depth: u8) -> [f32; 4] {
@@ -1062,12 +1091,18 @@ fn belief_search(
     paranoid: bool,
     root_exclusions: &[Action],
     node_budget_mode: BeliefNodeBudgetMode,
+    evidence_escalation_ms: u32,
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
     let config = config.normalized();
     let maximum_depth = config.maximum_depth;
     let branch_cap = config.branch_cap;
     let maximum_nodes = config.maximum_nodes;
     let deadline = CooperativeDeadline::start(config.time_budget_ms);
+    let hard_deadline = deadline.with_budget_ms(
+        config
+            .time_budget_ms
+            .saturating_add(evidence_escalation_ms),
+    );
     let particle_preparation_started = deadline.elapsed_ms();
     let Some(first_particle) = particles.first() else {
         return Err(DepthBeliefError::Empty);
@@ -1658,15 +1693,42 @@ fn belief_search(
     }
     let one_ply_floor_ms = elapsed_stage_ms(&deadline, one_ply_floor_started);
     let deep_waves_started = deadline.elapsed_ms();
+    let actor = observer as usize;
+    let aggregate_winner = |entries: &[Aggregate]| {
+        entries
+            .iter()
+            .max_by(|left, right| {
+                let left_value = left.value[actor] / left.covered_weight.max(f32::EPSILON);
+                let right_value = right.value[actor] / right.covered_weight.max(f32::EPSILON);
+                left_value.total_cmp(&right_value)
+            })
+            .map(|entry| entry.action.clone())
+    };
+    let floor_winner = aggregate_winner(&aggregate);
     let mut attempted_depth = 0u8;
+    let mut evidence_escalation_triggered = false;
+    let mut evidence_escalation_pending = false;
+    let mut evidence_escalation_completed = false;
+    let mut evidence_escalation_start_nodes = 0u32;
+    let mut evidence_escalation_start_ms = 0u32;
+    let mut evidence_escalation_nodes = 0u32;
+    let mut evidence_escalation_elapsed_ms = 0u32;
 
     for target_depth in 1..=maximum_depth {
-        if deadline.has_elapsed() {
+        let active_deadline = if evidence_escalation_pending {
+            &hard_deadline
+        } else {
+            &deadline
+        };
+        if active_deadline.has_elapsed() {
             deadline_reached = true;
             break;
         }
         let wave_node_budget = match node_budget_mode {
             BeliefNodeBudgetMode::Global => maximum_nodes.saturating_sub(nodes),
+            BeliefNodeBudgetMode::PerDepthWave if evidence_escalation_pending => {
+                evidence_escalation_node_budget(maximum_nodes)
+            }
             BeliefNodeBudgetMode::PerDepthWave => maximum_nodes,
         };
         let minimum_complete_wave_nodes =
@@ -1674,7 +1736,12 @@ fn belief_search(
         if wave_node_budget < minimum_complete_wave_nodes {
             break;
         }
-        attempted_depth = target_depth;
+        let wave_target_depth = if evidence_escalation_pending {
+            evidence_escalation_target_depth(target_depth)
+        } else {
+            target_depth
+        };
+        attempted_depth = attempted_depth.max(wave_target_depth);
         let wave_action_budgets = allocate_root_node_budgets(
             root_actions.len(),
             wave_node_budget / positive_particle_count,
@@ -1693,7 +1760,7 @@ fn belief_search(
             }
             wave_particles += 1;
             for (action_index, action) in root_actions.iter().enumerate() {
-                if deadline.has_elapsed() {
+                if active_deadline.has_elapsed() {
                     deadline_reached = true;
                     wave_complete = false;
                     break 'particles;
@@ -1721,13 +1788,13 @@ fn belief_search(
                     .max(1);
                 let remaining_cells =
                     total_wave_cells.saturating_sub(completed_wave_cells).max(1) as u32;
-                let remaining_ms = deadline.remaining_ms();
+                let remaining_ms = active_deadline.remaining_ms();
                 if remaining_ms != u32::MAX && remaining_ms < remaining_cells {
                     wave_complete = false;
                     break 'particles;
                 }
-                let child_deadline = if remaining_ms == u32::MAX {
-                    deadline.clone()
+                let child_deadline = if evidence_escalation_pending || remaining_ms == u32::MAX {
+                    active_deadline.clone()
                 } else {
                     CooperativeDeadline::start((remaining_ms / remaining_cells).max(1))
                 };
@@ -1737,7 +1804,7 @@ fn belief_search(
                     } else {
                         Algorithm::MaxN
                     },
-                    maximum_depth: target_depth,
+                    maximum_depth: wave_target_depth,
                     maximum_nodes: nodes_for_action,
                     node_limit: nodes_for_action,
                     branch_cap: branch_cap.max(1),
@@ -1761,8 +1828,8 @@ fn belief_search(
                 nodes += searcher.nodes;
                 cutoffs += searcher.cutoffs;
                 wave_depth = wave_depth.max(searcher.deepest_depth);
-                if searcher.deadline_reached || deadline.has_elapsed() {
-                    deadline_reached |= deadline.has_elapsed();
+                if searcher.deadline_reached || active_deadline.has_elapsed() {
+                    deadline_reached |= active_deadline.has_elapsed();
                     wave_complete = false;
                     break 'particles;
                 }
@@ -1780,14 +1847,43 @@ fn belief_search(
         }
 
         if !wave_complete {
+            if evidence_escalation_pending {
+                evidence_escalation_nodes = nodes.saturating_sub(evidence_escalation_start_nodes);
+                evidence_escalation_elapsed_ms = hard_deadline
+                    .elapsed_ms()
+                    .saturating_sub(evidence_escalation_start_ms);
+            }
             break;
         }
+        let wave_winner = aggregate_winner(&wave);
         aggregate = wave;
         particles_searched = wave_particles;
         depth = wave_depth;
+
+        if evidence_escalation_pending {
+            evidence_escalation_completed = true;
+            evidence_escalation_nodes = nodes.saturating_sub(evidence_escalation_start_nodes);
+            evidence_escalation_elapsed_ms = hard_deadline
+                .elapsed_ms()
+                .saturating_sub(evidence_escalation_start_ms);
+            break;
+        }
+        if target_depth == 1
+            && should_escalate_binary_root_evidence(
+                node_budget_mode,
+                root_actions.len(),
+                evidence_escalation_ms,
+                floor_winner.as_ref(),
+                wave_winner.as_ref(),
+            )
+        {
+            evidence_escalation_triggered = true;
+            evidence_escalation_pending = true;
+            evidence_escalation_start_nodes = nodes;
+            evidence_escalation_start_ms = hard_deadline.elapsed_ms();
+        }
     }
-    let deep_waves_ms = elapsed_stage_ms(&deadline, deep_waves_started);
-    let actor = observer as usize;
+    let deep_waves_ms = elapsed_stage_ms(&hard_deadline, deep_waves_started);
     let mut actions = aggregate
         .into_iter()
         .map(|entry| DepthActionValue {
@@ -1862,6 +1958,10 @@ fn belief_search(
             deep_waves_ms,
             floor_complete,
             attempted_depth,
+            evidence_escalation_triggered,
+            evidence_escalation_completed,
+            evidence_escalation_nodes,
+            evidence_escalation_ms: evidence_escalation_elapsed_ms,
         }),
         provenance,
     })
@@ -2017,6 +2117,7 @@ fn public_opening_result(
         paranoid,
         &[],
         BeliefNodeBudgetMode::Global,
+        0,
     )
     .expect("one public setup state is a valid belief");
     DepthSearchResult {
@@ -2215,7 +2316,14 @@ pub fn search_weighted_belief_maxn_with_config(
     particles: &[BeliefParticle],
     config: BeliefDepthConfig,
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
-    belief_search(particles, config, false, &[], BeliefNodeBudgetMode::Global)
+    belief_search(
+        particles,
+        config,
+        false,
+        &[],
+        BeliefNodeBudgetMode::Global,
+        0,
+    )
 }
 
 pub fn search_weighted_belief_maxn_bounded(
@@ -2273,6 +2381,7 @@ pub fn search_weighted_belief_maxn_bounded_timed_excluding(
         false,
         root_exclusions,
         BeliefNodeBudgetMode::Global,
+        0,
     )
 }
 
@@ -2282,6 +2391,7 @@ pub fn search_weighted_belief_maxn_iterative_timed_excluding(
     branch_cap: usize,
     nodes_per_depth_wave: u32,
     time_budget_ms: u32,
+    evidence_escalation_ms: u32,
     root_exclusions: &[Action],
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
     belief_search(
@@ -2296,6 +2406,7 @@ pub fn search_weighted_belief_maxn_iterative_timed_excluding(
         false,
         root_exclusions,
         BeliefNodeBudgetMode::PerDepthWave,
+        evidence_escalation_ms,
     )
 }
 
@@ -2334,7 +2445,14 @@ pub fn search_weighted_belief_paranoid_with_config(
     particles: &[BeliefParticle],
     config: BeliefDepthConfig,
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
-    belief_search(particles, config, true, &[], BeliefNodeBudgetMode::Global)
+    belief_search(
+        particles,
+        config,
+        true,
+        &[],
+        BeliefNodeBudgetMode::Global,
+        0,
+    )
 }
 
 pub fn search_weighted_belief_paranoid_bounded(
@@ -2392,6 +2510,7 @@ pub fn search_weighted_belief_paranoid_bounded_timed_excluding(
         true,
         root_exclusions,
         BeliefNodeBudgetMode::Global,
+        0,
     )
 }
 
@@ -2415,6 +2534,7 @@ pub fn search_weighted_belief_paranoid_iterative_timed_excluding(
         true,
         root_exclusions,
         BeliefNodeBudgetMode::PerDepthWave,
+        0,
     )
 }
 
@@ -4002,11 +4122,60 @@ mod tests {
     use colonist_catan_core::{Action, DevCard, GameState, NodeKind, Phase, Resource, SplitMix64};
 
     use super::{
-        apply_action_friction, normalize_belief_root_priors, search_belief_maxn,
+        BeliefNodeBudgetMode, apply_action_friction, evidence_escalation_node_budget,
+        evidence_escalation_target_depth, normalize_belief_root_priors, search_belief_maxn,
         search_belief_maxn_bounded, search_maxn, search_paranoid,
         search_weighted_belief_maxn_bounded, search_weighted_belief_maxn_bounded_timed,
+        should_escalate_binary_root_evidence,
     };
     use crate::mcts::BeliefParticle;
+
+    #[test]
+    fn evidence_escalation_requires_binary_completed_wave_disagreement() {
+        let roll = Action::Roll;
+        let knight = Action::PlayKnight {
+            hex: 0,
+            victim: None,
+        };
+
+        assert!(should_escalate_binary_root_evidence(
+            BeliefNodeBudgetMode::PerDepthWave,
+            2,
+            1_500,
+            Some(&roll),
+            Some(&knight),
+        ));
+        assert!(!should_escalate_binary_root_evidence(
+            BeliefNodeBudgetMode::PerDepthWave,
+            2,
+            1_500,
+            Some(&roll),
+            Some(&roll),
+        ));
+        assert!(!should_escalate_binary_root_evidence(
+            BeliefNodeBudgetMode::PerDepthWave,
+            3,
+            1_500,
+            Some(&roll),
+            Some(&knight),
+        ));
+        assert!(!should_escalate_binary_root_evidence(
+            BeliefNodeBudgetMode::PerDepthWave,
+            2,
+            0,
+            Some(&roll),
+            Some(&knight),
+        ));
+        assert!(!should_escalate_binary_root_evidence(
+            BeliefNodeBudgetMode::Global,
+            2,
+            1_500,
+            Some(&roll),
+            Some(&knight),
+        ));
+        assert_eq!(evidence_escalation_node_budget(8_000), 24_000);
+        assert_eq!(evidence_escalation_target_depth(2), 1);
+    }
 
     fn advance_setup_and_roll(state: &mut GameState, rng: &mut SplitMix64) {
         while matches!(

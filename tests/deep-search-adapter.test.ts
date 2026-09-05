@@ -969,18 +969,23 @@ describe("deep-search state adapter", () => {
     expect(built.request.tacticalNodes).toBe(900);
     expect(built.request.timeBudgetMs).toBe(2_000);
     expect(built.request.effort?.decisionTimeMs).toBe(2_000);
+    expect(built.request.effort?.cpu.evidenceEscalationMs).toBe(2_500);
 
     const coldSmokeBudgetMs = 350;
     built.request.timeBudgetMs = coldSmokeBudgetMs;
     built.request.effort = {
       ...built.request.effort!,
       decisionTimeMs: coldSmokeBudgetMs,
+      cpu: {
+        ...built.request.effort!.cpu,
+        evidenceEscalationMs: 0,
+      },
     };
     const started = performance.now();
     const response = analyzeWasm(built.request);
     const elapsed = performance.now() - started;
     expect(response.algorithm).toBe("maxn");
-    expect(response.engineRevision).toBe("deep-maxn-v10");
+    expect(response.engineRevision).toBe("deep-maxn-v11");
     expect([
       "exact-mandatory",
       "tactical-proven",
@@ -1060,6 +1065,7 @@ describe("deep-search state adapter", () => {
         maxDepth: 6,
         rootCap: 32,
         nodesPerDepthWave: 250_000,
+        evidenceEscalationMs: 0,
       },
       gpu: built.request.effort!.gpu,
     };

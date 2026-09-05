@@ -4,7 +4,7 @@ import type { WasmSearchResponse } from "../generated/wasm/colonist_search.js";
 export const NATIVE_GPU_HOST = "io.colonist_assistant.gpu";
 export const NATIVE_GPU_PROTOCOL_VERSION = 6;
 export const NATIVE_GPU_STATE_SCHEMA_VERSION = 3;
-const EXPECTED_ENGINE_REVISION = "deep-maxn-v10";
+const EXPECTED_ENGINE_REVISION = "deep-maxn-v11";
 
 export interface NativeGpuStatus {
   runtime: "gpu-native";

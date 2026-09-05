@@ -195,6 +195,8 @@ struct CpuEffortInput {
     max_depth: u8,
     root_cap: usize,
     nodes_per_depth_wave: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    evidence_escalation_ms: Option<u32>,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -247,6 +249,7 @@ impl Request {
                 max_depth: self.depth.unwrap_or(3),
                 root_cap: self.branch_cap.unwrap_or(12),
                 nodes_per_depth_wave: self.max_nodes.unwrap_or(48_000) as u32,
+                evidence_escalation_ms: None,
             },
             gpu: GpuEffortInput {
                 root_cap: self.branch_cap.unwrap_or(12),
@@ -264,6 +267,12 @@ impl Request {
                 max_depth: effort.cpu.max_depth.clamp(1, 6),
                 root_cap: effort.cpu.root_cap.clamp(2, 32),
                 nodes_per_depth_wave: effort.cpu.nodes_per_depth_wave.clamp(1_000, 250_000),
+                evidence_escalation_ms: effort
+                    .cpu
+                    .evidence_escalation_ms
+                    .and_then(|milliseconds| {
+                        (milliseconds > 0).then(|| milliseconds.clamp(1, 3_000))
+                    }),
             },
             gpu: GpuEffortInput {
                 root_cap: effort.gpu.root_cap.clamp(2, 24),
@@ -628,6 +637,10 @@ struct SearchStagesOutput {
     deep_waves_ms: u32,
     floor_complete: bool,
     attempted_depth: u8,
+    evidence_escalation_triggered: bool,
+    evidence_escalation_completed: bool,
+    evidence_escalation_nodes: u32,
+    evidence_escalation_ms: u32,
 }
 
 impl From<BeliefSearchStageTimings> for SearchStagesOutput {
@@ -641,6 +654,10 @@ impl From<BeliefSearchStageTimings> for SearchStagesOutput {
             deep_waves_ms: value.deep_waves_ms,
             floor_complete: value.floor_complete,
             attempted_depth: value.attempted_depth,
+            evidence_escalation_triggered: value.evidence_escalation_triggered,
+            evidence_escalation_completed: value.evidence_escalation_completed,
+            evidence_escalation_nodes: value.evidence_escalation_nodes,
+            evidence_escalation_ms: value.evidence_escalation_ms,
         }
     }
 }
@@ -1623,6 +1640,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
     let cpu_depth = effort.cpu.max_depth;
     let cpu_root_cap = effort.cpu.root_cap;
     let cpu_nodes_per_depth_wave = effort.cpu.nodes_per_depth_wave;
+    let cpu_evidence_escalation_ms = effort.cpu.evidence_escalation_ms.unwrap_or(0);
     let decision_clock = DecisionClock::start(decision_time_ms);
     let particles = game_states(request.state, request.last_rejected_trade)
         .map_err(|error| JsValue::from_str(&error))?;
@@ -1738,6 +1756,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
                     branch_cap,
                     maximum_nodes,
                     remaining_time_ms,
+                    cpu_evidence_escalation_ms,
                     &root_exclusions,
                 )
             }

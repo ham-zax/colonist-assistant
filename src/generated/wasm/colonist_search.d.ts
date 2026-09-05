@@ -29,12 +29,21 @@ export interface WasmSearchStages {
   deepWavesMs: number;
   floorComplete: boolean;
   attemptedDepth: number;
+  evidenceEscalationTriggered: boolean;
+  evidenceEscalationCompleted: boolean;
+  evidenceEscalationNodes: number;
+  evidenceEscalationMs: number;
 }
 
 export interface WasmSearchEffort {
   decisionTimeMs: number;
   tactical: { maxDepth: number; nodeBudget: number };
-  cpu: { maxDepth: number; rootCap: number; nodesPerDepthWave: number };
+  cpu: {
+    maxDepth: number;
+    rootCap: number;
+    nodesPerDepthWave: number;
+    evidenceEscalationMs?: number;
+  };
   gpu: { rootCap: number; rolloutBudget: number; rolloutSteps: number };
 }
 
