@@ -1406,6 +1406,7 @@ export class AssistantOverlay {
       diceHistory: this.session.diceHistory,
       playerOrder: [...this.session.state.playerOrder],
       assistant: {
+        extensionBuild: this.buildInfo.identity,
         engine: this.settings.engine,
         disablePlayerTrades: this.settings.disablePlayerTrades,
         autopilot: this.settings.autonomousPrivateGames,
