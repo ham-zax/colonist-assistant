@@ -513,26 +513,9 @@ export class GameSession {
     }
 
     candidates.sort((left, right) => left.index - right.index);
-    const currentFirstIds = candidates
-      .filter((candidate) => candidate.element.getAttribute("data-index") === "0")
-      .map((candidate) => candidate.id);
-    if (
-      this.events.length &&
-      currentFirstIds.length &&
-      currentFirstIds.every((id) => !this.seenIds.has(id))
-    ) {
-      this.storageGeneration += 1;
-      this.pruneSessionHistory = true;
-      this.state = createTrackerState();
-      this.events = [];
-      this.partialHistory = false;
-      this.diceHistory = createDiceHistoryState();
-      this.unmatchedCount = 0;
-      this.unmatchedIntegrityCount = 0;
-      this.unmatchedSamples = [];
-      this.startedAt = Date.now();
-      this.seenIds.clear();
-    }
+    // A changed rendering at index zero is not a new game. Only setGameKey()
+    // or an explicit reset owns that transition; otherwise a rerender can erase
+    // captured rolls and sticky conflicts before dice ingestion sees them.
     if (
       !this.events.length &&
       candidates.length &&
@@ -691,20 +674,15 @@ export class GameSession {
       }
     }
     const legacy = legacyDiceAmbiguityEvidence(stored);
-    const migrated = restoreDiceHistoryState({
+    return restoreDiceHistoryState({
       ...serializeDiceHistoryState(history),
       ambiguousLogIndices: legacy.ambiguousLogIndices,
-      hasUnlocatedRollAmbiguity: legacy.hasUnlocatedRollAmbiguity,
+      // Schema 3 has no independent dice completeness evidence. Persist this
+      // uncertainty, not just a derived provenance label that the next scan or
+      // restore would recompute from coverage alone.
+      hasUnlocatedRollAmbiguity:
+        legacy.hasUnlocatedRollAmbiguity || stored.partialHistory,
     });
-    // A schema-3 partial session never proves a complete dice prefix merely
-    // because its retained parsed events happen to begin at log index zero.
-    if (
-      stored.partialHistory &&
-      migrated.provenance === "complete-from-first-gameplay-roll"
-    ) {
-      migrated.provenance = "unknown";
-    }
-    return migrated;
   }
 
   private async restore(): Promise<void> {

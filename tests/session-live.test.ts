@@ -101,10 +101,11 @@ describe("live log session scanning", () => {
     session.stop();
   });
 
-  it("keeps one stochastic roll when the same Colonist log index rerenders with a new presentation fingerprint", async () => {
+  it.each([0, 1])("keeps one stochastic roll when log index %i rerenders with a new presentation fingerprint", async (logIndex) => {
     const root = document.createElement("div");
-    const entry = diceMessage(1, "Alice", 3, 5);
-    root.append(message(0, "Happy settling!"), entry);
+    const entry = diceMessage(logIndex, "Alice", 3, 5);
+    if (logIndex > 0) root.append(message(0, "Happy settling!"));
+    root.append(entry);
     document.body.append(root);
     const session = new GameSession(root, vi.fn(), "dice-rerender-game");
 
@@ -112,7 +113,7 @@ describe("live log session scanning", () => {
     const firstEventId = session.diceHistory.rolls[0]?.eventId;
     expect(session.diceHistory.rolls).toHaveLength(1);
 
-    const rerendered = diceMessage(1, "Alice", 3, 5);
+    const rerendered = diceMessage(logIndex, "Alice", 3, 5);
     rerendered.firstChild!.nodeValue = "Alice rolled the dice";
     entry.replaceWith(rerendered);
     await vi.waitFor(() => {
@@ -124,7 +125,7 @@ describe("live log session scanning", () => {
       eventId: firstEventId,
       actor: "Alice",
       total: 8,
-      logIndex: 1,
+      logIndex,
     });
     expect(
       buildLiveDecisionStochasticInput("balanced", session.diceHistory, ["Alice"]),
@@ -132,10 +133,11 @@ describe("live log session scanning", () => {
     session.stop();
   });
 
-  it("keeps same-index contradictory dice semantics out of Mref authority across later matching rerenders", async () => {
+  it.each([0, 1])("keeps contradictory dice at log index %i out of Mref authority across later matching rerenders", async (logIndex) => {
     const root = document.createElement("div");
-    const entry = diceMessage(1, "Alice", 3, 5);
-    root.append(message(0, "Happy settling!"), entry);
+    const entry = diceMessage(logIndex, "Alice", 3, 5);
+    if (logIndex > 0) root.append(message(0, "Happy settling!"));
+    root.append(entry);
     document.body.append(root);
     const session = new GameSession(root, vi.fn(), "dice-conflict-rerender-game");
 
@@ -144,11 +146,11 @@ describe("live log session scanning", () => {
       buildLiveDecisionStochasticInput("balanced", session.diceHistory, ["Alice"]),
     ).toMatchObject({ model: "mref-colonist-linked-2024-v1" });
 
-    const conflicting = diceMessage(1, "Alice", 4, 5);
+    const conflicting = diceMessage(logIndex, "Alice", 4, 5);
     conflicting.firstChild!.nodeValue = "Alice rolled differently";
     entry.replaceWith(conflicting);
     await vi.waitFor(() => {
-      expect(session.diceHistory.ambiguousLogIndices).toEqual([1]);
+      expect(session.diceHistory.ambiguousLogIndices).toEqual([logIndex]);
     });
 
     expect(session.diceHistory.rolls).toHaveLength(1);
@@ -156,7 +158,7 @@ describe("live log session scanning", () => {
       actor: "Alice",
       total: 8,
       dice: [3, 5],
-      logIndex: 1,
+      logIndex,
     });
     expect(session.diceHistory.provenance).toBe("gapped");
     expect(session.diceHistory.hasUnknownRollGap).toBe(true);
@@ -166,13 +168,13 @@ describe("live log session scanning", () => {
     await vi.waitFor(() => {
       expect(localStorage.get(`colonistAssistantSession:${session.id}`)).toMatchObject({
         diceHistory: {
-          ambiguousLogIndices: [1],
+          ambiguousLogIndices: [logIndex],
           provenance: "gapped",
         },
       });
     });
 
-    const matching = diceMessage(1, "Alice", 3, 5);
+    const matching = diceMessage(logIndex, "Alice", 3, 5);
     matching.firstChild!.nodeValue = "Alice rolled again";
     conflicting.replaceWith(matching);
     await vi.waitFor(() => {
@@ -180,12 +182,68 @@ describe("live log session scanning", () => {
     });
 
     expect(session.diceHistory.rolls).toHaveLength(1);
-    expect(session.diceHistory.ambiguousLogIndices).toEqual([1]);
+    expect(session.diceHistory.ambiguousLogIndices).toEqual([logIndex]);
     expect(session.diceHistory.provenance).toBe("gapped");
     expect(() =>
       buildLiveDecisionStochasticInput("balanced", session.diceHistory, ["Alice"]),
     ).toThrow(/usable public reference-dice history/);
     session.stop();
+  });
+
+  it.each([false, true])("preserves log-zero dice authority across a rerender (conflict=%s)", async (conflict) => {
+    const root = document.createElement("div");
+    const first = diceMessage(0, "Alice", 3, 5);
+    root.append(first, diceMessage(1, "Bob", 6, 1));
+    document.body.append(root);
+    const onUpdate = vi.fn();
+    const session = new GameSession(root, onUpdate, "dice-log-zero-game");
+    await session.start();
+    try {
+      onUpdate.mockClear();
+      const rerendered = diceMessage(0, "Alice", conflict ? 4 : 3, 5);
+      rerendered.firstChild!.nodeValue = "Alice rolled the dice";
+      first.replaceWith(rerendered);
+      await vi.waitFor(() => expect(onUpdate).toHaveBeenCalled());
+
+      expect(session.diceHistory.rolls.map((roll) => roll.total)).toEqual([8, 7]);
+      const construct = () => buildLiveDecisionStochasticInput(
+        "balanced", session.diceHistory, ["Alice", "Bob"],
+      );
+      if (conflict) {
+        expect(session.diceHistory.ambiguousLogIndices).toEqual([0]);
+        expect(construct).toThrow(/usable public reference-dice history/);
+      } else {
+        expect(session.diceHistory.ambiguousLogIndices).toEqual([]);
+        expect(construct()).toMatchObject({ model: "mref-colonist-linked-2024-v1" });
+      }
+    } finally {
+      session.stop();
+    }
+  });
+
+  it("does not let a harmless log-zero rerender erase an existing dice conflict", async () => {
+    const root = document.createElement("div");
+    const header = message(0, "Happy settling!");
+    const roll = diceMessage(1, "Alice", 3, 5);
+    root.append(header, roll);
+    document.body.append(root);
+    const onUpdate = vi.fn();
+    const session = new GameSession(root, onUpdate, "dice-conflict-header-game");
+    await session.start();
+    try {
+      roll.replaceWith(diceMessage(1, "Alice", 4, 5));
+      await vi.waitFor(() => expect(session.diceHistory.ambiguousLogIndices).toEqual([1]));
+      onUpdate.mockClear();
+      header.replaceWith(message(0, "Happy settling! Enjoy the game."));
+      await vi.waitFor(() => expect(onUpdate).toHaveBeenCalled());
+      expect(session.diceHistory.rolls.map((entry) => entry.total)).toEqual([8]);
+      expect(session.diceHistory.ambiguousLogIndices).toEqual([1]);
+      expect(() => buildLiveDecisionStochasticInput(
+        "balanced", session.diceHistory, ["Alice"],
+      )).toThrow(/usable public reference-dice history/);
+    } finally {
+      session.stop();
+    }
   });
 
   it("does not claim complete dice provenance across an integrity-relevant parser miss", async () => {
@@ -275,7 +333,7 @@ describe("live log session scanning", () => {
     second.stop();
   });
 
-  it("reconstructs parent schema 4 indexed integrity ambiguity before restoring Balanced authority", async () => {
+  it.each([false, true])("reconstructs legacy schema 4 ambiguity, including first-repair resaves (marker present: %s)", async (resavedByFirstRepair) => {
     const root = document.createElement("div");
     document.body.append(root);
     const session = new GameSession(root, vi.fn(), "legacy-schema4-indexed-ambiguity");
@@ -311,6 +369,7 @@ describe("live log session scanning", () => {
         ],
         provenance: "complete-from-first-gameplay-roll",
         coverage: { ranges: [[0, 1]] },
+        ...(resavedByFirstRepair ? { ambiguousLogIndices: [] } : {}),
         gaps: [],
         hasUnknownRollGap: false,
       },
@@ -443,6 +502,55 @@ describe("live log session scanning", () => {
     expect(session.diceHistory.missingPrefixRolls).toBeUndefined();
     session.stop();
   });
+
+  it.each(["next indexed message", "save and restore"])(
+    "keeps a partial schema 3 prefix untrusted after %s",
+    async (continuation) => {
+      const root = document.createElement("div");
+      document.body.append(root);
+      const gameKey = "legacy-partial-prefix-game";
+      const session = new GameSession(root, vi.fn(), gameKey);
+      const key = `colonistAssistantSession:${session.id}`;
+      localStorage.set(key, {
+        schema: 3,
+        id: session.id,
+        page: `${location.origin}${location.pathname}${location.search}`,
+        gameKey,
+        startedAt: 1,
+        updatedAt: 2,
+        events: [{
+          type: "roll", player: "Alice", dice: [3, 5],
+          id: "legacy-roll-0", index: 0, timestamp: 2,
+          raw: "Alice rolled :die-3: :die-5:",
+        }],
+        seenIds: ["legacy-roll-0"],
+        partialHistory: true,
+        unmatchedCount: 0,
+      });
+      await session.start();
+      const construct = (target: GameSession) => () => buildLiveDecisionStochasticInput(
+        "balanced", target.diceHistory, ["Alice", "Bob"],
+      );
+      let restored: GameSession | undefined;
+      try {
+        expect(construct(session)).toThrow(/usable public reference-dice history/);
+        if (continuation === "next indexed message") {
+          root.append(diceMessage(1, "Bob", 6, 1));
+          await vi.waitFor(() => expect(session.diceHistory.rolls).toHaveLength(2));
+          expect(construct(session)).toThrow(/usable public reference-dice history/);
+        } else {
+          await vi.waitFor(() => expect(localStorage.get(key)).toMatchObject({ schema: 4 }));
+          session.stop();
+          restored = new GameSession(root, vi.fn(), gameKey);
+          await restored.start();
+          expect(construct(restored)).toThrow(/usable public reference-dice history/);
+        }
+      } finally {
+        session.stop();
+        restored?.stop();
+      }
+    },
+  );
 
   it("carries trailing schema 3 integrity ambiguity into dice authority", async () => {
     const root = document.createElement("div");
