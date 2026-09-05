@@ -511,6 +511,13 @@ export class GameSession {
   private disposed = false;
   private myPlayer?: string;
   private initialPlacement = false;
+  /**
+   * A late-mounted virtualized log can begin above index zero during setup and
+   * backfill its prefix a few frames later. Defer the generic partial-history
+   * downgrade until setup ends so a transient presentation lag does not become
+   * a permanent recording warning.
+   */
+  private setupLogPrefixPending = false;
   private storageGeneration = 0;
   private storageSuppressed = false;
   private pruneSessionHistory = true;
@@ -606,6 +613,7 @@ export class GameSession {
     this.state = createTrackerState();
     this.events = [];
     this.partialHistory = false;
+    this.setupLogPrefixPending = false;
     this.diceHistory = createDiceHistoryState();
     this.unmatchedCount = 0;
     this.unmatchedIntegrityCount = 0;
@@ -635,6 +643,7 @@ export class GameSession {
     this.state = createTrackerState();
     this.events = [];
     this.partialHistory = false;
+    this.setupLogPrefixPending = false;
     this.diceHistory = createDiceHistoryState();
     this.unmatchedCount = 0;
     this.unmatchedIntegrityCount = 0;
@@ -669,7 +678,19 @@ export class GameSession {
   }
 
   setInitialPlacement(active: boolean, gameKey?: string): void {
+    const wasInitialPlacement = this.initialPlacement;
     this.initialPlacement = Boolean(active && gameKey && gameKey === this.gameKey);
+    if (wasInitialPlacement && !this.initialPlacement && this.setupLogPrefixPending) {
+      // The setup log never backfilled index zero before gameplay began. Card
+      // ranges may genuinely be missing setup evidence, so become conservative
+      // only at this semantic boundary rather than during transient hydration.
+      this.setupLogPrefixPending = false;
+      this.partialHistory = true;
+      if (this.observer) {
+        this.queueSave();
+        this.onUpdate(this);
+      }
+    }
     if (this.observer && this.initialPlacement && observeDiceSetupBoundary(this.diceHistory)) {
       this.queueSave();
       this.onUpdate(this);
@@ -842,6 +863,8 @@ export class GameSession {
     }
 
     candidates.sort((left, right) => left.index - right.index);
+    const sawLogIndexZero = candidates.some((candidate) => candidate.logIndex === 0);
+    if (sawLogIndexZero) this.setupLogPrefixPending = false;
     // Presentation changes, including index zero, are not game identity.
     // setGameKey() and explicit reset own history replacement; otherwise a
     // rerender could erase both accepted rolls and unresolved conflicts.
@@ -851,7 +874,11 @@ export class GameSession {
       candidates[0]!.index > 0 &&
       candidates.some((candidate) => candidate.element.hasAttribute("data-index"))
     ) {
-      this.partialHistory = true;
+      if (this.initialPlacement && !this.partialHistory) {
+        this.setupLogPrefixPending = true;
+      } else {
+        this.partialHistory = true;
+      }
     }
 
     let changed = false;

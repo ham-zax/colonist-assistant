@@ -58,7 +58,13 @@ const boot = async (): Promise<void> => {
     session?.setMyPlayer(resolvedMyPlayer);
     currentInitialPlacement = Boolean(currentBoard?.initialPlacement);
     session?.setInitialPlacement(currentInitialPlacement, currentBoard?.gameKey);
-    if (currentRoot === boardOnlyRoot) {
+    if (
+      (currentRoot === boardOnlyRoot || currentBoard?.botOnlyGame) &&
+      currentBoard?.gameplayRollCount !== undefined
+    ) {
+      // Bot games can expose the authoritative board roll several seconds before
+      // the virtualized game-log row hydrates. Capture that public roll now and
+      // reconcile the later DOM presentation by gameplay ordinal.
       session?.observeBoardDiceSnapshot(currentBoard);
     }
     overlay.updateBoard(currentBoard);
@@ -108,7 +114,12 @@ const boot = async (): Promise<void> => {
     next.setInitialPlacement(currentInitialPlacement, currentGameKey);
     await next.start();
     next.setMyPlayer(currentMyPlayer);
-    if (root === boardOnlyRoot) next.observeBoardDiceSnapshot(currentBoard);
+    if (
+      (root === boardOnlyRoot || currentBoard?.botOnlyGame) &&
+      currentBoard?.gameplayRollCount !== undefined
+    ) {
+      next.observeBoardDiceSnapshot(currentBoard);
+    }
   };
 
   await attach();

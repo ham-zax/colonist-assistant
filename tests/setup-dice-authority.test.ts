@@ -75,6 +75,35 @@ describe("Balanced setup dice authority", () => {
     expect(() => construct(session)).toThrow(/usable public reference-dice history/);
   });
 
+  it("does not make a late setup-log prefix permanently partial after index zero backfills", async () => {
+    const root = document.createElement("div");
+    root.append(message(2, "Alice placed a Settlement"));
+    const session = sessionFor(root);
+    await session.start();
+    expect(session.partialHistory).toBe(false);
+
+    root.prepend(
+      message(0, "Happy settling!"),
+      message(1, "Bot is placing a settlement for Alice"),
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    session.setInitialPlacement(false, gameKey);
+
+    expect(session.partialHistory).toBe(false);
+  });
+
+  it("marks setup history partial if the deferred log prefix never backfills before gameplay", async () => {
+    const root = document.createElement("div");
+    root.append(message(2, "Alice placed a Settlement"));
+    const session = sessionFor(root);
+    await session.start();
+    expect(session.partialHistory).toBe(false);
+
+    session.setInitialPlacement(false, gameKey);
+
+    expect(session.partialHistory).toBe(true);
+  });
+
   it("does not erase a roll-capable parser miss or observed conflict because setup is reported", async () => {
     const root = document.createElement("div");
     root.append(message(0, "Happy settling!"), message(1, "Alice cast the dice in an unknown format"));
@@ -131,6 +160,54 @@ describe("Balanced setup dice authority", () => {
     expect(construct(session)).toMatchObject({
       model: "mref-colonist-linked-2024-v1",
       rolls: [{ ordinal: 0, actor: 0, total: 8 }],
+    });
+  });
+
+  it("uses bot board rolls immediately while a mounted virtualized log is still hydrating", async () => {
+    const root = document.createElement("div");
+    for (let index = 0; index <= 16; index += 1) {
+      root.append(message(index, "Happy settling!"));
+    }
+    const session = sessionFor(root);
+    await session.start();
+    session.setInitialPlacement(false, gameKey);
+
+    expect(session.observeBoardDiceSnapshot({
+      gameKey,
+      botOnlyGame: true,
+      initialPlacement: false,
+      hasRolled: true,
+      lastRoll: 12,
+      currentPlayer: "Alice",
+      turn: 8,
+      gameplayRollCount: 1,
+    })).toBe(true);
+    expect(buildLiveDecisionStochasticInput(
+      "balanced",
+      session.diceHistory,
+      ["Alice", "Bob", "Cas", "Warp"],
+      1,
+    )).toMatchObject({
+      provenance: "complete-from-first-gameplay-roll",
+      rolls: [{ ordinal: 0, actor: 0, total: 12 }],
+    });
+
+    root.append(
+      message(18, "Happy settling!"),
+      message(20, "Happy settling!"),
+      roll(30, "Alice", 6, 6),
+    );
+    await vi.waitFor(() =>
+      expect(session.diceHistory.rolls.some((entry) => entry.logIndex === 30)).toBe(true));
+
+    expect(buildLiveDecisionStochasticInput(
+      "balanced",
+      session.diceHistory,
+      ["Alice", "Bob", "Cas", "Warp"],
+      1,
+    )).toMatchObject({
+      provenance: "complete-from-first-gameplay-roll",
+      rolls: [{ ordinal: 0, actor: 0, total: 12 }],
     });
   });
 

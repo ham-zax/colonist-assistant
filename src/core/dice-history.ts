@@ -527,12 +527,23 @@ const reconcileLiveRollCountAuthority = (
   if (
     state.ambiguousLogIndices.length > 0 ||
     state.hasUnlocatedRollAmbiguity ||
-    state.hasUnreconciledSources === true ||
     (state.conflictingLogIndices?.length ?? 0) > 0
   ) {
     return undefined;
   }
-  if (state.rolls.length > expectedRollCount) return undefined;
+  if (!playerMapping.length) return undefined;
+
+  const seatByPlayer = new Map(playerMapping.map((player, index) => [player, index]));
+  if (seatByPlayer.size !== playerMapping.length) {
+    throw new Error("Public stochastic player mapping contains duplicate players");
+  }
+  const players = playerMapping.length;
+  const sameSemanticRoll = (left: PublicDiceRoll, right: PublicDiceRoll): boolean =>
+    left.actor === right.actor &&
+    left.total === right.total &&
+    (left.dice === undefined || right.dice === undefined ||
+      JSON.stringify(left.dice) === JSON.stringify(right.dice));
+
   if (expectedRollCount === 0) {
     if (state.rolls.length) return undefined;
     const empty = cloneDiceHistoryState(state);
@@ -540,23 +551,80 @@ const reconcileLiveRollCountAuthority = (
     empty.missingPrefixRolls = 0;
     empty.gaps = [];
     empty.hasUnknownRollGap = false;
+    delete empty.hasUnreconciledSources;
     return empty;
   }
-  if (!state.rolls.length || !playerMapping.length) return undefined;
+  if (!state.rolls.length) return undefined;
 
-  const seatByPlayer = new Map(playerMapping.map((player, index) => [player, index]));
-  if (seatByPlayer.size !== playerMapping.length) {
-    throw new Error("Public stochastic player mapping contains duplicate players");
+  const boardRolls = state.rolls.flatMap((roll) => {
+    const matched = roll.eventId.match(/^board-roll:(\d+):/u);
+    return matched ? [{ ordinal: Number(matched[1]), roll }] : [];
+  });
+  const indexedRolls = state.rolls
+    .filter((roll) => roll.logIndex !== undefined)
+    .sort((left, right) => left.logIndex! - right.logIndex!);
+  const unsupported = state.rolls.filter(
+    (roll) => roll.logIndex === undefined && !/^board-roll:\d+:/u.test(roll.eventId),
+  );
+  if (unsupported.length) return undefined;
+
+  const byOrdinal = new Map<number, PublicDiceRoll>();
+  for (const { ordinal, roll } of boardRolls) {
+    if (!Number.isInteger(ordinal) || ordinal < 0 || ordinal >= expectedRollCount) {
+      return undefined;
+    }
+    const seat = seatByPlayer.get(roll.actor);
+    if (seat === undefined) {
+      throw new Error(`Public dice history references unmapped actor: ${roll.actor}`);
+    }
+    if (seat !== ordinal % players) return undefined;
+    const prior = byOrdinal.get(ordinal);
+    if (prior && !sameSemanticRoll(prior, roll)) return undefined;
+    if (!prior) byOrdinal.set(ordinal, roll);
   }
-  const seats = state.rolls.map((roll) => {
+
+  // A complete board sequence is independently sufficient public authority in
+  // bot games. The virtualized DOM log may lag or omit harmless presentation
+  // rows; require its observed roll sequence to be a compatible subsequence,
+  // but do not let generic log sparsity invalidate complete board roll evidence.
+  if (
+    byOrdinal.size === expectedRollCount &&
+    Array.from({ length: expectedRollCount }, (_, ordinal) => byOrdinal.has(ordinal)).every(Boolean)
+  ) {
+    let searchFrom = 0;
+    for (const indexed of indexedRolls) {
+      let matchedOrdinal = -1;
+      for (let ordinal = searchFrom; ordinal < expectedRollCount; ordinal += 1) {
+        const board = byOrdinal.get(ordinal)!;
+        if (sameSemanticRoll(board, indexed)) {
+          matchedOrdinal = ordinal;
+          break;
+        }
+      }
+      if (matchedOrdinal < 0) return undefined;
+      searchFrom = matchedOrdinal + 1;
+    }
+    const complete = cloneDiceHistoryState(state);
+    complete.rolls = Array.from({ length: expectedRollCount }, (_, ordinal) =>
+      byOrdinal.get(ordinal)!).map((roll) => ({
+        ...roll,
+        ...(roll.dice ? { dice: [...roll.dice] as [number, number] } : {}),
+      }));
+    complete.missingPrefixRolls = 0;
+    complete.gaps = [];
+    complete.hasUnknownRollGap = false;
+    complete.provenance = "complete-from-first-gameplay-roll";
+    delete complete.hasUnreconciledSources;
+    return complete;
+  }
+
+  const seats = indexedRolls.map((roll) => {
     const seat = seatByPlayer.get(roll.actor);
     if (seat === undefined) {
       throw new Error(`Public dice history references unmapped actor: ${roll.actor}`);
     }
     return seat;
   });
-  const players = playerMapping.length;
-
   const earliest: number[] = [];
   let previous = -1;
   for (const seat of seats) {
@@ -566,7 +634,6 @@ const reconcileLiveRollCountAuthority = (
     earliest.push(ordinal);
     previous = ordinal;
   }
-
   const latest = new Array<number>(seats.length);
   let next = expectedRollCount;
   for (let index = seats.length - 1; index >= 0; index -= 1) {
@@ -579,17 +646,30 @@ const reconcileLiveRollCountAuthority = (
   }
   if (earliest.some((ordinal, index) => ordinal !== latest[index])) return undefined;
 
-  // Rust partial-history gaps must be anchored by a later observed roll. Do not
-  // pretend a missing trailing roll is reconstructable merely because its count
-  // is known from board progress.
-  if (earliest.at(-1) !== expectedRollCount - 1) return undefined;
+  for (let index = 0; index < indexedRolls.length; index += 1) {
+    const ordinal = earliest[index]!;
+    const roll = indexedRolls[index]!;
+    const prior = byOrdinal.get(ordinal);
+    if (prior && !sameSemanticRoll(prior, roll)) return undefined;
+    byOrdinal.set(ordinal, roll);
+  }
 
+  const ordered = [...byOrdinal.entries()].sort(([left], [right]) => left - right);
+  if (!ordered.length || ordered.at(-1)![0] !== expectedRollCount - 1) {
+    // Rust partial-history gaps must be anchored by a later observed roll. Do
+    // not pretend a missing trailing roll is reconstructable from count alone.
+    return undefined;
+  }
   const reconciled = cloneDiceHistoryState(state);
-  reconciled.missingPrefixRolls = earliest[0]!;
+  reconciled.rolls = ordered.map(([, roll]) => ({
+    ...roll,
+    ...(roll.dice ? { dice: [...roll.dice] as [number, number] } : {}),
+  }));
+  reconciled.missingPrefixRolls = ordered[0]![0];
   reconciled.gaps = [];
-  for (let index = 1; index < earliest.length; index += 1) {
-    const prior = earliest[index - 1]!;
-    const current = earliest[index]!;
+  for (let index = 1; index < ordered.length; index += 1) {
+    const prior = ordered[index - 1]![0];
+    const current = ordered[index]![0];
     if (current > prior + 1) {
       reconciled.gaps.push({
         afterOrdinal: prior,
@@ -603,6 +683,7 @@ const reconcileLiveRollCountAuthority = (
     : reconciled.missingPrefixRolls > 0
       ? "gap-free-suffix"
       : "complete-from-first-gameplay-roll";
+  delete reconciled.hasUnreconciledSources;
   return reconciled;
 };
 
