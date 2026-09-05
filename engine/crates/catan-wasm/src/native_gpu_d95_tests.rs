@@ -188,16 +188,60 @@ fn d95_bridge_exposes_cut_and_causal_protector_can_win_deeper_arbitration() {
 }
 
 #[test]
+fn censored_losses_do_not_displace_settlement_conversion() {
+    // D142/D147/D150 comparator reproduction, not a fabricated full-game state.
+    // The report supplies completion/outcome rates; leaf values here isolate
+    // the bug: observing fewer losses must not overrule stronger VP conversion.
+    let settlement = aggregate_root_for_ordering(
+        Action::BuildSettlement { vertex: 30 }, -0.50, 0.50, 0.25, -1.0, 0.04);
+    for action in [
+        Action::EndTurn,
+        Action::BuildRoad { edge: 36 },
+        Action::MaritimeTrade {
+            give: colonist_catan_core::Resource::Lumber,
+            receive: colonist_catan_core::Resource::Grain, ratio: 3,
+        },
+    ] {
+        let delayed_loss = aggregate_root_for_ordering(action, -0.125, 0.125, 0.109375, -2.0, 0.04);
+        let roots = vec![delayed_loss, settlement.clone()];
+        assert_eq!(terminal_bounds(&roots[0]).0, -1.0);
+        assert_eq!(terminal_bounds(&roots[1]).0, -1.0);
+        assert_eq!(racing_contenders(&[0, 1], &roots), vec![1]);
+        assert_eq!(escalated_root_order(&[0, 1], &roots)[0], 1);
+        assert_eq!(escalated_root_order(&[1, 0], &roots)[0], 1);
+    }
+}
+
+#[test]
+fn strong_completed_terminal_evidence_still_beats_a_better_leaf() {
+    let mut win = aggregate_root_for_ordering(Action::EndTurn, 1.0, 1.0, 0.0, -3.0, 0.0);
+    let mut loss = aggregate_root_for_ordering(Action::BuildRoad { edge: 36 }, -1.0, 1.0, 0.0, 3.0, 0.0);
+    win.samples = 1_000;
+    loss.samples = 1_000;
+    assert_eq!(escalated_root_order(&[1, 0], &[win, loss]), vec![0, 1]);
+}
+
+#[test]
+fn fewer_terminal_losses_cannot_break_an_equal_leaf_tie() {
+    let mut productive = aggregate_root_for_ordering(Action::BuildSettlement { vertex: 30 }, -0.5, 0.5, 0.25, -1.0, 0.04);
+    productive.prior = 0.9;
+    let mut delay = aggregate_root_for_ordering(Action::EndTurn, -0.125, 0.125, 0.109375, -1.0, 0.04);
+    delay.prior = 0.02;
+    assert_eq!(escalated_root_order(&[0, 1], &[delay, productive])[0], 1);
+}
+
+#[test]
 fn escalated_three_root_order_is_input_order_independent() {
-    // Root 0 is the only margin-confidence contender, root 1 remains a
-    // terminal-confidence contender, and root 2 is outside the terminal tier.
+    // With complete and well-sampled outcomes, root 2 is outside the terminal
+    // tier. Root 0 leads the strategic tier; root 1 remains a terminal contender.
     // This protects the global-tier ordering against the old non-transitive
     // pairwise confidence-overlap semantics.
-    let roots = vec![
-        aggregate_root_for_ordering(Action::BuildRoad { edge: 10 }, 0.80, 0.8, 0.01, 5.0, 0.04),
-        aggregate_root_for_ordering(Action::BuildRoad { edge: 11 }, 0.79, 0.8, 0.01, 4.8, 0.04),
-        aggregate_root_for_ordering(Action::BuildRoad { edge: 12 }, 0.40, 0.8, 0.01, 6.0, 0.04),
+    let mut roots = vec![
+        aggregate_root_for_ordering(Action::BuildRoad { edge: 10 }, 0.80, 1.0, 0.36, 5.0, 0.04),
+        aggregate_root_for_ordering(Action::BuildRoad { edge: 11 }, 0.79, 1.0, 0.3759, 4.8, 0.04),
+        aggregate_root_for_ordering(Action::BuildRoad { edge: 12 }, 0.40, 1.0, 0.84, 6.0, 0.04),
     ];
+    for root in &mut roots { root.samples = 10_000; }
     let expected = vec![0, 1, 2];
     for input in [
         vec![0, 1, 2],

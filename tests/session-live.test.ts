@@ -119,9 +119,10 @@ describe("live log session scanning", () => {
     rerendered.firstChild!.nodeValue = "Alice rolled the dice";
     entry.replaceWith(rerendered);
     await vi.waitFor(() => {
-      expect(session.events.filter((event) => event.type === "roll")).toHaveLength(2);
+      expect(session.events.filter((event) => event.type === "roll")).toHaveLength(1);
     });
 
+    expect(session.state.currentTurn.sequence).toBe(1);
     expect(session.diceHistory.rolls).toHaveLength(1);
     expect(session.diceHistory.rolls[0]).toMatchObject({
       eventId: firstEventId,
@@ -132,6 +133,121 @@ describe("live log session scanning", () => {
     expect(
       buildLiveDecisionStochasticInput("balanced", session.diceHistory, ["Alice"]),
     ).toMatchObject({ model: "mref-colonist-linked-2024-v1" });
+    session.stop();
+  });
+
+  it("resolves an indexed roll when Colonist hydrates die attributes in place", async () => {
+    const root = document.createElement("div");
+    const entry = message(0, "Alice rolled");
+    const left = document.createElement("img");
+    const right = document.createElement("img");
+    left.alt = "loading-die";
+    right.alt = "loading-die";
+    entry.append(left, right);
+    root.append(entry);
+    document.body.append(root);
+    const session = new GameSession(root, vi.fn(), "dice-attribute-hydration-game");
+
+    await session.start();
+    expect(session.diceHistory.rolls).toEqual([]);
+    expect(session.diceHistory.ambiguousLogIndices).toEqual([0]);
+    expect(session.events).toEqual([
+      expect.objectContaining({ type: "roll", player: "Alice", index: 0 }),
+    ]);
+
+    left.alt = "dice_white3";
+    right.alt = "dice_white5";
+    await vi.waitFor(() => {
+      expect(session.diceHistory.rolls).toEqual([
+        expect.objectContaining({ actor: "Alice", total: 8, dice: [3, 5], logIndex: 0 }),
+      ]);
+    });
+
+    expect(session.diceHistory.ambiguousLogIndices).toEqual([]);
+    expect(session.diceHistory.provenance).toBe("complete-from-first-gameplay-roll");
+    expect(session.events).toEqual([
+      expect.objectContaining({ type: "roll", player: "Alice", dice: [3, 5], index: 0 }),
+    ]);
+    expect(session.state.currentTurn.sequence).toBe(1);
+    session.stop();
+  });
+
+  it("replays a late virtualized log backfill in authoritative index order", async () => {
+    const root = document.createElement("div");
+    root.append(diceMessage(0, "Alice", 3, 5), diceMessage(2, "Bob", 6, 1));
+    document.body.append(root);
+    const session = new GameSession(root, vi.fn(), "late-index-backfill-game");
+
+    await session.start();
+    expect(session.state.currentTurn).toMatchObject({ player: "Bob", sequence: 2 });
+
+    root.append(diceMessage(1, "Carol", 2, 2));
+    await vi.waitFor(() => {
+      expect(session.events.flatMap((event) => event.index ?? [])).toEqual([0, 1, 2]);
+    });
+
+    expect(rollPlayers(session)).toEqual(["Alice", "Carol", "Bob"]);
+    expect(session.state.currentTurn).toMatchObject({ player: "Bob", sequence: 3 });
+    session.stop();
+  });
+
+  it("preserves a non-roll indexed conflict through rerender and persistence", async () => {
+    const root = document.createElement("div");
+    const entry = message(0, "Alice placed a Road");
+    root.append(entry);
+    document.body.append(root);
+    const session = new GameSession(root, vi.fn(), "non-roll-slot-conflict");
+    await session.start();
+    entry.textContent = "Bob placed a Road";
+    await vi.waitFor(() => expect(session.diceHistory.conflictingLogIndices).toEqual([0]));
+    entry.textContent = "Happy settling!";
+    await vi.waitFor(() => expect(session.unmatchedCount).toBeGreaterThan(1));
+    expect(() => buildLiveDecisionStochasticInput("balanced", session.diceHistory, ["Alice"])).toThrow();
+    session.stop();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const restored = new GameSession(root, vi.fn(), "non-roll-slot-conflict");
+    await restored.start();
+    expect(restored.diceHistory.conflictingLogIndices).toEqual([0]);
+    expect(() => buildLiveDecisionStochasticInput("balanced", restored.diceHistory, ["Alice"])).toThrow();
+    restored.stop();
+  });
+
+  it("keeps public awards and rendered counteroffers out of dice uncertainty", async () => {
+    const longestRoad = "hamzax received Longest Road :road: (+2 VPs)";
+    const counter =
+      "Grandetorino proposed counter offer to NJDgaming, offering :wool: for :grain:";
+    const root = document.createElement("div");
+    root.append(
+      diceMessage(0, "Alice", 3, 5),
+      message(1, longestRoad),
+      message(2, counter),
+      diceMessage(3, "Bob", 6, 1),
+    );
+    document.body.append(root);
+    const session = new GameSession(root, vi.fn(), "harmless-public-log-game");
+
+    await session.start();
+
+    expect(session.unmatchedIntegrityCount).toBe(0);
+    expect(session.unmatchedSamples).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          reason: "known-redundant-award",
+          affectsIntegrity: false,
+          sample: longestRoad,
+        }),
+        expect.objectContaining({
+          reason: "known-redundant-trade-offer",
+          affectsIntegrity: false,
+          sample: counter,
+        }),
+      ]),
+    );
+    expect(session.diceHistory.ambiguousLogIndices).toEqual([]);
+    expect(session.diceHistory.provenance).toBe("complete-from-first-gameplay-roll");
+    expect(() =>
+      buildLiveDecisionStochasticInput("balanced", session.diceHistory, ["Alice", "Bob"]),
+    ).not.toThrow();
     session.stop();
   });
 
@@ -180,7 +296,7 @@ describe("live log session scanning", () => {
     matching.firstChild!.nodeValue = "Alice rolled again";
     conflicting.replaceWith(matching);
     await vi.waitFor(() => {
-      expect(session.events.filter((event) => event.type === "roll")).toHaveLength(2);
+      expect(session.events.filter((event) => event.type === "roll")).toHaveLength(1);
     });
 
     expect(session.diceHistory.rolls).toHaveLength(1);
@@ -205,7 +321,13 @@ describe("live log session scanning", () => {
       const rerendered = diceMessage(0, "Alice", conflict ? 4 : 3, 5);
       rerendered.firstChild!.nodeValue = "Alice rolled the dice";
       first.replaceWith(rerendered);
-      await vi.waitFor(() => expect(onUpdate).toHaveBeenCalled());
+      if (conflict) {
+        await vi.waitFor(() => expect(session.diceHistory.ambiguousLogIndices).toEqual([0]));
+        expect(onUpdate).toHaveBeenCalled();
+      } else {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        expect(onUpdate).not.toHaveBeenCalled();
+      }
 
       expect(session.diceHistory.rolls.map((roll) => roll.total)).toEqual([8, 7]);
       const construct = () => buildLiveDecisionStochasticInput(

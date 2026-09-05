@@ -355,22 +355,28 @@ fn aggregate_root(
     }
 }
 
-fn compare_roots(left: &AggregatedRoot, right: &AggregatedRoot) -> std::cmp::Ordering {
-    left.terminal_outcome
-        .total_cmp(&right.terminal_outcome)
-        .then_with(|| left.strategic_margin.total_cmp(&right.strategic_margin))
-        .then_with(|| left.victory_margin.total_cmp(&right.victory_margin))
-        .then_with(|| right.mean_turn.total_cmp(&left.mean_turn))
-        .then_with(|| left.prior.total_cmp(&right.prior))
+// Point estimates only order roots within the global evidence tiers below.
+// A censored rollout is an unknown outcome, never a neutral terminal result.
+fn terminal_bounds(root: &AggregatedRoot) -> (f32, f32) {
+    let unresolved = 1.0 - root.terminal_rate.clamp(0.0, 1.0);
+    let valid = root.samples.saturating_sub(root.errors);
+    let sampling = if valid == 0 {
+        2.0
+    } else {
+        // Bounded-outcome Hoeffding interval; unlike empirical variance, this
+        // retains uncertainty when a small batch contains only wins or losses.
+        (2.0 * 40.0_f32.ln() / valid as f32).sqrt()
+            .max(confidence_width(root.terminal_variance, valid))
+    };
+    (
+        (root.terminal_outcome - unresolved - sampling).max(-1.0),
+        (root.terminal_outcome + unresolved + sampling).min(1.0),
+    )
 }
 
-fn compare_escalated_point_estimates(
-    left: &AggregatedRoot,
-    right: &AggregatedRoot,
-) -> std::cmp::Ordering {
+fn compare_roots(left: &AggregatedRoot, right: &AggregatedRoot) -> std::cmp::Ordering {
     left.strategic_margin
         .total_cmp(&right.strategic_margin)
-        .then_with(|| left.terminal_outcome.total_cmp(&right.terminal_outcome))
         .then_with(|| left.victory_margin.total_cmp(&right.victory_margin))
         .then_with(|| right.mean_turn.total_cmp(&left.mean_turn))
         .then_with(|| left.prior.total_cmp(&right.prior))
@@ -385,14 +391,13 @@ fn escalated_root_order(indices: &[usize], roots: &[AggregatedRoot]) -> Vec<usiz
         .iter()
         .map(|index| {
             let root = &roots[*index];
-            root.terminal_outcome - confidence_width(root.terminal_variance, root.samples)
+            terminal_bounds(root).0
         })
         .max_by(f32::total_cmp)
         .expect("non-empty escalation set has a terminal lower bound");
     let is_terminal_contender = |index: usize| {
         let root = &roots[index];
-        root.terminal_outcome + confidence_width(root.terminal_variance, root.samples) + 1e-6
-            >= best_terminal_lower
+        terminal_bounds(root).1 + 1e-6 >= best_terminal_lower
     };
     let best_margin_lower = indices
         .iter()
@@ -430,71 +435,32 @@ fn escalated_root_order(indices: &[usize], roots: &[AggregatedRoot]) -> Vec<usiz
         let right_tier = tier(*right);
         left_tier
             .cmp(&right_tier)
-            .then_with(|| {
-                if left_tier == 0 {
-                    compare_roots(&roots[*left], &roots[*right])
-                } else {
-                    compare_escalated_point_estimates(&roots[*left], &roots[*right])
-                }
-            })
+            .then_with(|| compare_roots(&roots[*left], &roots[*right]))
             .reverse()
     });
     order
-}
-
-fn compare_surviving_roots(
-    left: &AggregatedRoot,
-    right: &AggregatedRoot,
-    prefer_prior: bool,
-) -> std::cmp::Ordering {
-    if !prefer_prior {
-        return compare_roots(left, right);
-    }
-    left.prior
-        .total_cmp(&right.prior)
-        .then_with(|| compare_roots(left, right))
 }
 
 fn racing_contenders(active: &[usize], roots: &[AggregatedRoot]) -> Vec<usize> {
     if active.len() <= 1 {
         return active.to_vec();
     }
-    let best = active
-        .iter()
-        .copied()
-        .max_by(|left, right| compare_roots(&roots[*left], &roots[*right]))
-        .expect("non-empty active root set has a best root");
-    let best_root = &roots[best];
-    let best_terminal_lower = best_root.terminal_outcome
-        - confidence_width(best_root.terminal_variance, best_root.samples);
-    let best_margin_lower = best_root.strategic_margin
-        - confidence_width(best_root.strategic_margin_variance, best_root.samples);
-    let mut contenders = active
-        .iter()
-        .copied()
-        .filter(|index| {
-            let root = &roots[*index];
-            let terminal_upper =
-                root.terminal_outcome + confidence_width(root.terminal_variance, root.samples);
-            if terminal_upper + 1e-6 < best_terminal_lower {
-                return false;
-            }
-            let terminal_overlap = (root.terminal_outcome - best_root.terminal_outcome).abs()
-                <= confidence_width(root.terminal_variance, root.samples)
-                    + confidence_width(best_root.terminal_variance, best_root.samples);
-            if !terminal_overlap {
-                return true;
-            }
-            root.strategic_margin
-                + confidence_width(root.strategic_margin_variance, root.samples)
-                + 1e-6
-                >= best_margin_lower
-        })
+    let best_terminal_lower = active.iter()
+        .map(|index| terminal_bounds(&roots[*index]).0)
+        .max_by(f32::total_cmp).unwrap();
+    let terminal_contenders = active.iter().copied()
+        .filter(|index| terminal_bounds(&roots[*index]).1 + 1e-6 >= best_terminal_lower)
         .collect::<Vec<_>>();
-    if !contenders.contains(&best) {
-        contenders.push(best);
-    }
-    contenders
+    let best_margin_lower = terminal_contenders.iter().map(|index| {
+        let root = &roots[*index];
+        root.strategic_margin - confidence_width(root.strategic_margin_variance, root.samples)
+    }).max_by(f32::total_cmp).unwrap();
+    terminal_contenders.into_iter().filter(|index| {
+        let root = &roots[*index];
+        root.strategic_margin
+            + confidence_width(root.strategic_margin_variance, root.samples) + 1e-6
+            >= best_margin_lower
+    }).collect()
 }
 
 fn horizon_escalation_schedule(initial_horizon: usize) -> Vec<usize> {
@@ -965,15 +931,6 @@ impl NativeGpuSearchEngine {
             &promoted_spatial_actions,
             root_cap,
         );
-        let admitted_by_promotion = admitted
-            .iter()
-            .filter(|(action, _)| {
-                !admitted_without_promotions
-                    .iter()
-                    .any(|(ordinary, _)| ordinary == action)
-            })
-            .map(|(action, _)| action.clone())
-            .collect::<Vec<_>>();
         let trade_assessments = admitted
             .iter()
             .map(|(candidate_action, _)| {
@@ -1292,51 +1249,14 @@ impl NativeGpuSearchEngine {
                 candidate.errors == 0 && candidate.samples > 0
             })
             .collect::<Vec<_>>();
-        let pairwise_unresolved =
-            shallow_final_root_order
-                .iter()
-                .enumerate()
-                .all(|(position, left)| {
-                    shallow_final_root_order[position + 1..]
-                        .iter()
-                        .all(|right| {
-                            racing_contenders(&[*left, *right], &shallow_aggregated).len() == 2
-                        })
-                });
-        // Priors only stabilize a wholly ordinary survivor set after every final pair has been
-        // checked by the racer's own confidence rule. Mandatory blockers, promotion-only
-        // admissions, exact families, and EndTurn keep rollout-first final arbitration.
-        let prefer_prior_for_survivors = pairwise_unresolved
-            && shallow_final_root_order.iter().all(|index| {
-                let candidate = &shallow_aggregated[*index];
-                candidate.action != Action::EndTurn
-                    && exact_family_for_action(&candidate.action).is_none()
-                    && !admitted_by_promotion.contains(&candidate.action)
-                    && !verified_blockers
-                        .iter()
-                        .any(|(action, _)| action == &candidate.action)
-            });
-        let shallow_chosen_index = shallow_final_root_order
-            .iter()
-            .copied()
-            .max_by(|left, right| {
-                compare_surviving_roots(
-                    &shallow_aggregated[*left],
-                    &shallow_aggregated[*right],
-                    prefer_prior_for_survivors,
-                )
-            })
+        // Use the same global uncertainty tiers for racing, final selection,
+        // and deeper arbitration. Pairwise overlap comparisons are not transitive.
+        shallow_final_root_order =
+            escalated_root_order(&shallow_final_root_order, &shallow_aggregated);
+        let shallow_chosen_index = shallow_final_root_order.first().copied()
             .ok_or_else(|| {
                 "GPU native search had no error-free surviving root candidate".to_string()
             })?;
-        shallow_final_root_order.sort_by(|left, right| {
-            compare_surviving_roots(
-                &shallow_aggregated[*left],
-                &shallow_aggregated[*right],
-                prefer_prior_for_survivors,
-            )
-            .reverse()
-        });
 
         let mut aggregated = shallow_aggregated.clone();
         let mut final_root_order = shallow_final_root_order.clone();
@@ -1678,8 +1598,7 @@ impl NativeGpuSearchEngine {
                 .enumerate()
                 .map(|(index, candidate)| {
                     let aggregate = &aggregated[index];
-                    let terminal_width =
-                        confidence_width(aggregate.terminal_variance, aggregate.samples);
+                    let (terminal_lower, terminal_upper) = terminal_bounds(aggregate);
                     let margin_width =
                         confidence_width(aggregate.victory_margin_variance, aggregate.samples);
                     let strategic_width =
@@ -1725,8 +1644,8 @@ impl NativeGpuSearchEngine {
                         ),
                         terminal_outcome: Some(aggregate.terminal_outcome),
                         terminal_rate: Some(aggregate.terminal_rate),
-                        terminal_lower_bound: Some(aggregate.terminal_outcome - terminal_width),
-                        terminal_upper_bound: Some(aggregate.terminal_outcome + terminal_width),
+                        terminal_lower_bound: Some(terminal_lower),
+                        terminal_upper_bound: Some(terminal_upper),
                         victory_margin: Some(aggregate.victory_margin),
                         victory_margin_lower_bound: Some(aggregate.victory_margin - margin_width),
                         victory_margin_upper_bound: Some(aggregate.victory_margin + margin_width),

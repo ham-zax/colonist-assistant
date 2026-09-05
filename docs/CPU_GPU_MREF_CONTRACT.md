@@ -88,6 +88,39 @@ before resident buffers are used.
 sources. Native Mref requires NVRTC device-128-bit support when rebuilding the
 artifact; running the packaged companion uses the embedded PTX and driver.
 
+## Post-integration live-game repair
+
+The later live-game repair changes native root arbitration and its rollout
+horizon. It does not change the pinned CPU rules, M0/Mref probabilities, packed
+state ABI, or strategic leaf formula. The earlier independent GPU verdict
+applies to its reviewed commit range, not automatically to this repair.
+
+Strategic root evaluation advances to a common absolute turn relative to the
+pre-action state. The existing effort setting and exported horizon retain their
+legacy units: `ceil(horizon / 4)` is the number of completed turns. Building or
+trading before ending a turn cannot reduce opponents' simulated opportunities.
+Cancellation remains checked between groups of at most four turns; a runaway
+micro-action sequence is an error, not a successfully evaluated shorter leaf.
+The zero-horizon CPU/CUDA leaf comparison still applies only the root action.
+
+Terminal bounds include the entire unresolved outcome mass plus a bounded
+sampling interval. Global evidence tiers govern both racing and final ranking;
+overlapping terminal bounds defer to the strategic leaf and VP margin. Fewer
+observed terminal losses cannot break an otherwise equal strategic comparison.
+These are search uncertainty bounds, not calibrated live win probabilities.
+
+Indexed session events are replayed in log order; synthetic observations keep
+their observed log watermark. Semantic hydration updates the same event slot.
+Bot board observations and returning log rolls merge only when the indexed
+prefix proves their common ordinals; contradictions and unresolved alignment
+keep Balanced Dice unavailable. Compact records retain source/index metadata
+in `@eventEvidence`, keyed by the existing event anchors.
+
+Trade workflows share retry deadlines: missing controls resolve or fail within
+about 1.2 seconds at that step, step completion is bounded at four seconds, and
+the transaction is bounded at twelve seconds. Failure cancels the workflow and
+requests a fresh board/replan.
+
 ## Verification
 
 Run from the repository root, on a CUDA-capable machine:

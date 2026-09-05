@@ -99,6 +99,129 @@ describe("Balanced setup dice authority", () => {
     expect(session.diceHistory.provenance).not.toBe("complete-from-first-gameplay-roll");
   });
 
+  it("keeps Balanced authority in bot-only games when Colonist never mounts a game log", async () => {
+    const session = sessionFor(document.createElement("div"));
+    await session.start();
+    expect(construct(session)).toMatchObject({
+      model: "mref-colonist-linked-2024-v1",
+      rolls: [],
+      provenance: "complete-from-first-gameplay-roll",
+    });
+    session.setInitialPlacement(false, gameKey);
+    expect(session.observeBoardDiceSnapshot({
+      gameKey,
+      botOnlyGame: true,
+      initialPlacement: false,
+      hasRolled: true,
+      lastRoll: 8,
+      currentPlayer: "Alice",
+      turn: 0,
+    })).toBe(true);
+    expect(session.observeBoardDiceSnapshot({
+      gameKey,
+      botOnlyGame: true,
+      initialPlacement: false,
+      hasRolled: true,
+      lastRoll: 8,
+      currentPlayer: "Alice",
+      turn: 0,
+    })).toBe(false);
+    expect(construct(session)).toMatchObject({
+      model: "mref-colonist-linked-2024-v1",
+      rolls: [{ ordinal: 0, actor: 0, total: 8 }],
+    });
+  });
+
+  it("keeps a known missed bot turn explicit in the Mref posterior", async () => {
+    const session = sessionFor(document.createElement("div"));
+    await session.start();
+    session.setInitialPlacement(false, gameKey);
+    session.observeBoardDiceSnapshot({
+      gameKey, botOnlyGame: true, initialPlacement: false,
+      hasRolled: true, lastRoll: 8, currentPlayer: "Alice", turn: 0,
+    });
+    session.observeBoardDiceSnapshot({
+      gameKey, botOnlyGame: true, initialPlacement: false,
+      hasRolled: true, lastRoll: 9, currentPlayer: "Alice", turn: 2,
+    });
+    expect(session.diceHistory.gaps).toEqual([{ afterOrdinal: 0, missingRolls: 1 }]);
+    expect(construct(session)).toMatchObject({
+      model: "mref-colonist-linked-2024-v1",
+      rolls: [
+        { ordinal: 0, actor: 0, total: 8 },
+        { ordinal: 2, actor: 0, total: 9 },
+      ],
+      gaps: [{ afterOrdinal: 0, missingRolls: 1 }],
+    });
+  });
+
+  it("does not duplicate a log-observed roll when the bot log unmounts midgame", async () => {
+    const root = document.createElement("div");
+    root.append(roll(0, "Alice", 3, 5));
+    const session = sessionFor(root);
+    await session.start();
+    session.setInitialPlacement(false, gameKey);
+    expect(session.diceHistory.rolls).toHaveLength(1);
+    expect(session.observeBoardDiceSnapshot({
+      gameKey, botOnlyGame: true, initialPlacement: false,
+      hasRolled: true, lastRoll: 8, currentPlayer: "Alice", turn: 0,
+    })).toBe(false);
+    expect(session.diceHistory.rolls).toHaveLength(1);
+    expect(construct(session).rolls).toEqual([{ ordinal: 0, actor: 0, total: 8 }]);
+  });
+
+  it.each([false, true])("reconciles a returning bot log by ordinal (conflict=%s)", async (conflict) => {
+    const root = document.createElement("div");
+    const session = sessionFor(root);
+    await session.start();
+    session.setInitialPlacement(false, gameKey);
+    session.observeBoardDiceSnapshot({
+      gameKey, botOnlyGame: true, hasRolled: true,
+      lastRoll: 8, currentPlayer: "Alice", turn: 0,
+    });
+    session.observeBoardDiceSnapshot({
+      gameKey, botOnlyGame: true, hasRolled: true,
+      lastRoll: 9, currentPlayer: "Bob", turn: 1,
+    });
+    root.append(roll(0, "Alice", conflict ? 4 : 3, 5), roll(1, "Bob", 4, 5));
+    await vi.waitFor(() => expect(session.events).toHaveLength(2));
+    if (conflict) {
+      expect(() => construct(session)).toThrow();
+    } else {
+      expect(session.diceHistory.rolls).toHaveLength(2);
+      expect(construct(session).rolls).toEqual([
+        { ordinal: 0, actor: 0, total: 8 }, { ordinal: 1, actor: 1, total: 9 },
+      ]);
+    }
+  });
+
+  it("preserves missed turns when a complete log hands off to board capture", async () => {
+    const root = document.createElement("div");
+    root.append(roll(0, "Alice", 3, 5));
+    const session = sessionFor(root);
+    await session.start();
+    session.setInitialPlacement(false, gameKey);
+    session.observeBoardDiceSnapshot({
+      gameKey, botOnlyGame: true, hasRolled: true,
+      lastRoll: 9, currentPlayer: "Alice", turn: 2,
+    });
+    expect(session.diceHistory.gaps).toEqual([{ afterOrdinal: 0, missingRolls: 1 }]);
+    expect(construct(session).rolls?.map((event) => event.ordinal)).toEqual([0, 2]);
+  });
+
+  it("rejects a different actor for an already observed board turn after a gap", async () => {
+    const session = sessionFor(document.createElement("div"));
+    await session.start();
+    session.setInitialPlacement(false, gameKey);
+    for (const [turn, currentPlayer] of [[0, "Alice"], [2, "Alice"], [2, "Bob"]] as const) {
+      session.observeBoardDiceSnapshot({
+        gameKey, botOnlyGame: true, hasRolled: true, lastRoll: 8, currentPlayer, turn,
+      });
+    }
+    expect(session.diceHistory.rolls).toHaveLength(2);
+    expect(() => construct(session)).toThrow();
+  });
+
   it("recovers the persisted harmless bot-placement miss captured in the live setup", async () => {
     const session = sessionFor(document.createElement("div"));
     storage.set(`colonistAssistantSession:${session.id}`, {

@@ -454,6 +454,7 @@ pub struct CudaSimEngine {
     transition_kernel: CudaFunction,
     rollout_action_kernel: CudaFunction,
     rollout_steps_kernel: CudaFunction,
+    root_rollout_turns_kernel: CudaFunction,
     arena_kernel: CudaFunction,
     run_until_candidate_kernel: CudaFunction,
     sample_candidate_roots_kernel: CudaFunction,
@@ -519,6 +520,7 @@ impl CudaSimEngine {
         let transition_kernel = module.load_function("apply_transition_batch_kernel")?;
         let rollout_action_kernel = module.load_function("generate_rollout_actions_batch_kernel")?;
         let rollout_steps_kernel = module.load_function("run_rollout_steps_kernel")?;
+        let root_rollout_turns_kernel = module.load_function("run_root_rollout_turns_kernel")?;
         let arena_kernel = module.load_function("run_games_kernel")?;
         let run_until_candidate_kernel = module.load_function("run_until_candidate_kernel")?;
         let sample_candidate_roots_kernel =
@@ -574,6 +576,7 @@ impl CudaSimEngine {
             transition_kernel,
             rollout_action_kernel,
             rollout_steps_kernel,
+            root_rollout_turns_kernel,
             arena_kernel,
             run_until_candidate_kernel,
             sample_candidate_roots_kernel,
@@ -1656,25 +1659,32 @@ impl CudaSimEngine {
                 unsafe { arguments.launch(config)? };
             }
             if rollout_steps_u32 > 0 {
-                let mut remaining_steps = rollout_steps_u32;
-                while remaining_steps > 0 {
+                // Preserve the configured effort scale: four legacy action
+                // units fund one completed turn. Every root shares the target
+                // relative to its pre-action base, including EndTurn itself.
+                let turns = rollout_steps_u32.div_ceil(4);
+                let mut turns_ahead = 0u32;
+                while turns_ahead < turns {
                     if should_cancel() {
                         return Err(CudaSimError::Cancelled);
                     }
-                    let step_chunk = remaining_steps.min(16);
-                    let mut arguments = self.stream.launch_builder(&self.rollout_steps_kernel);
+                    turns_ahead = (turns_ahead + 4).min(turns);
+                    let mut arguments = self.stream.launch_builder(&self.root_rollout_turns_kernel);
                     arguments.arg(&mut self.search_state_device);
                     arguments.arg(&self.topology_device);
                     arguments.arg(&mut self.search_action_device);
                     arguments.arg(&mut self.search_status_device);
                     arguments.arg(&mut self.search_rng_device);
                     arguments.arg(&mut self.search_chance_rng_device);
+                    arguments.arg(&self.state_device);
+                    arguments.arg(&self.root_base_index_device);
+                    arguments.arg(&base_stride);
+                    arguments.arg(&chunk_rollouts_u32);
                     arguments.arg(&stride);
                     arguments.arg(&lane_count_u32);
-                    arguments.arg(&step_chunk);
+                    arguments.arg(&turns_ahead);
                     unsafe { arguments.launch(config)? };
                     self.stream.synchronize()?;
-                    remaining_steps -= step_chunk;
                 }
             }
             {
@@ -2304,6 +2314,32 @@ mod tests {
         engine.seed_rollout_rng(seed)?;
         engine.generate_rollout_actions()?;
         Ok(engine.download_generated_actions()?.remove(0))
+    }
+
+    #[test]
+    fn root_micro_actions_share_the_pre_action_turn_horizon() -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = GameState::standard(71_001, 4);
+        finish_setup(&mut state);
+        state.phase = Phase::Main;
+        state.current_player = 0;
+        state.players.iter_mut().for_each(|player| player.resources = [0; 5]);
+        state.players[0].resources[Resource::Lumber.index()] = 4;
+        state.bank = [15, 19, 19, 19, 19];
+        let actions = vec![
+            Action::MaritimeTrade { give: Resource::Lumber, receive: Resource::Grain, ratio: 4 },
+            Action::EndTurn,
+        ];
+        for action in &actions { assert!(state.legal_actions().contains(action)); }
+        let mut engine = CudaSimEngine::new()?;
+        engine.upload_states(std::slice::from_ref(&state))?;
+        let result = engine.search_root_actions(std::slice::from_ref(&actions), 16, 16, 91_123)?;
+        for stat in &result.rows[0] {
+            assert_eq!(stat.errors, 0, "{:?}", stat.action);
+            assert_eq!(stat.terminal_samples, 0, "early-game fixture should remain nonterminal");
+            assert_eq!(stat.mean_turn, (state.turn + 4) as f32,
+                "root micro-actions must not shorten the opponent horizon: {:?}", stat.action);
+        }
+        Ok(())
     }
 
     #[test]

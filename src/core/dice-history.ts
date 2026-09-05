@@ -47,6 +47,10 @@ export interface DiceHistoryState {
   coverage: DiceLogCoverage;
   /** Indexed log entries whose unresolved semantics could conceal contradictory gameplay-roll evidence. */
   ambiguousLogIndices: number[];
+  /** Contradictory indexed events; ordinary coverage cannot resolve them. */
+  conflictingLogIndices?: number[];
+  /** Board turns and indexed rolls do not yet have a proven shared ordinal. */
+  hasUnreconciledSources?: boolean;
   /** Roll-capable uncertainty that cannot be assigned to exact log indexes. */
   hasUnlocatedRollAmbiguity: boolean;
   /** Independently established missing gameplay-roll count before rolls[0]. */
@@ -74,6 +78,8 @@ export interface StoredDiceHistoryState {
   provenance: DiceHistoryProvenance;
   coverage: DiceLogCoverage;
   ambiguousLogIndices?: number[];
+  conflictingLogIndices?: number[];
+  hasUnreconciledSources?: boolean;
   hasUnlocatedRollAmbiguity?: boolean;
   missingPrefixRolls?: number;
   gaps: DiceHistoryGap[];
@@ -90,7 +96,8 @@ const refreshProvenance = (state: DiceHistoryState): void => {
     (gap) => gap.missingRolls === undefined,
   );
   const parserAmbiguity =
-    state.ambiguousLogIndices.length > 0 || state.hasUnlocatedRollAmbiguity;
+    state.ambiguousLogIndices.length > 0 || state.hasUnlocatedRollAmbiguity
+      || state.hasUnreconciledSources === true;
   state.hasUnknownRollGap = coverageGap || explicitUnknownGap || parserAmbiguity;
   if (coverageGap || state.gaps.length > 0 || parserAmbiguity) {
     state.provenance = "gapped";
@@ -176,7 +183,8 @@ export const observeLogCoverage = (
       ),
     );
     state.ambiguousLogIndices = state.ambiguousLogIndices.filter(
-      (index) => !resolved.has(index) || occupiedRollIndices.has(index),
+      (index) => !resolved.has(index) || occupiedRollIndices.has(index)
+        || state.conflictingLogIndices?.includes(index),
     );
   }
   const ranges = [
@@ -197,6 +205,22 @@ export const noteRollCapableLogAmbiguity = (
     return;
   }
   if (state.rolls.some((roll) => roll.logIndex === logIndex)) return;
+  markAmbiguousLogIndex(state, logIndex);
+};
+
+/** A trustworthy identity carried contradictory roll/non-roll semantics. */
+export const notePublicRollConflict = (
+  state: DiceHistoryState,
+  logIndex: number | undefined,
+): void => {
+  if (logIndex === undefined || !validIndex(logIndex)) {
+    state.hasUnlocatedRollAmbiguity = true;
+    refreshProvenance(state);
+    return;
+  }
+  state.conflictingLogIndices = [...new Set([
+    ...(state.conflictingLogIndices ?? []), logIndex,
+  ])].sort((left, right) => left - right);
   markAmbiguousLogIndex(state, logIndex);
 };
 
@@ -309,6 +333,48 @@ export const appendPublicDiceRoll = (
   });
 };
 
+/**
+ * A complete indexed prefix establishes the ordinal of each DOM roll. Only
+ * then can board turn observations be merged without guessing from repeated
+ * actor/total pairs. Gapped DOM evidence stays unavailable until it backfills.
+ */
+export const reconcilePublicDiceSources = (state: DiceHistoryState): void => {
+  const board = state.rolls.filter((roll) => /^board-roll:\d+:/u.test(roll.eventId));
+  const indexed = state.rolls.filter((roll) => roll.logIndex !== undefined);
+  if (!board.length || !indexed.length) return;
+  if (state.coverage.ranges.length !== 1 || state.coverage.ranges[0]?.[0] !== 0
+      || state.ambiguousLogIndices.length || state.hasUnlocatedRollAmbiguity) {
+    state.hasUnreconciledSources = true;
+    refreshProvenance(state);
+    return;
+  }
+  delete state.hasUnreconciledSources;
+  if (board.length + indexed.length !== state.rolls.length) {
+    notePublicRollConflict(state, undefined);
+    return;
+  }
+  indexed.sort((left, right) => left.logIndex! - right.logIndex!);
+  const byOrdinal = new Map(indexed.map((roll, ordinal) => [ordinal, roll]));
+  for (const roll of board) {
+    const ordinal = Number(roll.eventId.match(/^board-roll:(\d+):/u)![1]);
+    const prior = byOrdinal.get(ordinal);
+    if (prior && (prior.actor !== roll.actor || prior.total !== roll.total)) {
+      notePublicRollConflict(state, prior.logIndex);
+      return;
+    }
+    if (!prior) byOrdinal.set(ordinal, roll);
+  }
+  const ordered = [...byOrdinal].sort(([left], [right]) => left - right);
+  state.rolls = ordered.map(([, roll]) => roll);
+  state.missingPrefixRolls = ordered[0]![0];
+  state.gaps = ordered.slice(1).flatMap(([ordinal], position) => {
+    const previous = ordered[position]![0];
+    return ordinal > previous + 1
+      ? [{ afterOrdinal: previous, missingRolls: ordinal - previous - 1 }] : [];
+  });
+  refreshProvenance(state);
+};
+
 export const cloneDiceHistoryState = (
   state: DiceHistoryState,
 ): DiceHistoryState => ({
@@ -319,6 +385,9 @@ export const cloneDiceHistoryState = (
   provenance: state.provenance,
   coverage: { ranges: state.coverage.ranges.map(([start, end]) => [start, end]) },
   ambiguousLogIndices: [...state.ambiguousLogIndices],
+  ...(state.conflictingLogIndices?.length
+    ? { conflictingLogIndices: [...state.conflictingLogIndices] } : {}),
+  ...(state.hasUnreconciledSources ? { hasUnreconciledSources: true } : {}),
   hasUnlocatedRollAmbiguity: state.hasUnlocatedRollAmbiguity,
   ...(state.missingPrefixRolls !== undefined
     ? { missingPrefixRolls: state.missingPrefixRolls }
@@ -342,6 +411,10 @@ export const restoreDiceHistoryState = (
   restored.ambiguousLogIndices = [
     ...new Set((stored.ambiguousLogIndices ?? []).filter(validIndex)),
   ].sort((left, right) => left - right);
+  for (const index of stored.conflictingLogIndices ?? []) {
+    if (validIndex(index)) notePublicRollConflict(restored, index);
+  }
+  restored.hasUnreconciledSources = stored.hasUnreconciledSources === true;
   restored.hasUnlocatedRollAmbiguity = stored.hasUnlocatedRollAmbiguity === true;
   restored.missingPrefixRolls =
     stored.missingPrefixRolls !== undefined && validIndex(stored.missingPrefixRolls)
@@ -356,6 +429,7 @@ export const restoreDiceHistoryState = (
         : {}),
     }));
   for (const roll of stored.rolls ?? []) appendPublicDiceRoll(restored, roll);
+  reconcilePublicDiceSources(restored);
   refreshProvenance(restored);
   return restored;
 };

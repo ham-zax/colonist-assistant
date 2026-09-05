@@ -85,6 +85,32 @@ const encodedDisplay = (
 };
 
 describe("compact LLM game record", () => {
+  it("exports event source/index and updates hydrated evidence under the same anchor", () => {
+    const builder = new CompactGameBuilder();
+    const event = {
+      type: "roll" as const, player: "Alice", id: "indexed-roll", index: 140,
+      timestamp: 1_050, raw: "Alice rolled",
+    };
+    builder.apply({ ...captureBase, playerOrder: ["Alice", "Bob"], events: [event], decisions: [] }, false);
+    const record = builder.apply({
+      ...captureBase, playerOrder: ["Alice", "Bob"], decisions: [],
+      events: [{ ...event, dice: [3, 5] }],
+    }, false);
+    expect(record.events).toHaveLength(1);
+    expect(record.events[0]?.at(-1)).toEqual([3, 5]);
+    const anchor = String(record.events[0]![0]);
+    expect(record.eventEvidence?.[anchor]).toEqual({ logIndex: 140, source: "game-log" });
+    expect(formatCompactGameRecord(record)).toContain(
+      `@eventEvidence=${JSON.stringify(record.eventEvidence)}`,
+    );
+    const resumed = new CompactGameBuilder(record).apply({
+      ...captureBase, playerOrder: ["Alice", "Bob"], decisions: [],
+      events: [{ ...event, dice: [3, 5] }],
+    }, false);
+    expect(resumed.events).toHaveLength(1);
+    expect(resumed.eventEvidence).toEqual(record.eventEvidence);
+  });
+
   it("persists dedicated public dice history independently of compact event rows", () => {
     const diceHistory = createDiceHistoryState();
     observeLogCoverage(diceHistory, [0, 1]);

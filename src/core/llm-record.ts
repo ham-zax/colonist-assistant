@@ -29,9 +29,11 @@ type UnmatchedLogReason =
   | "known-ignored-friendly-robber-status"
   | "known-redundant-trade-offer"
   | "known-redundant-robber-move"
+  | "known-redundant-award"
   | "known-ignored-production-blocked"
   | "known-ignored-empty-robbery"
   | "known-ignored-bot-status"
+  | "conflicting-log-index"
   | "unrecognized-log-format";
 
 export interface CompactRecordContracts {
@@ -170,6 +172,8 @@ export interface CompactGameRecord {
   archetypes: CompactRow[];
   handVectors: number[][];
   events: CompactRow[];
+  /** Causal source metadata keyed by the stable E* event anchor. */
+  eventEvidence?: Record<string, { logIndex?: number; logWatermark?: number; source: string }>;
 }
 
 export interface CompactGameCapture {
@@ -1082,6 +1086,7 @@ export class CompactGameBuilder {
   private record?: CompactGameRecord;
   private snapshot?: SnapshotState;
   private eventIds = new Set<string>();
+  private eventRows = new Map<string, CompactRow>();
   private decisionIndexByState = new Map<string, number>();
   private beliefIdByDigest = new Map<string, string>();
   private handVectorIndex = new Map<string, number>();
@@ -1095,6 +1100,7 @@ export class CompactGameBuilder {
           typeof row[0] === "string" ? [row[0]] : [],
         ),
       );
+      this.eventRows = new Map(normalized.events.map((row) => [String(row[0]), row]));
       normalized.decisions.forEach((row, index) => {
         const state = row[4];
         if (typeof state === "string") this.decisionIndexByState.set(state, index);
@@ -1285,12 +1291,29 @@ export class CompactGameBuilder {
     for (const event of input.events) {
       const row = encodeEvent(event, record.startedAt, aliasing.alias);
       const eventKey = String(row[0]);
+      if (this.eventIds.has(eventKey) && !this.eventRows.has(eventKey)) continue;
+      record.eventEvidence ??= {};
+      record.eventEvidence[eventKey] = {
+        ...(event.index !== undefined ? { logIndex: event.index } : {}),
+        ...(event.logWatermark !== undefined ? { logWatermark: event.logWatermark } : {}),
+        source: event.index !== undefined ? "game-log" : event.raw,
+      };
+      const existing = this.eventRows.get(eventKey);
+      if (existing) {
+        // Hydration enriches the same indexed event after its first capture.
+        existing.splice(0, existing.length, ...row);
+        continue;
+      }
       if (this.eventIds.has(eventKey)) continue;
       this.eventIds.add(eventKey);
+      this.eventRows.set(eventKey, row);
       record.events.push(row);
     }
     if (record.events.length > MAX_EVENTS) {
-      record.events.splice(0, record.events.length - MAX_EVENTS);
+      for (const row of record.events.splice(0, record.events.length - MAX_EVENTS)) {
+        this.eventRows.delete(String(row[0]));
+        delete record.eventEvidence?.[String(row[0])];
+      }
       record.partialHistory = true;
     }
 
@@ -2185,7 +2208,7 @@ export const formatCompactGameRecord = (record: CompactGameRecord): string => {
     `@time=${JSON.stringify({ frames: "dtMs since previous frame; first since start", decisions: "dtMs since start", events: "dtMs since start" })}`,
     `@actionKeys=${JSON.stringify({ t: "targetId", t2: "secondTargetId", r: "resource", r2: "otherResource", q: "ratio", b: "build", ctl: "control", card: "development card", v: "verdict", accept: "boolean", mode: "trade mode", ba: "board action", oi: "offer index", tid: "trade id", ai: "accepted-player index", c: "confidence", p: "player alias", fp: "follow-up player alias", pt: "screen point x,y", cards: "resource vector", recv: "receive resource vector", give: "give resource vector", get: "receive resource vector", cg: "counter give resource vector", cr: "counter receive resource vector", eg: "existing give resource vector", er: "existing receive resource vector", to: "recipient aliases", fr: "follow-up resource sequence" })}`,
     `@eventArgs=${JSON.stringify({ discover: "[P]", gain: "[P,R,reason]", spend: "[P,R,reason]", transfer: "[from,to,R,reason]", trade: "[P,acceptor,giveR,getR,bank]", "trade-offered": "[P,recipients,giveR,getR]", "trade-accepted": "[P,creator,giveR,getR]", "trade-rejected": "[P,creator,giveR,getR]", "trade-countered": "[P,creator,giveR,getR,counterGiveR,counterGetR]", "trade-embargoed": "[P,creator]", "trade-embargo-cleared": "[P,creator]", "trade-expired": "[P,recipients,giveR,getR]", "unknown-transfer": "[from,to,count]", "unknown-discard": "[P,count]", monopoly: "[P,resource,amount]", "buy-dev": "[P]", "play-dev": "[P,card]", roll: "[P,dice]" })}`,
-    `@diagnostics=${JSON.stringify({ searchStages: "particlePrep/rootScoring/exactFamilies/threatSafety/onePly/deepWaves are actual elapsed ms inside the bounded CPU belief search; evidenceEscalation records whether a binary floor/wave disagreement triggered the bounded same-depth rerun, whether it completed and actually strengthened realized per-root evidence, plus baseline/rerun nodes and elapsed ms; omitted for opening/GPU paths where these stages do not apply", effectiveEffort: "backend-resolved search effort after native profiling and engine-side clamping, including the optional CPU evidence-escalation reserve", decisionRationale: "plain-language summary, causal reasons, and auditable evidence derived from the final authority, chosen root, runner-up data, exact comparator, provenance, and deadline state", searchResult: "stable per-analysis identity inside this recording; reusedFrom points at the first decision row that owns reused search work", exactCandidates: "source=exact exposes decisionScore, lowerScore, and the authoritative comparatorScore", gpuRoots: "retained GPU roots expose per-root final evaluation horizon, shallow evidence when re-evaluated, terminal outcome, terminal completion rate, parity-tested strategic-cutoff confidence bands, raw victory-margin bands, and adaptive-horizon escalation provenance", executionDiagnostic: "failure-only trade identity/DOM evidence with assistant-owned badge text removed; ctl entries expose candidate controls and disabled/active evidence", unmatchedSamples: "bounded deduplicated unparsed log forms classified as harmless/redundant or integrity-relevant; @unmatchedRelevant alone gates benchmark integrity" })}`,
+    `@diagnostics=${JSON.stringify({ searchStages: "particlePrep/rootScoring/exactFamilies/threatSafety/onePly/deepWaves are actual elapsed ms inside the bounded CPU belief search; evidenceEscalation records whether a binary floor/wave disagreement triggered the bounded same-depth rerun, whether it completed and actually strengthened realized per-root evidence, plus baseline/rerun nodes and elapsed ms; omitted for opening/GPU paths where these stages do not apply", effectiveEffort: "backend-resolved search effort after native profiling and engine-side clamping, including the optional CPU evidence-escalation reserve", decisionRationale: "plain-language summary, causal reasons, and auditable evidence derived from the final authority, chosen root, runner-up data, exact comparator, provenance, and deadline state", searchResult: "stable per-analysis identity inside this recording; reusedFrom points at the first decision row that owns reused search work", exactCandidates: "source=exact exposes decisionScore, lowerScore, and the authoritative comparatorScore", gpuRoots: "retained GPU roots expose per-root horizon in legacy effort units (ceil(horizon/4) completed turns), shallow evidence when re-evaluated, terminal outcome, terminal completion rate, terminal bounds including unresolved outcomes and sampling uncertainty, strategic-cutoff bands, raw victory-margin bands, and adaptive-horizon provenance", executionDiagnostic: "failure-only trade identity/DOM evidence with assistant-owned badge text removed; ctl entries expose candidate controls and disabled/active evidence", unmatchedSamples: "bounded deduplicated unparsed log forms classified as harmless/redundant or integrity-relevant; @unmatchedRelevant alone gates benchmark integrity" })}`,
     `@beliefWorlds=${JSON.stringify("handRefs follow the player order declared by each @beliefs row")}`,
     `@aliases=${JSON.stringify(record.aliases)}`,
     `@assistant=${JSON.stringify(record.assistant)}`,
@@ -2240,5 +2263,6 @@ export const formatCompactGameRecord = (record: CompactGameRecord): string => {
   section("beliefWorlds", record.contracts.beliefWorldColumns, record.beliefWorlds);
   section("archetypes", record.contracts.archetypeColumns, record.archetypes);
   section("events", record.contracts.eventColumns, record.events);
+  if (record.eventEvidence) lines.push(`@eventEvidence=${JSON.stringify(record.eventEvidence)}`);
   return lines.join("\n");
 };

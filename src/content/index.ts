@@ -20,12 +20,15 @@ const boot = async (): Promise<void> => {
   let currentRoot: HTMLElement | undefined;
   let currentGameKey: string | undefined;
   let currentMyPlayer: string | undefined;
-  const initialBoard = readPublicBoardSnapshot();
-  let currentInitialPlacement = Boolean(initialBoard?.initialPlacement);
-  currentGameKey = initialBoard?.gameKey;
+  let currentBoard = readPublicBoardSnapshot();
+  const boardOnlyRoot = document.createElement("div");
+  boardOnlyRoot.dataset.colonistAssistantBoardOnly = "true";
+  let currentInitialPlacement = Boolean(currentBoard?.initialPlacement);
+  let currentBotOnlyGame = Boolean(currentBoard?.botOnlyGame);
+  currentGameKey = currentBoard?.gameKey;
   currentMyPlayer =
-    initialBoard?.localSeatDiagnostics?.identity.status === "resolved"
-      ? initialBoard.myPlayer
+    currentBoard?.localSeatDiagnostics?.identity.status === "resolved"
+      ? currentBoard.myPlayer
       : undefined;
 
   let overlay: AssistantOverlay;
@@ -41,8 +44,9 @@ const boot = async (): Promise<void> => {
     reset: clearCurrentSession,
   });
   overlay.setSettings(settings);
-  overlay.updateBoard(initialBoard);
+  overlay.updateBoard(currentBoard);
   const removeBoardBridge = installPublicBoardBridge((snapshot) => {
+    currentBoard = snapshot ?? readPublicBoardSnapshot();
     if (snapshot?.gameKey) {
       currentGameKey = snapshot.gameKey;
       session?.setGameKey(snapshot.gameKey);
@@ -53,9 +57,13 @@ const boot = async (): Promise<void> => {
         : undefined;
     currentMyPlayer = resolvedMyPlayer;
     session?.setMyPlayer(resolvedMyPlayer);
-    currentInitialPlacement = Boolean(snapshot?.initialPlacement);
-    session?.setInitialPlacement(currentInitialPlacement, snapshot?.gameKey);
-    overlay.updateBoard(snapshot ?? readPublicBoardSnapshot());
+    currentInitialPlacement = Boolean(currentBoard?.initialPlacement);
+    currentBotOnlyGame = Boolean(currentBoard?.botOnlyGame);
+    session?.setInitialPlacement(currentInitialPlacement, currentBoard?.gameKey);
+    if (currentRoot === boardOnlyRoot) {
+      session?.observeBoardDiceSnapshot(currentBoard);
+    }
+    overlay.updateBoard(currentBoard);
   });
 
   const attach = async (): Promise<void> => {
@@ -64,7 +72,11 @@ const boot = async (): Promise<void> => {
         "#game-canvas, script[type='application/json'][data-colonist-public-board], [data-hex-id]",
       ),
     );
-    const root = hasLiveGameSurface ? findLogRoot() : undefined;
+    const logRoot = hasLiveGameSurface ? findLogRoot() : undefined;
+    // Colonist bot-only games may never mount the chat/game-log virtualizer.
+    // Keep a real session alive from public board evidence so setup authority,
+    // recording, and Balanced-Dice history do not depend on that optional DOM.
+    const root = logRoot ?? (hasLiveGameSurface && currentBotOnlyGame ? boardOnlyRoot : undefined);
     if (!settings.enabled) {
       session?.stop();
       session = undefined;
@@ -98,6 +110,7 @@ const boot = async (): Promise<void> => {
     next.setInitialPlacement(currentInitialPlacement, currentGameKey);
     await next.start();
     next.setMyPlayer(currentMyPlayer);
+    if (root === boardOnlyRoot) next.observeBoardDiceSnapshot(currentBoard);
   };
 
   await attach();

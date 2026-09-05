@@ -142,6 +142,8 @@ export type TrackerEvent =
 export type StoredEvent = TrackerEvent & {
   id: string;
   index?: number;
+  /** Highest public log index observed when an indexless event was captured; -1 means no indexed log row was visible yet. */
+  logWatermark?: number;
   timestamp: number;
   raw: string;
 };

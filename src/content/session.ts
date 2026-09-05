@@ -22,6 +22,8 @@ import {
   createDiceHistoryState,
   DICE_HISTORY_INTEGRITY_VERSION,
   noteMissingPublicRoll,
+  notePublicRollConflict,
+  reconcilePublicDiceSources,
   noteRollCapableLogAmbiguity,
   observeLogCoverage,
   observeDiceSetupBoundary,
@@ -37,9 +39,11 @@ export type UnmatchedLogReason =
   | "known-ignored-friendly-robber-status"
   | "known-redundant-trade-offer"
   | "known-redundant-robber-move"
+  | "known-redundant-award"
   | "known-ignored-production-blocked"
   | "known-ignored-empty-robbery"
   | "known-ignored-bot-status"
+  | "conflicting-log-index"
   | "unrecognized-log-format";
 
 export interface UnmatchedLogSample {
@@ -127,9 +131,17 @@ const classifyUnmatchedLog = (
   if (/\bmoved robber to\b/iu.test(normalized)) {
     return { reason: "known-redundant-robber-move", affectsIntegrity: false };
   }
-  if (/\bwants to give\b.+\bfor\b/iu.test(normalized)) {
+  if (/\b(?:received|lost)\s+(?:the\s+)?(?:longest road|largest army)\b/iu.test(normalized)) {
+    // Award ownership and VP totals come from the validated board snapshot.
+    // The rendered announcement is useful audit text, not an extra state transition.
+    return { reason: "known-redundant-award", affectsIntegrity: false };
+  }
+  if (
+    /\bwants to give\b.+\bfor\b/iu.test(normalized) ||
+    /\bproposed counter offer to\b.+\boffering\b.+\bfor\b/iu.test(normalized)
+  ) {
     // Active-trade snapshots are ingested separately with stable trade
-    // identity, so the rendered chat offer is duplicate evidence.
+    // identity, so the rendered chat offer/counter is duplicate evidence.
     return { reason: "known-redundant-trade-offer", affectsIntegrity: false };
   }
   return { reason: "unrecognized-log-format", affectsIntegrity: true };
@@ -338,6 +350,134 @@ export const canonicalizeEvent = (
   };
 };
 
+type IndexedEventRelation = "same" | "enrich" | "conflict";
+
+const storedEventSemantics = (event: StoredEvent): Record<string, unknown> => {
+  const semantics = { ...(event as unknown as Record<string, unknown>) };
+  for (const key of ["id", "index", "logWatermark", "timestamp", "raw"]) {
+    delete semantics[key];
+  }
+  return semantics;
+};
+
+const compatibleEventColor = (
+  left: unknown,
+  right: unknown,
+): boolean =>
+  typeof left !== "string" || typeof right !== "string" || left === right;
+
+const indexedEventRelation = (
+  existing: StoredEvent,
+  incoming: StoredEvent,
+): IndexedEventRelation => {
+  const left = storedEventSemantics(existing);
+  const right = storedEventSemantics(incoming);
+  const leftColor = left.color;
+  const rightColor = right.color;
+  delete left.color;
+  delete right.color;
+
+  if (JSON.stringify(left) === JSON.stringify(right)) {
+    if (!compatibleEventColor(leftColor, rightColor)) return "conflict";
+    return leftColor === undefined && rightColor !== undefined ? "enrich" : "same";
+  }
+
+  if (existing.type === "roll" && incoming.type === "roll") {
+    const leftDice = left.dice;
+    const rightDice = right.dice;
+    delete left.dice;
+    delete right.dice;
+    if (
+      JSON.stringify(left) === JSON.stringify(right) &&
+      compatibleEventColor(leftColor, rightColor)
+    ) {
+      if (leftDice === undefined && rightDice !== undefined) return "enrich";
+      if (leftDice !== undefined && rightDice === undefined) return "same";
+      if (JSON.stringify(leftDice) === JSON.stringify(rightDice)) {
+        return leftColor === undefined && rightColor !== undefined ? "enrich" : "same";
+      }
+    }
+  }
+  return "conflict";
+};
+
+const enrichIndexedEvent = (
+  existing: StoredEvent,
+  incoming: StoredEvent,
+): StoredEvent => {
+  const existingColor = (existing as TrackerEvent & { color?: string }).color;
+  const incomingColor = (incoming as TrackerEvent & { color?: string }).color;
+  const enriched = {
+    ...existing,
+    ...(existingColor === undefined && incomingColor !== undefined
+      ? { color: incomingColor }
+      : {}),
+    raw: incoming.raw,
+  } as StoredEvent;
+  if (
+    existing.type === "roll" &&
+    incoming.type === "roll" &&
+    existing.dice === undefined &&
+    incoming.dice !== undefined
+  ) {
+    return { ...enriched, dice: [...incoming.dice] as [number, number] } as StoredEvent;
+  }
+  return enriched;
+};
+
+const validLogWatermark = (value: number | undefined): value is number =>
+  value !== undefined && Number.isInteger(value) && value >= -1;
+
+const normalizeEventJournal = (
+  source: readonly StoredEvent[],
+): {
+  events: StoredEvent[];
+  conflictingLogIndices: number[];
+  maxLogIndex: number;
+} => {
+  const entries: Array<{ event: StoredEvent; ordinal: number }> = [];
+  const indexedEntry = new Map<number, number>();
+  const conflicts = new Set<number>();
+  let maxLogIndex = -1;
+
+  source.forEach((original, ordinal) => {
+    if (validStoredLogIndex(original.index)) {
+      maxLogIndex = Math.max(maxLogIndex, original.index);
+      const priorEntry = indexedEntry.get(original.index);
+      if (priorEntry !== undefined) {
+        const prior = entries[priorEntry]!;
+        const relation = indexedEventRelation(prior.event, original);
+        if (relation === "enrich") prior.event = enrichIndexedEvent(prior.event, original);
+        if (relation === "conflict") conflicts.add(original.index);
+        return;
+      }
+      indexedEntry.set(original.index, entries.length);
+      entries.push({ event: original, ordinal });
+      return;
+    }
+
+    const event = validLogWatermark(original.logWatermark)
+      ? original
+      : { ...original, logWatermark: maxLogIndex };
+    entries.push({ event, ordinal });
+  });
+
+  entries.sort((left, right) => {
+    const leftAnchor = left.event.index ?? left.event.logWatermark ?? -1;
+    const rightAnchor = right.event.index ?? right.event.logWatermark ?? -1;
+    if (leftAnchor !== rightAnchor) return leftAnchor - rightAnchor;
+    const leftPhase = left.event.index === undefined ? 1 : 0;
+    const rightPhase = right.event.index === undefined ? 1 : 0;
+    return leftPhase - rightPhase || left.ordinal - right.ordinal;
+  });
+
+  return {
+    events: entries.map(({ event }) => event),
+    conflictingLogIndices: [...conflicts].sort((left, right) => left - right),
+    maxLogIndex,
+  };
+};
+
 const deriveId = (): string => {
   const pathGameId = location.pathname.match(/\/game\/([^/?#]+)/)?.[1];
   const queryGameId = new URLSearchParams(location.search).get("gameId");
@@ -367,6 +507,7 @@ export class GameSession {
   private observer?: MutationObserver;
   private saveTimer?: number;
   private syntheticSequence = 0;
+  private maxObservedLogIndex = -1;
   private disposed = false;
   private myPlayer?: string;
   private initialPlacement = false;
@@ -391,8 +532,22 @@ export class GameSession {
     this.observer.observe(this.root, {
       childList: true,
       subtree: true,
+      characterData: true,
       attributes: true,
-      attributeFilter: ["data-index", "src", "style"],
+      // Keep this contract synchronized with snapshotMessage()/serializeNode().
+      // Colonist hydrates virtualized rows in place, so semantic text/icon
+      // changes must trigger a rescan even when no child node is replaced.
+      attributeFilter: [
+        "data-index",
+        "src",
+        "alt",
+        "title",
+        "aria-label",
+        "data-tooltip-content",
+        "class",
+        "style",
+        "href",
+      ],
     });
     // A restored session can have no unseen log entries. Still claim it as the
     // current game and prune records retained by older extension versions.
@@ -415,13 +570,14 @@ export class GameSession {
     if (this.disposed || !events.length) return false;
     let changed = false;
     for (const [index, event] of events.entries()) {
-      const id = `${source}:${event.type}:${this.events.length}:${index}:${JSON.stringify(event)}`;
+      const id = `${source}:${event.type}:${this.syntheticSequence++}:${index}:${JSON.stringify(event)}`;
       if (this.seenIds.has(id)) continue;
       this.seenIds.add(id);
       const stored = canonicalizeEvent(
         {
           ...event,
           id,
+          logWatermark: this.maxObservedLogIndex,
           timestamp: Date.now(),
           raw: source,
         } as StoredEvent,
@@ -456,6 +612,7 @@ export class GameSession {
     this.unmatchedSamples = [];
     this.seenIds.clear();
     this.syntheticSequence = 0;
+    this.maxObservedLogIndex = -1;
     if (rescan) this.scan(true);
     this.queueSave();
     this.onUpdate(this);
@@ -482,6 +639,8 @@ export class GameSession {
     this.unmatchedCount = 0;
     this.unmatchedIntegrityCount = 0;
     this.unmatchedSamples = [];
+    this.syntheticSequence = 0;
+    this.maxObservedLogIndex = -1;
     try {
       await enqueueStorage(clearCurrentGameStorage);
     } catch (error) {
@@ -517,6 +676,106 @@ export class GameSession {
     }
   }
 
+  /**
+   * Bot-only Colonist games can omit the rendered game-log virtualizer entirely.
+   * In that mode the page bridge remains public authority for the active turn
+   * and rolled total, so retain one roll per completed-turn ordinal. Skipped
+   * turn ordinals become explicit known-count gaps and stay fail-closed.
+   */
+  observeBoardDiceSnapshot(snapshot: {
+    gameKey?: string;
+    botOnlyGame?: boolean;
+    initialPlacement?: boolean;
+    hasRolled?: boolean;
+    lastRoll?: number;
+    currentPlayer?: string;
+    turn?: number;
+  } | undefined): boolean {
+    if (
+      this.disposed ||
+      !snapshot?.botOnlyGame ||
+      !snapshot.gameKey ||
+      snapshot.gameKey !== this.gameKey
+    ) {
+      return false;
+    }
+    if (snapshot.initialPlacement) {
+      return observeDiceSetupBoundary(this.diceHistory);
+    }
+    if (
+      !snapshot.hasRolled ||
+      !Number.isInteger(snapshot.lastRoll) ||
+      snapshot.lastRoll! < 2 ||
+      snapshot.lastRoll! > 12 ||
+      !snapshot.currentPlayer?.trim() ||
+      !Number.isInteger(snapshot.turn) ||
+      snapshot.turn! < 0
+    ) {
+      return false;
+    }
+    const turn = snapshot.turn!;
+    const actor = snapshot.currentPlayer.trim();
+    const eventId = `board-roll:${turn}:${actor}`;
+    // A log observed earlier in the same game stays authoritative by ordinal.
+    // This only avoids double-counting the current roll when Colonist unmounts
+    // the log virtualizer midgame; any contradiction stays fail-closed.
+    // (A complete log-anchored history may leave missingPrefixRolls undefined,
+    // so provenance completeness — not the explicit zero — is the anchor.)
+    if (
+      this.diceHistory.provenance === "complete-from-first-gameplay-roll" &&
+      this.diceHistory.gaps.length === 0
+    ) {
+      const ordinalRoll = this.diceHistory.rolls[turn];
+      if (ordinalRoll) {
+        if (ordinalRoll.actor === actor && ordinalRoll.total === snapshot.lastRoll) return false;
+        noteRollCapableLogAmbiguity(this.diceHistory, undefined);
+        this.queueSave();
+        this.onUpdate(this);
+        return true;
+      }
+    }
+    const existing = this.diceHistory.rolls.find((roll) =>
+      roll.eventId.startsWith(`board-roll:${turn}:`));
+    if (existing) {
+      if (existing.actor === actor && existing.total === snapshot.lastRoll) return false;
+      noteRollCapableLogAmbiguity(this.diceHistory, undefined);
+      this.queueSave();
+      this.onUpdate(this);
+      return true;
+    }
+    const priorBoardTurns = this.diceHistory.rolls.flatMap((roll) => {
+      const matched = roll.eventId.match(/^board-roll:(\d+):/u);
+      return matched ? [Number(matched[1])] : [];
+    });
+    if (priorBoardTurns.some((prior) => prior > turn)) {
+      // A delayed bridge snapshot cannot append a historical turn at the tail.
+      notePublicRollConflict(this.diceHistory, undefined);
+      this.queueSave();
+      this.onUpdate(this);
+      return true;
+    }
+    const anchored =
+      this.diceHistory.provenance === "complete-from-first-gameplay-roll" ||
+      this.diceHistory.missingPrefixRolls !== undefined;
+    const expectedTurn = anchored
+      ? (this.diceHistory.missingPrefixRolls ?? 0) + this.diceHistory.rolls.length
+        + this.diceHistory.gaps.reduce((count, gap) => count + (gap.missingRolls ?? 0), 0)
+      : priorBoardTurns.length
+        ? Math.max(...priorBoardTurns) + 1
+        : turn;
+    for (let missingTurn = expectedTurn; missingTurn < turn; missingTurn += 1) {
+      noteMissingPublicRoll(this.diceHistory);
+    }
+    appendPublicDiceRoll(this.diceHistory, {
+      actor,
+      total: snapshot.lastRoll!,
+      eventId,
+    });
+    this.queueSave();
+    this.onUpdate(this);
+    return true;
+  }
+
   setMyPlayer(myPlayer?: string): void {
     const normalized = myPlayer?.trim();
     if (!normalized || normalized === "You") {
@@ -544,6 +803,7 @@ export class GameSession {
 
   private scan(force = false): void {
     if (this.disposed) return;
+    const priorMaxLogIndex = this.maxObservedLogIndex;
     const language = detectLanguage();
     const elements = findMessageElements(this.root);
     const occurrence = new Map<string, number>();
@@ -557,6 +817,9 @@ export class GameSession {
     for (const element of elements) {
       const snapshot = snapshotMessage(element, language);
       if (!snapshot) continue;
+      if (validStoredLogIndex(snapshot.index)) {
+        this.maxObservedLogIndex = Math.max(this.maxObservedLogIndex, snapshot.index);
+      }
       let id = stableMessageId(snapshot);
       if (snapshot.index === undefined) {
         const base = hashString(`${snapshot.serialText}|${snapshot.visibleText}`);
@@ -587,6 +850,7 @@ export class GameSession {
     }
 
     let changed = false;
+    let journalReplayRequired = false;
     for (const candidate of candidates) {
       this.seenElements.set(candidate.element, candidate.id);
       if (this.seenIds.has(candidate.id)) continue;
@@ -613,10 +877,36 @@ export class GameSession {
       const stored = canonicalizeEvent({
         ...parsed.event,
         id: candidate.id,
-        ...(snapshot.index !== undefined ? { index: snapshot.index } : {}),
+        ...(snapshot.index !== undefined
+          ? { index: snapshot.index }
+          : { logWatermark: this.maxObservedLogIndex }),
         timestamp: Date.now(),
         raw: snapshot.serialText,
       } as StoredEvent, this.myPlayer);
+      const existingPosition =
+        stored.index === undefined
+          ? -1
+          : this.events.findIndex((event) => event.index === stored.index);
+      const existing =
+        existingPosition >= 0 ? this.events[existingPosition] : undefined;
+      const relation = existing
+        ? indexedEventRelation(existing, stored)
+        : undefined;
+      if (existing && relation === "conflict") {
+        // One server/log identity cannot own two semantic events. Retain the
+        // first event for generic tracking and fail stochastic authority closed.
+        notePublicRollConflict(this.diceHistory, stored.index);
+        this.partialHistory = true;
+        this.unmatchedCount += 1;
+        this.unmatchedIntegrityCount += 1;
+        this.recordUnmatched(
+          `${existing.raw} <> ${stored.raw}`,
+          stored.index,
+          { reason: "conflicting-log-index", affectsIntegrity: true },
+        );
+        changed = true;
+        continue;
+      }
       if (stored.type === "roll") {
         try {
           if (stored.dice) {
@@ -627,6 +917,11 @@ export class GameSession {
               eventId: stored.id,
               ...(stored.index !== undefined ? { logIndex: stored.index } : {}),
             });
+          } else if (stored.index !== undefined) {
+            // A rendered roll row can hydrate its dice icons later. Keep exact
+            // index uncertainty so that a later semantic rerender can resolve it
+            // instead of permanently inventing a missing gameplay ordinal.
+            noteRollCapableLogAmbiguity(this.diceHistory, stored.index);
           } else {
             noteMissingPublicRoll(this.diceHistory);
           }
@@ -645,11 +940,34 @@ export class GameSession {
           continue;
         }
       }
+      if (existing && relation === "same") continue;
+      if (existing && relation === "enrich") {
+        this.events[existingPosition] = enrichIndexedEvent(existing, stored);
+        journalReplayRequired = true;
+        changed = true;
+        continue;
+      }
       this.events.push(stored);
-      this.state = reduceTracker(this.state, stored, stored);
+      if (stored.index !== undefined && stored.index <= priorMaxLogIndex) {
+        journalReplayRequired = true;
+      }
+      if (!journalReplayRequired) {
+        this.state = reduceTracker(this.state, stored, stored);
+      }
       changed = true;
     }
 
+    if (journalReplayRequired) {
+      const journal = normalizeEventJournal(this.events);
+      this.events = journal.events;
+      for (const index of journal.conflictingLogIndices) {
+        notePublicRollConflict(this.diceHistory, index);
+      }
+      if (journal.conflictingLogIndices.length) this.partialHistory = true;
+      this.state = replayEvents(this.events);
+    }
+
+    reconcilePublicDiceSources(this.diceHistory);
     if (this.initialPlacement && observeDiceSetupBoundary(this.diceHistory)) changed = true;
     if (changed) {
       if (this.storageSuppressed) {
@@ -764,12 +1082,17 @@ export class GameSession {
     if (this.gameKey && stored.gameKey && this.gameKey !== stored.gameKey) return;
     this.gameKey ??= stored.gameKey;
     this.startedAt = stored.startedAt;
-    this.events = stored.events;
-    this.partialHistory = stored.partialHistory;
+    const journal = normalizeEventJournal(stored.events);
+    const normalizedStored = { ...stored, events: journal.events } as RestorableSession;
+    this.events = journal.events;
+    this.partialHistory = stored.partialHistory || journal.conflictingLogIndices.length > 0;
     this.diceHistory =
-      stored.schema === 4
-        ? restoreSchema4DiceHistory(stored)
-        : this.migrateLegacyDiceHistory(stored);
+      normalizedStored.schema === 4
+        ? restoreSchema4DiceHistory(normalizedStored)
+        : this.migrateLegacyDiceHistory(normalizedStored);
+    for (const index of journal.conflictingLogIndices) {
+      notePublicRollConflict(this.diceHistory, index);
+    }
     this.unmatchedCount = stored.unmatchedCount;
     this.unmatchedIntegrityCount =
       stored.unmatchedIntegrityCount ??
@@ -783,21 +1106,34 @@ export class GameSession {
         ...sample,
         affectsIntegrity: sample.affectsIntegrity ?? sample.reason === "unrecognized-log-format",
       }));
-    // Reclassify only retained, now-recognized bot placement notices. Exact
-    // covered indexes can clear parser ambiguity, never occupied-roll conflicts.
+    // Reclassify retained legacy misses that the current parser now proves are
+    // harmless/redundant. Exact covered indexes can clear parser ambiguity,
+    // never occupied-roll conflicts.
     for (const sample of this.unmatchedSamples) {
       if (sample.reason !== "unrecognized-log-format") continue;
       const classification = classifyUnmatchedLog({
         serialText: sample.sample, visibleText: sample.sample, language: "en",
       });
-      if (classification.reason !== "known-ignored-bot-status") continue;
+      if (classification.affectsIntegrity) continue;
       if (sample.affectsIntegrity) {
         this.unmatchedIntegrityCount = Math.max(0, this.unmatchedIntegrityCount - sample.count);
       }
       Object.assign(sample, classification);
-      observeLogCoverage(this.diceHistory, [sample.firstLogIndex, sample.lastLogIndex].filter(validStoredLogIndex));
+      observeLogCoverage(
+        this.diceHistory,
+        [sample.firstLogIndex, sample.lastLogIndex].filter(validStoredLogIndex),
+      );
     }
-    this.state = replayEvents(stored.events);
+    this.maxObservedLogIndex = Math.max(
+      journal.maxLogIndex,
+      ...this.diceHistory.coverage.ranges.map(([, end]) => end),
+      ...this.diceHistory.ambiguousLogIndices,
+      ...this.unmatchedSamples.flatMap((sample) =>
+        [sample.firstLogIndex, sample.lastLogIndex].filter(validStoredLogIndex),
+      ),
+    );
+    this.syntheticSequence = Math.max(this.syntheticSequence, this.events.length);
+    this.state = replayEvents(this.events);
     for (const id of stored.seenIds) this.seenIds.add(id);
   }
 

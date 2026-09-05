@@ -4667,6 +4667,35 @@ extern "C" __global__ void run_rollout_steps_kernel(
     }
 }
 
+// Strategic root search uses a common pre-action turn boundary. Micro-actions
+// (building/trading) cannot buy a shorter opponent horizon. The action guard
+// detects a stuck rollout instead of silently scoring an earlier leaf.
+extern "C" __global__ void run_root_rollout_turns_kernel(
+    uint32_t *states, const uint32_t *topology, uint32_t *actions,
+    uint32_t *status, uint64_t *rng_states, uint64_t *chance_rng_states,
+    const uint32_t *base_states, const uint32_t *base_indices,
+    uint32_t base_stride, uint32_t rollouts_per_action,
+    uint32_t stride, uint32_t count, uint32_t turns_ahead
+) {
+    const uint32_t lane = blockIdx.x * blockDim.x + threadIdx.x;
+    if (lane >= count || status[lane] != STATUS_OK) return;
+    const uint32_t base = base_indices[lane / rollouts_per_action];
+    const uint32_t target = state_get(base_states, base_stride, STATE_TURN, base) + turns_ahead;
+    for (uint32_t step = 0u; step < 256u; ++step) {
+        if (status[lane] != STATUS_OK
+            || state_get(states, stride, STATE_PHASE, lane) == PHASE_FINISHED
+            || state_get(states, stride, STATE_TURN, lane) >= target) return;
+        generate_rollout_action_lane(
+            states, topology, actions, rng_states, chance_rng_states, stride, lane
+        );
+        apply_transition_lane(states, topology, actions, status, stride, lane);
+    }
+    if (state_get(states, stride, STATE_PHASE, lane) != PHASE_FINISHED
+        && state_get(states, stride, STATE_TURN, lane) < target) {
+        status[lane] = STATUS_INVALID_STATE;
+    }
+}
+
 extern "C" __global__ void assign_rotating_profiles_kernel(
     uint32_t *states,
     const uint32_t *profiles,

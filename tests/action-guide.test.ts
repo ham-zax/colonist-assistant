@@ -1954,6 +1954,37 @@ describe("action guide autopilot", () => {
     });
   });
 
+  it("replans promptly when the D123 grain offer control is absent", async () => {
+    const open = document.createElement("button");
+    open.id = "action-button-trade";
+    open.addEventListener("click", () => {
+      const panel = document.getElementById("missing-grain-panel");
+      if (panel) { panel.remove(); return; }
+      const modal = document.createElement("div");
+      modal.id = "missing-grain-panel";
+      modal.innerHTML = '<button id="action-button-trade-bank" disabled></button>';
+      document.body.append(modal);
+    });
+    document.body.append(open);
+    const give = emptyResources();
+    give.grain = 3;
+    const receive = emptyResources();
+    receive.ore = 1;
+    const onExecution = vi.fn();
+    renderActionGuide({
+      kind: "trade-builder", mode: "bank", give, receive,
+      label: "Trade 3 grain for ore", signature: "D123-missing-grain", confidence: 1,
+    }, { highlight: true, autonomous: true, onExecution });
+    await vi.advanceTimersByTimeAsync(2_500);
+    expect(onExecution).toHaveBeenCalledTimes(1);
+    expect(onExecution).toHaveBeenCalledWith(expect.objectContaining({
+      succeeded: false, reason: "Workflow control not found: Offer grain 1/3",
+    }));
+    expect(document.getElementById("missing-grain-panel")).toBeNull();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(onExecution).toHaveBeenCalledTimes(1);
+  });
+
   it("retries an idempotent trade-panel control when Colonist drops the first click", async () => {
     const open = document.createElement("button");
     open.id = "action-button-trade";

@@ -2213,6 +2213,21 @@ const startWorkflow = (
     requestBoardRefresh();
   };
 
+  const startedAt = Date.now();
+  let activeStep = -1;
+  let stepStartedAt = startedAt;
+  // All retries share a deadline, including controls replaced before clicking.
+  const expired = (index: number): boolean => {
+    if (activeStep !== index) {
+      activeStep = index;
+      stepStartedAt = Date.now();
+    }
+    if (!tradeTransaction) return false;
+    if (Date.now() - stepStartedAt < 4_000 && Date.now() - startedAt < 12_000) return false;
+    fail(`Trade workflow timed out: ${steps[index]?.label ?? "commit"}`);
+    return true;
+  };
+
   const run = (index: number, attempts = 0): void => {
     if (
       generation !== workflowGeneration ||
@@ -2220,6 +2235,7 @@ const startWorkflow = (
     ) {
       return;
     }
+    if (expired(index)) return;
     const tradeFailure = tradeTransaction
       ? visibleTradeFailure(
           ignoredTradeFailureLogKeys,
@@ -2275,9 +2291,17 @@ const startWorkflow = (
       later(() => run(index + 1), 90);
       return;
     }
+    const activeOptions = workflowOptions ?? options;
+    const validateState = index === 0
+      ? activeOptions.validate
+      : activeOptions.validateContinuation ?? activeOptions.validate;
+    if (tradeTransaction && validateState && !validateState()) {
+      fail("State signature or legal target set changed during workflow");
+      return;
+    }
     const element = step.resolve();
     if (!element) {
-      if (attempts < 30) {
+      if (attempts < 30 && (!tradeTransaction || Date.now() - stepStartedAt < 1_200)) {
         later(() => run(index, attempts + 1), 180);
       } else {
         fail(`Workflow control not found: ${step.label}`);
@@ -2314,6 +2338,7 @@ const startWorkflow = (
         ) {
           return;
         }
+        if (expired(index)) return;
         const failure = tradeTransaction
           ? visibleTradeFailure(
               ignoredTradeFailureLogKeys,
@@ -2414,6 +2439,7 @@ const startWorkflow = (
           advance();
           return;
         }
+        if (expired(index)) return;
         // Colonist frequently replaces React controls while the workflow is
         // waiting for its first-click delay or a modal animation. A detached
         // node still accepts HTMLElement.click() without reaching the live UI,
@@ -2423,7 +2449,11 @@ const startWorkflow = (
         if (!freshElement) {
           workflowCurrentElement = undefined;
           requestBoardRefresh();
-          later(() => run(index, attempts + 1), 180);
+          if (tradeTransaction && Date.now() - stepStartedAt >= 1_200) {
+            fail(`Workflow control not found: ${step.label}`);
+          } else {
+            later(() => run(index, attempts + 1), 180);
+          }
           return;
         }
         workflowCurrentElement = freshElement;

@@ -798,6 +798,63 @@ describe("overlay settings interaction", () => {
     overlay.destroy();
   });
 
+  it("does not start CPU/GPU search for an incoming trade disabled by local policy", async () => {
+    const tracker = reduceTracker(createTrackerState(), {
+      type: "discover",
+      player: "rodrgds",
+    });
+    const give = emptyResources();
+    give.wool = 1;
+    const receive = emptyResources();
+    receive.brick = 1;
+    const overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS, disablePlayerTrades: true },
+      { reset: vi.fn() },
+    );
+    await Promise.resolve();
+    sendMessage.mockClear();
+    const internals = overlay as unknown as {
+      board: Parameters<AssistantOverlay["updateBoard"]>[0];
+      decisionRuntimeError: string;
+      scheduleDecisionAnalysis: (
+        state: ReturnType<typeof createTrackerState>,
+        player: string,
+      ) => void;
+    };
+    internals.board = {
+      hexes: [], vertices: [], edges: [], diceMode: "random",
+      gameKey: "disabled-incoming-trade", myPlayer: "rodrgds",
+      currentPlayer: "Bot", playerOrder: ["rodrgds", "Bot"],
+      isMyTurn: false, hasRolled: true, action: "none",
+      activeTrades: [{
+        id: "incoming-disabled",
+        creator: "Bot",
+        tradeExecutor: "Bot",
+        creatorGive: give,
+        creatorReceive: receive,
+        incoming: true,
+        counterOffer: false,
+        canAccept: true,
+        myResponse: "pending",
+      }],
+      localSeatDiagnostics: {
+        seatSource: "gameController.myColor+currentUserId+gameUserStates",
+        identity: {
+          status: "resolved", reason: "cross-checked",
+          source: "controller+account-user-id+store-roster",
+          currentUserIdAvailable: true, currentUserMatchColors: [1],
+          myColor: 1, currentUserColor: 1,
+        },
+      },
+    };
+
+    internals.scheduleDecisionAnalysis(tracker, "rodrgds");
+
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(internals.decisionRuntimeError).toBe("");
+    overlay.destroy();
+  });
+
   it("searches the live outgoing counteroffer while continuing to show its wait state", async () => {
     const tracker = reduceTracker(createTrackerState(), {
       type: "discover",

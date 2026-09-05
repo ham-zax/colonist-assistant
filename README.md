@@ -12,6 +12,10 @@ CPU/WASM owns opening, opponent-turn pondering, and unavailable-backend fallback
 Both backends preserve the requested stochastic model, including the named
 Balanced-Dice reference model when public evidence supports it. See the
 [CPU/GPU Mref contract and verification gates](docs/CPU_GPU_MREF_CONTRACT.md).
+Native strategic roots use a common completed-turn horizon. Unfinished
+rollouts retain terminal uncertainty instead of counting as neutral outcomes;
+overlapping terminal evidence defers to strategic leaf value. This repair is
+not a measured live win-rate improvement.
 The engine combines exact local solvers, bounded setup search, CUDA strategic
 rollouts, and observation-safe weighted-belief Deep MaxN. Experimental belief
 PUCT, UCT, and AlphaBeta remain diagnostic

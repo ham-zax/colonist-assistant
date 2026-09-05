@@ -521,9 +521,7 @@ export const explainDeepSearchDecision = (
       `The surviving root won the native GPU comparison after ${search.rollouts.toLocaleString()} rollout samples across ${search.rustSearchParticleCount.toLocaleString()} searched belief worlds`,
     );
     evidence.push(
-      search.rootProvenance.horizonEscalation
-        ? "Escalated roots are rerun at one common deeper horizon; terminal outcomes remain primary, while overlapping terminal evidence defers to the parity-tested strategic cutoff, raw victory-point margin, and then faster completion"
-        : "GPU roots are ordered by terminal outcome, then the parity-tested strategic cutoff, raw victory-point margin, and faster completion, with strategic prior as the final tie-break",
+      "GPU roots share a completed-turn horizon. Terminal bounds include unresolved outcomes and sampling uncertainty; overlapping evidence is ranked by strategic cutoff, raw victory-point margin, completion time, and strategic prior",
     );
   } else if (search.authority === "weighted-policy") {
     summary = `The weighted policy chose to ${chosenLabel}`;

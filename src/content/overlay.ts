@@ -2681,6 +2681,21 @@ export class AssistantOverlay {
         }
       : board;
     const decisionBoard = decisionBoardBase;
+    if (this.settings.disablePlayerTrades && hasPendingIncomingTrade) {
+      // This policy makes the only executable local response deterministic.
+      // Do not spend CPU/GPU budget searching a trade that nextClick() must
+      // decline regardless of strategic value.
+      this.decisionAnalysis = undefined;
+      this.decisionKey = "";
+      this.decisionPendingKey = "";
+      this.decisionSlowKey = "";
+      this.decisionWaitingForPreviousSearch = false;
+      this.decisionRuntimeError = "";
+      this.decisionEvidenceWait = undefined;
+      this.decisionTraces.supersedePending();
+      this.decisionWorker.reset();
+      return;
+    }
     if (this.awaitingLocalSevenProtocol()) {
       this.decisionAnalysis = undefined;
       this.decisionKey = "";
