@@ -34,7 +34,7 @@ const HORIZON_ESCALATION_MIN_REMAINING_MS: u32 = 40;
 const HORIZON_ESCALATION_MIN_SAMPLES_PER_ROOT: usize = 16;
 const HORIZON_ESCALATION_MAX_SAMPLES_PER_ROOT: usize = 32;
 pub const NATIVE_GPU_PROTOCOL_VERSION: u32 = 6;
-pub const NATIVE_GPU_STATE_SCHEMA_VERSION: u32 = 3;
+pub const NATIVE_GPU_STATE_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -640,11 +640,6 @@ impl NativeGpuSearchEngine {
         }
 
         let stochastic = resolve_stochastic(&request)?;
-        if stochastic.state.reference_belief().is_some() {
-            return Err(
-                "GPU native search supports only m0-fair-iid-2d6-v1 stochastic semantics".into(),
-            );
-        }
         let particles = game_states(
             request.state,
             request.last_rejected_trade,

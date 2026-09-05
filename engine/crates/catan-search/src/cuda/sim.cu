@@ -66,7 +66,25 @@ typedef unsigned long long uint64_t;
 #define PLAYER_STRIDE 28u
 #define STATE_DOMESTIC_TRADE_DISABLED 402u
 #define STATE_DOMESTIC_TRADE_EMBARGOES 403u
-#define STATE_WORDS 404u
+// Mref lanes carry one sampled public controller. Pending roots refer to a
+// shared immutable posterior pool, sampled independently inside each rollout.
+#define STATE_DICE_MODEL 404u
+#define STATE_DICE_POOL_OFFSET 405u
+#define STATE_DICE_POOL_COUNT 406u
+#define STATE_DICE_CONTROLLER 407u
+#define DICE_CONTROLLER_WORDS 26u
+#define DICE_PARTICLE_WORDS 28u
+#define DICE_REMAINING 0u
+#define DICE_CARDS_LEFT 11u
+#define DICE_RECENT 12u
+#define DICE_RECENT_LEN 17u
+#define DICE_INITIALIZED 18u
+#define DICE_SEVENS 19u
+#define DICE_STREAK_OWNER 23u
+#define DICE_STREAK_COUNT 24u
+#define DICE_PREPARED_ACTOR 25u
+#define DICE_RNG_DOMAIN 0x6d72656664696365ull
+#define STATE_WORDS 433u
 
 #define PLAYER_RESOURCES 0u
 #define PLAYER_DEVELOPMENT 5u
@@ -1029,6 +1047,203 @@ static inline __device__ uint64_t splitmix64_next(uint64_t *state) {
 
 static inline __device__ uint32_t rng_range(uint64_t *state, uint32_t end) {
     return (uint32_t)(splitmix64_next(state) % (uint64_t)end);
+}
+
+static inline __device__ uint32_t dice_get(
+    const uint32_t *states, uint32_t stride, uint32_t lane, uint32_t field
+) {
+    return state_get(states, stride, STATE_DICE_CONTROLLER + field, lane);
+}
+
+static inline __device__ void dice_set(
+    uint32_t *states, uint32_t stride, uint32_t lane, uint32_t field, uint32_t value
+) {
+    state_set(states, stride, STATE_DICE_CONTROLLER + field, lane, value);
+}
+
+// Exact quotient/remainder of value * 2^32 / total without overflowing u64.
+// Raw reference weights total < 2^50 even with saturated u32 seven counters.
+static inline __device__ uint64_t dice_fixed_quotient(
+    uint64_t value, uint64_t total, uint64_t *remainder
+) {
+    if (value == total) { *remainder = 0ull; return 0x100000000ull; }
+    uint64_t quotient = 0ull;
+    for (uint32_t bit = 0u; bit < 32u; ++bit) {
+        value <<= 1u;
+        quotient <<= 1u;
+        if (value >= total) { value -= total; quotient |= 1ull; }
+    }
+    *remainder = value;
+    return quotient;
+}
+
+static inline __device__ int reference_dice_distribution(
+    const uint32_t *states, uint32_t stride, uint32_t lane, uint64_t *weights
+) {
+    for (uint32_t i = 0u; i < 11u; ++i) weights[i] = 0ull;
+    const uint32_t actor = state_get(states, stride, STATE_CURRENT_PLAYER, lane);
+    const uint32_t players = state_get(states, stride, STATE_NUM_PLAYERS, lane);
+    if (state_get(states, stride, STATE_DICE_MODEL, lane) != 1u
+        || state_get(states, stride, STATE_DICE_POOL_COUNT, lane) != 0u
+        || actor >= players || dice_get(states, stride, lane, DICE_PREPARED_ACTOR) != actor + 1u) {
+        return 0;
+    }
+    const uint32_t mask = dice_get(states, stride, lane, DICE_INITIALIZED);
+    if ((mask & (1u << actor)) == 0u) return 0;
+    uint32_t initialized = 0u;
+    uint64_t sevens = 0ull;
+    for (uint32_t player = 0u; player < players; ++player) {
+        initialized += (mask >> player) & 1u;
+        sevens += (uint64_t)dice_get(states, stride, lane, DICE_SEVENS + player);
+    }
+    const uint64_t unit = sevens < initialized ? 1ull : sevens;
+    const uint64_t denominator = 5ull * unit;
+    long long numerator = sevens < initialized ? 5ll
+        : 5ll * (2ll * (long long)sevens - (long long)initialized
+            * (long long)dice_get(states, stride, lane, DICE_SEVENS + actor));
+    // Imbalance is in [-2, 2]. Beyond streak 10 either sign is already clamped;
+    // bounding only this calculation avoids overflow without changing the law.
+    const uint32_t streak = dice_get(states, stride, lane, DICE_STREAK_COUNT);
+    const long long delta = 2ll * (long long)(streak < 10u ? streak : 10u) * (long long)unit;
+    numerator += dice_get(states, stride, lane, DICE_STREAK_OWNER) == actor + 1u ? -delta : delta;
+    if (numerator < 0ll) numerator = 0ll;
+    if (numerator > (long long)(2ull * denominator)) numerator = (long long)(2ull * denominator);
+
+    uint64_t raw[11];
+    uint64_t remainders[11];
+    uint64_t total = 0ull;
+    const uint32_t recent_len = dice_get(states, stride, lane, DICE_RECENT_LEN);
+    if (recent_len > 5u) return 0;
+    for (uint32_t i = 0u; i < 11u; ++i) {
+        uint32_t recent = 0u;
+        for (uint32_t j = 0u; j < recent_len; ++j) {
+            recent += dice_get(states, stride, lane, DICE_RECENT + j) == i + 2u ? 1u : 0u;
+        }
+        const uint32_t suppression = recent >= 3u ? 0u : 100u - 34u * recent;
+        raw[i] = (uint64_t)dice_get(states, stride, lane, DICE_REMAINING + i)
+            * (uint64_t)suppression * (i == 5u ? (uint64_t)numerator : denominator);
+        total += raw[i];
+    }
+    if (total == 0ull) return 0;
+    uint64_t assigned = 0ull;
+    for (uint32_t i = 0u; i < 11u; ++i) {
+        weights[i] = dice_fixed_quotient(raw[i], total, &remainders[i]);
+        assigned += weights[i];
+    }
+    // Largest remainder, ties by ascending total, exactly as the CPU oracle.
+    uint32_t awarded = 0u;
+    for (uint64_t extra = assigned; extra < 0x100000000ull; ++extra) {
+        uint32_t best = 11u;
+        for (uint32_t i = 0u; i < 11u; ++i) {
+            if ((awarded & (1u << i)) == 0u
+                && (best == 11u || remainders[i] > remainders[best])) best = i;
+        }
+        if (best == 11u) return 0;
+        ++weights[best];
+        awarded |= 1u << best;
+    }
+    return 1;
+}
+
+static inline __device__ int prepare_reference_dice(
+    uint32_t *states, uint32_t stride, uint32_t lane
+) {
+    if (state_get(states, stride, STATE_DICE_MODEL, lane) == 0u) return 1;
+    const uint32_t actor = state_get(states, stride, STATE_CURRENT_PLAYER, lane);
+    if (state_get(states, stride, STATE_DICE_MODEL, lane) != 1u
+        || state_get(states, stride, STATE_DICE_POOL_COUNT, lane) != 0u
+        || dice_get(states, stride, lane, DICE_PREPARED_ACTOR) != 0u
+        || actor >= state_get(states, stride, STATE_NUM_PLAYERS, lane)) return 0;
+    dice_set(states, stride, lane, DICE_INITIALIZED,
+        dice_get(states, stride, lane, DICE_INITIALIZED) | (1u << actor));
+    if (dice_get(states, stride, lane, DICE_CARDS_LEFT) < 13u) {
+        for (uint32_t i = 0u; i < 11u; ++i) {
+            dice_set(states, stride, lane, DICE_REMAINING + i, i < 6u ? i + 1u : 11u - i);
+        }
+        dice_set(states, stride, lane, DICE_CARDS_LEFT, 36u);
+    }
+    dice_set(states, stride, lane, DICE_PREPARED_ACTOR, actor + 1u);
+    return 1;
+}
+
+static inline __device__ int resolve_reference_dice(
+    uint32_t *states, uint32_t stride, uint32_t lane, uint32_t total
+) {
+    if (state_get(states, stride, STATE_DICE_MODEL, lane) == 0u) return 1;
+    uint64_t weights[11];
+    if (total < 2u || total > 12u || !reference_dice_distribution(states, stride, lane, weights)
+        || weights[total - 2u] == 0ull) return 0;
+    const uint32_t remaining = dice_get(states, stride, lane, DICE_REMAINING + total - 2u);
+    const uint32_t cards = dice_get(states, stride, lane, DICE_CARDS_LEFT);
+    if (remaining == 0u || cards == 0u) return 0;
+    dice_set(states, stride, lane, DICE_REMAINING + total - 2u, remaining - 1u);
+    dice_set(states, stride, lane, DICE_CARDS_LEFT, cards - 1u);
+    uint32_t recent_len = dice_get(states, stride, lane, DICE_RECENT_LEN);
+    if (recent_len == 5u) {
+        for (uint32_t i = 0u; i < 4u; ++i) {
+            dice_set(states, stride, lane, DICE_RECENT + i, dice_get(states, stride, lane, DICE_RECENT + i + 1u));
+        }
+        recent_len = 4u;
+    }
+    dice_set(states, stride, lane, DICE_RECENT + recent_len, total);
+    dice_set(states, stride, lane, DICE_RECENT_LEN, recent_len + 1u);
+    const uint32_t actor = state_get(states, stride, STATE_CURRENT_PLAYER, lane);
+    if (total == 7u) {
+        const uint32_t sevens = dice_get(states, stride, lane, DICE_SEVENS + actor);
+        dice_set(states, stride, lane, DICE_SEVENS + actor, sevens == 0xffffffffu ? sevens : sevens + 1u);
+        const uint32_t streak = dice_get(states, stride, lane, DICE_STREAK_COUNT);
+        dice_set(states, stride, lane, DICE_STREAK_COUNT,
+            dice_get(states, stride, lane, DICE_STREAK_OWNER) == actor + 1u
+                ? (streak == 0xffffffffu ? streak : streak + 1u) : 1u);
+        dice_set(states, stride, lane, DICE_STREAK_OWNER, actor + 1u);
+    }
+    dice_set(states, stride, lane, DICE_PREPARED_ACTOR, 0u);
+    return 1;
+}
+
+static inline __device__ int materialize_reference_dice(
+    uint32_t *states, const uint32_t *pool, uint32_t stride, uint32_t lane, uint64_t seed
+) {
+    const uint32_t count = state_get(states, stride, STATE_DICE_POOL_COUNT, lane);
+    if (count == 0u) return 1;
+    if (count > 64u || state_get(states, stride, STATE_DICE_MODEL, lane) != 1u) return 0;
+    const uint32_t offset = state_get(states, stride, STATE_DICE_POOL_OFFSET, lane);
+    uint64_t rng = mix_stream_seed(seed, 0ull, DICE_RNG_DOMAIN);
+    uint64_t ticket = splitmix64_next(&rng) & 0xffffffffull;
+    for (uint32_t particle = 0u; particle < count; ++particle) {
+        const uint32_t base = offset + particle * DICE_PARTICLE_WORDS;
+        const uint64_t mass = (uint64_t)pool[base] | ((uint64_t)pool[base + 1u] << 32u);
+        if (ticket < mass) {
+            for (uint32_t field = 0u; field < DICE_CONTROLLER_WORDS; ++field) {
+                dice_set(states, stride, lane, field, pool[base + 2u + field]);
+            }
+            state_set(states, stride, STATE_DICE_POOL_COUNT, lane, 0u);
+            state_set(states, stride, STATE_DICE_POOL_OFFSET, lane, 0u);
+            return 1;
+        }
+        ticket -= mass;
+    }
+    return 0;
+}
+
+extern "C" __global__ void materialize_reference_dice_kernel(
+    uint32_t *states, const uint32_t *pool, const uint64_t *chance_rng,
+    uint32_t *status, uint32_t stride, uint32_t count
+) {
+    const uint32_t lane = blockIdx.x * blockDim.x + threadIdx.x;
+    if (lane < count && !materialize_reference_dice(states, pool, stride, lane, chance_rng[lane])) {
+        status[lane] = STATUS_INVALID_STATE;
+    }
+}
+
+extern "C" __global__ void reference_dice_distribution_kernel(
+    const uint32_t *states, uint64_t *output, uint32_t stride, uint32_t count
+) {
+    const uint32_t lane = blockIdx.x * blockDim.x + threadIdx.x;
+    if (lane >= count) return;
+    uint64_t weights[11];
+    reference_dice_distribution(states, stride, lane, weights);
+    for (uint32_t i = 0u; i < 11u; ++i) output[i * stride + lane] = weights[i];
 }
 
 static inline __device__ void clear_action(
@@ -3184,9 +3399,22 @@ static inline __device__ void generate_rollout_action_lane(
         }
         seen = total_weight > 0u ? 1u : 0u;
     } else if (phase == PHASE_ROLL_CHANCE) {
-        const uint32_t roll = rng_range(&rng, 6u) + rng_range(&rng, 6u) + 2u;
+        uint32_t roll = 0u;
+        if (state_get(states, stride, STATE_DICE_MODEL, lane) == 0u) {
+            // Preserve the M0 random stream byte-for-byte.
+            roll = rng_range(&rng, 6u) + rng_range(&rng, 6u) + 2u;
+        } else {
+            uint64_t weights[11];
+            if (reference_dice_distribution(states, stride, lane, weights)) {
+                uint64_t ticket = splitmix64_next(&rng) & 0xffffffffull;
+                for (uint32_t i = 0u; i < 11u; ++i) {
+                    if (ticket < weights[i]) { roll = i + 2u; break; }
+                    ticket -= weights[i];
+                }
+            }
+        }
         write_action(actions, stride, lane, ACTION_RESOLVE_ROLL, roll, 0u, 0u);
-        seen = 1u;
+        seen = roll >= 2u ? 1u : 0u;
     } else if (phase == PHASE_DISCARD) {
         const uint32_t player = state_get(states, stride, STATE_DISCARD_CURSOR, lane);
         const uint32_t required = state_get(states, stride, STATE_DISCARD_REMAINING + player, lane);
@@ -3853,6 +4081,10 @@ static inline __device__ void apply_transition_lane(
             status[lane] = STATUS_INVALID_PHASE;
             return;
         }
+        if (!prepare_reference_dice(states, stride, lane)) {
+            status[lane] = STATUS_INVALID_STATE;
+            return;
+        }
         state_set(states, stride, STATE_PHASE, lane, PHASE_ROLL_CHANCE);
         state_set(states, stride, STATE_PHASE_ARG, lane, 0u);
         return;
@@ -3864,7 +4096,7 @@ static inline __device__ void apply_transition_lane(
             return;
         }
         const uint32_t roll = action_get(actions, stride, ACTION_ARG0, lane);
-        if (roll < 2u || roll > 12u) {
+        if (roll < 2u || roll > 12u || !resolve_reference_dice(states, stride, lane, roll)) {
             status[lane] = STATUS_INVALID_ACTION;
             return;
         }
@@ -4993,6 +5225,7 @@ extern "C" __global__ void expand_root_rollouts_kernel(
     const uint32_t *base_states,
     uint32_t base_stride,
     const uint32_t *topology,
+    const uint32_t *dice_pool,
     const uint32_t *root_actions,
     const uint32_t *root_base_indices,
     const uint64_t *root_seed_keys,
@@ -5032,6 +5265,10 @@ extern "C" __global__ void expand_root_rollouts_kernel(
     chance_rng_states[lane] = mix_stream_seed(
         seed ^ root_seed, rollout, ROOT_CHANCE_RNG_DOMAIN
     );
+    if (!materialize_reference_dice(states, dice_pool, stride, lane, chance_rng_states[lane])) {
+        status[lane] = STATUS_INVALID_STATE;
+        return;
+    }
     apply_transition_lane(states, topology, actions, status, stride, lane);
 }
 
@@ -5114,7 +5351,7 @@ extern "C" __global__ void reduce_root_rollouts_kernel(
 
 // Checked before any resident state or reduction buffer is used by Rust.
 extern "C" __global__ void simulation_contract_kernel(uint32_t *out) {
-    out[0] = 2u;
+    out[0] = 3u;
     out[1] = STATE_WORDS;
     out[2] = ACTION_WORDS;
     out[3] = 12u;

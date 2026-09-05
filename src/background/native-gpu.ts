@@ -1,13 +1,15 @@
 import type { NativeGpuBuildIdentity } from "../core/engine";
 import type { WasmSearchResponse } from "../generated/wasm/colonist_search.js";
-import { M0_FAIR_IID_2D6_V1 } from "../core/dice-history";
+import { M0_FAIR_IID_2D6_V1, MREF_COLONIST_LINKED_2024_V1 } from "../core/dice-history";
 
 export const NATIVE_GPU_HOST = "io.colonist_assistant.gpu";
 export const NATIVE_GPU_PROTOCOL_VERSION = 6;
-export const NATIVE_GPU_STATE_SCHEMA_VERSION = 3;
-export const NATIVE_GPU_STOCHASTIC_MODEL = M0_FAIR_IID_2D6_V1;
+// Schema 4 requires stateful Mref support; an older M0-only host must not
+// pass the handshake and silently reinterpret a Balanced request.
+export const NATIVE_GPU_STATE_SCHEMA_VERSION = 4;
+export const NATIVE_GPU_STOCHASTIC_MODELS = [M0_FAIR_IID_2D6_V1, MREF_COLONIST_LINKED_2024_V1] as const;
 export const nativeGpuSupportsStochasticModel = (model: string | undefined): boolean =>
-  (model ?? M0_FAIR_IID_2D6_V1) === NATIVE_GPU_STOCHASTIC_MODEL;
+  NATIVE_GPU_STOCHASTIC_MODELS.some((supported) => supported === (model ?? M0_FAIR_IID_2D6_V1));
 const EXPECTED_ENGINE_REVISION = "deep-maxn-v12";
 
 export interface NativeGpuStatus {

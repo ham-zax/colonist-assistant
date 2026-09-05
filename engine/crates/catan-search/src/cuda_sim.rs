@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use colonist_catan_core::{
     Action, Board, Building, DevCard, GameState, Phase, Port, Resource, TradeOffer,
+    ReferenceController, StochasticState, FIXED_BELIEF_MASS, REFERENCE_PARTICLES,
 };
 use cudarc::driver::{
     CudaContext, CudaFunction, CudaModule, CudaSlice, DriverError, LaunchConfig, PushKernelArg,
@@ -73,7 +74,13 @@ const STATE_PLAYERS: usize = STATE_ROADS + EDGE_COUNT;
 const PLAYER_STRIDE: usize = 28;
 const STATE_DOMESTIC_TRADE_DISABLED: usize = STATE_PLAYERS + MAX_PLAYERS * PLAYER_STRIDE;
 const STATE_DOMESTIC_TRADE_EMBARGOES: usize = STATE_DOMESTIC_TRADE_DISABLED + 1;
-const STATE_WORDS: usize = STATE_DOMESTIC_TRADE_EMBARGOES + 1;
+const STATE_DICE_MODEL: usize = STATE_DOMESTIC_TRADE_EMBARGOES + 1;
+const STATE_DICE_POOL_OFFSET: usize = STATE_DICE_MODEL + 1;
+const STATE_DICE_POOL_COUNT: usize = STATE_DICE_POOL_OFFSET + 1;
+const STATE_DICE_CONTROLLER: usize = STATE_DICE_POOL_COUNT + 1;
+const DICE_CONTROLLER_WORDS: usize = 26;
+const DICE_PARTICLE_WORDS: usize = DICE_CONTROLLER_WORDS + 2;
+const STATE_WORDS: usize = STATE_DICE_CONTROLLER + DICE_CONTROLLER_WORDS;
 
 const ACTION_TAG: usize = 0;
 const ACTION_ARG0: usize = 1;
@@ -320,6 +327,11 @@ impl CudaSimPackedState {
     pub fn new(state: &GameState) -> Result<Self, CudaSimError> {
         let mut words = [0u32; STATE_WORDS];
         pack_state_words(state, &mut words)?;
+        if words[STATE_DICE_POOL_COUNT] != 0 {
+            return Err(CudaSimError::UnsupportedState(
+                "a public dice mixture requires upload_states and rollout materialization",
+            ));
+        }
         Ok(Self { words })
     }
 
@@ -458,6 +470,9 @@ pub struct CudaSimEngine {
     summary_kernel: CudaFunction,
     expand_roots_kernel: CudaFunction,
     reduce_roots_kernel: CudaFunction,
+    materialize_dice_kernel: CudaFunction,
+    dice_pool_device: CudaSlice<u32>,
+    pending_dice: bool,
     topology_device: CudaSlice<u32>,
     topology_host: Vec<u32>,
     state_device: CudaSlice<u32>,
@@ -524,7 +539,9 @@ impl CudaSimEngine {
         let summary_kernel = module.load_function("summarize_games_kernel")?;
         let expand_roots_kernel = module.load_function("expand_root_rollouts_kernel")?;
         let reduce_roots_kernel = module.load_function("reduce_root_rollouts_kernel")?;
+        let materialize_dice_kernel = module.load_function("materialize_reference_dice_kernel")?;
         let stream = context.default_stream();
+        let dice_pool_device = stream.alloc_zeros(1)?;
         let contract_kernel = module.load_function("simulation_contract_kernel")?;
         let mut contract_device = stream.alloc_zeros::<u32>(4)?;
         let mut arguments = stream.launch_builder(&contract_kernel);
@@ -532,7 +549,7 @@ impl CudaSimEngine {
         unsafe { arguments.launch(LaunchConfig::for_num_elems(1))? };
         let contract = stream.clone_dtoh(&contract_device)?;
         stream.synchronize()?;
-        if contract != [2, STATE_WORDS as u32, ACTION_WORDS as u32, ROOT_STATS_WORDS as u32] {
+        if contract != [3, STATE_WORDS as u32, ACTION_WORDS as u32, ROOT_STATS_WORDS as u32] {
             return Err(CudaSimError::UnsupportedState("embedded CUDA artifact ABI does not match Rust; rebuild sim.ptx"));
         }
         let topology_device = stream.clone_htod(&topology_host)?;
@@ -576,6 +593,9 @@ impl CudaSimEngine {
             summary_kernel,
             expand_roots_kernel,
             reduce_roots_kernel,
+            materialize_dice_kernel,
+            dice_pool_device,
+            pending_dice: false,
             topology_device,
             topology_host,
             state_device,
@@ -644,12 +664,37 @@ impl CudaSimEngine {
         self.ensure_capacity(states.len())?;
         self.state_host.clear();
         self.state_host.resize(STATE_WORDS * states.len(), 0);
+        let mut pool = Vec::<u32>::new();
+        let mut beliefs = Vec::<(&StochasticState, u32)>::new();
+        self.pending_dice = false;
         for (lane, state) in states.iter().enumerate() {
-            let packed = CudaSimPackedState::new(state)?;
-            for (field, value) in packed.words.iter().copied().enumerate() {
+            let mut words = [0u32; STATE_WORDS];
+            pack_state_words(state, &mut words)?;
+            if words[STATE_DICE_POOL_COUNT] != 0 {
+                self.pending_dice = true;
+                let offset = if let Some((_, offset)) = beliefs.iter().find(|(belief, _)| **belief == state.stochastic) {
+                    *offset
+                } else {
+                    let offset = u32::try_from(pool.len()).map_err(|_| CudaSimError::BatchTooLarge)?;
+                    pool.reserve(state.stochastic.particle_count() * DICE_PARTICLE_WORDS);
+                    for particle in state.stochastic.reference_belief().unwrap().particles() {
+                        pool.push(particle.mass as u32);
+                        pool.push((particle.mass >> 32) as u32);
+                        pool.extend(pack_reference_controller(&particle.controller));
+                    }
+                    u32::try_from(pool.len()).map_err(|_| CudaSimError::BatchTooLarge)?;
+                    beliefs.push((&state.stochastic, offset));
+                    offset
+                };
+                words[STATE_DICE_POOL_OFFSET] = offset;
+            }
+            for (field, value) in words.into_iter().enumerate() {
                 self.state_host[field * states.len() + lane] = value;
             }
         }
+        // Public dice beliefs are shared, not multiplied by private worlds.
+        if pool.is_empty() { pool.push(0); }
+        self.dice_pool_device = self.stream.clone_htod(&pool)?;
         self.stream
             .memcpy_htod(&self.state_host, &mut self.state_device)?;
         self.stream.synchronize()?;
@@ -738,6 +783,20 @@ impl CudaSimEngine {
             .memcpy_htod(&self.rng_host, &mut self.rng_device)?;
         self.stream
             .memcpy_htod(&self.chance_rng_host, &mut self.chance_rng_device)?;
+        if self.pending_dice {
+            self.clear_transition_status(count)?;
+            let count_u32 = u32::try_from(count).map_err(|_| CudaSimError::BatchTooLarge)?;
+            let mut arguments = self.stream.launch_builder(&self.materialize_dice_kernel);
+            arguments.arg(&mut self.state_device);
+            arguments.arg(&self.dice_pool_device);
+            arguments.arg(&self.chance_rng_device);
+            arguments.arg(&mut self.status_device);
+            arguments.arg(&count_u32);
+            arguments.arg(&count_u32);
+            unsafe { arguments.launch(LaunchConfig::for_num_elems(count_u32))? };
+            self.check_transition_status(count)?;
+            self.pending_dice = false;
+        }
         self.stream.synchronize()?;
         Ok(())
     }
@@ -1161,6 +1220,7 @@ impl CudaSimEngine {
                     arguments.arg(&self.state_device);
                     arguments.arg(&stride);
                     arguments.arg(&self.topology_device);
+                    arguments.arg(&self.dice_pool_device);
                     arguments.arg(&self.root_action_device);
                     arguments.arg(&self.root_base_index_device);
                     arguments.arg(&self.root_seed_key_device);
@@ -1606,6 +1666,7 @@ impl CudaSimEngine {
                 arguments.arg(&self.state_device);
                 arguments.arg(&base_stride);
                 arguments.arg(&self.topology_device);
+                arguments.arg(&self.dice_pool_device);
                 arguments.arg(&self.root_action_device);
                 arguments.arg(&self.root_base_index_device);
                 arguments.arg(&self.root_seed_key_device);
@@ -2038,6 +2099,23 @@ fn pack_trade_words(trade: Option<TradeOffer>, words: &mut [u32; STATE_WORDS], b
     words[base + TRADE_REJECTED] = trade.rejected as u32;
 }
 
+fn pack_reference_controller(controller: &ReferenceController) -> [u32; DICE_CONTROLLER_WORDS] {
+    let mut words = [0u32; DICE_CONTROLLER_WORDS];
+    for (i, count) in controller.remaining_counts().into_iter().enumerate() {
+        words[i] = count as u32;
+    }
+    words[11] = controller.cards_left() as u32;
+    let recent = controller.recent_totals();
+    for (i, total) in recent.iter().enumerate() { words[12 + i] = *total as u32; }
+    words[17] = recent.len() as u32;
+    words[18] = controller.initialized_player_mask() as u32;
+    words[19..23].copy_from_slice(&controller.seven_counts());
+    words[23] = holder_code(controller.seven_streak_owner());
+    words[24] = controller.seven_streak_count();
+    words[25] = holder_code(controller.prepared_actor());
+    words
+}
+
 fn pack_state_words(state: &GameState, words: &mut [u32; STATE_WORDS]) -> Result<(), CudaSimError> {
     let board = state.board.as_ref();
     let players = board.num_players as usize;
@@ -2077,6 +2155,18 @@ fn pack_state_words(state: &GameState, words: &mut [u32; STATE_WORDS]) -> Result
     words[STATE_PLAYER_TRADES_ENABLED] = u32::from(state.player_trades_enabled);
     words[STATE_DOMESTIC_TRADE_DISABLED] = state.domestic_trade_disabled as u32;
     words[STATE_DOMESTIC_TRADE_EMBARGOES] = state.domestic_trade_embargoes as u32;
+    if let Some(belief) = state.stochastic.reference_belief() {
+        if belief.particle_count() == 0 || belief.particle_count() > REFERENCE_PARTICLES
+            || belief.total_mass() != FIXED_BELIEF_MASS {
+            return Err(CudaSimError::UnsupportedState("invalid public stochastic belief"));
+        }
+        words[STATE_DICE_MODEL] = 1;
+        if belief.particle_count() == 1 {
+            words[STATE_DICE_CONTROLLER..].copy_from_slice(&pack_reference_controller(&belief.particles()[0].controller));
+        } else {
+            words[STATE_DICE_POOL_COUNT] = belief.particle_count() as u32;
+        }
+    }
     words[STATE_TRADE_CURSOR] = state.trade_cursor as u32;
     words[STATE_TRADE_NEGOTIATION_ROUND] = state.trade_negotiation_round as u32;
     pack_trade_words(state.trade, words, STATE_TRADE);
@@ -2194,6 +2284,10 @@ fn building_code(building: Building) -> u32 {
         Building::City(player) => player as u32 + 5,
     }
 }
+
+#[cfg(test)]
+#[path = "cuda_dice_tests.rs"]
+mod dice_tests;
 
 #[cfg(test)]
 mod tests {

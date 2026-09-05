@@ -5,12 +5,13 @@ games where all players agree to its use. It reads game data shown to the
 player, tracks known cards, keeps honest ranges for unknown cards, and marks
 one legal next step in the Colonist page.
 
-The decision engine runs locally as Rust and WebAssembly in the browser.
-Strategist ★ is the single user-facing decision authority. It combines exact
-local solvers, a bounded setup search, and observation-safe weighted-belief
-Deep MaxN. Experimental belief PUCT, UCT, and AlphaBeta remain diagnostic
-comparison policies in the native arena; replay tooling also exposes selected
-diagnostic search budgets. They are not selectable live engines.
+The decision engine runs locally, using native CUDA for eligible midgame
+Strategist decisions when the GPU companion is available. Rust/WebAssembly
+provides the CPU semantic reference, opening solver, and fallback.
+Strategist ★ remains the single user-facing decision authority. Exact local
+solvers and observation-safe root proposals precede strategic search.
+Experimental belief PUCT, UCT, and AlphaBeta remain diagnostic comparison
+policies in the native arena, not selectable live engines.
 
 This project is not affiliated with, endorsed by, or sponsored by Colonist or
 CATAN Studio. Use it only in games where every participant has agreed to
@@ -50,7 +51,8 @@ your own shown resource cards, and bank counts when the room shows them.
 
 It does not read game chat, cookies, account tokens, network messages,
 opponents’ hidden cards, or hidden development cards. It does not use a
-server, ads, tracking, or usage reports. Game work stays in the browser.
+server, ads, tracking, or usage reports. Game work stays on the local machine,
+in the browser or its native GPU companion.
 Chrome may sync settings through the user’s Google account when Chrome Sync is
 on.
 
@@ -92,14 +94,29 @@ failure-containment limit. At that cutoff the request is reported as an engine
 error and autopilot remains paused. A service-worker or WASM failure is also
 shown as `WASM error`; no JavaScript action policy substitutes for Strategist.
 
+## Native GPU and Balanced Dice
+
+The native companion supports both fair-IID M0 and the named Balanced-Dice
+reference model, Mref. Live Mref requests require usable public dice history
+and canonical engine seat mapping. Missing or contradictory evidence fails
+closed instead of silently selecting M0.
+
+The extension and companion must be updated together: native protocol 6 now
+requires state/semantic schema 4. Older M0-only companions are rejected before
+analysis. Build the companion with `npm run build:companion` and the extension
+with `npm run build`. See [the CPU/GPU contract](docs/GPU_MREF_CONTRACT.md) for
+model ownership, artifact generation, exact parity checks, and limitations.
+
 ## Decision engine
 
 **Strategist** is the only live engine. Complete local enumeration handles
 mandatory and parameterized action families. Setup uses the dedicated
-belief-aggregated snake-order draft solver; normal play uses bounded,
-vector-valued weighted-belief Deep MaxN with structured action ordering. Each
-simulated player advances its own race value rather than being treated as part
-of a single hostile coalition.
+belief-aggregated snake-order draft solver. Eligible midgame decisions use
+native CUDA root rollouts; the CPU reference/fallback uses bounded,
+vector-valued weighted-belief Deep MaxN. These search algorithms need not choose
+the same action even when they share the same game and stochastic semantics.
+Each simulated player advances its own race value rather than being treated
+as part of a single hostile coalition.
 
 The bundled learned policy and value heads are both unpromoted and disabled
 because their grouped validation evidence did not pass the production gates.

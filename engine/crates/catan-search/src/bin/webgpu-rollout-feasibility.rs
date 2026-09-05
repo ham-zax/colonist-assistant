@@ -395,11 +395,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if state.player_trades_enabled {
         return Err("representative state unexpectedly enables player trades".into());
     }
-    let packed = CudaSimPackedState::new(&state)?;
-    let base_state_words = packed.words().to_vec();
-    if base_state_words.len() != STATE_WORDS {
-        return Err("packed state size drifted".into());
+    if state.stochastic.reference_belief().is_some() {
+        return Err("the legacy WebGPU feasibility shader supports M0 only".into());
     }
+    let packed = CudaSimPackedState::new(&state)?;
+    // The experimental WGSL ABI is still the unchanged 404-word M0 prefix.
+    // Native CUDA appends its own stochastic state; do not feed that tail to
+    // the old shader or label this experiment as Mref parity.
+    let base_state_words = packed.words().get(..STATE_WORDS)
+        .ok_or("packed M0 state prefix size drifted")?.to_vec();
     let topology = topology_words(&state)?;
     let root_action_words = root_words(&roots)?;
 

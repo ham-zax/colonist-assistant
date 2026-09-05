@@ -761,7 +761,7 @@ impl EngineChoice {
 }
 
 const NATIVE_GPU_PROTOCOL_VERSION: u32 = 6;
-const NATIVE_GPU_STATE_SCHEMA_VERSION: u32 = 2;
+const NATIVE_GPU_STATE_SCHEMA_VERSION: u32 = 4;
 
 struct NativeGpuClient {
     child: Child,
