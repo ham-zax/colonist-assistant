@@ -106,6 +106,68 @@ describe("live stochastic evidence recovery", () => {
     expect(internals.decisionRuntimeError).toBe("");
   });
 
+  it("waits for the board snapshot when the current log roll arrives one update first", async () => {
+    const sendMessage = vi.fn(async (message: { id: number; stochastic?: unknown }) =>
+      message.stochastic
+        ? { id: message.id, analysis: { engine: "deep-search", runtime: "background-gpu", players: [] } }
+        : { id: message.id, runtime: "background-gpu", engineRevision: "deep-maxn-v12", initializationMs: 1 });
+    vi.stubGlobal("chrome", {
+      runtime: { getURL: (path: string) => `chrome-extension://fixture/${path}`, getManifest: () => ({ version: "0.9.1" }), sendMessage },
+      storage: { local: { get: async () => ({}), set: async () => {}, remove: async () => {} }, sync: { set: async () => {} } },
+    });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let tracker = reduceTracker(createTrackerState(), { type: "discover", player: "Alice" });
+    tracker = reduceTracker(tracker, { type: "discover", player: "Bob" });
+    const history = createDiceHistoryState();
+    observeLogCoverage(history, [0, 1, 16, 20]);
+    appendPublicDiceRoll(history, { actor: "Alice", total: 6, dice: [2, 4], eventId: "first", logIndex: 16 });
+    appendPublicDiceRoll(history, { actor: "Bob", total: 5, dice: [2, 3], eventId: "second", logIndex: 20 });
+
+    overlay = new AssistantOverlay({ ...DEFAULT_SETTINGS }, { reset: vi.fn() });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const internals = overlay as unknown as {
+      board: BoardSnapshot;
+      session: { diceHistory: typeof history };
+      decisionRuntimeError: string;
+      scheduleDecisionAnalysis: (state: typeof tracker, player: string) => void;
+      render: () => void;
+    };
+    vi.spyOn(internals, "render").mockImplementation(() => {});
+    internals.session = { diceHistory: history };
+    internals.board = {
+      hexes: [], vertices: [], edges: [], diceMode: "balanced", gameKey: "roll-race",
+      myPlayer: "Bob", currentPlayer: "Bob", playerOrder: ["Alice", "Bob"],
+      isMyTurn: true, hasRolled: false, gameplayRollCount: 1, action: "none",
+      localSeatDiagnostics: {
+        seatSource: "gameController.myColor+currentUserId+gameUserStates",
+        identity: { status: "resolved", reason: "cross-checked", source: "controller+account-user-id+store-roster", currentUserIdAvailable: true, currentUserMatchColors: [2], myColor: 2, currentUserColor: 2 },
+      },
+    };
+    sendMessage.mockClear();
+
+    internals.scheduleDecisionAnalysis(tracker, "Bob");
+
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(consoleError).not.toHaveBeenCalled();
+    expect(consoleWarn).not.toHaveBeenCalled();
+    expect(internals.decisionRuntimeError).toMatch(/waiting for the board.*catch up/i);
+
+    internals.board = { ...internals.board, hasRolled: true, gameplayRollCount: 2 };
+    internals.scheduleDecisionAnalysis(tracker, "Bob");
+
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledOnce());
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      stochastic: expect.objectContaining({
+        model: "mref-colonist-linked-2024-v1",
+        rolls: [
+          { ordinal: 0, actor: 0, total: 6 },
+          { ordinal: 1, actor: 1, total: 5 },
+        ],
+      }),
+    }));
+  });
+
   it("resumes when missing startup evidence arrives without retrying unchanged evidence", async () => {
     const sendMessage = vi.fn(async (message: { id: number; stochastic?: unknown }) =>
       message.stochastic

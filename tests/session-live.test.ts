@@ -931,6 +931,27 @@ describe("live log session scanning", () => {
     session.stop();
   });
 
+  it("treats Colonist's empty robber victim notice as harmless public evidence", async () => {
+    const root = document.createElement("div");
+    root.append(message(47, "No player to steal from"));
+    document.body.append(root);
+    const session = new GameSession(root, vi.fn(), "empty-robbery-game");
+
+    await session.start();
+
+    expect(session.events).toEqual([]);
+    expect(session.unmatchedIntegrityCount).toBe(0);
+    expect(session.unmatchedSamples).toEqual([
+      expect.objectContaining({
+        reason: "known-ignored-empty-robbery",
+        affectsIntegrity: false,
+        sample: "No player to steal from",
+      }),
+    ]);
+    expect(session.diceHistory.ambiguousLogIndices).toEqual([]);
+    session.stop();
+  });
+
   it("ingests a new message when a virtualized element is reused", async () => {
     const root = document.createElement("div");
     const entry = message(0, "Alice rolled");

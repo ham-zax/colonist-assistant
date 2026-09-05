@@ -122,7 +122,7 @@ const classifyUnmatchedLog = (
       affectsIntegrity: false,
     };
   }
-  if (/^player has no cards\.?$/iu.test(normalized)) {
+  if (/^(?:player has no cards\.?|no player to steal from)$/iu.test(normalized)) {
     return { reason: "known-ignored-empty-robbery", affectsIntegrity: false };
   }
   if (/is blocked by the robber.*no resources produced/iu.test(normalized)) {
@@ -521,6 +521,8 @@ export class GameSession {
    * a permanent recording warning.
    */
   private setupLogPrefixPending = false;
+  /** True only when partialHistory was introduced by a deferred setup-prefix miss. */
+  private partialHistoryFromMissingPrefix = false;
   private storageGeneration = 0;
   private storageSuppressed = false;
   private pruneSessionHistory = true;
@@ -601,6 +603,7 @@ export class GameSession {
       if (this.events.length > MAX_STORED_EVENTS) {
         this.events = this.events.slice(-MAX_STORED_EVENTS);
         this.state = replayEvents(this.events);
+        this.partialHistoryFromMissingPrefix = false;
         this.partialHistory = true;
       }
       this.queueSave();
@@ -617,6 +620,7 @@ export class GameSession {
     this.events = [];
     this.partialHistory = false;
     this.setupLogPrefixPending = false;
+    this.partialHistoryFromMissingPrefix = false;
     this.diceHistory = createDiceHistoryState();
     this.unmatchedCount = 0;
     this.unmatchedIntegrityCount = 0;
@@ -647,6 +651,7 @@ export class GameSession {
     this.events = [];
     this.partialHistory = false;
     this.setupLogPrefixPending = false;
+    this.partialHistoryFromMissingPrefix = false;
     this.diceHistory = createDiceHistoryState();
     this.unmatchedCount = 0;
     this.unmatchedIntegrityCount = 0;
@@ -689,6 +694,7 @@ export class GameSession {
       // ranges may genuinely be missing setup evidence, so become conservative
       // only at this semantic boundary rather than during transient hydration.
       this.setupLogPrefixPending = false;
+      if (!this.partialHistory) this.partialHistoryFromMissingPrefix = true;
       this.partialHistory = true;
       if (this.observer) {
         this.queueSave();
@@ -868,7 +874,14 @@ export class GameSession {
 
     candidates.sort((left, right) => left.index - right.index);
     const sawLogIndexZero = candidates.some((candidate) => candidate.logIndex === 0);
-    if (sawLogIndexZero) this.setupLogPrefixPending = false;
+    const recoveredMissingPrefix = sawLogIndexZero && this.partialHistoryFromMissingPrefix;
+    if (sawLogIndexZero) {
+      this.setupLogPrefixPending = false;
+      if (recoveredMissingPrefix) {
+        this.partialHistoryFromMissingPrefix = false;
+        this.partialHistory = false;
+      }
+    }
     // Presentation changes, including index zero, are not game identity.
     // setGameKey() and explicit reset own history replacement; otherwise a
     // rerender could erase both accepted rolls and unresolved conflicts.
@@ -881,11 +894,12 @@ export class GameSession {
       if (this.initialPlacement !== false && !this.partialHistory) {
         this.setupLogPrefixPending = true;
       } else {
+        if (!this.partialHistory) this.partialHistoryFromMissingPrefix = true;
         this.partialHistory = true;
       }
     }
 
-    let changed = false;
+    let changed = recoveredMissingPrefix;
     let journalReplayRequired = false;
     for (const candidate of candidates) {
       this.seenElements.set(candidate.element, candidate.id);
@@ -932,6 +946,7 @@ export class GameSession {
         // One server/log identity cannot own two semantic events. Retain the
         // first event for generic tracking and fail stochastic authority closed.
         notePublicRollConflict(this.diceHistory, stored.index);
+        this.partialHistoryFromMissingPrefix = false;
         this.partialHistory = true;
         this.unmatchedCount += 1;
         this.unmatchedIntegrityCount += 1;
@@ -999,7 +1014,10 @@ export class GameSession {
       for (const index of journal.conflictingLogIndices) {
         notePublicRollConflict(this.diceHistory, index);
       }
-      if (journal.conflictingLogIndices.length) this.partialHistory = true;
+      if (journal.conflictingLogIndices.length) {
+        this.partialHistoryFromMissingPrefix = false;
+        this.partialHistory = true;
+      }
       this.state = replayEvents(this.events);
     }
 
@@ -1013,6 +1031,7 @@ export class GameSession {
       if (this.events.length > MAX_STORED_EVENTS) {
         this.events = this.events.slice(-MAX_STORED_EVENTS);
         this.state = replayEvents(this.events);
+        this.partialHistoryFromMissingPrefix = false;
         this.partialHistory = true;
       }
       this.queueSave();
@@ -1122,6 +1141,9 @@ export class GameSession {
     const normalizedStored = { ...stored, events: journal.events } as RestorableSession;
     this.events = journal.events;
     this.partialHistory = stored.partialHistory || journal.conflictingLogIndices.length > 0;
+    // Persisted partial history has no trustworthy causal tag. Never clear it
+    // merely because a later virtualizer mount exposes index zero.
+    this.partialHistoryFromMissingPrefix = false;
     this.diceHistory =
       normalizedStored.schema === 4
         ? restoreSchema4DiceHistory(normalizedStored)

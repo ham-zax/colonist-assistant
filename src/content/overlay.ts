@@ -2646,6 +2646,39 @@ export class AssistantOverlay {
     return `Dice evidence: ${history.provenance}; ${history.rolls.length} observed roll${history.rolls.length === 1 ? "" : "s"}; board gameplay-roll count ${this.board?.gameplayRollCount ?? "not established"}; log coverage ${ranges}; ambiguous indexes ${ambiguous}; unlocated ambiguity ${history.hasUnlocatedRollAmbiguity ? "yes" : "no"}; missing prefix rolls ${history.missingPrefixRolls ?? "not established"}. Analysis resumes when usable evidence arrives. Export the record if this persists; resetting midgame cannot recover missing rolls`;
   }
 
+  private currentLogRollPrecedesBoardSnapshot(board: BoardSnapshot): boolean {
+    const history = this.session?.diceHistory;
+    const expected = board.gameplayRollCount;
+    const order = board.playerOrder;
+    if (
+      board.diceMode !== "balanced" ||
+      board.hasRolled !== false ||
+      !history ||
+      !Number.isInteger(expected) ||
+      expected === undefined ||
+      expected < 0 ||
+      !order?.length ||
+      !board.currentPlayer ||
+      history.rolls.length !== expected + 1
+    ) {
+      return false;
+    }
+    const latest = history.rolls.at(-1);
+    const expectedActor = order[expected % order.length];
+    if (!latest || latest.actor !== expectedActor || latest.actor !== board.currentPlayer) {
+      return false;
+    }
+    try {
+      // Prove that the only mismatch is a board snapshot exactly one current
+      // roll behind the already-rendered public log. Any ambiguity/conflict
+      // still fails closed in the normal constructor below.
+      buildLiveDecisionStochasticInput("balanced", history, order, expected + 1);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private scheduleDecisionAnalysis(
     state: TrackerState | undefined,
     player: string | undefined,
@@ -2890,6 +2923,20 @@ export class AssistantOverlay {
     };
     let stochastic: PublicStochasticInput;
     this.decisionEvidenceWait = undefined;
+    if (this.currentLogRollPrecedesBoardSnapshot(decisionBoard)) {
+      this.decisionWorker.reset();
+      this.decisionAnalysis = undefined;
+      this.decisionPendingKey = "";
+      this.decisionSlowKey = "";
+      this.decisionWaitingForPreviousSearch = false;
+      this.decisionEvidenceWait = this.stochasticEvidenceSignature(board);
+      const detail = "Public dice roll arrived before the board turn snapshot; waiting for the board state to catch up";
+      this.decisionRuntimeError = detail;
+      this.decisionRuntimeDetail = detail;
+      this.decisionTraces.supersedePending();
+      this.render();
+      return;
+    }
     try {
       stochastic = buildLiveDecisionStochasticInput(
         decisionBoard.diceMode,
