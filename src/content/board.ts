@@ -416,6 +416,7 @@ const validSnapshot = (value: unknown): value is BoardSnapshot => {
     (candidate.currentPlayer === undefined ||
       typeof candidate.currentPlayer === "string") &&
     optionalBoundedInteger(candidate.turn, 0, 100_000) &&
+    optionalBoundedInteger(candidate.gameplayRollCount, 0, 100_000) &&
     optionalBoundedInteger(candidate.lastRoll, 0, 12) &&
     (candidate.hasRolled === undefined ||
       typeof candidate.hasRolled === "boolean") &&

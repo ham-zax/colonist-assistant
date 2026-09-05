@@ -99,7 +99,7 @@ describe("Balanced setup dice authority", () => {
     expect(session.diceHistory.provenance).not.toBe("complete-from-first-gameplay-roll");
   });
 
-  it("keeps Balanced authority in bot-only games when Colonist never mounts a game log", async () => {
+  it("keeps Balanced authority from public board evidence when the game log is absent", async () => {
     const session = sessionFor(document.createElement("div"));
     await session.start();
     expect(construct(session)).toMatchObject({
@@ -110,21 +110,23 @@ describe("Balanced setup dice authority", () => {
     session.setInitialPlacement(false, gameKey);
     expect(session.observeBoardDiceSnapshot({
       gameKey,
-      botOnlyGame: true,
+      botOnlyGame: false,
       initialPlacement: false,
       hasRolled: true,
       lastRoll: 8,
       currentPlayer: "Alice",
-      turn: 0,
+      turn: 4,
+      gameplayRollCount: 1,
     })).toBe(true);
     expect(session.observeBoardDiceSnapshot({
       gameKey,
-      botOnlyGame: true,
+      botOnlyGame: false,
       initialPlacement: false,
       hasRolled: true,
       lastRoll: 8,
       currentPlayer: "Alice",
-      turn: 0,
+      turn: 4,
+      gameplayRollCount: 1,
     })).toBe(false);
     expect(construct(session)).toMatchObject({
       model: "mref-colonist-linked-2024-v1",
@@ -138,11 +140,13 @@ describe("Balanced setup dice authority", () => {
     session.setInitialPlacement(false, gameKey);
     session.observeBoardDiceSnapshot({
       gameKey, botOnlyGame: true, initialPlacement: false,
-      hasRolled: true, lastRoll: 8, currentPlayer: "Alice", turn: 0,
+      hasRolled: true, lastRoll: 8, currentPlayer: "Alice", turn: 4,
+      gameplayRollCount: 1,
     });
     session.observeBoardDiceSnapshot({
       gameKey, botOnlyGame: true, initialPlacement: false,
-      hasRolled: true, lastRoll: 9, currentPlayer: "Alice", turn: 2,
+      hasRolled: true, lastRoll: 9, currentPlayer: "Alice", turn: 6,
+      gameplayRollCount: 3,
     });
     expect(session.diceHistory.gaps).toEqual([{ afterOrdinal: 0, missingRolls: 1 }]);
     expect(construct(session)).toMatchObject({
@@ -164,7 +168,8 @@ describe("Balanced setup dice authority", () => {
     expect(session.diceHistory.rolls).toHaveLength(1);
     expect(session.observeBoardDiceSnapshot({
       gameKey, botOnlyGame: true, initialPlacement: false,
-      hasRolled: true, lastRoll: 8, currentPlayer: "Alice", turn: 0,
+      hasRolled: true, lastRoll: 8, currentPlayer: "Alice", turn: 4,
+      gameplayRollCount: 1,
     })).toBe(false);
     expect(session.diceHistory.rolls).toHaveLength(1);
     expect(construct(session).rolls).toEqual([{ ordinal: 0, actor: 0, total: 8 }]);

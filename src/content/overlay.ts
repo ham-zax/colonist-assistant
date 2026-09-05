@@ -2633,6 +2633,7 @@ export class AssistantOverlay {
       board.gameKey,
       board.diceMode,
       board.playerOrder,
+      board.gameplayRollCount,
       this.session?.diceHistory ? diceHistoryDigest(this.session.diceHistory) : null,
     ]);
   }
@@ -2642,7 +2643,7 @@ export class AssistantOverlay {
     if (!history) return "The public game log is still attaching; analysis resumes when usable evidence arrives";
     const ranges = history.coverage.ranges.slice(0, 4).map(([start, end]) => `${start}-${end}`).join(",") || "none";
     const ambiguous = history.ambiguousLogIndices.slice(0, 8).join(",") || "none";
-    return `Dice evidence: ${history.provenance}; ${history.rolls.length} observed roll${history.rolls.length === 1 ? "" : "s"}; log coverage ${ranges}; ambiguous indexes ${ambiguous}; unlocated ambiguity ${history.hasUnlocatedRollAmbiguity ? "yes" : "no"}; missing prefix rolls ${history.missingPrefixRolls ?? "not established"}. Analysis resumes when usable evidence arrives. Export the record if this persists; resetting midgame cannot recover missing rolls`;
+    return `Dice evidence: ${history.provenance}; ${history.rolls.length} observed roll${history.rolls.length === 1 ? "" : "s"}; board gameplay-roll count ${this.board?.gameplayRollCount ?? "not established"}; log coverage ${ranges}; ambiguous indexes ${ambiguous}; unlocated ambiguity ${history.hasUnlocatedRollAmbiguity ? "yes" : "no"}; missing prefix rolls ${history.missingPrefixRolls ?? "not established"}. Analysis resumes when usable evidence arrives. Export the record if this persists; resetting midgame cannot recover missing rolls`;
   }
 
   private scheduleDecisionAnalysis(
@@ -2875,15 +2876,15 @@ export class AssistantOverlay {
       this.decisionRuntimeDetail = displayedDetail;
       this.decisionTraces.failure(traceKey, displayedDetail);
       const reportFailure = this.decisionEvidenceWait !== undefined ? console.warn : console.error;
+      const failureDiagnostic = {
+        key,
+        engine: this.settings.engine,
+        detail: displayedDetail,
+        policy: "selected-engine-only",
+        fallbackStarted: false,
+      };
       reportFailure(
-        `[Colonist Assistant] Strategist failed: ${displayedDetail}`,
-        {
-          key,
-          engine: this.settings.engine,
-          detail: displayedDetail,
-          policy: "selected-engine-only",
-          fallbackStarted: false,
-        },
+        `[Colonist Assistant] Strategist failed: ${displayedDetail} ${JSON.stringify(failureDiagnostic)}`,
       );
       this.render();
     };
@@ -2894,6 +2895,7 @@ export class AssistantOverlay {
         decisionBoard.diceMode,
         this.session?.diceHistory,
         decisionBoard.playerOrder,
+        decisionBoard.gameplayRollCount,
       );
     } catch (error) {
       this.decisionWorker.reset();

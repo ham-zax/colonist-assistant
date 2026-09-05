@@ -198,6 +198,8 @@ export interface BoardSnapshot {
   botOnlyGame?: boolean;
   currentPlayer?: string;
   turn?: number;
+  /** Number of gameplay dice rolls that have occurred, excluding setup turns. */
+  gameplayRollCount?: number;
   lastRoll?: number;
   hasRolled?: boolean;
   domesticTradeUsed?: boolean;

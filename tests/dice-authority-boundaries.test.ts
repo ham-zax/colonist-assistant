@@ -108,7 +108,13 @@ describe("R6 stochastic authority lifecycle boundaries", () => {
     const replacement = roll(0, "Alice", conflict ? 4 : 3, 5);
     replacement.firstChild!.nodeValue = "Alice rolled the dice";
     first.replaceWith(replacement);
-    await vi.waitFor(() => expect(update).toHaveBeenCalled());
+    if (conflict) {
+      await vi.waitFor(() => expect(session.diceHistory.ambiguousLogIndices).toEqual([0]));
+      expect(update).toHaveBeenCalled();
+    } else {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      expect(update).not.toHaveBeenCalled();
+    }
 
     expect(session.diceHistory.rolls.map((item) => item.total)).toEqual([8, 7]);
     if (conflict) {

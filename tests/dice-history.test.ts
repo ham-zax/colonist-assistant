@@ -119,6 +119,68 @@ describe("public dice history", () => {
     expect(state.hasUnknownRollGap).toBe(true);
   });
 
+  it("uses public gameplay-roll count to prove sparse generic log indexes did not lose a roll", () => {
+    const state = createDiceHistoryState();
+    observeLogCoverage(state, [
+      ...Array.from({ length: 29 }, (_, index) => index),
+      30,
+    ]);
+    appendPublicDiceRoll(state, roll("r30", "P0", 8, 30));
+
+    expect(state.provenance).toBe("gapped");
+    expect(state.ambiguousLogIndices).toEqual([]);
+    expect(
+      buildLiveDecisionStochasticInput(
+        "balanced",
+        state,
+        ["P0", "P1", "P2", "P3"],
+        1,
+      ),
+    ).toMatchObject({
+      model: "mref-colonist-linked-2024-v1",
+      provenance: "complete-from-first-gameplay-roll",
+      rolls: [{ ordinal: 0, actor: 0, total: 8 }],
+    });
+  });
+
+  it("reconstructs a uniquely located internal roll miss from public turn progress", () => {
+    const state = createDiceHistoryState();
+    observeLogCoverage(state, [0, 2]);
+    appendPublicDiceRoll(state, roll("r0", "P0", 8, 0));
+    appendPublicDiceRoll(state, roll("r2", "P2", 6, 2));
+
+    expect(
+      buildLiveDecisionStochasticInput(
+        "balanced",
+        state,
+        ["P0", "P1", "P2", "P3"],
+        3,
+      ),
+    ).toMatchObject({
+      provenance: "gapped",
+      gaps: [{ afterOrdinal: 0, missingRolls: 1 }],
+      rolls: [
+        { ordinal: 0, actor: 0, total: 8 },
+        { ordinal: 2, actor: 2, total: 6 },
+      ],
+    });
+  });
+
+  it("fails closed when board progress cannot uniquely place a sparse roll across a full seat cycle", () => {
+    const state = createDiceHistoryState();
+    observeLogCoverage(state, [0, 2]);
+    appendPublicDiceRoll(state, roll("r0-or-r4", "P0", 8, 2));
+
+    expect(() =>
+      buildLiveDecisionStochasticInput(
+        "balanced",
+        state,
+        ["P0", "P1", "P2", "P3"],
+        5,
+      ),
+    ).toThrow(/does not reconcile with public turn progress/);
+  });
+
   it("preserves complete provenance when a persisted prefix reconnects to a contiguous suffix", () => {
     const first = createDiceHistoryState();
     observeLogCoverage(first, [0, 1, 2]);

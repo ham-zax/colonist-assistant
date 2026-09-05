@@ -1100,6 +1100,12 @@ import { observeColonistDiceMode } from "./dice-mode";
       vertices.filter((vertex: Record<string, any>) => vertex.building).length +
       edges.filter((edge: Record<string, any>) => edge.player).length;
     const completedTurns = Number(currentState.completedTurns ?? 0);
+    const setupTurnCount = 2 * playOrder.length;
+    const gameplayRollCount = initialPlacement
+      ? 0
+      : playOrder.length >= 2 && completedTurns >= setupTurnCount
+        ? completedTurns - setupTurnCount + (diceState?.diceThrown ? 1 : 0)
+        : undefined;
     if (
       !isReplay &&
       previousLiveProgress &&
@@ -1315,6 +1321,7 @@ import { observeColonistDiceMode } from "./dice-mode";
           }
         : {}),
       turn: Math.max(0, completedTurns),
+      ...(gameplayRollCount !== undefined ? { gameplayRollCount } : {}),
       hasRolled: Boolean(diceState?.diceThrown),
       gameOver,
       ...(winner ? { winner } : {}),

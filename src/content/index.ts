@@ -24,7 +24,6 @@ const boot = async (): Promise<void> => {
   const boardOnlyRoot = document.createElement("div");
   boardOnlyRoot.dataset.colonistAssistantBoardOnly = "true";
   let currentInitialPlacement = Boolean(currentBoard?.initialPlacement);
-  let currentBotOnlyGame = Boolean(currentBoard?.botOnlyGame);
   currentGameKey = currentBoard?.gameKey;
   currentMyPlayer =
     currentBoard?.localSeatDiagnostics?.identity.status === "resolved"
@@ -58,7 +57,6 @@ const boot = async (): Promise<void> => {
     currentMyPlayer = resolvedMyPlayer;
     session?.setMyPlayer(resolvedMyPlayer);
     currentInitialPlacement = Boolean(currentBoard?.initialPlacement);
-    currentBotOnlyGame = Boolean(currentBoard?.botOnlyGame);
     session?.setInitialPlacement(currentInitialPlacement, currentBoard?.gameKey);
     if (currentRoot === boardOnlyRoot) {
       session?.observeBoardDiceSnapshot(currentBoard);
@@ -73,10 +71,10 @@ const boot = async (): Promise<void> => {
       ),
     );
     const logRoot = hasLiveGameSurface ? findLogRoot() : undefined;
-    // Colonist bot-only games may never mount the chat/game-log virtualizer.
-    // Keep a real session alive from public board evidence so setup authority,
-    // recording, and Balanced-Dice history do not depend on that optional DOM.
-    const root = logRoot ?? (hasLiveGameSurface && currentBotOnlyGame ? boardOnlyRoot : undefined);
+    // The chat/game-log virtualizer is optional and can attach late in any game.
+    // Keep a real session alive from validated public board evidence so setup
+    // authority, recording, and Balanced-Dice history do not depend on that DOM.
+    const root = logRoot ?? (hasLiveGameSurface ? boardOnlyRoot : undefined);
     if (!settings.enabled) {
       session?.stop();
       session = undefined;

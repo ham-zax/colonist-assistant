@@ -507,17 +507,133 @@ const referenceHistoryAvailable = (state: DiceHistoryState): boolean => {
   return false;
 };
 
+/**
+ * Generic Colonist log indexes are presentation/history slots, not roll
+ * ordinals. A virtualized log may permanently omit harmless rows. When the
+ * public board supplies the exact number of gameplay rolls that have occurred,
+ * reconstruct roll ordinals from canonical seat order instead of treating a
+ * missing generic log index as a missing die roll.
+ *
+ * We accept only a unique actor-cycle alignment and require the latest gameplay
+ * roll to be observed. Prefix/internal misses are represented with known counts
+ * for the reference posterior; an unanchored trailing miss stays unavailable.
+ */
+const reconcileLiveRollCountAuthority = (
+  state: DiceHistoryState,
+  playerMapping: readonly string[],
+  expectedRollCount: number,
+): DiceHistoryState | undefined => {
+  if (!Number.isInteger(expectedRollCount) || expectedRollCount < 0) return undefined;
+  if (
+    state.ambiguousLogIndices.length > 0 ||
+    state.hasUnlocatedRollAmbiguity ||
+    state.hasUnreconciledSources === true ||
+    (state.conflictingLogIndices?.length ?? 0) > 0
+  ) {
+    return undefined;
+  }
+  if (state.rolls.length > expectedRollCount) return undefined;
+  if (expectedRollCount === 0) {
+    if (state.rolls.length) return undefined;
+    const empty = cloneDiceHistoryState(state);
+    empty.provenance = "complete-from-first-gameplay-roll";
+    empty.missingPrefixRolls = 0;
+    empty.gaps = [];
+    empty.hasUnknownRollGap = false;
+    return empty;
+  }
+  if (!state.rolls.length || !playerMapping.length) return undefined;
+
+  const seatByPlayer = new Map(playerMapping.map((player, index) => [player, index]));
+  if (seatByPlayer.size !== playerMapping.length) {
+    throw new Error("Public stochastic player mapping contains duplicate players");
+  }
+  const seats = state.rolls.map((roll) => {
+    const seat = seatByPlayer.get(roll.actor);
+    if (seat === undefined) {
+      throw new Error(`Public dice history references unmapped actor: ${roll.actor}`);
+    }
+    return seat;
+  });
+  const players = playerMapping.length;
+
+  const earliest: number[] = [];
+  let previous = -1;
+  for (const seat of seats) {
+    let ordinal = seat;
+    while (ordinal <= previous) ordinal += players;
+    if (ordinal >= expectedRollCount) return undefined;
+    earliest.push(ordinal);
+    previous = ordinal;
+  }
+
+  const latest = new Array<number>(seats.length);
+  let next = expectedRollCount;
+  for (let index = seats.length - 1; index >= 0; index -= 1) {
+    const seat = seats[index]!;
+    let ordinal = seat + Math.floor((expectedRollCount - 1 - seat) / players) * players;
+    while (ordinal >= next) ordinal -= players;
+    if (ordinal < 0) return undefined;
+    latest[index] = ordinal;
+    next = ordinal;
+  }
+  if (earliest.some((ordinal, index) => ordinal !== latest[index])) return undefined;
+
+  // Rust partial-history gaps must be anchored by a later observed roll. Do not
+  // pretend a missing trailing roll is reconstructable merely because its count
+  // is known from board progress.
+  if (earliest.at(-1) !== expectedRollCount - 1) return undefined;
+
+  const reconciled = cloneDiceHistoryState(state);
+  reconciled.missingPrefixRolls = earliest[0]!;
+  reconciled.gaps = [];
+  for (let index = 1; index < earliest.length; index += 1) {
+    const prior = earliest[index - 1]!;
+    const current = earliest[index]!;
+    if (current > prior + 1) {
+      reconciled.gaps.push({
+        afterOrdinal: prior,
+        missingRolls: current - prior - 1,
+      });
+    }
+  }
+  reconciled.hasUnknownRollGap = false;
+  reconciled.provenance = reconciled.gaps.length
+    ? "gapped"
+    : reconciled.missingPrefixRolls > 0
+      ? "gap-free-suffix"
+      : "complete-from-first-gameplay-roll";
+  return reconciled;
+};
+
 export const buildLiveDecisionStochasticInput = (
   diceMode: DiceMode,
   state: DiceHistoryState | undefined,
   canonicalPlayerOrder: readonly string[] | undefined,
+  expectedRollCount?: number,
 ): PublicStochasticInput => {
   if (diceMode !== "balanced") return { model: M0_FAIR_IID_2D6_V1 };
-  if (!state || !referenceHistoryAvailable(state)) {
-    throw new Error("Balanced Dice requires usable public reference-dice history");
-  }
   if (!canonicalPlayerOrder?.length) {
     throw new Error("Balanced Dice requires canonical engine player ordering");
+  }
+  if (!state) {
+    throw new Error("Balanced Dice requires usable public reference-dice history");
+  }
+  if (expectedRollCount !== undefined) {
+    const reconciled = reconcileLiveRollCountAuthority(
+      state,
+      canonicalPlayerOrder,
+      expectedRollCount,
+    );
+    if (!reconciled) {
+      throw new Error(
+        "Balanced Dice public roll sequence does not reconcile with public turn progress",
+      );
+    }
+    return buildReferenceStochasticInput(reconciled, canonicalPlayerOrder);
+  }
+  if (!referenceHistoryAvailable(state)) {
+    throw new Error("Balanced Dice requires usable public reference-dice history");
   }
   return buildReferenceStochasticInput(state, canonicalPlayerOrder);
 };

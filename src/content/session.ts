@@ -677,10 +677,10 @@ export class GameSession {
   }
 
   /**
-   * Bot-only Colonist games can omit the rendered game-log virtualizer entirely.
-   * In that mode the page bridge remains public authority for the active turn
-   * and rolled total, so retain one roll per completed-turn ordinal. Skipped
-   * turn ordinals become explicit known-count gaps and stay fail-closed.
+   * Colonist can omit or attach the rendered game-log virtualizer late. While
+   * the session is board-only, the validated page bridge remains public
+   * authority for active-turn roll count, actor, and total. Skipped gameplay
+   * roll ordinals become explicit known-count gaps and stay fail-closed.
    */
   observeBoardDiceSnapshot(snapshot: {
     gameKey?: string;
@@ -690,10 +690,11 @@ export class GameSession {
     lastRoll?: number;
     currentPlayer?: string;
     turn?: number;
+    gameplayRollCount?: number;
   } | undefined): boolean {
     if (
       this.disposed ||
-      !snapshot?.botOnlyGame ||
+      !snapshot ||
       !snapshot.gameKey ||
       snapshot.gameKey !== this.gameKey
     ) {
@@ -714,8 +715,12 @@ export class GameSession {
       return false;
     }
     const turn = snapshot.turn!;
+    const rollOrdinal =
+      Number.isInteger(snapshot.gameplayRollCount) && snapshot.gameplayRollCount! > 0
+        ? snapshot.gameplayRollCount! - 1
+        : turn;
     const actor = snapshot.currentPlayer.trim();
-    const eventId = `board-roll:${turn}:${actor}`;
+    const eventId = `board-roll:${rollOrdinal}:${actor}`;
     // A log observed earlier in the same game stays authoritative by ordinal.
     // This only avoids double-counting the current roll when Colonist unmounts
     // the log virtualizer midgame; any contradiction stays fail-closed.
@@ -725,7 +730,7 @@ export class GameSession {
       this.diceHistory.provenance === "complete-from-first-gameplay-roll" &&
       this.diceHistory.gaps.length === 0
     ) {
-      const ordinalRoll = this.diceHistory.rolls[turn];
+      const ordinalRoll = this.diceHistory.rolls[rollOrdinal];
       if (ordinalRoll) {
         if (ordinalRoll.actor === actor && ordinalRoll.total === snapshot.lastRoll) return false;
         noteRollCapableLogAmbiguity(this.diceHistory, undefined);
@@ -735,7 +740,7 @@ export class GameSession {
       }
     }
     const existing = this.diceHistory.rolls.find((roll) =>
-      roll.eventId.startsWith(`board-roll:${turn}:`));
+      roll.eventId.startsWith(`board-roll:${rollOrdinal}:`));
     if (existing) {
       if (existing.actor === actor && existing.total === snapshot.lastRoll) return false;
       noteRollCapableLogAmbiguity(this.diceHistory, undefined);
@@ -747,7 +752,7 @@ export class GameSession {
       const matched = roll.eventId.match(/^board-roll:(\d+):/u);
       return matched ? [Number(matched[1])] : [];
     });
-    if (priorBoardTurns.some((prior) => prior > turn)) {
+    if (priorBoardTurns.some((prior) => prior > rollOrdinal)) {
       // A delayed bridge snapshot cannot append a historical turn at the tail.
       notePublicRollConflict(this.diceHistory, undefined);
       this.queueSave();
@@ -762,8 +767,8 @@ export class GameSession {
         + this.diceHistory.gaps.reduce((count, gap) => count + (gap.missingRolls ?? 0), 0)
       : priorBoardTurns.length
         ? Math.max(...priorBoardTurns) + 1
-        : turn;
-    for (let missingTurn = expectedTurn; missingTurn < turn; missingTurn += 1) {
+        : rollOrdinal;
+    for (let missingTurn = expectedTurn; missingTurn < rollOrdinal; missingTurn += 1) {
       noteMissingPublicRoll(this.diceHistory);
     }
     appendPublicDiceRoll(this.diceHistory, {
