@@ -278,6 +278,51 @@ describe("deep-search state adapter", () => {
     expect(mref.state.worlds.every((world: any) => !("stochastic" in world))).toBe(true);
   });
 
+  it("binds M_ref actors to the exact canonical engine seat ordering and rejects reordering", () => {
+    const canonicalBoard: BoardSnapshot = {
+      ...board,
+      playerOrder: ["Rival", "You"],
+    };
+    const canonicalReference: PublicStochasticInput = {
+      model: MREF_COLONIST_LINKED_2024_V1,
+      beliefPolicy: PUBLIC_HISTORY_BELIEF_V1,
+      playerMapping: ["Rival", "You"],
+      rolls: [
+        { ordinal: 0, actor: 1, total: 8 },
+        { ordinal: 1, actor: 0, total: 6 },
+      ],
+      provenance: "complete-from-first-gameplay-roll",
+      diceHistoryDigest: "canonical-seat-order",
+    };
+    const built = buildDeepSearchRequest(
+      state,
+      canonicalBoard,
+      "You",
+      {},
+      true,
+      24,
+      canonicalReference,
+    );
+
+    expect(built.players).toEqual(["Rival", "You"]);
+    expect((built.request as any).stochastic.playerMapping).toEqual(built.players);
+
+    expect(() =>
+      buildDeepSearchRequest(
+        state,
+        canonicalBoard,
+        "You",
+        {},
+        true,
+        24,
+        {
+          ...canonicalReference,
+          playerMapping: ["You", "Rival"],
+        },
+      ),
+    ).toThrow(/canonical engine player ordering/);
+  });
+
   it("executes M_ref deterministically in WASM and fails closed on unknown provenance", async () => {
     const bytes = await readFile(
       new URL(

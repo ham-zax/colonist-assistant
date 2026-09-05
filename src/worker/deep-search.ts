@@ -1086,6 +1086,18 @@ export const buildDeepSearchRequest = (
   if (players.length < 2 || players.length > 4) {
     throw new Error("Deep Search supports standard 2–4 player games");
   }
+  if (stochastic?.model === MREF_COLONIST_LINKED_2024_V1) {
+    const mapping = stochastic.playerMapping;
+    if (
+      !mapping ||
+      mapping.length !== players.length ||
+      mapping.some((player, index) => player !== players[index])
+    ) {
+      throw new Error(
+        "Reference stochastic player mapping must match canonical engine player ordering",
+      );
+    }
+  }
   const discardLimits = [
     ...new Set(
       players

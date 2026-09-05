@@ -100,6 +100,92 @@ describe("live log session scanning", () => {
     session.stop();
   });
 
+  it("keeps one stochastic roll when the same Colonist log index rerenders with a new presentation fingerprint", async () => {
+    const root = document.createElement("div");
+    const entry = diceMessage(1, "Alice", 3, 5);
+    root.append(message(0, "Happy settling!"), entry);
+    document.body.append(root);
+    const session = new GameSession(root, vi.fn(), "dice-rerender-game");
+
+    await session.start();
+    const firstEventId = session.diceHistory.rolls[0]?.eventId;
+    expect(session.diceHistory.rolls).toHaveLength(1);
+
+    const rerendered = diceMessage(1, "Alice", 3, 5);
+    rerendered.firstChild!.nodeValue = "Alice rolled the dice";
+    entry.replaceWith(rerendered);
+    await vi.waitFor(() => {
+      expect(session.events.filter((event) => event.type === "roll")).toHaveLength(2);
+    });
+
+    expect(session.diceHistory.rolls).toHaveLength(1);
+    expect(session.diceHistory.rolls[0]).toMatchObject({
+      eventId: firstEventId,
+      actor: "Alice",
+      total: 8,
+      logIndex: 1,
+    });
+    session.stop();
+  });
+
+  it("does not claim complete dice provenance across an integrity-relevant parser miss", async () => {
+    const root = document.createElement("div");
+    root.append(
+      diceMessage(0, "Alice", 3, 5),
+      message(1, "Alice cast the dice and the table reported eight"),
+      diceMessage(2, "Bob", 6, 1),
+    );
+    document.body.append(root);
+    const session = new GameSession(root, vi.fn(), "dice-parser-miss-game");
+
+    await session.start();
+
+    expect(session.unmatchedIntegrityCount).toBe(1);
+    expect(session.diceHistory.coverage.ranges).toEqual([[0, 0], [2, 2]]);
+    expect(session.diceHistory.ambiguousLogIndices).toEqual([1]);
+    expect(session.diceHistory.provenance).toBe("gapped");
+    expect(session.diceHistory.hasUnknownRollGap).toBe(true);
+    session.stop();
+  });
+
+  it("weakens dice provenance for a trailing roll-capable parser miss", async () => {
+    const root = document.createElement("div");
+    root.append(
+      diceMessage(0, "Alice", 3, 5),
+      message(1, "Alice cast the dice and the table reported eight"),
+    );
+    document.body.append(root);
+    const session = new GameSession(root, vi.fn(), "dice-trailing-parser-miss-game");
+
+    await session.start();
+
+    expect(session.unmatchedIntegrityCount).toBe(1);
+    expect(session.diceHistory.coverage.ranges).toEqual([[0, 0]]);
+    expect(session.diceHistory.ambiguousLogIndices).toEqual([1]);
+    expect(session.diceHistory.provenance).toBe("gapped");
+    expect(session.diceHistory.hasUnknownRollGap).toBe(true);
+    session.stop();
+  });
+
+  it("keeps independently complete dice provenance across known harmless unmatched messages", async () => {
+    const root = document.createElement("div");
+    root.append(
+      diceMessage(0, "Alice", 3, 5),
+      message(1, "Happy settling!"),
+      diceMessage(2, "Bob", 6, 1),
+    );
+    document.body.append(root);
+    const session = new GameSession(root, vi.fn(), "dice-harmless-unmatched-game");
+
+    await session.start();
+
+    expect(session.unmatchedIntegrityCount).toBe(0);
+    expect(session.diceHistory.coverage.ranges).toEqual([[0, 2]]);
+    expect(session.diceHistory.ambiguousLogIndices).toEqual([]);
+    expect(session.diceHistory.provenance).toBe("complete-from-first-gameplay-roll");
+    session.stop();
+  });
+
   it("persists schema 4 dice history independently and reconnects a contiguous suffix", async () => {
     const firstRoot = document.createElement("div");
     firstRoot.append(diceMessage(0, "Alice", 4, 4), diceMessage(1, "Bob", 3, 3));

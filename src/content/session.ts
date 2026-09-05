@@ -20,6 +20,7 @@ import {
   appendPublicDiceRoll,
   createDiceHistoryState,
   noteMissingPublicRoll,
+  noteRollCapableLogAmbiguity,
   observeLogCoverage,
   restoreDiceHistoryState,
   serializeDiceHistoryState,
@@ -130,6 +131,11 @@ const classifyUnmatchedLog = (
   }
   return { reason: "unrecognized-log-format", affectsIntegrity: true };
 };
+
+const unmatchedCanConcealGameplayRoll = (
+  classification: ReturnType<typeof classifyUnmatchedLog>,
+): boolean => classification.reason === "unrecognized-log-format";
+
 const MAX_SEEN_IDS = 2600;
 const MAX_UNMATCHED_SAMPLES = 24;
 const MAX_UNMATCHED_SAMPLE_CHARS = 220;
@@ -462,12 +468,6 @@ export class GameSession {
       this.startedAt = Date.now();
       this.seenIds.clear();
     }
-    observeLogCoverage(
-      this.diceHistory,
-      candidates.flatMap((candidate) =>
-        candidate.logIndex === undefined ? [] : [candidate.logIndex],
-      ),
-    );
     if (
       !this.events.length &&
       candidates.length &&
@@ -489,9 +489,19 @@ export class GameSession {
         const classification = classifyUnmatchedLog(snapshot);
         this.unmatchedCount += 1;
         if (classification.affectsIntegrity) this.unmatchedIntegrityCount += 1;
+        if (candidate.logIndex !== undefined) {
+          if (unmatchedCanConcealGameplayRoll(classification)) {
+            noteRollCapableLogAmbiguity(this.diceHistory, candidate.logIndex);
+          } else {
+            observeLogCoverage(this.diceHistory, [candidate.logIndex]);
+          }
+        }
         this.recordUnmatched(snapshot.serialText, snapshot.index, classification);
         changed = true;
         continue;
+      }
+      if (candidate.logIndex !== undefined) {
+        observeLogCoverage(this.diceHistory, [candidate.logIndex]);
       }
       const stored = canonicalizeEvent({
         ...parsed.event,

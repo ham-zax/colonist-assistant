@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   appendPublicDiceRoll,
+  buildLiveDecisionStochasticInput,
   cloneDiceHistoryState,
   createDiceHistoryState,
   diceHistoryDigest,
   noteMissingPublicRoll,
+  noteRollCapableLogAmbiguity,
   observeLogCoverage,
   publicRollObservations,
   restoreDiceHistoryState,
@@ -30,6 +32,46 @@ describe("public dice history", () => {
 
     expect(state.rolls.map(({ eventId }) => eventId)).toEqual(["r1", "r2", "r3"]);
     expect(state.rolls.map(({ total }) => total)).toEqual([6, 7, 8]);
+  });
+
+  it("treats a stable Colonist log index as dice-event identity across presentation changes", () => {
+    const state = createDiceHistoryState();
+    observeLogCoverage(state, [4]);
+    appendPublicDiceRoll(state, {
+      ...roll("presentation-a", "P0", 8, 4),
+      dice: [3, 5],
+    });
+    appendPublicDiceRoll(state, {
+      ...roll("presentation-b", "P0", 8, 4),
+      dice: [3, 5],
+    });
+
+    expect(state.rolls).toHaveLength(1);
+    expect(state.rolls[0]).toMatchObject({
+      eventId: "presentation-a",
+      actor: "P0",
+      total: 8,
+      dice: [3, 5],
+      logIndex: 4,
+    });
+  });
+
+  it("fails closed on conflicting semantic dice evidence at one stable log index", () => {
+    const state = createDiceHistoryState();
+    observeLogCoverage(state, [4]);
+    appendPublicDiceRoll(state, {
+      ...roll("presentation-a", "P0", 8, 4),
+      dice: [3, 5],
+    });
+
+    expect(() =>
+      appendPublicDiceRoll(state, {
+        ...roll("presentation-b", "P0", 9, 4),
+        dice: [4, 5],
+      }),
+    ).toThrow(/log index 4/);
+    expect(state.rolls).toHaveLength(1);
+    expect(state.rolls[0]?.total).toBe(8);
   });
 
   it("marks coverage complete when indexed observation is continuous from zero", () => {
@@ -98,6 +140,26 @@ describe("public dice history", () => {
     expect(state.provenance).toBe("complete-from-first-gameplay-roll");
   });
 
+  it("persists roll-capable parser ambiguity until that exact log index is semantically resolved", () => {
+    const state = createDiceHistoryState();
+    observeLogCoverage(state, [0]);
+    appendPublicDiceRoll(state, roll("r0", "P0", 8, 0));
+    noteRollCapableLogAmbiguity(state, 1);
+
+    expect(state.ambiguousLogIndices).toEqual([1]);
+    expect(state.provenance).toBe("gapped");
+    expect(state.hasUnknownRollGap).toBe(true);
+
+    const restored = restoreDiceHistoryState(serializeDiceHistoryState(state));
+    expect(restored.ambiguousLogIndices).toEqual([1]);
+    expect(restored.provenance).toBe("gapped");
+
+    observeLogCoverage(restored, [1]);
+    expect(restored.ambiguousLogIndices).toEqual([]);
+    expect(restored.coverage.ranges).toEqual([[0, 1]]);
+    expect(restored.provenance).toBe("complete-from-first-gameplay-roll");
+  });
+
   it("represents missing-prefix and known middle rolls in stochastic ordinals", () => {
     const state = createDiceHistoryState();
     observeLogCoverage(state, [0, 1, 2, 3]);
@@ -113,6 +175,39 @@ describe("public dice history", () => {
       { ordinal: 1, actor: 0, total: 8 },
       { ordinal: 3, actor: 1, total: 6 },
     ]);
+  });
+
+  it("selects M_ref only for Balanced live decisions with usable canonical evidence", () => {
+    const state = createDiceHistoryState();
+    observeLogCoverage(state, [0]);
+    appendPublicDiceRoll(state, roll("r0", "P0", 8, 0));
+
+    expect(
+      buildLiveDecisionStochasticInput("balanced", state, ["P0", "P1"]),
+    ).toMatchObject({
+      model: "mref-colonist-linked-2024-v1",
+      playerMapping: ["P0", "P1"],
+      rolls: [{ ordinal: 0, actor: 0, total: 8 }],
+      provenance: "complete-from-first-gameplay-roll",
+    });
+    expect(
+      buildLiveDecisionStochasticInput("random", undefined, undefined),
+    ).toEqual({ model: "m0-fair-iid-2d6-v1" });
+    expect(
+      buildLiveDecisionStochasticInput("unknown", undefined, undefined),
+    ).toEqual({ model: "m0-fair-iid-2d6-v1" });
+  });
+
+  it("fails closed instead of downgrading Balanced live decisions without usable M_ref authority", () => {
+    const unavailable = createDiceHistoryState();
+    expect(() =>
+      buildLiveDecisionStochasticInput("balanced", unavailable, ["P0", "P1"]),
+    ).toThrow(/usable public reference-dice history/);
+
+    observeLogCoverage(unavailable, [0]);
+    expect(() =>
+      buildLiveDecisionStochasticInput("balanced", unavailable, undefined),
+    ).toThrow(/canonical engine player ordering/);
   });
 
   it("rejects totals outside the public 2..12 domain", () => {

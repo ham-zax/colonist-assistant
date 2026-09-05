@@ -28,6 +28,10 @@ import {
   shouldFastTrackRoll,
 } from "../core/forced-action";
 import {
+  buildLiveDecisionStochasticInput,
+  type PublicStochasticInput,
+} from "../core/dice-history";
+import {
   NUMBER_PIPS,
   scoreCityPlacements,
   scoreRoadPlacements,
@@ -2800,6 +2804,51 @@ export class AssistantOverlay {
         });
       }
     }
+    const failDecisionRequest = (detail: string): void => {
+      if (this.decisionKey !== key) return;
+      // Keep authoritative-decision gates closed. A failed or unsafe request
+      // must never expose an executable coaching fallback.
+      this.decisionPendingKey = "";
+      this.decisionSlowKey = "";
+      this.decisionWaitingForPreviousSearch = false;
+      this.decisionAnalysis = undefined;
+      const contextInvalidated =
+        detail === EXTENSION_CONTEXT_RELOAD_MESSAGE ||
+        isExtensionContextInvalidatedError(detail);
+      if (contextInvalidated) this.decisionContextInvalidated = true;
+      const displayedDetail = this.decisionContextInvalidated
+        ? EXTENSION_CONTEXT_RELOAD_MESSAGE
+        : detail;
+      this.decisionRuntimeError = displayedDetail;
+      this.decisionRuntimeDetail = displayedDetail;
+      this.decisionTraces.failure(traceKey, displayedDetail);
+      console.error(
+        `[Colonist Assistant] Strategist failed: ${displayedDetail}`,
+        {
+          key,
+          engine: this.settings.engine,
+          detail: displayedDetail,
+          policy: "selected-engine-only",
+          fallbackStarted: false,
+        },
+      );
+      this.render();
+    };
+    let stochastic: PublicStochasticInput;
+    try {
+      stochastic = buildLiveDecisionStochasticInput(
+        decisionBoard.diceMode,
+        this.session?.diceHistory,
+        decisionBoard.playerOrder,
+      );
+    } catch (error) {
+      failDecisionRequest(
+        error instanceof Error
+          ? error.message
+          : "Balanced Dice stochastic evidence is unavailable",
+      );
+      return;
+    }
     const requestDisposition = this.decisionWorker.request(
       key,
       state,
@@ -2848,36 +2897,7 @@ export class AssistantOverlay {
         this.decisionTraces.slow(traceKey);
         this.render();
       },
-      (detail) => {
-        if (this.decisionKey !== key) return;
-        // Keep authoritative-decision gates closed. A failed WASM request
-        // must never expose an executable coaching fallback.
-        this.decisionPendingKey = "";
-        this.decisionSlowKey = "";
-        this.decisionWaitingForPreviousSearch = false;
-        this.decisionAnalysis = undefined;
-        const contextInvalidated =
-          detail === EXTENSION_CONTEXT_RELOAD_MESSAGE ||
-          isExtensionContextInvalidatedError(detail);
-        if (contextInvalidated) this.decisionContextInvalidated = true;
-        const displayedDetail = this.decisionContextInvalidated
-          ? EXTENSION_CONTEXT_RELOAD_MESSAGE
-          : detail;
-        this.decisionRuntimeError = displayedDetail;
-        this.decisionRuntimeDetail = displayedDetail;
-        this.decisionTraces.failure(traceKey, displayedDetail);
-        console.error(
-          `[Colonist Assistant] Strategist failed: ${displayedDetail}`,
-          {
-            key,
-            engine: this.settings.engine,
-            detail: displayedDetail,
-            policy: "selected-engine-only",
-            fallbackStarted: false,
-          },
-        );
-        this.render();
-      },
+      failDecisionRequest,
       searchConstraints,
       !this.settings.disablePlayerTrades,
       () => {
@@ -2891,6 +2911,7 @@ export class AssistantOverlay {
         this.decisionWaitingForPreviousSearch = false;
         this.render();
       },
+      stochastic,
     );
     if (
       requestDisposition === "started" ||

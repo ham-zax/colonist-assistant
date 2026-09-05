@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { DecisionAnalysis } from "../src/core/engine";
+import {
+  appendPublicDiceRoll,
+  buildLiveDecisionStochasticInput,
+  createDiceHistoryState,
+  observeLogCoverage,
+} from "../src/core/dice-history";
 import type { BoardSnapshot } from "../src/core/placement";
 import type { TrackerState } from "../src/core/types";
 import { DecisionWorkerClient } from "../src/content/decision-worker";
@@ -114,7 +120,7 @@ describe("decision service client", () => {
     client.destroy();
   });
 
-  it("preserves an explicit M_ref validation request for background CPU routing", async () => {
+  it("sends live Balanced-Dice history as an explicit M_ref request", async () => {
     const analysis: DecisionAnalysis = {
       engine: "deep-search",
       players: [],
@@ -128,19 +134,28 @@ describe("decision service client", () => {
     }));
     vi.stubGlobal("chrome", { runtime: { sendMessage } });
     const client = new DecisionWorkerClient();
-    const stochastic = {
-      model: "mref-colonist-linked-2024-v1" as const,
-      beliefPolicy: "public-history-belief-v1" as const,
-      playerMapping: ["You", "Rival"],
-      rolls: [{ ordinal: 0, actor: 0, total: 8 }],
-      provenance: "complete-from-first-gameplay-roll" as const,
-      diceHistoryDigest: "history",
-    };
+    const diceHistory = createDiceHistoryState();
+    observeLogCoverage(diceHistory, [0]);
+    appendPublicDiceRoll(diceHistory, {
+      eventId: "roll-0",
+      actor: "You",
+      total: 8,
+      logIndex: 0,
+    });
+    const liveBoard = {
+      diceMode: "balanced",
+      playerOrder: ["You", "Rival"],
+    } as BoardSnapshot;
+    const stochastic = buildLiveDecisionStochasticInput(
+      liveBoard.diceMode,
+      diceHistory,
+      liveBoard.playerOrder,
+    );
 
     client.request(
-      "reference-validation",
+      "balanced-live",
       {} as TrackerState,
-      {} as BoardSnapshot,
+      liveBoard,
       "You",
       "deep-search",
       vi.fn(),
@@ -154,7 +169,14 @@ describe("decision service client", () => {
 
     await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledOnce());
     expect(sendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ stochastic }),
+      expect.objectContaining({
+        board: liveBoard,
+        stochastic: expect.objectContaining({
+          model: "mref-colonist-linked-2024-v1",
+          playerMapping: ["You", "Rival"],
+          rolls: [{ ordinal: 0, actor: 0, total: 8 }],
+        }),
+      }),
     );
     client.destroy();
   });

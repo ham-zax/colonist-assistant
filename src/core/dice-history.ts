@@ -1,3 +1,5 @@
+import type { DiceMode } from "./placement";
+
 export interface PublicDiceRoll {
   actor: string;
   total: number;
@@ -41,6 +43,8 @@ export interface DiceHistoryState {
   rolls: PublicDiceRoll[];
   provenance: DiceHistoryProvenance;
   coverage: DiceLogCoverage;
+  /** Indexed log entries whose unparsed semantics could conceal a gameplay roll. */
+  ambiguousLogIndices: number[];
   /** Independently established missing gameplay-roll count before rolls[0]. */
   missingPrefixRolls?: number;
   /** Missing gameplay-roll intervals. Omitted missingRolls means the gap length is unknown. */
@@ -63,6 +67,7 @@ export interface StoredDiceHistoryState {
   rolls: PublicDiceRoll[];
   provenance: DiceHistoryProvenance;
   coverage: DiceLogCoverage;
+  ambiguousLogIndices?: number[];
   missingPrefixRolls?: number;
   gaps: DiceHistoryGap[];
   hasUnknownRollGap: boolean;
@@ -77,8 +82,9 @@ const refreshProvenance = (state: DiceHistoryState): void => {
   const explicitUnknownGap = state.gaps.some(
     (gap) => gap.missingRolls === undefined,
   );
-  state.hasUnknownRollGap = coverageGap || explicitUnknownGap;
-  if (coverageGap || state.gaps.length > 0) {
+  const parserAmbiguity = state.ambiguousLogIndices.length > 0;
+  state.hasUnknownRollGap = coverageGap || explicitUnknownGap || parserAmbiguity;
+  if (coverageGap || state.gaps.length > 0 || parserAmbiguity) {
     state.provenance = "gapped";
     return;
   }
@@ -113,6 +119,7 @@ export const createDiceHistoryState = (): DiceHistoryState => ({
   rolls: [],
   provenance: "unknown",
   coverage: { ranges: [] },
+  ambiguousLogIndices: [],
   gaps: [],
   hasUnknownRollGap: false,
 });
@@ -121,11 +128,31 @@ export const observeLogCoverage = (
   state: DiceHistoryState,
   indices: readonly number[],
 ): void => {
+  const observed = indices.filter(validIndex);
+  if (observed.length) {
+    const resolved = new Set(observed);
+    state.ambiguousLogIndices = state.ambiguousLogIndices.filter(
+      (index) => !resolved.has(index),
+    );
+  }
   const ranges = [
     ...state.coverage.ranges,
-    ...indices.filter(validIndex).map((index) => [index, index] as [number, number]),
+    ...observed.map((index) => [index, index] as [number, number]),
   ];
   state.coverage.ranges = normalizeCoverage(ranges);
+  refreshProvenance(state);
+};
+
+export const noteRollCapableLogAmbiguity = (
+  state: DiceHistoryState,
+  logIndex: number,
+): void => {
+  if (!validIndex(logIndex)) return;
+  if (state.rolls.some((roll) => roll.logIndex === logIndex)) return;
+  if (!state.ambiguousLogIndices.includes(logIndex)) {
+    state.ambiguousLogIndices.push(logIndex);
+    state.ambiguousLogIndices.sort((left, right) => left - right);
+  }
   refreshProvenance(state);
 };
 
@@ -189,6 +216,30 @@ export const appendPublicDiceRoll = (
   roll: PublicDiceRoll,
 ): void => {
   validateRoll(roll);
+  if (roll.logIndex !== undefined) {
+    const indexed = state.rolls.find(
+      (candidate) => candidate.logIndex === roll.logIndex,
+    );
+    if (indexed) {
+      const diceConflict =
+        indexed.dice !== undefined &&
+        roll.dice !== undefined &&
+        JSON.stringify(indexed.dice) !== JSON.stringify(roll.dice);
+      if (
+        indexed.actor !== roll.actor ||
+        indexed.total !== roll.total ||
+        diceConflict
+      ) {
+        throw new Error(
+          `Conflicting public dice evidence for log index ${roll.logIndex}`,
+        );
+      }
+      if (!indexed.dice && roll.dice) {
+        indexed.dice = [...roll.dice] as [number, number];
+      }
+      return;
+    }
+  }
   const existing = state.rolls.find((candidate) => candidate.eventId === roll.eventId);
   if (existing) {
     if (
@@ -222,6 +273,7 @@ export const cloneDiceHistoryState = (
   })),
   provenance: state.provenance,
   coverage: { ranges: state.coverage.ranges.map(([start, end]) => [start, end]) },
+  ambiguousLogIndices: [...state.ambiguousLogIndices],
   ...(state.missingPrefixRolls !== undefined
     ? { missingPrefixRolls: state.missingPrefixRolls }
     : {}),
@@ -238,6 +290,9 @@ export const restoreDiceHistoryState = (
 ): DiceHistoryState => {
   const restored = createDiceHistoryState();
   restored.coverage.ranges = normalizeCoverage(stored.coverage?.ranges ?? []);
+  restored.ambiguousLogIndices = [
+    ...new Set((stored.ambiguousLogIndices ?? []).filter(validIndex)),
+  ].sort((left, right) => left - right);
   restored.missingPrefixRolls =
     stored.missingPrefixRolls !== undefined && validIndex(stored.missingPrefixRolls)
       ? stored.missingPrefixRolls
@@ -314,11 +369,43 @@ export const buildReferenceStochasticInput = (
   };
 };
 
+const referenceHistoryAvailable = (state: DiceHistoryState): boolean => {
+  if (state.provenance === "complete-from-first-gameplay-roll") return true;
+  if (state.provenance === "gap-free-suffix") {
+    return state.missingPrefixRolls !== undefined;
+  }
+  if (state.provenance === "gapped") {
+    return (
+      !state.hasUnknownRollGap &&
+      state.gaps.every((gap) => gap.missingRolls !== undefined)
+    );
+  }
+  return false;
+};
+
+export const buildLiveDecisionStochasticInput = (
+  diceMode: DiceMode,
+  state: DiceHistoryState | undefined,
+  canonicalPlayerOrder: readonly string[] | undefined,
+): PublicStochasticInput => {
+  if (diceMode !== "balanced") return { model: M0_FAIR_IID_2D6_V1 };
+  if (!state || !referenceHistoryAvailable(state)) {
+    throw new Error("Balanced Dice requires usable public reference-dice history");
+  }
+  if (!canonicalPlayerOrder?.length) {
+    throw new Error("Balanced Dice requires canonical engine player ordering");
+  }
+  return buildReferenceStochasticInput(state, canonicalPlayerOrder);
+};
+
 export const diceHistoryDigest = (state: DiceHistoryState): string =>
   fnv1a64(
     JSON.stringify({
       provenance: state.provenance,
       coverage: state.coverage.ranges,
+      ...(state.ambiguousLogIndices.length
+        ? { ambiguousLogIndices: state.ambiguousLogIndices }
+        : {}),
       hasUnknownRollGap: state.hasUnknownRollGap,
       missingPrefixRolls: state.missingPrefixRolls ?? null,
       gaps: state.gaps.map((gap) => [gap.afterOrdinal, gap.missingRolls ?? null]),
