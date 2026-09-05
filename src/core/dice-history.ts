@@ -98,8 +98,10 @@ const refreshProvenance = (state: DiceHistoryState): void => {
   }
   const first = ranges[0]?.[0];
   if (first === undefined) {
-    state.provenance = "unknown";
-  } else if ((state.missingPrefixRolls ?? 0) > 0 || first > 0) {
+    state.provenance = state.missingPrefixRolls === 0
+      ? "complete-from-first-gameplay-roll"
+      : "unknown";
+  } else if ((state.missingPrefixRolls ?? 0) > 0 || (first > 0 && state.missingPrefixRolls !== 0)) {
     state.provenance = "gap-free-suffix";
   } else {
     state.provenance = "complete-from-first-gameplay-roll";
@@ -132,6 +134,21 @@ export const createDiceHistoryState = (): DiceHistoryState => ({
   gaps: [],
   hasUnknownRollGap: false,
 });
+
+/** A same-game setup observation proves that no gameplay roll precedes this boundary. */
+export const observeDiceSetupBoundary = (state: DiceHistoryState): boolean => {
+  // Never erase observed rolls, contradictions, or unresolved parser evidence.
+  if (state.rolls.length || state.gaps.length || state.ambiguousLogIndices.length || state.hasUnlocatedRollAmbiguity) return false;
+  if (state.missingPrefixRolls === 0 && state.coverage.ranges.length <= 1) return false;
+  const last = state.coverage.ranges.at(-1)?.[1];
+  // The authoritative setup phase proves this entire prefix is roll-free;
+  // blank presentation rows inside it are not missing gameplay observations.
+  // No server index is invented when the log itself is empty.
+  state.coverage.ranges = last === undefined ? [] : [[0, last]];
+  state.missingPrefixRolls = 0;
+  refreshProvenance(state);
+  return true;
+};
 
 const markAmbiguousLogIndex = (
   state: DiceHistoryState,
