@@ -76,6 +76,8 @@ interface StoredSessionV3 {
 interface StoredSession extends Omit<StoredSessionV3, "schema"> {
   schema: 4;
   diceHistory: StoredDiceHistoryState;
+  setupLogPrefixEnd?: number;
+  partialHistoryFromMissingPrefix?: boolean;
 }
 
 type RestorableSession = StoredSessionV3 | StoredSession;
@@ -106,7 +108,7 @@ const classifyUnmatchedLog = (
   if (/^happy settling!|\blist of commands:\s*\/help\b/iu.test(normalized)) {
     return { reason: "known-ignored-system-message", affectsIntegrity: false };
   }
-  if (/^bot is (?:selecting cards to discard|placing (?:a |an )?(?:road|settlement)) for\b/iu.test(normalized) && !/:die-[1-6]:/u.test(normalized)) {
+  if (/^bot is (?:selecting cards to discard|selecting who to rob|placing (?:a |an )?(?:road|settlement)) for\b/iu.test(normalized) && !/:die-[1-6]:/u.test(normalized)) {
     return { reason: "known-ignored-bot-status", affectsIntegrity: false };
   }
   if (
@@ -122,7 +124,7 @@ const classifyUnmatchedLog = (
       affectsIntegrity: false,
     };
   }
-  if (/^(?:player has no cards\.?|no player to steal from)$/iu.test(normalized)) {
+  if (/^(?:player has no cards\.?|players don't have any cards\.?|no player to steal from)$/iu.test(normalized)) {
     return { reason: "known-ignored-empty-robbery", affectsIntegrity: false };
   }
   if (/is blocked by the robber.*no resources produced/iu.test(normalized)) {
@@ -508,6 +510,7 @@ export class GameSession {
   private saveTimer?: number;
   private syntheticSequence = 0;
   private maxObservedLogIndex = -1;
+  private readonly observedLogIndices = new Set<number>();
   private disposed = false;
   private myPlayer?: string;
   // Undefined until the public board bridge has established whether this game
@@ -521,6 +524,8 @@ export class GameSession {
    * a permanent recording warning.
    */
   private setupLogPrefixPending = false;
+  /** Highest setup log index that must be backfilled before the prefix is complete. */
+  private setupLogPrefixEnd?: number;
   /** True only when partialHistory was introduced by a deferred setup-prefix miss. */
   private partialHistoryFromMissingPrefix = false;
   private storageGeneration = 0;
@@ -620,6 +625,7 @@ export class GameSession {
     this.events = [];
     this.partialHistory = false;
     this.setupLogPrefixPending = false;
+    this.setupLogPrefixEnd = undefined;
     this.partialHistoryFromMissingPrefix = false;
     this.diceHistory = createDiceHistoryState();
     this.unmatchedCount = 0;
@@ -628,6 +634,7 @@ export class GameSession {
     this.seenIds.clear();
     this.syntheticSequence = 0;
     this.maxObservedLogIndex = -1;
+    this.observedLogIndices.clear();
     if (rescan) this.scan(true);
     this.queueSave();
     this.onUpdate(this);
@@ -651,6 +658,7 @@ export class GameSession {
     this.events = [];
     this.partialHistory = false;
     this.setupLogPrefixPending = false;
+    this.setupLogPrefixEnd = undefined;
     this.partialHistoryFromMissingPrefix = false;
     this.diceHistory = createDiceHistoryState();
     this.unmatchedCount = 0;
@@ -658,6 +666,7 @@ export class GameSession {
     this.unmatchedSamples = [];
     this.syntheticSequence = 0;
     this.maxObservedLogIndex = -1;
+    this.observedLogIndices.clear();
     try {
       await enqueueStorage(clearCurrentGameStorage);
     } catch (error) {
@@ -812,6 +821,24 @@ export class GameSession {
     return true;
   }
 
+  hasPublicRobberCompletionAfterLogIndex(rollLogIndex: number): boolean {
+    if (!validStoredLogIndex(rollLogIndex)) return false;
+    const completedByTransfer = this.events.some((event) =>
+      event.index !== undefined &&
+      event.index > rollLogIndex &&
+      (
+        (event.type === "transfer" && event.reason === "robbery") ||
+        event.type === "unknown-transfer"
+      ),
+    );
+    if (completedByTransfer) return true;
+    return this.unmatchedSamples.some((sample) =>
+      sample.reason === "known-ignored-empty-robbery" &&
+      sample.lastLogIndex !== undefined &&
+      sample.lastLogIndex > rollLogIndex,
+    );
+  }
+
   setMyPlayer(myPlayer?: string): void {
     const normalized = myPlayer?.trim();
     if (!normalized || normalized === "You") {
@@ -855,6 +882,7 @@ export class GameSession {
       if (!snapshot) continue;
       if (validStoredLogIndex(snapshot.index)) {
         this.maxObservedLogIndex = Math.max(this.maxObservedLogIndex, snapshot.index);
+        this.observedLogIndices.add(snapshot.index);
       }
       let id = stableMessageId(snapshot);
       if (snapshot.index === undefined) {
@@ -873,29 +901,44 @@ export class GameSession {
     }
 
     candidates.sort((left, right) => left.index - right.index);
-    const sawLogIndexZero = candidates.some((candidate) => candidate.logIndex === 0);
-    const recoveredMissingPrefix = sawLogIndexZero && this.partialHistoryFromMissingPrefix;
-    if (sawLogIndexZero) {
-      this.setupLogPrefixPending = false;
-      if (recoveredMissingPrefix) {
-        this.partialHistoryFromMissingPrefix = false;
-        this.partialHistory = false;
-      }
-    }
+    const indexedCandidates = candidates.filter(
+      (candidate): candidate is typeof candidate & { logIndex: number } =>
+        candidate.logIndex !== undefined,
+    );
+    const firstCandidateLogIndex = indexedCandidates[0]?.logIndex;
     // Presentation changes, including index zero, are not game identity.
     // setGameKey() and explicit reset own history replacement; otherwise a
     // rerender could erase both accepted rolls and unresolved conflicts.
     if (
       !this.events.length &&
-      candidates.length &&
-      candidates[0]!.index > 0 &&
-      candidates.some((candidate) => candidate.element.hasAttribute("data-index"))
+      firstCandidateLogIndex !== undefined &&
+      firstCandidateLogIndex > 0
     ) {
+      this.setupLogPrefixEnd = Math.max(
+        this.setupLogPrefixEnd ?? -1,
+        firstCandidateLogIndex - 1,
+      );
       if (this.initialPlacement !== false && !this.partialHistory) {
         this.setupLogPrefixPending = true;
       } else {
         if (!this.partialHistory) this.partialHistoryFromMissingPrefix = true;
         this.partialHistory = true;
+      }
+    }
+    const setupPrefixComplete =
+      this.setupLogPrefixEnd !== undefined &&
+      Array.from(
+        { length: this.setupLogPrefixEnd + 1 },
+        (_, index) => index,
+      ).every((index) => this.observedLogIndices.has(index));
+    const recoveredMissingPrefix =
+      setupPrefixComplete && this.partialHistoryFromMissingPrefix;
+    if (setupPrefixComplete) {
+      this.setupLogPrefixPending = false;
+      this.setupLogPrefixEnd = undefined;
+      if (recoveredMissingPrefix) {
+        this.partialHistoryFromMissingPrefix = false;
+        this.partialHistory = false;
       }
     }
 
@@ -1141,9 +1184,22 @@ export class GameSession {
     const normalizedStored = { ...stored, events: journal.events } as RestorableSession;
     this.events = journal.events;
     this.partialHistory = stored.partialHistory || journal.conflictingLogIndices.length > 0;
-    // Persisted partial history has no trustworthy causal tag. Never clear it
-    // merely because a later virtualizer mount exposes index zero.
-    this.partialHistoryFromMissingPrefix = false;
+    const storedSetupLogPrefixEnd =
+      normalizedStored.schema === 4 &&
+      validStoredLogIndex(normalizedStored.setupLogPrefixEnd)
+        ? normalizedStored.setupLogPrefixEnd
+        : undefined;
+    this.setupLogPrefixEnd = storedSetupLogPrefixEnd;
+    this.partialHistoryFromMissingPrefix = Boolean(
+      normalizedStored.schema === 4 &&
+      normalizedStored.partialHistoryFromMissingPrefix === true &&
+      this.partialHistory &&
+      storedSetupLogPrefixEnd !== undefined,
+    );
+    this.setupLogPrefixPending = Boolean(
+      storedSetupLogPrefixEnd !== undefined &&
+      !this.partialHistoryFromMissingPrefix,
+    );
     this.diceHistory =
       normalizedStored.schema === 4
         ? restoreSchema4DiceHistory(normalizedStored)
@@ -1192,7 +1248,14 @@ export class GameSession {
     );
     this.syntheticSequence = Math.max(this.syntheticSequence, this.events.length);
     this.state = replayEvents(this.events);
-    for (const id of stored.seenIds) this.seenIds.add(id);
+    for (const id of stored.seenIds) {
+      this.seenIds.add(id);
+      const matchedIndex = id.match(/^index:(\d+):/u)?.[1];
+      if (matchedIndex !== undefined) {
+        const index = Number(matchedIndex);
+        if (validStoredLogIndex(index)) this.observedLogIndices.add(index);
+      }
+    }
   }
 
   private queueSave(): void {
@@ -1217,6 +1280,12 @@ export class GameSession {
       seenIds: [...this.seenIds].slice(-MAX_SEEN_IDS),
       partialHistory: this.partialHistory,
       diceHistory: serializeDiceHistoryState(this.diceHistory),
+      ...(this.setupLogPrefixEnd !== undefined
+        ? { setupLogPrefixEnd: this.setupLogPrefixEnd }
+        : {}),
+      ...(this.partialHistoryFromMissingPrefix
+        ? { partialHistoryFromMissingPrefix: true }
+        : {}),
       unmatchedCount: this.unmatchedCount,
       unmatchedIntegrityCount: this.unmatchedIntegrityCount,
       unmatchedSamples: this.unmatchedSamples.map((sample) => ({ ...sample })),

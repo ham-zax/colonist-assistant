@@ -14,6 +14,12 @@ export interface PublicRollObservation {
   total: number;
 }
 
+export interface LivePublicRollAuthority {
+  ordinal: number;
+  actor: string;
+  total: number;
+}
+
 export const M0_FAIR_IID_2D6_V1 = "m0-fair-iid-2d6-v1" as const;
 export const MREF_COLONIST_LINKED_2024_V1 =
   "mref-colonist-linked-2024-v1" as const;
@@ -583,6 +589,60 @@ const reconcileLiveRollCountAuthority = (
     if (!prior) byOrdinal.set(ordinal, roll);
   }
 
+  const seats = indexedRolls.map((roll) => {
+    const seat = seatByPlayer.get(roll.actor);
+    if (seat === undefined) {
+      throw new Error(`Public dice history references unmapped actor: ${roll.actor}`);
+    }
+    return seat;
+  });
+  const ordinalAcceptsIndexedRoll = (
+    ordinal: number,
+    roll: PublicDiceRoll,
+  ): boolean => {
+    const board = byOrdinal.get(ordinal);
+    return !board || sameSemanticRoll(board, roll);
+  };
+  const indexedOrdinalBounds = (): {
+    earliest: number[];
+    latest: number[];
+  } | undefined => {
+    const earliest: number[] = [];
+    let previous = -1;
+    for (let index = 0; index < seats.length; index += 1) {
+      const seat = seats[index]!;
+      const roll = indexedRolls[index]!;
+      let ordinal = seat;
+      while (
+        ordinal < expectedRollCount &&
+        (ordinal <= previous || !ordinalAcceptsIndexedRoll(ordinal, roll))
+      ) {
+        ordinal += players;
+      }
+      if (ordinal >= expectedRollCount) return undefined;
+      earliest.push(ordinal);
+      previous = ordinal;
+    }
+    const latest = new Array<number>(seats.length);
+    let next = expectedRollCount;
+    for (let index = seats.length - 1; index >= 0; index -= 1) {
+      const seat = seats[index]!;
+      const roll = indexedRolls[index]!;
+      let ordinal = seat + Math.floor((expectedRollCount - 1 - seat) / players) * players;
+      while (
+        ordinal >= 0 &&
+        (ordinal >= next || !ordinalAcceptsIndexedRoll(ordinal, roll))
+      ) {
+        ordinal -= players;
+      }
+      if (ordinal < 0) return undefined;
+      latest[index] = ordinal;
+      next = ordinal;
+    }
+    return { earliest, latest };
+  };
+  const bounds = indexedOrdinalBounds();
+
   // A complete board sequence is independently sufficient public authority in
   // bot games. The virtualized DOM log may lag or omit harmless presentation
   // rows; require its observed roll sequence to be a compatible subsequence,
@@ -604,12 +664,21 @@ const reconcileLiveRollCountAuthority = (
       if (matchedOrdinal < 0) return undefined;
       searchFrom = matchedOrdinal + 1;
     }
+    const completeRolls = Array.from(
+      { length: expectedRollCount },
+      (_, ordinal) => byOrdinal.get(ordinal)!,
+    );
+    if (bounds) {
+      for (let index = 0; index < indexedRolls.length; index += 1) {
+        if (bounds.earliest[index] !== bounds.latest[index]) continue;
+        completeRolls[bounds.earliest[index]!] = indexedRolls[index]!;
+      }
+    }
     const complete = cloneDiceHistoryState(state);
-    complete.rolls = Array.from({ length: expectedRollCount }, (_, ordinal) =>
-      byOrdinal.get(ordinal)!).map((roll) => ({
-        ...roll,
-        ...(roll.dice ? { dice: [...roll.dice] as [number, number] } : {}),
-      }));
+    complete.rolls = completeRolls.map((roll) => ({
+      ...roll,
+      ...(roll.dice ? { dice: [...roll.dice] as [number, number] } : {}),
+    }));
     complete.missingPrefixRolls = 0;
     complete.gaps = [];
     complete.hasUnknownRollGap = false;
@@ -618,36 +687,11 @@ const reconcileLiveRollCountAuthority = (
     return complete;
   }
 
-  const seats = indexedRolls.map((roll) => {
-    const seat = seatByPlayer.get(roll.actor);
-    if (seat === undefined) {
-      throw new Error(`Public dice history references unmapped actor: ${roll.actor}`);
-    }
-    return seat;
-  });
-  const earliest: number[] = [];
-  let previous = -1;
-  for (const seat of seats) {
-    let ordinal = seat;
-    while (ordinal <= previous) ordinal += players;
-    if (ordinal >= expectedRollCount) return undefined;
-    earliest.push(ordinal);
-    previous = ordinal;
+  if (!bounds || bounds.earliest.some((ordinal, index) => ordinal !== bounds.latest[index])) {
+    return undefined;
   }
-  const latest = new Array<number>(seats.length);
-  let next = expectedRollCount;
-  for (let index = seats.length - 1; index >= 0; index -= 1) {
-    const seat = seats[index]!;
-    let ordinal = seat + Math.floor((expectedRollCount - 1 - seat) / players) * players;
-    while (ordinal >= next) ordinal -= players;
-    if (ordinal < 0) return undefined;
-    latest[index] = ordinal;
-    next = ordinal;
-  }
-  if (earliest.some((ordinal, index) => ordinal !== latest[index])) return undefined;
-
   for (let index = 0; index < indexedRolls.length; index += 1) {
-    const ordinal = earliest[index]!;
+    const ordinal = bounds.earliest[index]!;
     const roll = indexedRolls[index]!;
     const prior = byOrdinal.get(ordinal);
     if (prior && !sameSemanticRoll(prior, roll)) return undefined;
@@ -687,11 +731,38 @@ const reconcileLiveRollCountAuthority = (
   return reconciled;
 };
 
+export const reconciledLivePublicRollAt = (
+  state: DiceHistoryState | undefined,
+  canonicalPlayerOrder: readonly string[] | undefined,
+  expectedRollCount: number | undefined,
+  ordinal: number,
+): PublicDiceRoll | undefined => {
+  if (!state || !canonicalPlayerOrder?.length || expectedRollCount === undefined) {
+    return undefined;
+  }
+  const reconciled = reconcileLiveRollCountAuthority(
+    state,
+    canonicalPlayerOrder,
+    expectedRollCount,
+  );
+  if (!reconciled) return undefined;
+  const position = rollOrdinals(reconciled).indexOf(ordinal);
+  if (position < 0) return undefined;
+  const roll = reconciled.rolls[position];
+  return roll
+    ? {
+        ...roll,
+        ...(roll.dice ? { dice: [...roll.dice] as [number, number] } : {}),
+      }
+    : undefined;
+};
+
 export const buildLiveDecisionStochasticInput = (
   diceMode: DiceMode,
   state: DiceHistoryState | undefined,
   canonicalPlayerOrder: readonly string[] | undefined,
   expectedRollCount?: number,
+  currentRoll?: LivePublicRollAuthority,
 ): PublicStochasticInput => {
   if (diceMode !== "balanced") return { model: M0_FAIR_IID_2D6_V1 };
   if (!canonicalPlayerOrder?.length) {
@@ -711,7 +782,27 @@ export const buildLiveDecisionStochasticInput = (
         "Balanced Dice public roll sequence does not reconcile with public turn progress",
       );
     }
-    return buildReferenceStochasticInput(reconciled, canonicalPlayerOrder);
+    const stochastic = buildReferenceStochasticInput(
+      reconciled,
+      canonicalPlayerOrder,
+    );
+    if (currentRoll) {
+      const actor = canonicalPlayerOrder.indexOf(currentRoll.actor);
+      const observed = stochastic.rolls?.find(
+        (roll) => roll.ordinal === currentRoll.ordinal,
+      );
+      if (
+        actor < 0 ||
+        !observed ||
+        observed.actor !== actor ||
+        observed.total !== currentRoll.total
+      ) {
+        throw new Error(
+          "Balanced Dice public roll history does not match the current public board roll",
+        );
+      }
+    }
+    return stochastic;
   }
   if (!referenceHistoryAvailable(state)) {
     throw new Error("Balanced Dice requires usable public reference-dice history");

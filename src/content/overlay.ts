@@ -31,6 +31,7 @@ import {
   buildLiveDecisionStochasticInput,
   diceHistoryDigest,
   MREF_COLONIST_LINKED_2024_V1,
+  reconciledLivePublicRollAt,
   type PublicStochasticInput,
 } from "../core/dice-history";
 import {
@@ -809,13 +810,41 @@ export class AssistantOverlay {
       blockedHex && blockedHex !== this.localSevenProtocol!.robberHexBefore,
     );
     const victimChoiceRequired = this.robberVictimCandidates(next).length > 1;
+    let publicCompletionObserved = false;
+    const currentRollOrdinal =
+      Number.isInteger(next.gameplayRollCount) && next.gameplayRollCount! > 0
+        ? next.gameplayRollCount! - 1
+        : undefined;
+    if (currentRollOrdinal !== undefined && this.session) {
+      try {
+        const currentRoll = reconciledLivePublicRollAt(
+          this.session.diceHistory,
+          next.playerOrder,
+          next.gameplayRollCount,
+          currentRollOrdinal,
+        );
+        publicCompletionObserved = Boolean(
+          currentRoll?.logIndex !== undefined &&
+          currentRoll.actor === next.currentPlayer &&
+          currentRoll.total === 7 &&
+          this.session.hasPublicRobberCompletionAfterLogIndex(currentRoll.logIndex),
+        );
+      } catch {
+        // Invalid stochastic evidence remains fail-closed in decision scheduling.
+      }
+    }
     if (
-      this.localSevenProtocol!.robberObserved &&
       next.action === "none" &&
       !next.robberVictimSelection &&
       (
-        previousVictimSelection ||
-        (robberMoveJustCompleted && robberMoved && !victimChoiceRequired)
+        publicCompletionObserved ||
+        (
+          this.localSevenProtocol!.robberObserved &&
+          (
+            previousVictimSelection ||
+            (robberMoveJustCompleted && robberMoved && !victimChoiceRequired)
+          )
+        )
       )
     ) {
       this.localSevenProtocol = undefined;
@@ -2634,6 +2663,9 @@ export class AssistantOverlay {
       board.diceMode,
       board.playerOrder,
       board.gameplayRollCount,
+      board.hasRolled,
+      board.currentPlayer,
+      board.lastRoll,
       this.session?.diceHistory ? diceHistoryDigest(this.session.diceHistory) : null,
     ]);
   }
@@ -2952,11 +2984,26 @@ export class AssistantOverlay {
       return;
     }
     try {
+      const currentRoll =
+        decisionBoard.hasRolled === true &&
+        decisionBoard.currentPlayer &&
+        decisionBoard.lastRoll !== undefined &&
+        Number.isInteger(decisionBoard.lastRoll) &&
+        decisionBoard.gameplayRollCount !== undefined &&
+        Number.isInteger(decisionBoard.gameplayRollCount) &&
+        decisionBoard.gameplayRollCount > 0
+          ? {
+              ordinal: decisionBoard.gameplayRollCount - 1,
+              actor: decisionBoard.currentPlayer,
+              total: decisionBoard.lastRoll,
+            }
+          : undefined;
       stochastic = buildLiveDecisionStochasticInput(
         decisionBoard.diceMode,
         this.session?.diceHistory,
         decisionBoard.playerOrder,
         decisionBoard.gameplayRollCount,
+        currentRoll,
       );
     } catch (error) {
       this.decisionWorker.reset();

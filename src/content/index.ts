@@ -44,30 +44,47 @@ const boot = async (): Promise<void> => {
   });
   overlay.setSettings(settings);
   overlay.updateBoard(currentBoard);
+  let boardPublicationActive = false;
+  let pendingSessionUpdate: GameSession | undefined;
+  const publishSessionUpdate = (updated: GameSession): void => {
+    if (boardPublicationActive) {
+      pendingSessionUpdate = updated;
+      return;
+    }
+    overlay.update(updated);
+  };
   const removeBoardBridge = installPublicBoardBridge((snapshot) => {
-    currentBoard = snapshot ?? readPublicBoardSnapshot();
-    if (snapshot?.gameKey) {
-      currentGameKey = snapshot.gameKey;
-      session?.setGameKey(snapshot.gameKey);
+    boardPublicationActive = true;
+    try {
+      currentBoard = snapshot ?? readPublicBoardSnapshot();
+      if (snapshot?.gameKey) {
+        currentGameKey = snapshot.gameKey;
+        session?.setGameKey(snapshot.gameKey);
+      }
+      const resolvedMyPlayer =
+        snapshot?.localSeatDiagnostics?.identity.status === "resolved"
+          ? snapshot.myPlayer
+          : undefined;
+      currentMyPlayer = resolvedMyPlayer;
+      session?.setMyPlayer(resolvedMyPlayer);
+      currentInitialPlacement = Boolean(currentBoard?.initialPlacement);
+      session?.setInitialPlacement(currentInitialPlacement, currentBoard?.gameKey);
+      if (
+        (currentRoot === boardOnlyRoot || currentBoard?.botOnlyGame) &&
+        currentBoard?.gameplayRollCount !== undefined
+      ) {
+        // Bot games can expose the authoritative board roll several seconds before
+        // the virtualized game-log row hydrates. Capture that public roll now and
+        // reconcile the later DOM presentation by gameplay ordinal.
+        session?.observeBoardDiceSnapshot(currentBoard);
+      }
+      overlay.updateBoard(currentBoard);
+    } finally {
+      boardPublicationActive = false;
+      const pending = pendingSessionUpdate;
+      pendingSessionUpdate = undefined;
+      if (pending) overlay.update(pending);
     }
-    const resolvedMyPlayer =
-      snapshot?.localSeatDiagnostics?.identity.status === "resolved"
-        ? snapshot.myPlayer
-        : undefined;
-    currentMyPlayer = resolvedMyPlayer;
-    session?.setMyPlayer(resolvedMyPlayer);
-    currentInitialPlacement = Boolean(currentBoard?.initialPlacement);
-    session?.setInitialPlacement(currentInitialPlacement, currentBoard?.gameKey);
-    if (
-      (currentRoot === boardOnlyRoot || currentBoard?.botOnlyGame) &&
-      currentBoard?.gameplayRollCount !== undefined
-    ) {
-      // Bot games can expose the authoritative board roll several seconds before
-      // the virtualized game-log row hydrates. Capture that public roll now and
-      // reconcile the later DOM presentation by gameplay ordinal.
-      session?.observeBoardDiceSnapshot(currentBoard);
-    }
-    overlay.updateBoard(currentBoard);
   });
 
   const attach = async (): Promise<void> => {
@@ -107,7 +124,7 @@ const boot = async (): Promise<void> => {
     if (!root) return;
     const next = new GameSession(
       root,
-      (updated) => overlay.update(updated),
+      publishSessionUpdate,
       currentGameKey,
     );
     session = next;

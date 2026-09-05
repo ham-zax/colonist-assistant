@@ -108,6 +108,35 @@ describe("Balanced setup dice authority", () => {
     expect(session.partialHistory).toBe(false);
   });
 
+  it("restores deferred setup-prefix authority and clears it only after the full prefix backfills", async () => {
+    const root = document.createElement("div");
+    root.append(message(3, "Alice placed a Road"));
+    const session = sessionFor(root);
+    await session.start();
+    session.setInitialPlacement(false, gameKey);
+    expect(session.partialHistory).toBe(true);
+
+    await vi.waitFor(() =>
+      expect(storage.get(`colonistAssistantSession:${session.id}`)).toMatchObject({
+        partialHistory: true,
+        setupLogPrefixEnd: 2,
+        partialHistoryFromMissingPrefix: true,
+      }));
+    session.stop();
+
+    const restored = new GameSession(root, vi.fn(), gameKey);
+    sessions.push(restored);
+    await restored.start();
+    expect(restored.partialHistory).toBe(true);
+
+    root.prepend(
+      message(0, "Happy settling!"),
+      message(1, "Alice joined the game"),
+      message(2, "Alice placed a Settlement"),
+    );
+    await vi.waitFor(() => expect(restored.partialHistory).toBe(false));
+  });
+
   it("does not mark startup history partial before the board bridge establishes setup", async () => {
     const root = document.createElement("div");
     root.append(message(2, "Alice placed a Settlement"));
