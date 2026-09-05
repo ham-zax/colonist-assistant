@@ -52,7 +52,9 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // stop() queues the final save; retain the Chrome mock until that queue drains.
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
   document.body.replaceChildren();
   vi.unstubAllGlobals();
 });
