@@ -1078,33 +1078,43 @@ static inline __device__ void reservoir_action(
     }
 }
 
-static inline __device__ int weighted_reservoir_select(
+static inline __device__ int weighted_policy_select(
     uint64_t *rng,
     uint32_t *total_weight,
-    uint32_t weight
+    uint32_t *best_weight,
+    uint32_t weight,
+    int greedy
 ) {
     if (weight == 0u) {
         return 0;
     }
     const uint32_t next_total = *total_weight + weight;
-    const int selected = rng_range(rng, next_total) < weight;
     *total_weight = next_total;
-    return selected;
+    if (greedy) {
+        if (weight > *best_weight) {
+            *best_weight = weight;
+            return 1;
+        }
+        return 0;
+    }
+    return rng_range(rng, next_total) < weight;
 }
 
-static inline __device__ void weighted_reservoir_action(
+static inline __device__ void weighted_policy_action(
     uint32_t *actions,
     uint32_t stride,
     uint32_t lane,
     uint64_t *rng,
     uint32_t *total_weight,
+    uint32_t *best_weight,
     uint32_t weight,
+    int greedy,
     uint32_t tag,
     uint32_t arg0,
     uint32_t arg1,
     uint32_t arg2
 ) {
-    if (weighted_reservoir_select(rng, total_weight, weight)) {
+    if (weighted_policy_select(rng, total_weight, best_weight, weight, greedy)) {
         write_action(actions, stride, lane, tag, arg0, arg1, arg2);
     }
 }
@@ -2694,6 +2704,7 @@ static inline __device__ int choose_road_building_pair(
     uint32_t stride,
     uint32_t lane,
     uint64_t *rng,
+    int greedy,
     uint32_t *selected_first,
     uint32_t *selected_second_code,
     uint32_t *selected_score
@@ -2701,6 +2712,7 @@ static inline __device__ int choose_road_building_pair(
     const uint32_t player = state_get(states, stride, STATE_CURRENT_PLAYER, lane);
     const uint32_t roads_left = player_get(states, stride, lane, player, PLAYER_ROADS_LEFT);
     uint32_t total_weight = 0u;
+    uint32_t best_weight = 0u;
     *selected_first = 0xffffffffu;
     *selected_second_code = 0u;
     *selected_score = 0u;
@@ -2715,12 +2727,10 @@ static inline __device__ int choose_road_building_pair(
             const uint32_t weight = road_building_pair_policy_score(
                 states, topology, stride, lane, first, 0xffffffffu
             );
-            const uint32_t next_total = total_weight + weight;
-            if (rng_range(rng, next_total) < weight) {
+            if (weighted_policy_select(rng, &total_weight, &best_weight, weight, greedy)) {
                 *selected_first = first;
                 *selected_score = weight;
             }
-            total_weight = next_total;
         }
         return *selected_first != 0xffffffffu;
     }
@@ -2735,13 +2745,11 @@ static inline __device__ int choose_road_building_pair(
             const uint32_t weight = road_building_pair_policy_score(
                 states, topology, stride, lane, first, second
             );
-            const uint32_t next_total = total_weight + weight;
-            if (rng_range(rng, next_total) < weight) {
+            if (weighted_policy_select(rng, &total_weight, &best_weight, weight, greedy)) {
                 *selected_first = first;
                 *selected_second_code = second + 1u;
                 *selected_score = weight;
             }
-            total_weight = next_total;
         }
     }
     return *selected_first != 0xffffffffu;
@@ -2897,11 +2905,13 @@ static inline __device__ int choose_weighted_robber_action(
     uint32_t stride,
     uint32_t lane,
     uint64_t *rng,
+    int greedy,
     uint32_t *selected_hex,
     uint32_t *selected_victim_code
 ) {
     const uint32_t players = state_get(states, stride, STATE_NUM_PLAYERS, lane);
     uint32_t total_weight = 0u;
+    uint32_t best_weight = 0u;
     int found = 0;
     for (uint32_t hex = 0u; hex < HEX_COUNT; ++hex) {
         if (!robber_hex_allowed(states, topology, stride, lane, hex)) {
@@ -2910,12 +2920,10 @@ static inline __device__ int choose_weighted_robber_action(
         const uint32_t victims = robber_victim_mask(states, topology, stride, lane, hex);
         if (victims == 0u) {
             const uint32_t weight = robber_policy_score(states, topology, stride, lane, hex, 0u);
-            const uint32_t next_total = total_weight + weight;
-            if (rng_range(rng, next_total) < weight) {
+            if (weighted_policy_select(rng, &total_weight, &best_weight, weight, greedy)) {
                 *selected_hex = hex;
                 *selected_victim_code = 0u;
             }
-            total_weight = next_total;
             found = 1;
             continue;
         }
@@ -2927,12 +2935,10 @@ static inline __device__ int choose_weighted_robber_action(
             const uint32_t weight = robber_policy_score(
                 states, topology, stride, lane, hex, victim_code
             );
-            const uint32_t next_total = total_weight + weight;
-            if (rng_range(rng, next_total) < weight) {
+            if (weighted_policy_select(rng, &total_weight, &best_weight, weight, greedy)) {
                 *selected_hex = hex;
                 *selected_victim_code = victim_code;
             }
-            total_weight = next_total;
             found = 1;
         }
     }
@@ -2986,13 +2992,15 @@ static inline __device__ void generate_rollout_action_lane(
     uint64_t *rng_states,
     uint64_t *chance_rng_states,
     uint32_t stride,
-    uint32_t lane
+    uint32_t lane,
+    int controlled_player_turn
 ) {
     clear_action(actions, stride, lane);
     const uint32_t phase = state_get(states, stride, STATE_PHASE, lane);
     const int chance_phase = phase == PHASE_ROLL_CHANCE
         || phase == PHASE_DEVELOPMENT_CHANCE
         || phase == PHASE_RESOLVE_STEAL;
+    const int greedy_policy = controlled_player_turn && !chance_phase;
     uint64_t rng = chance_phase ? chance_rng_states[lane] : rng_states[lane];
     const uint32_t current = state_get(states, stride, STATE_CURRENT_PLAYER, lane);
     const uint32_t players = state_get(states, stride, STATE_NUM_PLAYERS, lane);
@@ -3000,15 +3008,18 @@ static inline __device__ void generate_rollout_action_lane(
 
     if (phase == PHASE_SETUP_SETTLEMENT) {
         uint32_t total_weight = 0u;
+        uint32_t best_weight = 0u;
         for (uint32_t vertex = 0u; vertex < VERTEX_COUNT; ++vertex) {
             if (can_place_settlement_device(states, topology, stride, lane, vertex, 1)) {
-                weighted_reservoir_action(
+                weighted_policy_action(
                     actions,
                     stride,
                     lane,
                     &rng,
                     &total_weight,
+                    &best_weight,
                     vertex_policy_score(states, topology, stride, lane, vertex),
+                    greedy_policy,
                     ACTION_PLACE_SETTLEMENT,
                     vertex,
                     0u,
@@ -3021,16 +3032,19 @@ static inline __device__ void generate_rollout_action_lane(
         const uint32_t settlement = state_get(states, stride, STATE_PHASE_ARG, lane);
         const uint32_t edge_count = topo_vertex_edge_count(topology, settlement);
         uint32_t total_weight = 0u;
+        uint32_t best_weight = 0u;
         for (uint32_t slot = 0u; slot < edge_count; ++slot) {
             const uint32_t edge = topo_vertex_edge(topology, settlement, slot);
             if (state_get(states, stride, STATE_ROADS + edge, lane) == 0u) {
-                weighted_reservoir_action(
+                weighted_policy_action(
                     actions,
                     stride,
                     lane,
                     &rng,
                     &total_weight,
+                    &best_weight,
                     road_policy_score(states, topology, stride, lane, edge),
+                    greedy_policy,
                     ACTION_PLACE_ROAD,
                     edge,
                     0u,
@@ -3041,13 +3055,16 @@ static inline __device__ void generate_rollout_action_lane(
         seen = total_weight > 0u ? 1u : 0u;
     } else if (phase == PHASE_PRE_ROLL) {
         uint32_t total_weight = 0u;
-        weighted_reservoir_action(
+        uint32_t best_weight = 0u;
+        weighted_policy_action(
             actions,
             stride,
             lane,
             &rng,
             &total_weight,
+            &best_weight,
             profile_scaled_weight(states, stride, lane, current, 0u, 6000u),
+            greedy_policy,
             ACTION_ROLL,
             0u,
             0u,
@@ -3057,7 +3074,7 @@ static inline __device__ void generate_rollout_action_lane(
             uint32_t hex = 0u;
             uint32_t victim_code = 0u;
             if (choose_weighted_robber_action(
-                states, topology, stride, lane, &rng, &hex, &victim_code
+                states, topology, stride, lane, &rng, greedy_policy, &hex, &victim_code
             )) {
                 const uint32_t unblock_base = robber_blocks_actor_production(
                     states, topology, stride, lane, current
@@ -3068,13 +3085,15 @@ static inline __device__ void generate_rollout_action_lane(
                 const uint32_t base = decisive_base > unblock_base
                     ? decisive_base
                     : unblock_base;
-                weighted_reservoir_action(
+                weighted_policy_action(
                     actions,
                     stride,
                     lane,
                     &rng,
                     &total_weight,
+                    &best_weight,
                     profile_scaled_weight(states, stride, lane, current, 2u, base),
+                    greedy_policy,
                     ACTION_PLAY_KNIGHT,
                     hex,
                     victim_code,
@@ -3088,7 +3107,7 @@ static inline __device__ void generate_rollout_action_lane(
             uint32_t second_code = 0u;
             uint32_t pair_score = 0u;
             if (choose_road_building_pair(
-                states, topology, stride, lane, &rng, &first, &second_code, &pair_score
+                states, topology, stride, lane, &rng, greedy_policy, &first, &second_code, &pair_score
             )) {
                 const uint32_t roads_left = player_get(
                     states, stride, lane, current, PLAYER_ROADS_LEFT
@@ -3096,13 +3115,15 @@ static inline __device__ void generate_rollout_action_lane(
                 const uint32_t base = pair_score >= 10000u
                     ? 8000u
                     : (roads_left == 1u ? 24u : 1600u);
-                weighted_reservoir_action(
+                weighted_policy_action(
                     actions,
                     stride,
                     lane,
                     &rng,
                     &total_weight,
+                    &best_weight,
                     profile_scaled_weight(states, stride, lane, current, 2u, base),
+                    greedy_policy,
                     ACTION_PLAY_ROAD_BUILDING,
                     first,
                     second_code,
@@ -3112,6 +3133,7 @@ static inline __device__ void generate_rollout_action_lane(
         }
         if (development_playable(states, stride, lane, current, 3u)) {
             uint32_t pair_weight = 0u;
+            uint32_t pair_best_weight = 0u;
             uint32_t selected_first = 0xffffffffu;
             uint32_t selected_second = 0xffffffffu;
             for (uint32_t first = 0u; first < 5u; ++first) {
@@ -3124,21 +3146,22 @@ static inline __device__ void generate_rollout_action_lane(
                     const uint32_t weight = year_of_plenty_pair_score(
                         states, topology, stride, lane, current, first, second
                     );
-                    const uint32_t next_total = pair_weight + weight;
-                    if (rng_range(&rng, next_total) < weight) {
+                    if (weighted_policy_select(
+                        &rng, &pair_weight, &pair_best_weight, weight, greedy_policy
+                    )) {
                         selected_first = first;
                         selected_second = second;
                     }
-                    pair_weight = next_total;
                 }
             }
             if (selected_first != 0xffffffffu) {
-                weighted_reservoir_action(
+                weighted_policy_action(
                     actions,
                     stride,
                     lane,
                     &rng,
                     &total_weight,
+                    &best_weight,
                     profile_scaled_weight(
                         states,
                         stride,
@@ -3147,6 +3170,7 @@ static inline __device__ void generate_rollout_action_lane(
                         2u,
                         pair_weight >= 10000u ? 9000u : 3600u
                     ),
+                    greedy_policy,
                     ACTION_PLAY_YEAR_OF_PLENTY,
                     selected_first,
                     selected_second,
@@ -3156,23 +3180,25 @@ static inline __device__ void generate_rollout_action_lane(
         }
         if (development_playable(states, stride, lane, current, 4u)) {
             uint32_t resource_weight = 0u;
+            uint32_t resource_best_weight = 0u;
             uint32_t selected_resource = 0u;
             for (uint32_t resource = 0u; resource < 5u; ++resource) {
                 const uint32_t weight = monopoly_resource_score(
                     states, topology, stride, lane, current, resource
                 );
-                const uint32_t next_total = resource_weight + weight;
-                if (rng_range(&rng, next_total) < weight) {
+                if (weighted_policy_select(
+                    &rng, &resource_weight, &resource_best_weight, weight, greedy_policy
+                )) {
                     selected_resource = resource;
                 }
-                resource_weight = next_total;
             }
-            weighted_reservoir_action(
+            weighted_policy_action(
                 actions,
                 stride,
                 lane,
                 &rng,
                 &total_weight,
+                &best_weight,
                 profile_scaled_weight(
                     states,
                     stride,
@@ -3181,6 +3207,7 @@ static inline __device__ void generate_rollout_action_lane(
                     2u,
                     resource_weight >= 10000u ? 6000u : 1400u
                 ),
+                greedy_policy,
                 ACTION_PLAY_MONOPOLY,
                 selected_resource,
                 0u,
@@ -3220,6 +3247,25 @@ static inline __device__ void generate_rollout_action_lane(
             if (total == 0u) {
                 break;
             }
+            if (greedy_policy) {
+                uint32_t selected = 0xffffffffu;
+                uint32_t selected_score = 0xffffffffu;
+                for (uint32_t resource = 0u; resource < 5u; ++resource) {
+                    if (remaining[resource] == 0u) {
+                        continue;
+                    }
+                    const uint32_t score = resource_policy_score(resource);
+                    if (score < selected_score) {
+                        selected = resource;
+                        selected_score = score;
+                    }
+                }
+                if (selected != 0xffffffffu) {
+                    --remaining[selected];
+                    ++discard[selected];
+                }
+                continue;
+            }
             uint32_t target = rng_range(&rng, total);
             for (uint32_t resource = 0u; resource < 5u; ++resource) {
                 if (target < remaining[resource]) {
@@ -3238,7 +3284,7 @@ static inline __device__ void generate_rollout_action_lane(
         uint32_t hex = 0u;
         uint32_t victim_code = 0u;
         if (choose_weighted_robber_action(
-            states, topology, stride, lane, &rng, &hex, &victim_code
+            states, topology, stride, lane, &rng, greedy_policy, &hex, &victim_code
         )) {
             write_action(actions, stride, lane, ACTION_MOVE_ROBBER, hex, victim_code, 0u);
             seen = 1u;
@@ -3260,17 +3306,20 @@ static inline __device__ void generate_rollout_action_lane(
         }
     } else if (phase == PHASE_MAIN) {
         uint32_t family_weight = 0u;
+        uint32_t family_best_weight = 0u;
         const uint32_t actor_vp = player_get(states, stride, lane, current, PLAYER_PUBLIC_VP)
             + player_get(states, stride, lane, current, PLAYER_DEVELOPMENT + 1u);
         const uint32_t victory_target = state_get(states, stride, STATE_VICTORY_TARGET, lane);
 
-        weighted_reservoir_action(
+        weighted_policy_action(
             actions,
             stride,
             lane,
             &rng,
             &family_weight,
+            &family_best_weight,
             profile_scaled_weight(states, stride, lane, current, 0u, 120u),
+            greedy_policy,
             ACTION_END_TURN,
             0u,
             0u,
@@ -3280,26 +3329,29 @@ static inline __device__ void generate_rollout_action_lane(
         if (player_get(states, stride, lane, current, PLAYER_ROADS_LEFT) > 0u
             && has_cost(states, stride, lane, current, ROAD_COST)) {
             uint32_t candidate_weight = 0u;
+            uint32_t candidate_best_weight = 0u;
             uint32_t selected_edge = 0xffffffffu;
             for (uint32_t edge = 0u; edge < EDGE_COUNT; ++edge) {
                 if (!can_build_road_device(states, topology, stride, lane, edge, 0xffffffffu)) {
                     continue;
                 }
                 const uint32_t weight = road_policy_score(states, topology, stride, lane, edge);
-                const uint32_t next_total = candidate_weight + weight;
-                if (rng_range(&rng, next_total) < weight) {
+                if (weighted_policy_select(
+                    &rng, &candidate_weight, &candidate_best_weight, weight, greedy_policy
+                )) {
                     selected_edge = edge;
                 }
-                candidate_weight = next_total;
             }
             if (selected_edge != 0xffffffffu) {
-                weighted_reservoir_action(
+                weighted_policy_action(
                     actions,
                     stride,
                     lane,
                     &rng,
                     &family_weight,
+                    &family_best_weight,
                     profile_scaled_weight(states, stride, lane, current, 1u, 900u),
+                    greedy_policy,
                     ACTION_BUILD_ROAD,
                     selected_edge,
                     0u,
@@ -3311,27 +3363,30 @@ static inline __device__ void generate_rollout_action_lane(
         if (player_get(states, stride, lane, current, PLAYER_SETTLEMENTS_LEFT) > 0u
             && has_cost(states, stride, lane, current, SETTLEMENT_COST)) {
             uint32_t candidate_weight = 0u;
+            uint32_t candidate_best_weight = 0u;
             uint32_t selected_vertex = 0xffffffffu;
             for (uint32_t vertex = 0u; vertex < VERTEX_COUNT; ++vertex) {
                 if (!can_place_settlement_device(states, topology, stride, lane, vertex, 0)) {
                     continue;
                 }
                 const uint32_t weight = vertex_policy_score(states, topology, stride, lane, vertex);
-                const uint32_t next_total = candidate_weight + weight;
-                if (rng_range(&rng, next_total) < weight) {
+                if (weighted_policy_select(
+                    &rng, &candidate_weight, &candidate_best_weight, weight, greedy_policy
+                )) {
                     selected_vertex = vertex;
                 }
-                candidate_weight = next_total;
             }
             if (selected_vertex != 0xffffffffu) {
                 const uint32_t base = actor_vp + 1u >= victory_target ? 24000u : 3200u;
-                weighted_reservoir_action(
+                weighted_policy_action(
                     actions,
                     stride,
                     lane,
                     &rng,
                     &family_weight,
+                    &family_best_weight,
                     profile_scaled_weight(states, stride, lane, current, 1u, base),
+                    greedy_policy,
                     ACTION_BUILD_SETTLEMENT,
                     selected_vertex,
                     0u,
@@ -3343,27 +3398,30 @@ static inline __device__ void generate_rollout_action_lane(
         if (player_get(states, stride, lane, current, PLAYER_CITIES_LEFT) > 0u
             && has_cost(states, stride, lane, current, CITY_COST)) {
             uint32_t candidate_weight = 0u;
+            uint32_t candidate_best_weight = 0u;
             uint32_t selected_vertex = 0xffffffffu;
             for (uint32_t vertex = 0u; vertex < VERTEX_COUNT; ++vertex) {
                 if (state_get(states, stride, STATE_BUILDINGS + vertex, lane) != current + 1u) {
                     continue;
                 }
                 const uint32_t weight = vertex_policy_score(states, topology, stride, lane, vertex) + 200u;
-                const uint32_t next_total = candidate_weight + weight;
-                if (rng_range(&rng, next_total) < weight) {
+                if (weighted_policy_select(
+                    &rng, &candidate_weight, &candidate_best_weight, weight, greedy_policy
+                )) {
                     selected_vertex = vertex;
                 }
-                candidate_weight = next_total;
             }
             if (selected_vertex != 0xffffffffu) {
                 const uint32_t base = actor_vp + 1u >= victory_target ? 26000u : 4200u;
-                weighted_reservoir_action(
+                weighted_policy_action(
                     actions,
                     stride,
                     lane,
                     &rng,
                     &family_weight,
+                    &family_best_weight,
                     profile_scaled_weight(states, stride, lane, current, 2u, base),
+                    greedy_policy,
                     ACTION_BUILD_CITY,
                     selected_vertex,
                     0u,
@@ -3377,13 +3435,15 @@ static inline __device__ void generate_rollout_action_lane(
             deck_total += state_get(states, stride, STATE_DEVELOPMENT_DECK + card, lane);
         }
         if (deck_total > 0u && has_cost(states, stride, lane, current, DEVELOPMENT_COST)) {
-            weighted_reservoir_action(
+            weighted_policy_action(
                 actions,
                 stride,
                 lane,
                 &rng,
                 &family_weight,
+                &family_best_weight,
                 profile_scaled_weight(states, stride, lane, current, 2u, 900u),
+                greedy_policy,
                 ACTION_BUY_DEVELOPMENT,
                 0u,
                 0u,
@@ -3396,6 +3456,7 @@ static inline __device__ void generate_rollout_action_lane(
         // proposed-action domain; unknown availability is not treated as known.
         {
             uint32_t maritime_weight = 0u;
+            uint32_t maritime_best_weight = 0u;
             uint32_t maritime_give = 0xffffffffu;
             uint32_t maritime_receive = 0xffffffffu;
             uint32_t maritime_ratio = 0u;
@@ -3412,23 +3473,25 @@ static inline __device__ void generate_rollout_action_lane(
                         states, stride, lane, current, give, receive, ratio
                     );
                     if (weight == 0u) continue;
-                    const uint32_t next_total = maritime_weight + weight;
-                    if (rng_range(&rng, next_total) < weight) {
+                    if (weighted_policy_select(
+                        &rng, &maritime_weight, &maritime_best_weight, weight, greedy_policy
+                    )) {
                         maritime_give = give;
                         maritime_receive = receive;
                         maritime_ratio = ratio;
                     }
-                    maritime_weight = next_total;
                 }
             }
             if (maritime_give != 0xffffffffu) {
-                weighted_reservoir_action(
+                weighted_policy_action(
                     actions,
                     stride,
                     lane,
                     &rng,
                     &family_weight,
+                    &family_best_weight,
                     profile_scaled_weight(states, stride, lane, current, 0u, 700u),
+                    greedy_policy,
                     ACTION_MARITIME_TRADE,
                     maritime_give,
                     maritime_receive,
@@ -3442,16 +3505,18 @@ static inline __device__ void generate_rollout_action_lane(
             uint32_t hex = 0u;
             uint32_t victim_code = 0u;
             if (choose_weighted_robber_action(
-                states, topology, stride, lane, &rng, &hex, &victim_code
+                states, topology, stride, lane, &rng, greedy_policy, &hex, &victim_code
             )) {
                 const uint32_t base = knight_policy_base(states, stride, lane, current);
-                weighted_reservoir_action(
+                weighted_policy_action(
                     actions,
                     stride,
                     lane,
                     &rng,
                     &family_weight,
+                    &family_best_weight,
                     profile_scaled_weight(states, stride, lane, current, 2u, base),
+                    greedy_policy,
                     ACTION_PLAY_KNIGHT,
                     hex,
                     victim_code,
@@ -3466,7 +3531,7 @@ static inline __device__ void generate_rollout_action_lane(
             uint32_t second_code = 0u;
             uint32_t pair_score = 0u;
             if (choose_road_building_pair(
-                states, topology, stride, lane, &rng, &first, &second_code, &pair_score
+                states, topology, stride, lane, &rng, greedy_policy, &first, &second_code, &pair_score
             )) {
                 const uint32_t roads_left = player_get(
                     states, stride, lane, current, PLAYER_ROADS_LEFT
@@ -3474,13 +3539,15 @@ static inline __device__ void generate_rollout_action_lane(
                 const uint32_t base = pair_score >= 10000u
                     ? 8000u
                     : (roads_left == 1u ? 24u : 1600u);
-                weighted_reservoir_action(
+                weighted_policy_action(
                     actions,
                     stride,
                     lane,
                     &rng,
                     &family_weight,
+                    &family_best_weight,
                     profile_scaled_weight(states, stride, lane, current, 2u, base),
+                    greedy_policy,
                     ACTION_PLAY_ROAD_BUILDING,
                     first,
                     second_code,
@@ -3491,6 +3558,7 @@ static inline __device__ void generate_rollout_action_lane(
 
         if (development_playable(states, stride, lane, current, 3u)) {
             uint32_t pair_weight = 0u;
+            uint32_t pair_best_weight = 0u;
             uint32_t selected_first = 0xffffffffu;
             uint32_t selected_second = 0xffffffffu;
             for (uint32_t first = 0u; first < 5u; ++first) {
@@ -3503,21 +3571,22 @@ static inline __device__ void generate_rollout_action_lane(
                     const uint32_t weight = year_of_plenty_pair_score(
                         states, topology, stride, lane, current, first, second
                     );
-                    const uint32_t next_total = pair_weight + weight;
-                    if (rng_range(&rng, next_total) < weight) {
+                    if (weighted_policy_select(
+                        &rng, &pair_weight, &pair_best_weight, weight, greedy_policy
+                    )) {
                         selected_first = first;
                         selected_second = second;
                     }
-                    pair_weight = next_total;
                 }
             }
             if (selected_first != 0xffffffffu) {
-                weighted_reservoir_action(
+                weighted_policy_action(
                     actions,
                     stride,
                     lane,
                     &rng,
                     &family_weight,
+                    &family_best_weight,
                     profile_scaled_weight(
                         states,
                         stride,
@@ -3526,6 +3595,7 @@ static inline __device__ void generate_rollout_action_lane(
                         2u,
                         pair_weight >= 10000u ? 9000u : 3600u
                     ),
+                    greedy_policy,
                     ACTION_PLAY_YEAR_OF_PLENTY,
                     selected_first,
                     selected_second,
@@ -3536,23 +3606,25 @@ static inline __device__ void generate_rollout_action_lane(
 
         if (development_playable(states, stride, lane, current, 4u)) {
             uint32_t resource_weight = 0u;
+            uint32_t resource_best_weight = 0u;
             uint32_t selected_resource = 0u;
             for (uint32_t resource = 0u; resource < 5u; ++resource) {
                 const uint32_t weight = monopoly_resource_score(
                     states, topology, stride, lane, current, resource
                 );
-                const uint32_t next_total = resource_weight + weight;
-                if (rng_range(&rng, next_total) < weight) {
+                if (weighted_policy_select(
+                    &rng, &resource_weight, &resource_best_weight, weight, greedy_policy
+                )) {
                     selected_resource = resource;
                 }
-                resource_weight = next_total;
             }
-            weighted_reservoir_action(
+            weighted_policy_action(
                 actions,
                 stride,
                 lane,
                 &rng,
                 &family_weight,
+                &family_best_weight,
                 profile_scaled_weight(
                     states,
                     stride,
@@ -3561,6 +3633,7 @@ static inline __device__ void generate_rollout_action_lane(
                     2u,
                     resource_weight >= 10000u ? 6000u : 1400u
                 ),
+                greedy_policy,
                 ACTION_PLAY_MONOPOLY,
                 selected_resource,
                 0u,
@@ -3602,7 +3675,9 @@ static inline __device__ void generate_rollout_action_lane(
             const uint32_t weight = profile_scaled_weight(
                 states, stride, lane, current, 3u, base
             );
-            if (weighted_reservoir_select(&rng, &family_weight, weight)) {
+            if (weighted_policy_select(
+                &rng, &family_weight, &family_best_weight, weight, greedy_policy
+            )) {
                 uint32_t give[5];
                 uint32_t receive[5];
                 if (choose_best_domestic_trade_offer(
@@ -3618,17 +3693,20 @@ static inline __device__ void generate_rollout_action_lane(
     } else if (phase == PHASE_TRADE_RESPONSES) {
         if (trade_get(states, stride, lane, STATE_TRADE, TRADE_PRESENT) != 0u) {
             uint32_t total_weight = 0u;
+            uint32_t best_weight = 0u;
             if (trade_complete(states, stride, lane, STATE_TRADE)) {
                 const uint32_t creator = trade_get(
                     states, stride, lane, STATE_TRADE, TRADE_CREATOR
                 );
-                weighted_reservoir_action(
+                weighted_policy_action(
                     actions,
                     stride,
                     lane,
                     &rng,
                     &total_weight,
+                    &best_weight,
                     profile_scaled_weight(states, stride, lane, creator, 0u, 120u),
+                    greedy_policy,
                     ACTION_CANCEL_TRADE,
                     0u,
                     0u,
@@ -3661,15 +3739,17 @@ static inline __device__ void generate_rollout_action_lane(
                             )) {
                             continue;
                         }
-                        weighted_reservoir_action(
+                        weighted_policy_action(
                             actions,
                             stride,
                             lane,
                             &rng,
                             &total_weight,
+                            &best_weight,
                             profile_scaled_weight(
                                 states, stride, lane, creator, 3u, 900u + benefit * 4u
                             ),
+                            greedy_policy,
                             ACTION_CONFIRM_TRADE,
                             partner,
                             0u,
@@ -3682,13 +3762,15 @@ static inline __device__ void generate_rollout_action_lane(
                     states, stride, STATE_TRADE_CURSOR, lane
                 );
                 if (actor < players) {
-                    weighted_reservoir_action(
+                    weighted_policy_action(
                         actions,
                         stride,
                         lane,
                         &rng,
                         &total_weight,
+                        &best_weight,
                         profile_scaled_weight(states, stride, lane, actor, 4u, 700u),
+                        greedy_policy,
                         ACTION_RESPOND_TRADE,
                         0u,
                         0u,
@@ -3710,15 +3792,17 @@ static inline __device__ void generate_rollout_action_lane(
                         const uint32_t benefit = incoming > outgoing
                             ? incoming - outgoing
                             : 0u;
-                        weighted_reservoir_action(
+                        weighted_policy_action(
                             actions,
                             stride,
                             lane,
                             &rng,
                             &total_weight,
+                            &best_weight,
                             profile_scaled_weight(
                                 states, stride, lane, actor, 3u, 520u + benefit * 5u
                             ),
+                            greedy_policy,
                             ACTION_RESPOND_TRADE,
                             1u,
                             0u,
@@ -3737,8 +3821,8 @@ static inline __device__ void generate_rollout_action_lane(
                             const uint32_t weight = profile_scaled_weight(
                                 states, stride, lane, actor, 3u, 260u
                             );
-                            if (weighted_reservoir_select(
-                                &rng, &total_weight, weight
+                            if (weighted_policy_select(
+                                &rng, &total_weight, &best_weight, weight, greedy_policy
                             )) {
                                 write_counter_trade(
                                     actions, stride, lane, give, receive
@@ -4622,7 +4706,7 @@ extern "C" __global__ void generate_rollout_actions_batch_kernel(
         return;
     }
     generate_rollout_action_lane(
-        states, topology, actions, rng_states, chance_rng_states, stride, lane
+        states, topology, actions, rng_states, chance_rng_states, stride, lane, 0
     );
 }
 
@@ -4658,7 +4742,7 @@ extern "C" __global__ void run_rollout_steps_kernel(
     }
     for (uint32_t step = 0u; step < steps && status[lane] == STATUS_OK; ++step) {
         generate_rollout_action_lane(
-            states, topology, actions, rng_states, chance_rng_states, stride, lane
+            states, topology, actions, rng_states, chance_rng_states, stride, lane, 0
         );
         apply_transition_lane(states, topology, actions, status, stride, lane);
         if (state_get(states, stride, STATE_PHASE, lane) == PHASE_FINISHED) {
@@ -4680,13 +4764,23 @@ extern "C" __global__ void run_root_rollout_turns_kernel(
     const uint32_t lane = blockIdx.x * blockDim.x + threadIdx.x;
     if (lane >= count || status[lane] != STATUS_OK) return;
     const uint32_t base = base_indices[lane / rollouts_per_action];
+    const uint32_t controlled_player = state_actor(base_states, base_stride, base);
     const uint32_t target = state_get(base_states, base_stride, STATE_TURN, base) + turns_ahead;
     for (uint32_t step = 0u; step < 256u; ++step) {
         if (status[lane] != STATUS_OK
             || state_get(states, stride, STATE_PHASE, lane) == PHASE_FINISHED
             || state_get(states, stride, STATE_TURN, lane) >= target) return;
+        const int controlled_player_turn =
+            state_actor(states, stride, lane) == controlled_player;
         generate_rollout_action_lane(
-            states, topology, actions, rng_states, chance_rng_states, stride, lane
+            states,
+            topology,
+            actions,
+            rng_states,
+            chance_rng_states,
+            stride,
+            lane,
+            controlled_player_turn
         );
         apply_transition_lane(states, topology, actions, status, stride, lane);
     }
@@ -4767,7 +4861,7 @@ extern "C" __global__ void run_until_candidate_kernel(
             break;
         }
         generate_rollout_action_lane(
-            states, topology, actions, rng_states, chance_rng_states, stride, lane
+            states, topology, actions, rng_states, chance_rng_states, stride, lane, 0
         );
         apply_transition_lane(states, topology, actions, status, stride, lane);
         if (status[lane] == STATUS_OK) {
@@ -4850,7 +4944,8 @@ extern "C" __global__ void sample_candidate_root_actions_kernel(
         root_rng_states,
         root_chance_rng_states,
         root_count,
-        root
+        root,
+        0
     );
 }
 
@@ -5007,7 +5102,7 @@ extern "C" __global__ void run_games_kernel(
             break;
         }
         generate_rollout_action_lane(
-            states, topology, actions, rng_states, chance_rng_states, stride, lane
+            states, topology, actions, rng_states, chance_rng_states, stride, lane, 0
         );
         apply_transition_lane(states, topology, actions, status, stride, lane);
     }
