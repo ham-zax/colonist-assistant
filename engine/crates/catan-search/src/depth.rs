@@ -410,6 +410,10 @@ struct Searcher {
     /// distribution from the acting player's information set. Perfect-
     /// information diagnostic search keeps this false intentionally.
     observation_safe_recursive: bool,
+    /// The player whose root action this search is evaluating. Opponents keep
+    /// the observation-safe stochastic policy; this player uses one deliberate
+    /// observation-safe continuation action instead of an opponent-style mix.
+    controlled_player: Option<u8>,
     evaluation_cache: Rc<RefCell<HashMap<u64, [f32; 4]>>>,
 }
 
@@ -829,6 +833,29 @@ impl Searcher {
                     ranked
                 };
                 ranked.truncate(ranked.len().min(remaining as usize));
+                // The controlled player is not an opponent policy. Use the top
+                // observation-ranked action as a bounded deliberate continuation.
+                // Because ranking is derived from observed_state(actor), hidden
+                // worlds that are indistinguishable to the player choose the same
+                // continuation action. Full contingent belief optimization is a
+                // separate, later search problem.
+                if observation_safe && self.controlled_player == Some(actor) {
+                    ranked.truncate(1);
+                    return self
+                        .visit_ranked_decision(
+                            state,
+                            actor,
+                            ranked,
+                            DecisionVisitContext {
+                                depth,
+                                actions_in_turn,
+                                alpha,
+                                beta,
+                                subtree_limit,
+                            },
+                        )
+                        .0;
+                }
                 // Observation-safe opponents evaluate a prior-weighted mixture
                 // over the top observation-ranked actions. The mixture depends
                 // only on the actor's observation, so indistinguishable worlds
@@ -1838,6 +1865,7 @@ fn belief_search(
                     deadline: child_deadline,
                     deadline_reached: false,
                     observation_safe_recursive: true,
+                    controlled_player: Some(observer),
                     evaluation_cache: Rc::clone(&evaluation_cache),
                 };
                 let mut candidate_value = searcher.visit(
@@ -2226,6 +2254,7 @@ pub fn search_maxn_hostility_stress_bounded(
         deadline: CooperativeDeadline::start(0),
         deadline_reached: false,
         observation_safe_recursive: false,
+        controlled_player: None,
         evaluation_cache: Rc::new(RefCell::new(HashMap::new())),
     }
     .root(state))
@@ -2263,6 +2292,7 @@ pub fn search_maxn_bounded_timed(
         deadline: CooperativeDeadline::start(time_budget_ms),
         deadline_reached: false,
         observation_safe_recursive: false,
+        controlled_player: None,
         evaluation_cache: Rc::new(RefCell::new(HashMap::new())),
     }
     .root(state)
@@ -2320,6 +2350,7 @@ pub fn search_paranoid_bounded_timed(
         deadline: CooperativeDeadline::start(time_budget_ms),
         deadline_reached: false,
         observation_safe_recursive: false,
+        controlled_player: None,
         evaluation_cache: Rc::new(RefCell::new(HashMap::new())),
     }
     .root(state)
@@ -2935,6 +2966,7 @@ struct CudaLinearSearcher<'a, 'b> {
     maximum_nodes: u32,
     node_limit: u32,
     branch_cap: usize,
+    controlled_player: u8,
     nodes: u32,
     deepest_depth: u8,
     legal_actions_nanos: u64,
@@ -3044,6 +3076,12 @@ impl CudaLinearSearcher<'_, '_> {
                     policy_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
                 );
                 ranked.truncate(ranked.len().min(remaining as usize));
+                if actor == self.controlled_player {
+                    ranked.truncate(1);
+                    if let Some((_, weight)) = ranked.first_mut() {
+                        *weight = 1.0;
+                    }
+                }
                 let budget_started = std::time::Instant::now();
                 let budgets = allocate_root_node_budgets(ranked.len(), remaining);
                 self.budget_nanos = self.budget_nanos.saturating_add(
@@ -3117,6 +3155,7 @@ struct CudaDeferredSearcher<'a> {
     maximum_nodes: u32,
     node_limit: u32,
     branch_cap: usize,
+    controlled_player: u8,
     nodes: u32,
     deepest_depth: u8,
 }
@@ -3200,6 +3239,12 @@ impl CudaDeferredSearcher<'_> {
                 let mut ranked =
                     recursive_observation_policy(state, &actions, actor, self.branch_cap);
                 ranked.truncate(ranked.len().min(remaining as usize));
+                if actor == self.controlled_player {
+                    ranked.truncate(1);
+                    if let Some((_, weight)) = ranked.first_mut() {
+                        *weight = 1.0;
+                    }
+                }
                 let budgets = allocate_root_node_budgets(ranked.len(), remaining);
                 let mut carry = 0_u32;
                 let mut children = Vec::with_capacity(ranked.len());
@@ -3701,6 +3746,7 @@ fn cuda_belief_search_with_batch(
                     maximum_nodes: nodes_for_action,
                     node_limit: nodes_for_action,
                     branch_cap: branch_cap.max(1),
+                    controlled_player: observer,
                     nodes: 0,
                     deepest_depth: 0,
                     legal_actions_nanos: 0,
@@ -3931,6 +3977,7 @@ fn cuda_belief_search_with_batch(
                 maximum_nodes: nodes_for_action,
                 node_limit: nodes_for_action,
                 branch_cap: branch_cap.max(1),
+                controlled_player: observer,
                 nodes: 0,
                 deepest_depth: 0,
             };
@@ -4909,6 +4956,7 @@ mod tests {
             deadline: crate::deadline::CooperativeDeadline::start(0),
             deadline_reached: false,
             observation_safe_recursive: false,
+            controlled_player: None,
             evaluation_cache: std::rc::Rc::new(std::cell::RefCell::new(
                 std::collections::HashMap::new(),
             )),
