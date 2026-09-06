@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use colonist_catan_arena::{belief_particles, exact_parity_corpus};
 use colonist_catan_search::{
-    BeliefDepthConfig, BeliefDepthResult, CudaExactEvaluator,
+    BeliefDepthConfig, BeliefDepthResult, CudaExactEvaluator, StrategyPolicy,
     search_weighted_belief_maxn_cuda_with_config, search_weighted_belief_maxn_with_config,
 };
 use serde::Serialize;
@@ -65,6 +65,7 @@ fn search_config() -> BeliefDepthConfig {
         branch_cap: 8,
         maximum_nodes: 4_000,
         time_budget_ms: 0,
+        strategy_policy: StrategyPolicy::Baseline,
         strategic_particle_limit: PARTICLES,
     }
 }

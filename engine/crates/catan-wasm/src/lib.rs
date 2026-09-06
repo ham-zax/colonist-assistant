@@ -12,17 +12,17 @@ use colonist_catan_core::{
 };
 use colonist_catan_search::{
     ActionStats, BeliefParticle, BeliefSearchProvenance, BeliefSearchStageTimings,
-    CooperativeDeadline, DomesticTradeThreat, ENGINE_REVISION, ExactActionFamily, ExactActionValue,
-    ExactDecisionResult, HARD_VETO_POSTERIOR, IntroducedRoadFragility, Mcts,
-    DecisionFailureClass, ReachabilityDiagnostic, RoadCutContinuationAssessment,
+    CooperativeDeadline, DecisionFailureClass, DomesticTradeThreat, ENGINE_REVISION,
+    ExactActionFamily, ExactActionValue, ExactDecisionResult, HARD_VETO_POSTERIOR,
+    IntroducedRoadFragility, Mcts, ReachabilityDiagnostic, RoadCutContinuationAssessment,
     RootPromotionReason, RootPruneReason, SearchConfig, SearchMode, SearchReport, SearchStatistics,
-    StrategyId, StrategyProposalReason, StrategyShadowDiagnostics, TacticalResult, action_prior,
-    evaluate,
-    exact_action_comparator_score, exact_family_for_action, learned_model_version,
-    learned_trade_model_version, safer_end_turn_alternative,
-    search_weighted_belief_maxn_iterative_timed_excluding,
-    search_weighted_belief_paranoid_iterative_timed_excluding, solve_belief_current_turn,
-    solve_belief_current_turn_timed, solve_exact_belief_excluding,
+    StrategyAdmissionDiagnostic, StrategyEvidenceTier, StrategyId, StrategyOmissionReason,
+    StrategyPolicy, StrategyProposalReason, StrategyShadowDiagnostics, TacticalResult,
+    action_prior, evaluate, exact_action_comparator_score, exact_family_for_action,
+    learned_model_version, learned_trade_model_version, safer_end_turn_alternative,
+    search_weighted_belief_maxn_iterative_timed_excluding_with_strategy_policy,
+    search_weighted_belief_paranoid_iterative_timed_excluding_with_strategy_policy,
+    solve_belief_current_turn, solve_belief_current_turn_timed, solve_exact_belief_excluding,
     solve_exact_belief_excluding_controlled,
 };
 use serde::{Deserialize, Serialize};
@@ -32,8 +32,8 @@ use wasm_bindgen::prelude::*;
 mod native_gpu;
 #[cfg(all(feature = "native-gpu", not(target_arch = "wasm32")))]
 pub use native_gpu::{
-    NATIVE_GPU_PROTOCOL_VERSION, NATIVE_GPU_STATE_SCHEMA_VERSION, NATIVE_GPU_STOCHASTIC_MODELS, NativeGpuDeviceIdentity,
-    NativeGpuSearchEngine,
+    NATIVE_GPU_PROTOCOL_VERSION, NATIVE_GPU_STATE_SCHEMA_VERSION, NATIVE_GPU_STOCHASTIC_MODELS,
+    NativeGpuDeviceIdentity, NativeGpuSearchEngine,
 };
 
 thread_local! {
@@ -268,6 +268,8 @@ struct Request {
     mode: Option<String>,
     depth: Option<u8>,
     branch_cap: Option<usize>,
+    #[serde(default)]
+    strategy_policy: Option<String>,
     ponder: Option<bool>,
     #[serde(default)]
     stochastic: Option<StochasticInput>,
@@ -650,15 +652,41 @@ struct StrategyProposalOutput {
     reason: &'static str,
     baseline_rank: Option<usize>,
     retained: bool,
+    evidence_tier: &'static str,
+    selected_as_challenger: bool,
+    admitted: bool,
+    omission_reason: Option<&'static str>,
+    displaced_baseline_action: Option<ActionOutput>,
+    entered_common_search: bool,
+    common_search_rank: Option<usize>,
     failure_class: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StrategyAdmissionOutput {
+    root_cap: Option<usize>,
+    baseline_retained_count: usize,
+    proposed_count: usize,
+    distinct_proposed_count: usize,
+    already_baseline_retained_count: usize,
+    challenger_candidates_considered: usize,
+    challengers_selected: usize,
+    challengers_admitted: usize,
+    protected_root_count: usize,
+    omitted_challenger_count: usize,
+    evaluated_challenger_count: usize,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StrategyShadowOutput {
     policy_version: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strategy_policy: Option<&'static str>,
     context: StrategyContextOutput,
     reachability: ReachabilityOutput,
+    admission: StrategyAdmissionOutput,
     proposals: Vec<StrategyProposalOutput>,
 }
 
@@ -695,6 +723,39 @@ fn decision_failure_class_label(value: DecisionFailureClass) -> &'static str {
     }
 }
 
+fn strategy_evidence_tier_label(value: StrategyEvidenceTier) -> &'static str {
+    match value {
+        StrategyEvidenceTier::NecessarySource => "necessary-source",
+        StrategyEvidenceTier::ContestedOpportunity => "contested-opportunity",
+        StrategyEvidenceTier::CurrentTurn => "current-turn",
+    }
+}
+
+fn strategy_omission_reason_label(value: StrategyOmissionReason) -> &'static str {
+    match value {
+        StrategyOmissionReason::PolicyDisabled => "policy-disabled",
+        StrategyOmissionReason::AlreadyBaselineRetained => "already-baseline-retained",
+        StrategyOmissionReason::ChallengerLimit => "challenger-limit",
+        StrategyOmissionReason::ProtectedCapacity => "protected-capacity",
+    }
+}
+
+fn strategy_admission_output(value: StrategyAdmissionDiagnostic) -> StrategyAdmissionOutput {
+    StrategyAdmissionOutput {
+        root_cap: value.root_cap,
+        baseline_retained_count: value.baseline_retained_count,
+        proposed_count: value.proposed_count,
+        distinct_proposed_count: value.distinct_proposed_count,
+        already_baseline_retained_count: value.already_baseline_retained_count,
+        challenger_candidates_considered: value.challenger_candidates_considered,
+        challengers_selected: value.challengers_selected,
+        challengers_admitted: value.challengers_admitted,
+        protected_root_count: value.protected_root_count,
+        omitted_challenger_count: value.omitted_challenger_count,
+        evaluated_challenger_count: value.evaluated_challenger_count,
+    }
+}
+
 fn reachability_output(value: ReachabilityDiagnostic) -> ReachabilityOutput {
     ReachabilityOutput {
         exact_victory_points: value.exact_victory_points,
@@ -717,6 +778,7 @@ fn reachability_output(value: ReachabilityDiagnostic) -> ReachabilityOutput {
 fn strategy_shadow_output(value: StrategyShadowDiagnostics) -> StrategyShadowOutput {
     StrategyShadowOutput {
         policy_version: value.policy_version,
+        strategy_policy: value.strategy_policy,
         context: StrategyContextOutput {
             actor: value.context.actor,
             player_count: value.context.player_count,
@@ -726,6 +788,7 @@ fn strategy_shadow_output(value: StrategyShadowDiagnostics) -> StrategyShadowOut
             response_windows_before_next_turn: value.context.response_windows_before_next_turn,
         },
         reachability: reachability_output(value.reachability),
+        admission: strategy_admission_output(value.admission),
         proposals: value
             .proposals
             .into_iter()
@@ -735,6 +798,13 @@ fn strategy_shadow_output(value: StrategyShadowDiagnostics) -> StrategyShadowOut
                 reason: strategy_reason_label(proposal.reason),
                 baseline_rank: proposal.baseline_rank,
                 retained: proposal.retained,
+                evidence_tier: strategy_evidence_tier_label(proposal.evidence_tier),
+                selected_as_challenger: proposal.selected_as_challenger,
+                admitted: proposal.admitted,
+                omission_reason: proposal.omission_reason.map(strategy_omission_reason_label),
+                displaced_baseline_action: proposal.displaced_baseline_action.map(action),
+                entered_common_search: proposal.entered_common_search,
+                common_search_rank: proposal.common_search_rank,
                 failure_class: proposal.failure_class.map(decision_failure_class_label),
             })
             .collect(),
@@ -845,6 +915,7 @@ struct AuthorityTraceOutput {
 struct ResponseDiagnostics {
     rust_posterior_particles: usize,
     rust_search_particles: usize,
+    strategy_policy: Option<&'static str>,
     effective_effort: SearchEffortInput,
     search_stages: Option<SearchStagesOutput>,
     root_provenance: RootProvenanceOutput,
@@ -857,6 +928,8 @@ struct Response {
     engine_revision: &'static str,
     stochastic_model: &'static str,
     belief_policy: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strategy_policy: Option<&'static str>,
     dice_history_provenance: Option<String>,
     public_history_digest: Option<String>,
     stochastic_belief_digest: Option<String>,
@@ -1707,10 +1780,12 @@ fn basic_response_diagnostics(
     particles: usize,
     authority: DecisionAuthority,
     effective_effort: SearchEffortInput,
+    strategy_policy: StrategyPolicy,
 ) -> ResponseDiagnostics {
     ResponseDiagnostics {
         rust_posterior_particles: particles,
         rust_search_particles: particles,
+        strategy_policy: strategy_policy.explicit_identity(),
         effective_effort,
         search_stages: None,
         root_provenance: RootProvenanceOutput::default(),
@@ -1735,6 +1810,7 @@ fn response(
         engine_revision: ENGINE_REVISION,
         stochastic_model: stochastic.model,
         belief_policy: stochastic.belief_policy,
+        strategy_policy: diagnostics.strategy_policy,
         dice_history_provenance: stochastic.provenance.clone(),
         public_history_digest: stochastic.public_history_digest.clone(),
         stochastic_belief_digest: stochastic.belief_digest.clone(),
@@ -2002,6 +2078,17 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
     let request: Request = serde_wasm_bindgen::from_value(request)
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let mode = RequestedMode::parse(request.mode.as_deref())?;
+    let strategy_policy = StrategyPolicy::parse(request.strategy_policy.as_deref())
+        .map_err(|error| JsValue::from_str(&error))?;
+    if strategy_policy == StrategyPolicy::AdaptiveCandidateAdmissionV1
+        && !matches!(mode, RequestedMode::Maxn | RequestedMode::AlphaBeta)
+    {
+        return Err(JsValue::from_str(&format!(
+            "strategy policy {} is unsupported by search mode {}",
+            strategy_policy.label(),
+            mode.label()
+        )));
+    }
     let ponder = request.ponder.unwrap_or(false);
     let effort = request.resolved_effort();
     let decision_time_ms = effort.decision_time_ms;
@@ -2037,6 +2124,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
                     particles.len(),
                     DecisionAuthority::ExactMandatory,
                     effort,
+                    strategy_policy,
                 ),
                 &stochastic,
             ))
@@ -2108,6 +2196,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
                         particles.len(),
                         DecisionAuthority::TacticalProven,
                         effort,
+                        strategy_policy,
                     ),
                     &stochastic,
                 ))
@@ -2118,22 +2207,24 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
             let maximum_nodes = cpu_nodes_per_depth_wave;
             let remaining_time_ms = decision_clock.remaining_ms().max(1);
             let depth_report = if mode == RequestedMode::AlphaBeta {
-                search_weighted_belief_paranoid_iterative_timed_excluding(
+                search_weighted_belief_paranoid_iterative_timed_excluding_with_strategy_policy(
                     &particles,
                     depth,
                     branch_cap,
                     maximum_nodes,
                     remaining_time_ms,
+                    strategy_policy,
                     &root_exclusions,
                 )
             } else {
-                search_weighted_belief_maxn_iterative_timed_excluding(
+                search_weighted_belief_maxn_iterative_timed_excluding_with_strategy_policy(
                     &particles,
                     depth,
                     branch_cap,
                     maximum_nodes,
                     remaining_time_ms,
                     cpu_evidence_escalation_ms,
+                    strategy_policy,
                     &root_exclusions,
                 )
             }
@@ -2217,6 +2308,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
             let diagnostics = ResponseDiagnostics {
                 rust_posterior_particles,
                 rust_search_particles,
+                strategy_policy: strategy_policy.explicit_identity(),
                 effective_effort: effort,
                 search_stages,
                 root_provenance,
@@ -2319,6 +2411,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
             let diagnostics = ResponseDiagnostics {
                 rust_posterior_particles: particles.len(),
                 rust_search_particles: particles.len(),
+                strategy_policy: strategy_policy.explicit_identity(),
                 effective_effort: effort,
                 search_stages: None,
                 root_provenance: RootProvenanceOutput::default(),
@@ -2396,7 +2489,8 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
                     .ok_or_else(|| JsValue::from_str("pondering produced no search group"))
             })?;
             let authority = DecisionAuthority::DeepMaxn;
-            let diagnostics = basic_response_diagnostics(particles.len(), authority, effort);
+            let diagnostics =
+                basic_response_diagnostics(particles.len(), authority, effort, strategy_policy);
             (report, authority, diagnostics)
         };
     serde_wasm_bindgen::to_value(&response(

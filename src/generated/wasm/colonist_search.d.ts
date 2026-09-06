@@ -222,6 +222,19 @@ export type WasmDecisionFailureClass =
   | "continuation"
   | "belief-model";
 
+export type WasmStrategyPolicy = "adaptive-candidate-admission-v1";
+
+export type WasmStrategyEvidenceTier =
+  | "necessary-source"
+  | "contested-opportunity"
+  | "current-turn";
+
+export type WasmStrategyOmissionReason =
+  | "policy-disabled"
+  | "already-baseline-retained"
+  | "challenger-limit"
+  | "protected-capacity";
+
 export interface WasmStrategyContext {
   actor: number;
   playerCount: number;
@@ -254,13 +267,36 @@ export interface WasmStrategyProposalDiagnostic {
   reason: WasmStrategyProposalReason;
   baselineRank?: number;
   retained: boolean;
+  evidenceTier: WasmStrategyEvidenceTier;
+  selectedAsChallenger: boolean;
+  admitted: boolean;
+  omissionReason?: WasmStrategyOmissionReason;
+  displacedBaselineAction?: WasmAction;
+  enteredCommonSearch: boolean;
+  commonSearchRank?: number;
   failureClass?: WasmDecisionFailureClass;
+}
+
+export interface WasmStrategyAdmissionDiagnostic {
+  rootCap?: number;
+  baselineRetainedCount: number;
+  proposedCount: number;
+  distinctProposedCount: number;
+  alreadyBaselineRetainedCount: number;
+  challengerCandidatesConsidered: number;
+  challengersSelected: number;
+  challengersAdmitted: number;
+  protectedRootCount: number;
+  omittedChallengerCount: number;
+  evaluatedChallengerCount: number;
 }
 
 export interface WasmStrategyShadowDiagnostics {
   policyVersion: string;
+  strategyPolicy?: WasmStrategyPolicy;
   context: WasmStrategyContext;
   reachability: WasmReachabilityDiagnostic;
+  admission: WasmStrategyAdmissionDiagnostic;
   proposals: WasmStrategyProposalDiagnostic[];
 }
 
@@ -304,6 +340,7 @@ export interface WasmSearchResponse {
   engineRevision: string;
   stochasticModel?: string;
   beliefPolicy?: string;
+  strategyPolicy?: WasmStrategyPolicy;
   diceHistoryProvenance?: string;
   publicHistoryDigest?: string;
   stochasticBeliefDigest?: string;

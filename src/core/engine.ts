@@ -285,6 +285,19 @@ export type DeepSearchDecisionFailureClass =
   | "continuation"
   | "belief-model";
 
+export type DeepSearchStrategyPolicy = "adaptive-candidate-admission-v1";
+
+export type DeepSearchStrategyEvidenceTier =
+  | "necessary-source"
+  | "contested-opportunity"
+  | "current-turn";
+
+export type DeepSearchStrategyOmissionReason =
+  | "policy-disabled"
+  | "already-baseline-retained"
+  | "challenger-limit"
+  | "protected-capacity";
+
 export interface DeepSearchStrategyContext {
   actor: number;
   playerCount: number;
@@ -316,14 +329,38 @@ export interface DeepSearchStrategyProposalDiagnostic {
   action: DeepSearchAction;
   reason: DeepSearchStrategyProposalReason;
   baselineRank?: number;
+  /** Whether baseline admission retained this action before experimental admission. */
   retained: boolean;
+  evidenceTier: DeepSearchStrategyEvidenceTier;
+  selectedAsChallenger: boolean;
+  admitted: boolean;
+  omissionReason?: DeepSearchStrategyOmissionReason;
+  displacedBaselineAction?: DeepSearchAction;
+  enteredCommonSearch: boolean;
+  commonSearchRank?: number;
   failureClass?: DeepSearchDecisionFailureClass;
+}
+
+export interface DeepSearchStrategyAdmissionDiagnostic {
+  rootCap?: number;
+  baselineRetainedCount: number;
+  proposedCount: number;
+  distinctProposedCount: number;
+  alreadyBaselineRetainedCount: number;
+  challengerCandidatesConsidered: number;
+  challengersSelected: number;
+  challengersAdmitted: number;
+  protectedRootCount: number;
+  omittedChallengerCount: number;
+  evaluatedChallengerCount: number;
 }
 
 export interface DeepSearchStrategyShadowDiagnostics {
   policyVersion: string;
+  strategyPolicy?: DeepSearchStrategyPolicy;
   context: DeepSearchStrategyContext;
   reachability: DeepSearchReachabilityDiagnostic;
+  admission: DeepSearchStrategyAdmissionDiagnostic;
   proposals: DeepSearchStrategyProposalDiagnostic[];
 }
 
@@ -385,6 +422,7 @@ export interface DeepSearchResult {
   requestedStochasticModel: StochasticModelId;
   stochasticModel: StochasticModelId;
   beliefPolicy?: StochasticBeliefPolicyId;
+  strategyPolicy?: DeepSearchStrategyPolicy;
   diceHistoryProvenance?: DiceHistoryProvenance;
   publicHistoryDigest?: string;
   stochasticBeliefDigest?: string;

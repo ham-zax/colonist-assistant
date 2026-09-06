@@ -83,6 +83,7 @@ const hasPendingIncomingTrade = (message: DecisionMessage): boolean =>
   );
 
 export const shouldUseNativeGpu = (message: DecisionMessage): boolean =>
+  message.strategyPolicy === undefined &&
   nativeGpuSupportsStochasticModel(message.stochastic?.model) &&
   message.engine === "deep-search" &&
   !message.board.initialPlacement &&
@@ -238,9 +239,11 @@ chrome.runtime.onMessage.addListener(
         (runtime === "background-wasm"
           ? requestedStochasticModel === MREF_COLONIST_LINKED_2024_V1
             ? "Mref preserved on CPU/WASM; no eligible Mref-capable native route for this decision"
-            : message.engine === "deep-search" && message.board.initialPlacement
-              ? "Dedicated opening solver runs on WASM/CPU"
-              : nativeGpuEligible
+            : message.strategyPolicy
+              ? `Strategy policy ${message.strategyPolicy} requires WASM/CPU fixed-root admission`
+              : message.engine === "deep-search" && message.board.initialPlacement
+                ? "Dedicated opening solver runs on WASM/CPU"
+                : nativeGpuEligible
                 ? "Native GPU unavailable; using WASM Deep MaxN"
                 : message.engine === "weighted"
                   ? "Weighted mode runs on WASM"

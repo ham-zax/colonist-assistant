@@ -89,7 +89,9 @@ pub use shared::{
     select_experimental_strategic_particles, shared_root_candidates,
 };
 pub use strategy::{
-    DecisionFailureClass, STRATEGY_SHADOW_POLICY_VERSION, StrategyContext, StrategyId,
+    ADAPTIVE_CANDIDATE_ADMISSION_V1, DecisionFailureClass, MAX_STRATEGY_CHALLENGERS,
+    STRATEGY_SHADOW_POLICY_VERSION, StrategyAdmissionDiagnostic, StrategyContext,
+    StrategyEvidenceTier, StrategyId, StrategyOmissionReason, StrategyPolicy,
     StrategyProposalDiagnostic, StrategyProposalReason, StrategyShadowDiagnostics,
     shadow_strategy_diagnostics,
 };
@@ -123,10 +125,13 @@ pub use depth::{
     search_paranoid, search_paranoid_bounded,
     search_paranoid_bounded_timed, search_weighted_belief_maxn_bounded,
     search_weighted_belief_maxn_bounded_timed, search_weighted_belief_maxn_bounded_timed_excluding,
-    search_weighted_belief_maxn_iterative_timed_excluding, search_weighted_belief_maxn_with_config,
-    search_weighted_belief_paranoid_bounded, search_weighted_belief_paranoid_bounded_timed,
+    search_weighted_belief_maxn_iterative_timed_excluding,
+    search_weighted_belief_maxn_iterative_timed_excluding_with_strategy_policy,
+    search_weighted_belief_maxn_with_config, search_weighted_belief_paranoid_bounded,
+    search_weighted_belief_paranoid_bounded_timed,
     search_weighted_belief_paranoid_bounded_timed_excluding,
     search_weighted_belief_paranoid_iterative_timed_excluding,
+    search_weighted_belief_paranoid_iterative_timed_excluding_with_strategy_policy,
     search_weighted_belief_paranoid_with_config,
 };
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]

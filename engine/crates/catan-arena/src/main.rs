@@ -18,9 +18,9 @@ use colonist_catan_core::{
 use colonist_catan_search::{
     BeliefDepthConfig, BeliefParticle, BeliefSearchProvenance, DepthActionValue, ENGINE_REVISION,
     Mcts, RootPromotionReason, RootPruneReason, STRATEGIC_FEATURE_SCHEMA_VERSION, SearchConfig,
-    SearchMode, SearchReport, action_prior, choose_rollout_action, compute_spatial_root_impacts,
-    encode_actions, encode_heterogeneous_graph, evaluate, expansion_option_value,
-    pool_heterogeneous_graph, production_pips, search_maxn_bounded_timed,
+    SearchMode, SearchReport, StrategyPolicy, action_prior, choose_rollout_action,
+    compute_spatial_root_impacts, encode_actions, encode_heterogeneous_graph, evaluate,
+    expansion_option_value, pool_heterogeneous_graph, production_pips, search_maxn_bounded_timed,
     search_paranoid_bounded_timed, search_weighted_belief_maxn_with_config,
     search_weighted_belief_paranoid_with_config, strategic_utility, trade_acceptance_features,
 };
@@ -207,6 +207,7 @@ struct Config {
     maxn_depth: u8,
     maxn_branch: usize,
     maxn_nodes: Option<u32>,
+    strategy_policy: StrategyPolicy,
     maxn_time_ms: u32,
     opening_nodes: u32,
     opening_time_ms: u32,
@@ -261,6 +262,7 @@ impl Default for Config {
             maxn_depth: 3,
             maxn_branch: 12,
             maxn_nodes: None,
+            strategy_policy: StrategyPolicy::Baseline,
             maxn_time_ms: 0,
             opening_nodes: 12_000,
             opening_time_ms: 1_200,
@@ -382,6 +384,19 @@ fn parse_config() -> Config {
                     .clamp(1, 64)
             }
             "--maxn-nodes" => config.maxn_nodes = value.and_then(|v| v.parse().ok()),
+            "--strategy-policy" => {
+                config.strategy_policy = match value {
+                    Some("baseline") => StrategyPolicy::Baseline,
+                    Some(policy) => StrategyPolicy::parse(Some(policy)).unwrap_or_else(|error| {
+                        eprintln!("{error}");
+                        std::process::exit(2);
+                    }),
+                    None => {
+                        eprintln!("--strategy-policy requires a value");
+                        std::process::exit(2);
+                    }
+                };
+            }
             "--maxn-time-ms" => {
                 config.maxn_time_ms = value.and_then(|v| v.parse().ok()).unwrap_or(0)
             }
@@ -459,6 +474,7 @@ fn parse_config() -> Config {
                      [--iterations N] [--rollout-actions N] [--max-turns N] \\
                      [--belief-particles N] [--strategic-particles N] \\
                      [--maxn-depth N] [--maxn-branch N] [--maxn-nodes N] [--maxn-time-ms N] \\
+                     [--strategy-policy baseline|adaptive-candidate-admission-v1] \\
                      [--perfect-information] [--no-player-trades] [--evaluator cpu|cuda] \\
                      [--checkpoint-output progress.jsonl] [--challenge-output challenges.jsonl] \\
                      [--takeover-input challenges.jsonl] [--takeover-output outcomes.jsonl] \\
@@ -493,6 +509,28 @@ fn parse_config() -> Config {
     if !(2..=4).contains(&config.players) {
         eprintln!("--players must be 2, 3, or 4");
         std::process::exit(2);
+    }
+    if config.strategy_policy == StrategyPolicy::AdaptiveCandidateAdmissionV1 {
+        if !matches!(config.candidate, Engine::MaxN | Engine::AlphaBeta) {
+            eprintln!("adaptive-candidate-admission-v1 requires a maxn/alphabeta candidate");
+            std::process::exit(2);
+        }
+        if config.lineup.is_some() {
+            eprintln!(
+                "adaptive-candidate-admission-v1 uses the matched candidate seat and is incompatible with --lineup"
+            );
+            std::process::exit(2);
+        }
+        if config.takeover_input.is_some() {
+            eprintln!("adaptive-candidate-admission-v1 is not wired into takeover mode");
+            std::process::exit(2);
+        }
+        if config.perfect_information_search {
+            eprintln!(
+                "adaptive-candidate-admission-v1 requires weighted-belief search; perfect-information search does not implement strategy admission"
+            );
+            std::process::exit(2);
+        }
     }
     if config.takeover_input.is_some() != config.takeover_output.is_some() {
         eprintln!("--takeover-input and --takeover-output must be provided together");
@@ -552,8 +590,13 @@ fn parse_config() -> Config {
         eprintln!("--lineup must contain exactly --players engines");
         std::process::exit(2);
     }
-    if config.lineup.is_none() && config.candidate == config.baseline {
-        eprintln!("--candidate and --baseline must be different engines");
+    if config.lineup.is_none()
+        && config.candidate == config.baseline
+        && config.strategy_policy == StrategyPolicy::Baseline
+    {
+        eprintln!(
+            "--candidate and --baseline may match only when an explicit candidate strategy policy distinguishes them"
+        );
         std::process::exit(2);
     }
     if config.evaluator_backend == EvaluatorBackend::Cuda {
@@ -621,6 +664,15 @@ struct RootProvenanceTrace {
     retained_roots: Vec<String>,
     pruned_roots: Vec<PrunedRootTrace>,
     root_evidence: Vec<RootEvidenceTrace>,
+    strategy_policy: Option<String>,
+    strategy_proposed_count: usize,
+    strategy_distinct_proposed_count: usize,
+    strategy_challenger_candidates: usize,
+    strategy_challengers_admitted: usize,
+    strategy_challenger_displacements: usize,
+    strategy_challengers_evaluated: usize,
+    strategy_omitted_challengers: usize,
+    strategy_admitted_challenger_won: bool,
     search_winner: Option<String>,
     exact_family_replacement: Option<RootReplacementTrace>,
     safety_replacement: Option<RootReplacementTrace>,
@@ -645,6 +697,26 @@ fn root_promotion_reason(reason: RootPromotionReason) -> &'static str {
 }
 
 fn root_provenance_trace(provenance: &BeliefSearchProvenance) -> RootProvenanceTrace {
+    let strategy = provenance.strategy_shadow.as_ref();
+    let mut displaced_actions = Vec::<Action>::new();
+    let mut admitted_actions = Vec::<Action>::new();
+    if let Some(strategy) = strategy {
+        for proposal in &strategy.proposals {
+            if proposal.admitted && !admitted_actions.contains(&proposal.action) {
+                admitted_actions.push(proposal.action.clone());
+            }
+            if proposal.admitted
+                && proposal.displaced_baseline_action.is_some()
+                && !displaced_actions.contains(&proposal.action)
+            {
+                displaced_actions.push(proposal.action.clone());
+            }
+        }
+    }
+    let admitted_challenger_won = provenance
+        .search_winner
+        .as_ref()
+        .is_some_and(|winner| admitted_actions.contains(winner));
     RootProvenanceTrace {
         retained_roots: provenance
             .retained_roots
@@ -675,6 +747,27 @@ fn root_provenance_trace(provenance: &BeliefSearchProvenance) -> RootProvenanceT
                 trade_hard_veto: entry.trade_hard_veto,
             })
             .collect(),
+        strategy_policy: strategy
+            .and_then(|diagnostics| diagnostics.strategy_policy)
+            .map(str::to_string),
+        strategy_proposed_count: strategy
+            .map_or(0, |diagnostics| diagnostics.admission.proposed_count),
+        strategy_distinct_proposed_count: strategy.map_or(0, |diagnostics| {
+            diagnostics.admission.distinct_proposed_count
+        }),
+        strategy_challenger_candidates: strategy.map_or(0, |diagnostics| {
+            diagnostics.admission.challenger_candidates_considered
+        }),
+        strategy_challengers_admitted: strategy
+            .map_or(0, |diagnostics| diagnostics.admission.challengers_admitted),
+        strategy_challenger_displacements: displaced_actions.len(),
+        strategy_challengers_evaluated: strategy.map_or(0, |diagnostics| {
+            diagnostics.admission.evaluated_challenger_count
+        }),
+        strategy_omitted_challengers: strategy.map_or(0, |diagnostics| {
+            diagnostics.admission.omitted_challenger_count
+        }),
+        strategy_admitted_challenger_won: admitted_challenger_won,
         search_winner: provenance
             .search_winner
             .as_ref()
@@ -1327,6 +1420,15 @@ fn native_gpu_provenance(response: &Value) -> Option<RootProvenanceTrace> {
         retained_roots,
         pruned_roots,
         root_evidence,
+        strategy_policy: None,
+        strategy_proposed_count: 0,
+        strategy_distinct_proposed_count: 0,
+        strategy_challenger_candidates: 0,
+        strategy_challengers_admitted: 0,
+        strategy_challenger_displacements: 0,
+        strategy_challengers_evaluated: 0,
+        strategy_omitted_challengers: 0,
+        strategy_admitted_challenger_won: false,
         search_winner: provenance
             .get("searchWinner")
             .and_then(native_gpu_action_string),
@@ -1891,6 +1993,7 @@ fn choose_action(
     state: &GameState,
     rng: &mut SplitMix64,
     config: &Config,
+    strategy_policy: StrategyPolicy,
     persistent_searches: &mut [Option<Mcts>],
 ) -> EngineChoice {
     let actions = state.legal_actions();
@@ -1916,6 +2019,7 @@ fn choose_action(
         branch_cap: config.maxn_branch,
         maximum_nodes: nodes,
         time_budget_ms: time_ms,
+        strategy_policy,
         strategic_particle_limit: config.strategic_particle_limit,
     };
     match engine {
@@ -2214,6 +2318,14 @@ struct GameMetrics {
     strategic_particles: [u64; 4],
     search_deadlines: [u32; 4],
     search_action_values: [u64; 4],
+    strategy_policy_decisions: [u32; 4],
+    strategy_admission_decisions: [u32; 4],
+    strategy_challenger_candidates: [u64; 4],
+    strategy_challengers_admitted: [u64; 4],
+    strategy_omitted_challengers: [u64; 4],
+    strategy_challenger_displacements: [u64; 4],
+    strategy_challengers_evaluated: [u64; 4],
+    strategy_admitted_challenger_wins: [u32; 4],
     trade_value_sum: [f32; 4],
     calibration_brier_sum: [f32; 4],
     calibration_log_loss_sum: [f32; 4],
@@ -2554,6 +2666,94 @@ struct CandidateMetrics {
 }
 
 #[derive(Default)]
+struct StrategyPilotMetrics {
+    seat_samples: u32,
+    wins: u32,
+    cutoffs: u32,
+    rank_sum: f64,
+    victory_points: u64,
+    decisions: u64,
+    decision_nanos: u128,
+    search_decisions: u64,
+    search_nodes: u64,
+    search_depth: u64,
+    search_deadlines: u64,
+    policy_decisions: u64,
+    admission_decisions: u64,
+    challenger_candidates: u64,
+    challengers_admitted: u64,
+    challengers_omitted: u64,
+    challenger_displacements: u64,
+    challengers_evaluated: u64,
+    admitted_challenger_wins: u64,
+}
+
+impl StrategyPilotMetrics {
+    fn record_player(&mut self, result: &ArenaResult, player: usize, won: bool) {
+        let metrics = &result.game.metrics;
+        self.seat_samples += 1;
+        self.wins += u32::from(won);
+        self.cutoffs += u32::from(result.game.cutoff);
+        self.rank_sum += result.game.ranks[player] as f64;
+        self.victory_points += result.game.points[player] as u64;
+        self.decisions += metrics.decision_count[player] as u64;
+        self.decision_nanos += metrics.decision_time[player].as_nanos();
+        self.search_decisions += metrics.search_decision_count[player] as u64;
+        self.search_nodes += metrics.search_nodes[player];
+        self.search_depth += metrics.search_depth[player];
+        self.search_deadlines += metrics.search_deadlines[player] as u64;
+        self.policy_decisions += metrics.strategy_policy_decisions[player] as u64;
+        self.admission_decisions += metrics.strategy_admission_decisions[player] as u64;
+        self.challenger_candidates += metrics.strategy_challenger_candidates[player];
+        self.challengers_admitted += metrics.strategy_challengers_admitted[player];
+        self.challengers_omitted += metrics.strategy_omitted_challengers[player];
+        self.challenger_displacements += metrics.strategy_challenger_displacements[player];
+        self.challengers_evaluated += metrics.strategy_challengers_evaluated[player];
+        self.admitted_challenger_wins += metrics.strategy_admitted_challenger_wins[player] as u64;
+    }
+
+    fn json(&self, strategy_policy: StrategyPolicy) -> Value {
+        let seats = self.seat_samples.max(1) as f64;
+        let terminal_seats = self.seat_samples.saturating_sub(self.cutoffs).max(1) as f64;
+        let searches = self.search_decisions.max(1) as f64;
+        let policy_decisions = self.policy_decisions.max(1) as f64;
+        let admission_decisions = self.admission_decisions.max(1) as f64;
+        let admitted = self.challengers_admitted.max(1) as f64;
+        json!({
+            "strategyPolicy": strategy_policy.label(),
+            "seatSamples": self.seat_samples,
+            "terminalSeatSamples": self.seat_samples.saturating_sub(self.cutoffs),
+            "wins": self.wins,
+            "winShare": self.wins as f64 / terminal_seats,
+            "meanRank": self.rank_sum / seats,
+            "meanVictoryPoints": self.victory_points as f64 / seats,
+            "cutoffs": self.cutoffs,
+            "decisions": self.decisions,
+            "searchDecisions": self.search_decisions,
+            "meanSearchNodes": self.search_nodes as f64 / searches,
+            "meanSearchDepth": self.search_depth as f64 / searches,
+            "meanDecisionLatencyMs": self.decision_nanos as f64
+                / self.decisions.max(1) as f64
+                / 1_000_000.0,
+            "searchDeadlineShare": self.search_deadlines as f64 / searches,
+            "policyDecisions": self.policy_decisions,
+            "admissionDecisions": self.admission_decisions,
+            "admissionDecisionShare": self.admission_decisions as f64 / policy_decisions,
+            "challengerCandidates": self.challenger_candidates,
+            "challengersAdmitted": self.challengers_admitted,
+            "challengersOmitted": self.challengers_omitted,
+            "challengerDisplacements": self.challenger_displacements,
+            "challengerDisplacementShare": self.challenger_displacements as f64 / admitted,
+            "challengersEvaluated": self.challengers_evaluated,
+            "evaluatedChallengerShare": self.challengers_evaluated as f64 / admitted,
+            "admittedChallengerCommonSearchWins": self.admitted_challenger_wins,
+            "admittedChallengerCommonSearchWinShare": self.admitted_challenger_wins as f64
+                / admission_decisions,
+        })
+    }
+}
+
+#[derive(Default)]
 struct CheckpointEngineMetrics {
     wins: u32,
     seats: u32,
@@ -2611,6 +2811,7 @@ struct ArenaCheckpoint {
     blocks: u32,
     candidate: &'static str,
     baseline: &'static str,
+    strategy_policy: &'static str,
     lineup: Option<Vec<&'static str>>,
     board_generator: &'static str,
     seed: u64,
@@ -2719,6 +2920,7 @@ impl PartialArenaMetrics {
             blocks: config.blocks,
             candidate: config.candidate.as_str(),
             baseline: config.baseline.as_str(),
+            strategy_policy: config.strategy_policy.label(),
             lineup: config.lineup.as_ref().map(|lineup| {
                 lineup
                     .iter()
@@ -3055,11 +3257,19 @@ fn play_game_from_state(
                 } else {
                     engines[actor]
                 };
+                let strategy_policy = if config.lineup.is_none()
+                    && source.is_some_and(|(_, candidate_seat)| candidate_seat as usize == actor)
+                {
+                    config.strategy_policy
+                } else {
+                    StrategyPolicy::Baseline
+                };
                 choose_action(
                     decision_engine,
                     &state,
                     &mut policy_rngs[actor],
                     config,
+                    strategy_policy,
                     &mut persistent_searches,
                 )
             };
@@ -3076,6 +3286,25 @@ fn play_game_from_state(
                 metrics.strategic_particles[actor] += choice.strategic_particles as u64;
                 metrics.search_deadlines[actor] += u32::from(choice.deadline_reached);
                 metrics.search_action_values[actor] += choice.action_values.len() as u64;
+                if let Some(provenance) = choice.provenance.as_ref()
+                    && provenance.strategy_policy.is_some()
+                {
+                    metrics.strategy_policy_decisions[actor] += 1;
+                    metrics.strategy_admission_decisions[actor] +=
+                        u32::from(provenance.strategy_challengers_admitted > 0);
+                    metrics.strategy_challenger_candidates[actor] +=
+                        provenance.strategy_challenger_candidates as u64;
+                    metrics.strategy_challengers_admitted[actor] +=
+                        provenance.strategy_challengers_admitted as u64;
+                    metrics.strategy_omitted_challengers[actor] +=
+                        provenance.strategy_omitted_challengers as u64;
+                    metrics.strategy_challenger_displacements[actor] +=
+                        provenance.strategy_challenger_displacements as u64;
+                    metrics.strategy_challengers_evaluated[actor] +=
+                        provenance.strategy_challengers_evaluated as u64;
+                    metrics.strategy_admitted_challenger_wins[actor] +=
+                        u32::from(provenance.strategy_admitted_challenger_won);
+                }
             }
             let should_record_expert = config.expert_output.is_some()
                 && metrics.decision_count[actor] % config.expert_stride == 0
@@ -3879,6 +4108,8 @@ fn main() {
     let mut block_scores = Vec::with_capacity(config.blocks as usize);
     let mut engine_metrics: [CandidateMetrics; 6] =
         std::array::from_fn(|_| CandidateMetrics::default());
+    let mut strategy_pilot_metrics = StrategyPilotMetrics::default();
+    let mut baseline_pilot_metrics = StrategyPilotMetrics::default();
 
     if !config.json {
         let lineup = config.lineup.as_ref().map_or_else(
@@ -3892,9 +4123,10 @@ fn main() {
             },
         );
         println!(
-            "arena candidate={} baseline={} lineup={} information={} evaluator={} player_trades={} players={} blocks={} iterations={} threads={} seed={}",
+            "arena candidate={} baseline={} strategy_policy={} lineup={} information={} evaluator={} player_trades={} players={} blocks={} iterations={} threads={} seed={}",
             config.candidate.as_str(),
             config.baseline.as_str(),
+            config.strategy_policy.label(),
             lineup,
             information_mode(&config),
             config.evaluator_backend.as_str(),
@@ -4056,7 +4288,22 @@ fn main() {
             }
         }
         let winner_engine = result.engines[result.game.winner as usize];
-        let won = !result.game.cutoff && winner_engine == config.candidate;
+        let won = !result.game.cutoff
+            && if config.lineup.is_none() {
+                result.game.winner == result.seat
+            } else {
+                winner_engine == config.candidate
+            };
+        if config.lineup.is_none() {
+            strategy_pilot_metrics.record_player(&result, result.seat as usize, won);
+            for player in 0..config.players as usize {
+                if player == result.seat as usize {
+                    continue;
+                }
+                let baseline_won = !result.game.cutoff && result.game.winner as usize == player;
+                baseline_pilot_metrics.record_player(&result, player, baseline_won);
+            }
+        }
         if !result.game.cutoff {
             block_terminal_games[result.block as usize] += 1;
             block_wins[result.block as usize] += u32::from(won);
@@ -4168,6 +4415,10 @@ fn main() {
     let games_per_second = total_games as f64 / elapsed.as_secs_f64();
     let candidate_metrics = &engine_metrics[config.candidate as usize];
     let compact_engine_metrics = compact_engine_metrics(&engine_metrics);
+    let strategy_pilot_json = json!({
+        "candidate": strategy_pilot_metrics.json(config.strategy_policy),
+        "baseline": baseline_pilot_metrics.json(StrategyPolicy::Baseline),
+    });
     if config.json {
         let (gpu_stats, batch_stats, average_batch_size) =
             evaluator_benchmark_metrics(config.evaluator_backend);
@@ -4178,6 +4429,8 @@ fn main() {
                 "\"simulator\":\"colonist-native\",",
                 "\"candidate\":\"{}\",",
                 "\"baseline\":\"{}\",",
+                "\"strategyPolicy\":\"{}\",",
+                "\"strategyPilot\":{},",
                 "\"lineup\":{},",
                 "\"players\":{},",
                 "\"blocks\":{},",
@@ -4260,6 +4513,8 @@ fn main() {
             ),
             config.candidate.as_str(),
             config.baseline.as_str(),
+            config.strategy_policy.label(),
+            strategy_pilot_json,
             config.lineup.as_ref().map_or_else(
                 || "null".to_string(),
                 |lineup| format!(

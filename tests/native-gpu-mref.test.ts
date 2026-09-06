@@ -69,4 +69,12 @@ describe("native Mref capability and returned authority", () => {
     await expect(client.analyze({ stochastic: { model: "future-model" } })).rejects.toThrow(/does not support/);
     expect(postMessage).toHaveBeenCalledTimes(1);
   });
+
+  it("rejects explicit strategy policies before connecting to the native companion", async () => {
+    const { client, postMessage } = companion([M0, MREF], M0);
+    await expect(
+      client.analyze({ strategyPolicy: "adaptive-candidate-admission-v1" }),
+    ).rejects.toThrow(/does not support strategy policy/u);
+    expect(postMessage).not.toHaveBeenCalled();
+  });
 });

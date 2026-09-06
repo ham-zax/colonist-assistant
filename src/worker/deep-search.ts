@@ -25,6 +25,7 @@ import type { TrackerState } from "../core/types";
 import type {
   DeepSearchAction,
   DeepSearchResult,
+  DeepSearchStrategyPolicy,
   DecisionAnalysis,
   DecisionEngine,
   DecisionSearchConstraints,
@@ -841,8 +842,12 @@ const mapRootProvenance = (
       ? {
           strategyShadow: {
             policyVersion: provenance.strategyShadow.policyVersion,
+            ...(provenance.strategyShadow.strategyPolicy
+              ? { strategyPolicy: provenance.strategyShadow.strategyPolicy }
+              : {}),
             context: { ...provenance.strategyShadow.context },
             reachability: { ...provenance.strategyShadow.reachability },
+            admission: { ...provenance.strategyShadow.admission },
             proposals: provenance.strategyShadow.proposals.map((proposal) => ({
               strategy: proposal.strategy,
               action: mapAction(proposal.action, players, board),
@@ -851,6 +856,25 @@ const mapRootProvenance = (
                 ? { baselineRank: proposal.baselineRank }
                 : {}),
               retained: proposal.retained,
+              evidenceTier: proposal.evidenceTier,
+              selectedAsChallenger: proposal.selectedAsChallenger,
+              admitted: proposal.admitted,
+              ...(proposal.omissionReason
+                ? { omissionReason: proposal.omissionReason }
+                : {}),
+              ...(proposal.displacedBaselineAction
+                ? {
+                    displacedBaselineAction: mapAction(
+                      proposal.displacedBaselineAction,
+                      players,
+                      board,
+                    ),
+                  }
+                : {}),
+              enteredCommonSearch: proposal.enteredCommonSearch,
+              ...(typeof proposal.commonSearchRank === "number"
+                ? { commonSearchRank: proposal.commonSearchRank }
+                : {}),
               ...(proposal.failureClass
                 ? { failureClass: proposal.failureClass }
                 : {}),
@@ -1102,6 +1126,7 @@ export const buildDeepSearchRequest = (
   playerTradesEnabled = true,
   particleLimit = MAX_INTERACTIVE_PARTICLES,
   stochastic?: PublicStochasticInput,
+  strategyPolicy?: DeepSearchStrategyPolicy,
 ) => {
   const players = playerNames(state, board);
   if (players.length < 2 || players.length > 4) {
@@ -1632,6 +1657,7 @@ export const buildDeepSearchRequest = (
       mode: "maxn",
       depth: 5,
       branchCap: 10,
+      ...(strategyPolicy ? { strategyPolicy } : {}),
       ponder: false,
       ...(requestedStochasticModel === MREF_COLONIST_LINKED_2024_V1 && stochastic
         ? { stochastic }
@@ -1667,6 +1693,7 @@ export const analyzeDeepSearch = async (
   engine: DecisionEngine = "deep-search",
   executor?: DeepSearchExecutor,
   stochastic?: PublicStochasticInput,
+  strategyPolicy?: DeepSearchStrategyPolicy,
 ): Promise<DecisionAnalysis> => {
   if (!executor) await ensureWasm();
   const { request, players, root } = buildDeepSearchRequest(
@@ -1677,6 +1704,7 @@ export const analyzeDeepSearch = async (
     playerTradesEnabled,
     MAX_INTERACTIVE_PARTICLES,
     stochastic,
+    strategyPolicy,
   );
   request.mode = engine === "weighted" ? "weighted" : "maxn";
   if (board.initialPlacement) {
@@ -1783,6 +1811,9 @@ export const analyzeDeepSearch = async (
     stochasticModel,
     ...(response.beliefPolicy === PUBLIC_HISTORY_BELIEF_V1
       ? { beliefPolicy: PUBLIC_HISTORY_BELIEF_V1 }
+      : {}),
+    ...(response.strategyPolicy === "adaptive-candidate-admission-v1"
+      ? { strategyPolicy: response.strategyPolicy }
       : {}),
     ...(diceHistoryProvenance(response.diceHistoryProvenance)
       ? { diceHistoryProvenance: diceHistoryProvenance(response.diceHistoryProvenance) }

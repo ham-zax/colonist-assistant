@@ -1,5 +1,6 @@
 import {
   analyzePublicEstimate,
+  type DeepSearchStrategyPolicy,
   type DecisionAnalysis,
   type DecisionEngine,
   type DecisionSearchConstraints,
@@ -21,6 +22,7 @@ export interface DecisionRequest {
   /** Live rule seam: false forbids player negotiation while preserving maritime trades. */
   playerTradesEnabled?: boolean;
   stochastic?: PublicStochasticInput;
+  strategyPolicy?: DeepSearchStrategyPolicy;
 }
 
 export const analyzeDecisionRequest = async (
@@ -44,5 +46,6 @@ export const analyzeDecisionRequest = async (
     request.engine,
     executor,
     request.stochastic,
+    request.strategyPolicy,
   );
 };

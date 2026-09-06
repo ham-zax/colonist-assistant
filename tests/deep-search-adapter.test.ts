@@ -1181,6 +1181,73 @@ describe("deep-search state adapter", () => {
     expect(elapsed).toBeLessThan(1_000);
   }, 20_000);
 
+  it("round-trips experimental candidate admission through the packaged WASM boundary", async () => {
+    const bytes = await readFile(
+      new URL(
+        "../src/generated/wasm/colonist_search_bg.wasm",
+        import.meta.url,
+      ),
+    );
+    await initWasm({ module_or_path: bytes });
+    const built = buildDeepSearchRequest(
+      state,
+      board,
+      "You",
+      {},
+      true,
+      24,
+      undefined,
+      "adaptive-candidate-admission-v1",
+    );
+    const decisionTimeMs = 250;
+    built.request.timeBudgetMs = decisionTimeMs;
+    built.request.effort = {
+      ...built.request.effort!,
+      decisionTimeMs,
+      cpu: {
+        ...built.request.effort!.cpu,
+        maxDepth: 3,
+        nodesPerDepthWave: 2_000,
+        evidenceEscalationMs: 0,
+      },
+    };
+
+    const response = analyzeWasm(built.request);
+    expect(response.strategyPolicy).toBe("adaptive-candidate-admission-v1");
+    expect(response.rootProvenance.retainedRoots.length).toBeLessThanOrEqual(
+      built.request.branchCap,
+    );
+    if (response.rootProvenance.strategyShadow) {
+      const shadow = response.rootProvenance.strategyShadow;
+      expect(shadow.strategyPolicy).toBe("adaptive-candidate-admission-v1");
+      expect(shadow.admission.rootCap).toBe(built.request.branchCap);
+      expect(shadow.admission.challengersAdmitted).toBeLessThanOrEqual(3);
+      expect(shadow.admission.evaluatedChallengerCount).toBeLessThanOrEqual(
+        shadow.admission.challengersAdmitted,
+      );
+      expect(
+        shadow.proposals.every(
+          (proposal) => !proposal.admitted || proposal.enteredCommonSearch,
+        ),
+      ).toBe(true);
+    }
+  }, 10_000);
+
+  it("rejects unknown strategy policies at the packaged WASM boundary", async () => {
+    const bytes = await readFile(
+      new URL(
+        "../src/generated/wasm/colonist_search_bg.wasm",
+        import.meta.url,
+      ),
+    );
+    await initWasm({ module_or_path: bytes });
+    const built = buildDeepSearchRequest(state, board, "You");
+    (built.request as { strategyPolicy?: string }).strategyPolicy =
+      "adaptive-candidate-admission-v2";
+
+    expect(() => analyzeWasm(built.request)).toThrow(/unknown strategy policy/u);
+  });
+
   it("rejects unknown WASM search modes instead of silently changing algorithms", async () => {
     const bytes = await readFile(
       new URL(

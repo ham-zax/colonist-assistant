@@ -4,7 +4,7 @@ use colonist_catan_search::{
     ActionStats, BeliefParticle, CudaSimEngine, CudaSimError, CudaSimRootActionStats,
     DEVELOPMENT_EXACT_FAMILIES, ExactActionFamily, ExactDecisionResult, HARD_VETO_POSTERIOR,
     IntroducedRoadFragility, RoadCutContinuationAssessment, SearchReport, SearchStatistics,
-    actor_proposal_actions, admit_promoted_roots, apply_closeout_root_impacts,
+    StrategyPolicy, actor_proposal_actions, admit_promoted_roots, apply_closeout_root_impacts,
     belief_domestic_trade_assessment, belief_road_cut_continuation_assessment,
     belief_root_closeout_plans, compute_spatial_root_impacts, exact_family_for_action,
     forced_loss_weight, posterior_immediate_threat_weight, safer_end_turn_alternative,
@@ -596,6 +596,11 @@ impl NativeGpuSearchEngine {
         F: Fn() -> bool,
     {
         let request: Request = serde_json::from_value(value).map_err(|error| error.to_string())?;
+        if let Some(strategy_policy) = request.strategy_policy.as_deref() {
+            return Err(format!(
+                "GPU native search does not support strategy policy {strategy_policy}; route this request to CPU/WASM"
+            ));
+        }
         if matches!(request.mode.as_deref(), Some("weighted")) {
             return Err("GPU native search is reserved for the Strategist engine".into());
         }
@@ -634,6 +639,7 @@ impl NativeGpuSearchEngine {
                         particles.len(),
                         DecisionAuthority::ExactMandatory,
                         effort,
+                        StrategyPolicy::Baseline,
                     ),
                     &stochastic,
                 ))
@@ -698,6 +704,7 @@ impl NativeGpuSearchEngine {
                     particles.len(),
                     DecisionAuthority::TacticalProven,
                     effort,
+                    StrategyPolicy::Baseline,
                 ),
                 &stochastic,
             ))
@@ -1689,6 +1696,7 @@ impl NativeGpuSearchEngine {
         let diagnostics = ResponseDiagnostics {
             rust_posterior_particles: particles.len(),
             rust_search_particles: particles.len(),
+            strategy_policy: None,
             effective_effort: effort,
             search_stages: None,
             root_provenance,

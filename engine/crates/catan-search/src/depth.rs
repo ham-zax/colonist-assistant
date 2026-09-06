@@ -29,7 +29,10 @@ use crate::shared::{
     admit_promoted_roots, coalesce_identical_particles, immediate_winning_roots,
     select_experimental_strategic_particles,
 };
-use crate::strategy::{StrategyShadowDiagnostics, shadow_strategy_diagnostics};
+use crate::strategy::{
+    StrategyPolicy, StrategyShadowDiagnostics, admit_strategy_challengers,
+    finalize_strategy_diagnostics, shadow_strategy_diagnostics, strategy_diagnostics_for_admission,
+};
 use crate::threats::{
     RoadCutContinuationAssessment, belief_road_cut_continuation_assessment, forced_loss_weight,
     posterior_immediate_threat_weight,
@@ -178,32 +181,45 @@ fn attach_strategy_shadow(
     particles: &[BeliefParticle],
     actor: u8,
     ranked_actions: &[Action],
+    searched_actions: &[Action],
     requested_depth: u8,
     completed_depth: u8,
     deadline_reached: bool,
 ) {
-    let retained_actions = provenance
-        .retained_roots
-        .iter()
-        .map(|candidate| candidate.action.clone())
-        .collect::<Vec<_>>();
-    let promoted_actions = provenance
-        .root_evidence
-        .iter()
-        .filter(|evidence| evidence.promotion_reason.is_some())
-        .map(|evidence| evidence.action.clone())
-        .collect::<Vec<_>>();
-    provenance.strategy_shadow = shadow_strategy_diagnostics(
-        particles,
-        actor,
-        ranked_actions,
-        &retained_actions,
-        &promoted_actions,
-        provenance.search_winner.as_ref(),
-        requested_depth,
-        completed_depth,
-        deadline_reached,
-    );
+    if provenance.strategy_shadow.is_none() {
+        let retained_actions = provenance
+            .retained_roots
+            .iter()
+            .map(|candidate| candidate.action.clone())
+            .collect::<Vec<_>>();
+        let promoted_actions = provenance
+            .root_evidence
+            .iter()
+            .filter(|evidence| evidence.promotion_reason.is_some())
+            .map(|evidence| evidence.action.clone())
+            .collect::<Vec<_>>();
+        provenance.strategy_shadow = shadow_strategy_diagnostics(
+            particles,
+            actor,
+            ranked_actions,
+            &retained_actions,
+            &promoted_actions,
+            provenance.search_winner.as_ref(),
+            requested_depth,
+            completed_depth,
+            deadline_reached,
+        );
+    }
+    if let Some(diagnostics) = provenance.strategy_shadow.as_mut() {
+        finalize_strategy_diagnostics(
+            diagnostics,
+            searched_actions,
+            provenance.search_winner.as_ref(),
+            requested_depth,
+            completed_depth,
+            deadline_reached,
+        );
+    }
 }
 
 fn road_cut_continuation_for_root(
@@ -276,6 +292,9 @@ pub struct BeliefDepthConfig {
     pub branch_cap: usize,
     pub maximum_nodes: u32,
     pub time_budget_ms: u32,
+    /// Missing/legacy callers remain baseline-authoritative. Action-changing
+    /// strategy admission is available only through an explicit policy value.
+    pub strategy_policy: StrategyPolicy,
     /// Finite values opt into the legacy lossy coreset for arena/benchmark
     /// experiments. Production bounded-search entry points always use
     /// `usize::MAX`, leaving only exact-identical coalescing active.
@@ -289,6 +308,7 @@ impl BeliefDepthConfig {
             branch_cap: self.branch_cap.max(1),
             maximum_nodes: self.maximum_nodes.max(1),
             time_budget_ms: self.time_budget_ms,
+            strategy_policy: self.strategy_policy,
             strategic_particle_limit: self.strategic_particle_limit.max(1),
         }
     }
@@ -1538,12 +1558,65 @@ fn belief_search(
         .unwrap_or_default();
     let retained_without_promotions =
         admit_promoted_roots(&root_scored, &verified_blockers, &[], branch_cap);
-    let retained = admit_promoted_roots(
+    let baseline_retained = admit_promoted_roots(
         &root_scored,
         &verified_blockers,
         &promoted_spatial_actions,
         branch_cap,
     );
+    let mut strategy_admission = None;
+    let retained = if config.strategy_policy == StrategyPolicy::AdaptiveCandidateAdmissionV1 {
+        let ranked_actions = root_scored
+            .iter()
+            .map(|(action, _)| action.clone())
+            .collect::<Vec<_>>();
+        let baseline_actions = baseline_retained
+            .iter()
+            .map(|(action, _)| action.clone())
+            .collect::<Vec<_>>();
+        let mut protected_actions = Vec::<Action>::new();
+        for (action, _) in &verified_blockers {
+            if baseline_actions.contains(action) && !protected_actions.contains(action) {
+                protected_actions.push(action.clone());
+            }
+        }
+        if baseline_actions.contains(&Action::EndTurn) {
+            protected_actions.push(Action::EndTurn);
+        }
+        if let Some((leader, _)) = root_scored.first()
+            && baseline_actions.contains(leader)
+            && !protected_actions.contains(leader)
+        {
+            protected_actions.push(leader.clone());
+        }
+        for action in &promoted_spatial_actions {
+            if baseline_actions.contains(action) && !protected_actions.contains(action) {
+                protected_actions.push(action.clone());
+            }
+        }
+        if let Some(mut diagnostics) = strategy_diagnostics_for_admission(
+            posterior,
+            observer,
+            &ranked_actions,
+            &baseline_actions,
+            &promoted_spatial_actions,
+            branch_cap,
+        ) {
+            let admitted = admit_strategy_challengers(
+                &mut diagnostics,
+                &root_scored,
+                &baseline_retained,
+                &protected_actions,
+                branch_cap,
+            );
+            strategy_admission = Some(diagnostics);
+            admitted
+        } else {
+            baseline_retained.clone()
+        }
+    } else {
+        baseline_retained.clone()
+    };
     let mut root_evidence = ranked_diagnostics
         .iter()
         .map(|candidate| {
@@ -1718,7 +1791,7 @@ fn belief_search(
         pruned_root_count,
         pruned_roots,
         root_evidence,
-        strategy_shadow: None,
+        strategy_shadow: strategy_admission,
         trade_hard_veto_threshold: HARD_VETO_POSTERIOR,
         search_winner: None,
         exact_family_replacement: None,
@@ -2050,11 +2123,16 @@ fn belief_search(
         .iter()
         .map(|candidate| candidate.action.clone())
         .collect::<Vec<_>>();
+    let strategy_search_actions = actions
+        .iter()
+        .map(|candidate| candidate.action.clone())
+        .collect::<Vec<_>>();
     attach_strategy_shadow(
         &mut provenance,
         posterior,
         observer,
         &strategy_ranked_actions,
+        &strategy_search_actions,
         maximum_depth,
         depth,
         deadline_reached,
@@ -2234,6 +2312,7 @@ fn public_opening_result(
             branch_cap,
             maximum_nodes,
             time_budget_ms,
+            strategy_policy: StrategyPolicy::Baseline,
             strategic_particle_limit: 1,
         },
         paranoid,
@@ -2432,6 +2511,7 @@ pub fn search_belief_maxn_bounded(
             branch_cap,
             maximum_nodes,
             time_budget_ms: 0,
+            strategy_policy: StrategyPolicy::Baseline,
             strategic_particle_limit: usize::MAX,
         },
     )
@@ -2464,6 +2544,7 @@ pub fn search_weighted_belief_maxn_bounded(
             branch_cap,
             maximum_nodes,
             time_budget_ms: 0,
+            strategy_policy: StrategyPolicy::Baseline,
             strategic_particle_limit: usize::MAX,
         },
     )
@@ -2501,6 +2582,7 @@ pub fn search_weighted_belief_maxn_bounded_timed_excluding(
             branch_cap,
             maximum_nodes,
             time_budget_ms,
+            strategy_policy: StrategyPolicy::Baseline,
             strategic_particle_limit: usize::MAX,
         },
         false,
@@ -2519,6 +2601,28 @@ pub fn search_weighted_belief_maxn_iterative_timed_excluding(
     evidence_escalation_ms: u32,
     root_exclusions: &[Action],
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
+    search_weighted_belief_maxn_iterative_timed_excluding_with_strategy_policy(
+        particles,
+        depth,
+        branch_cap,
+        nodes_per_depth_wave,
+        time_budget_ms,
+        evidence_escalation_ms,
+        StrategyPolicy::Baseline,
+        root_exclusions,
+    )
+}
+
+pub fn search_weighted_belief_maxn_iterative_timed_excluding_with_strategy_policy(
+    particles: &[BeliefParticle],
+    depth: u8,
+    branch_cap: usize,
+    nodes_per_depth_wave: u32,
+    time_budget_ms: u32,
+    evidence_escalation_ms: u32,
+    strategy_policy: StrategyPolicy,
+    root_exclusions: &[Action],
+) -> Result<BeliefDepthResult, DepthBeliefError> {
     belief_search(
         particles,
         BeliefDepthConfig {
@@ -2526,6 +2630,7 @@ pub fn search_weighted_belief_maxn_iterative_timed_excluding(
             branch_cap,
             maximum_nodes: nodes_per_depth_wave,
             time_budget_ms,
+            strategy_policy,
             strategic_particle_limit: usize::MAX,
         },
         false,
@@ -2561,6 +2666,7 @@ pub fn search_belief_paranoid_bounded(
             branch_cap,
             maximum_nodes,
             time_budget_ms: 0,
+            strategy_policy: StrategyPolicy::Baseline,
             strategic_particle_limit: usize::MAX,
         },
     )
@@ -2593,6 +2699,7 @@ pub fn search_weighted_belief_paranoid_bounded(
             branch_cap,
             maximum_nodes,
             time_budget_ms: 0,
+            strategy_policy: StrategyPolicy::Baseline,
             strategic_particle_limit: usize::MAX,
         },
     )
@@ -2630,6 +2737,7 @@ pub fn search_weighted_belief_paranoid_bounded_timed_excluding(
             branch_cap,
             maximum_nodes,
             time_budget_ms,
+            strategy_policy: StrategyPolicy::Baseline,
             strategic_particle_limit: usize::MAX,
         },
         true,
@@ -2647,6 +2755,26 @@ pub fn search_weighted_belief_paranoid_iterative_timed_excluding(
     time_budget_ms: u32,
     root_exclusions: &[Action],
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
+    search_weighted_belief_paranoid_iterative_timed_excluding_with_strategy_policy(
+        particles,
+        depth,
+        branch_cap,
+        nodes_per_depth_wave,
+        time_budget_ms,
+        StrategyPolicy::Baseline,
+        root_exclusions,
+    )
+}
+
+pub fn search_weighted_belief_paranoid_iterative_timed_excluding_with_strategy_policy(
+    particles: &[BeliefParticle],
+    depth: u8,
+    branch_cap: usize,
+    nodes_per_depth_wave: u32,
+    time_budget_ms: u32,
+    strategy_policy: StrategyPolicy,
+    root_exclusions: &[Action],
+) -> Result<BeliefDepthResult, DepthBeliefError> {
     belief_search(
         particles,
         BeliefDepthConfig {
@@ -2654,6 +2782,7 @@ pub fn search_weighted_belief_paranoid_iterative_timed_excluding(
             branch_cap,
             maximum_nodes: nodes_per_depth_wave,
             time_budget_ms,
+            strategy_policy,
             strategic_particle_limit: usize::MAX,
         },
         true,
@@ -3478,12 +3607,65 @@ fn cuda_belief_search_with_batch(
         .unwrap_or_default();
     let retained_without_promotions =
         admit_promoted_roots(&root_scored, &verified_blockers, &[], branch_cap);
-    let retained = admit_promoted_roots(
+    let baseline_retained = admit_promoted_roots(
         &root_scored,
         &verified_blockers,
         &promoted_spatial_actions,
         branch_cap,
     );
+    let mut strategy_admission = None;
+    let retained = if config.strategy_policy == StrategyPolicy::AdaptiveCandidateAdmissionV1 {
+        let ranked_actions = root_scored
+            .iter()
+            .map(|(action, _)| action.clone())
+            .collect::<Vec<_>>();
+        let baseline_actions = baseline_retained
+            .iter()
+            .map(|(action, _)| action.clone())
+            .collect::<Vec<_>>();
+        let mut protected_actions = Vec::<Action>::new();
+        for (action, _) in &verified_blockers {
+            if baseline_actions.contains(action) && !protected_actions.contains(action) {
+                protected_actions.push(action.clone());
+            }
+        }
+        if baseline_actions.contains(&Action::EndTurn) {
+            protected_actions.push(Action::EndTurn);
+        }
+        if let Some((leader, _)) = root_scored.first()
+            && baseline_actions.contains(leader)
+            && !protected_actions.contains(leader)
+        {
+            protected_actions.push(leader.clone());
+        }
+        for action in &promoted_spatial_actions {
+            if baseline_actions.contains(action) && !protected_actions.contains(action) {
+                protected_actions.push(action.clone());
+            }
+        }
+        if let Some(mut diagnostics) = strategy_diagnostics_for_admission(
+            posterior,
+            observer,
+            &ranked_actions,
+            &baseline_actions,
+            &promoted_spatial_actions,
+            branch_cap,
+        ) {
+            let admitted = admit_strategy_challengers(
+                &mut diagnostics,
+                &root_scored,
+                &baseline_retained,
+                &protected_actions,
+                branch_cap,
+            );
+            strategy_admission = Some(diagnostics);
+            admitted
+        } else {
+            baseline_retained.clone()
+        }
+    } else {
+        baseline_retained.clone()
+    };
     let mut root_evidence = ranked_diagnostics
         .iter()
         .map(|candidate| {
@@ -3678,7 +3860,7 @@ fn cuda_belief_search_with_batch(
         pruned_root_count,
         pruned_roots,
         root_evidence,
-        strategy_shadow: None,
+        strategy_shadow: strategy_admission,
         trade_hard_veto_threshold: HARD_VETO_POSTERIOR,
         search_winner: None,
         exact_family_replacement,
@@ -3977,11 +4159,16 @@ fn cuda_belief_search_with_batch(
             .iter()
             .map(|candidate| candidate.action.clone())
             .collect::<Vec<_>>();
+        let strategy_search_actions = actions
+            .iter()
+            .map(|candidate| candidate.action.clone())
+            .collect::<Vec<_>>();
         attach_strategy_shadow(
             &mut provenance,
             posterior,
             observer,
             &strategy_ranked_actions,
+            &strategy_search_actions,
             maximum_depth,
             depth,
             false,
@@ -4179,11 +4366,16 @@ fn cuda_belief_search_with_batch(
         .iter()
         .map(|candidate| candidate.action.clone())
         .collect::<Vec<_>>();
+    let strategy_search_actions = actions
+        .iter()
+        .map(|candidate| candidate.action.clone())
+        .collect::<Vec<_>>();
     attach_strategy_shadow(
         &mut provenance,
         posterior,
         observer,
         &strategy_ranked_actions,
+        &strategy_search_actions,
         maximum_depth,
         depth,
         false,
@@ -5329,6 +5521,7 @@ mod tests {
                 branch_cap: 8,
                 maximum_nodes: 4_000,
                 time_budget_ms: 0,
+                strategy_policy: crate::StrategyPolicy::Baseline,
                 strategic_particle_limit: 12,
             },
         )
@@ -5386,12 +5579,130 @@ mod tests {
                 branch_cap: 4,
                 maximum_nodes: 500,
                 time_budget_ms: 0,
+                strategy_policy: crate::StrategyPolicy::Baseline,
                 strategic_particle_limit: 4,
             },
         )
         .unwrap();
         assert_eq!(report.posterior_particles, 16);
         assert_eq!(report.particles, 2);
+    }
+
+    #[test]
+    fn adaptive_candidate_admission_preserves_baseline_roster_contract_and_protected_roots() {
+        let state = recovered_turn_54_control();
+        let particles = [BeliefParticle { state, weight: 1.0 }];
+        let config = |strategy_policy| super::BeliefDepthConfig {
+            maximum_depth: 2,
+            branch_cap: 4,
+            maximum_nodes: 1_500,
+            time_budget_ms: 0,
+            strategy_policy,
+            strategic_particle_limit: usize::MAX,
+        };
+        let baseline = super::search_weighted_belief_maxn_with_config(
+            &particles,
+            config(crate::StrategyPolicy::Baseline),
+        )
+        .unwrap();
+        let legacy = search_weighted_belief_maxn_bounded(&particles, 2, 4, 1_500).unwrap();
+        let experimental = super::search_weighted_belief_maxn_with_config(
+            &particles,
+            config(crate::StrategyPolicy::AdaptiveCandidateAdmissionV1),
+        )
+        .unwrap();
+
+        assert_eq!(baseline.chosen, legacy.chosen);
+        assert_eq!(
+            baseline
+                .provenance
+                .retained_roots
+                .iter()
+                .map(|root| &root.action)
+                .collect::<Vec<_>>(),
+            legacy
+                .provenance
+                .retained_roots
+                .iter()
+                .map(|root| &root.action)
+                .collect::<Vec<_>>(),
+        );
+        assert!(baseline.provenance.retained_roots.len() <= 4);
+        assert_eq!(
+            experimental.provenance.retained_roots.len(),
+            baseline.provenance.retained_roots.len(),
+        );
+        assert!(experimental.provenance.retained_roots.len() <= 4);
+
+        let baseline_actions = baseline
+            .provenance
+            .retained_roots
+            .iter()
+            .map(|root| root.action.clone())
+            .collect::<Vec<_>>();
+        let experimental_actions = experimental
+            .provenance
+            .retained_roots
+            .iter()
+            .map(|root| root.action.clone())
+            .collect::<Vec<_>>();
+        if baseline_actions.contains(&Action::EndTurn) {
+            assert!(experimental_actions.contains(&Action::EndTurn));
+        }
+        if let Some(leader) = baseline.provenance.ranked_roots.first()
+            && baseline_actions.contains(&leader.action)
+        {
+            assert!(experimental_actions.contains(&leader.action));
+        }
+        for evidence in &baseline.provenance.root_evidence {
+            if evidence.promotion_reason.is_some() && baseline_actions.contains(&evidence.action) {
+                assert!(experimental_actions.contains(&evidence.action));
+            }
+        }
+
+        let diagnostics = experimental
+            .provenance
+            .strategy_shadow
+            .as_ref()
+            .expect("explicit strategy policy must expose admission provenance");
+        assert_eq!(
+            diagnostics.strategy_policy,
+            Some(crate::ADAPTIVE_CANDIDATE_ADMISSION_V1),
+        );
+        assert!(diagnostics.admission.challengers_admitted <= 3);
+        assert!(diagnostics.admission.evaluated_challenger_count <= 3);
+        assert!(
+            diagnostics
+                .proposals
+                .iter()
+                .all(|proposal| !proposal.admitted || proposal.entered_common_search)
+        );
+    }
+
+    #[test]
+    fn adaptive_candidate_admission_keeps_verified_forced_blocker_protected() {
+        let (state, blocker) = crate::threats::forced_blocker_fixture();
+        let particles = [BeliefParticle { state, weight: 1.0 }];
+        let report = super::search_weighted_belief_maxn_with_config(
+            &particles,
+            super::BeliefDepthConfig {
+                maximum_depth: 3,
+                branch_cap: 4,
+                maximum_nodes: 2_000,
+                time_budget_ms: 0,
+                strategy_policy: crate::StrategyPolicy::AdaptiveCandidateAdmissionV1,
+                strategic_particle_limit: usize::MAX,
+            },
+        )
+        .unwrap();
+        assert!(
+            report
+                .provenance
+                .retained_roots
+                .iter()
+                .any(|root| root.action == blocker)
+        );
+        assert_eq!(report.chosen, Some(blocker));
     }
 
     #[test]

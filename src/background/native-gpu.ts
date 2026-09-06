@@ -116,6 +116,12 @@ export class NativeGpuClient {
   }
 
   async analyze(request: unknown, decisionId?: number): Promise<WasmSearchResponse> {
+    const requestedStrategyPolicy = (request as { strategyPolicy?: unknown } | null)?.strategyPolicy;
+    if (requestedStrategyPolicy !== undefined) {
+      throw new NativeGpuCompatibilityError(
+        `GPU companion does not support strategy policy ${String(requestedStrategyPolicy)}`,
+      );
+    }
     const status = await this.status();
     if (!status) throw new Error("GPU companion is not installed");
     const requestedModel = (request as { stochastic?: { model?: string } } | null)?.stochastic?.model;

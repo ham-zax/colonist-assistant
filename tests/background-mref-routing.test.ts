@@ -50,6 +50,36 @@ describe("background Mref dispatch", () => {
     expect(analyze.mock.calls[0]?.[0]).toMatchObject({ stochastic: { model: MREF } });
   });
 
+  it("routes explicit strategy admission to CPU/WASM even when native GPU is available", async () => {
+    vi.resetModules();
+    let receive: (message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => unknown;
+    vi.stubGlobal("chrome", { runtime: { onMessage: { addListener: (listener: typeof receive) => { receive = listener; } } } });
+    const { NativeGpuClient } = await import("../src/background/native-gpu");
+    const status = vi.spyOn(NativeGpuClient.prototype, "status").mockResolvedValue({
+      runtime: "gpu-native", engineRevision: "deep-maxn-v12", stochasticModels: [M0, MREF],
+      device: { backend: "cuda-resident-sim", ordinal: 0, name: "routing-fixture", computeCapability: [8, 6] },
+    });
+    const native = vi.spyOn(NativeGpuClient.prototype, "analyze");
+    await import("../src/background/index");
+    const message = {
+      type: DECISION_MESSAGE_TYPE, id: 45, state: {}, rootPlayer: "P0", engine: "deep-search",
+      board: { initialPlacement: false, isMyTurn: true },
+      stochastic: { model: M0 },
+      strategyPolicy: "adaptive-candidate-admission-v1",
+    };
+    const response = await new Promise<unknown>((resolve) => receive(message, {}, resolve));
+    expect(response).toMatchObject({ analysis: {
+      runtime: "background-wasm",
+      runtimeReason: expect.stringMatching(/Strategy policy adaptive-candidate-admission-v1 requires WASM\/CPU/u),
+    } });
+    expect(status).not.toHaveBeenCalled();
+    expect(native).not.toHaveBeenCalled();
+    expect(analyze).toHaveBeenCalledOnce();
+    expect(analyze.mock.calls[0]?.[0]).toMatchObject({
+      strategyPolicy: "adaptive-candidate-admission-v1",
+    });
+  });
+
   it("preserves Mref on CPU/WASM when the selected native host is already disconnected", async () => {
     vi.resetModules();
     let receive: (message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => unknown;
