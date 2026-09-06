@@ -14,8 +14,10 @@ use colonist_catan_search::{
     ActionStats, BeliefParticle, BeliefSearchProvenance, BeliefSearchStageTimings,
     CooperativeDeadline, DomesticTradeThreat, ENGINE_REVISION, ExactActionFamily, ExactActionValue,
     ExactDecisionResult, HARD_VETO_POSTERIOR, IntroducedRoadFragility, Mcts,
-    RoadCutContinuationAssessment, RootPromotionReason, RootPruneReason, SearchConfig, SearchMode,
-    SearchReport, SearchStatistics, TacticalResult, action_prior, evaluate,
+    DecisionFailureClass, ReachabilityDiagnostic, RoadCutContinuationAssessment,
+    RootPromotionReason, RootPruneReason, SearchConfig, SearchMode, SearchReport, SearchStatistics,
+    StrategyId, StrategyProposalReason, StrategyShadowDiagnostics, TacticalResult, action_prior,
+    evaluate,
     exact_action_comparator_score, exact_family_for_action, learned_model_version,
     learned_trade_model_version, safer_end_turn_alternative,
     search_weighted_belief_maxn_iterative_timed_excluding,
@@ -612,6 +614,135 @@ struct RootCausalEvidenceOutput {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct StrategyContextOutput {
+    actor: u8,
+    player_count: u8,
+    opponent_count: u8,
+    victory_target: u8,
+    turn: u16,
+    response_windows_before_next_turn: u8,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReachabilityOutput {
+    exact_victory_points: u8,
+    victory_target: u8,
+    optimistic_building_gain: u8,
+    optimistic_award_gain: u8,
+    optimistic_without_future_development_vp: u8,
+    minimum_future_development_vp_required: u8,
+    future_development_vp_necessary: bool,
+    remaining_development_vp_min: u8,
+    remaining_development_vp_max: u8,
+    remaining_development_vp_expected: f32,
+    optimistic_with_min_future_development_vp: u8,
+    optimistic_with_max_future_development_vp: u8,
+    target_reachable_in_all_compatible_worlds: bool,
+    target_reachable_in_some_compatible_world: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StrategyProposalOutput {
+    strategy: &'static str,
+    action: ActionOutput,
+    reason: &'static str,
+    baseline_rank: Option<usize>,
+    retained: bool,
+    failure_class: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StrategyShadowOutput {
+    policy_version: &'static str,
+    context: StrategyContextOutput,
+    reachability: ReachabilityOutput,
+    proposals: Vec<StrategyProposalOutput>,
+}
+
+fn strategy_id_label(value: StrategyId) -> &'static str {
+    match value {
+        StrategyId::ProductionGrowth => "production-growth",
+        StrategyId::ExpansionRace => "expansion-race",
+        StrategyId::DevelopmentAccess => "development-access",
+        StrategyId::AwardRace => "award-race",
+        StrategyId::CloseoutRecovery => "closeout-recovery",
+    }
+}
+
+fn strategy_reason_label(value: StrategyProposalReason) -> &'static str {
+    match value {
+        StrategyProposalReason::CityProduction => "city-production",
+        StrategyProposalReason::SettlementProduction => "settlement-production",
+        StrategyProposalReason::SpatialRace => "spatial-race",
+        StrategyProposalReason::FutureDevelopmentVpRequired => "future-development-vp-required",
+        StrategyProposalReason::DevelopmentOptionValue => "development-option-value",
+        StrategyProposalReason::LongestRoadRace => "longest-road-race",
+        StrategyProposalReason::LargestArmyRace => "largest-army-race",
+        StrategyProposalReason::ImmediateWin => "immediate-win",
+    }
+}
+
+fn decision_failure_class_label(value: DecisionFailureClass) -> &'static str {
+    match value {
+        DecisionFailureClass::Coverage => "coverage",
+        DecisionFailureClass::Valuation => "valuation",
+        DecisionFailureClass::Horizon => "horizon",
+        DecisionFailureClass::Continuation => "continuation",
+        DecisionFailureClass::BeliefModel => "belief-model",
+    }
+}
+
+fn reachability_output(value: ReachabilityDiagnostic) -> ReachabilityOutput {
+    ReachabilityOutput {
+        exact_victory_points: value.exact_victory_points,
+        victory_target: value.victory_target,
+        optimistic_building_gain: value.optimistic_building_gain,
+        optimistic_award_gain: value.optimistic_award_gain,
+        optimistic_without_future_development_vp: value.optimistic_without_future_development_vp,
+        minimum_future_development_vp_required: value.minimum_future_development_vp_required,
+        future_development_vp_necessary: value.future_development_vp_necessary,
+        remaining_development_vp_min: value.remaining_development_vp_min,
+        remaining_development_vp_max: value.remaining_development_vp_max,
+        remaining_development_vp_expected: value.remaining_development_vp_expected,
+        optimistic_with_min_future_development_vp: value.optimistic_with_min_future_development_vp,
+        optimistic_with_max_future_development_vp: value.optimistic_with_max_future_development_vp,
+        target_reachable_in_all_compatible_worlds: value.target_reachable_in_all_compatible_worlds,
+        target_reachable_in_some_compatible_world: value.target_reachable_in_some_compatible_world,
+    }
+}
+
+fn strategy_shadow_output(value: StrategyShadowDiagnostics) -> StrategyShadowOutput {
+    StrategyShadowOutput {
+        policy_version: value.policy_version,
+        context: StrategyContextOutput {
+            actor: value.context.actor,
+            player_count: value.context.player_count,
+            opponent_count: value.context.opponent_count,
+            victory_target: value.context.victory_target,
+            turn: value.context.turn,
+            response_windows_before_next_turn: value.context.response_windows_before_next_turn,
+        },
+        reachability: reachability_output(value.reachability),
+        proposals: value
+            .proposals
+            .into_iter()
+            .map(|proposal| StrategyProposalOutput {
+                strategy: strategy_id_label(proposal.strategy),
+                action: action(proposal.action),
+                reason: strategy_reason_label(proposal.reason),
+                baseline_rank: proposal.baseline_rank,
+                retained: proposal.retained,
+                failure_class: proposal.failure_class.map(decision_failure_class_label),
+            })
+            .collect(),
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct HorizonEscalationOutput {
     reason: &'static str,
     provisional_winner: ActionOutput,
@@ -634,6 +765,8 @@ struct RootProvenanceOutput {
     pruned_roots: Vec<PrunedRootOutput>,
     root_evidence: Vec<RootCausalEvidenceOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    strategy_shadow: Option<StrategyShadowOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     horizon_escalation: Option<HorizonEscalationOutput>,
     trade_hard_veto_threshold: f32,
     search_winner: Option<ActionOutput>,
@@ -650,6 +783,7 @@ impl Default for RootProvenanceOutput {
             pruned_root_count: 0,
             pruned_roots: Vec::new(),
             root_evidence: Vec::new(),
+            strategy_shadow: None,
             horizon_escalation: None,
             trade_hard_veto_threshold: HARD_VETO_POSTERIOR,
             search_winner: None,
@@ -1435,6 +1569,7 @@ fn root_provenance_output(provenance: BeliefSearchProvenance) -> RootProvenanceO
                 }
             })
             .collect(),
+        strategy_shadow: provenance.strategy_shadow.map(strategy_shadow_output),
         horizon_escalation: None,
         trade_hard_veto_threshold: provenance.trade_hard_veto_threshold,
         search_winner: provenance.search_winner.map(action),

@@ -8,7 +8,7 @@ use colonist_catan_search::{
     belief_domestic_trade_assessment, belief_road_cut_continuation_assessment,
     belief_root_closeout_plans, compute_spatial_root_impacts, exact_family_for_action,
     forced_loss_weight, posterior_immediate_threat_weight, safer_end_turn_alternative,
-    shared_root_candidates, solve_belief_current_turn_timed,
+    shadow_strategy_diagnostics, shared_root_candidates, solve_belief_current_turn_timed,
     solve_exact_belief_excluding_controlled,
 };
 use colonist_catan_search::{road_intent, rollout_cutoff_margin};
@@ -22,7 +22,8 @@ use super::{
     basic_response_diagnostics, domestic_trade_threat_label, effective_particle_count,
     exact_family_label, exact_mandatory_report_controlled, game_states,
     introduced_road_fragility_output, resolve_stochastic, response, road_cut_continuation_output,
-    root_exclusion_actions, root_promotion_reason, weighted_policy_report_for_actions_controlled,
+    root_exclusion_actions, root_promotion_reason, strategy_shadow_output,
+    weighted_policy_report_for_actions_controlled,
 };
 
 const GPU_ALGORITHM: &str = "gpu-root-rollout";
@@ -1578,6 +1579,26 @@ impl NativeGpuSearchEngine {
             .map(|candidate| candidate.value)
             .unwrap_or_else(|| root_values(&chosen_root));
         let total_rollouts = total_executed_rollouts;
+        let ranked_actions = ranked
+            .iter()
+            .map(|candidate| candidate.action.clone())
+            .collect::<Vec<_>>();
+        let retained_actions = retained
+            .iter()
+            .map(|candidate| candidate.action.clone())
+            .collect::<Vec<_>>();
+        let strategy_shadow = shadow_strategy_diagnostics(
+            &particles,
+            actor,
+            &ranked_actions,
+            &retained_actions,
+            &promoted_spatial_actions,
+            Some(&chosen_root.action),
+            1,
+            1,
+            decision_clock.remaining_ms() == 0,
+        )
+        .map(strategy_shadow_output);
         let mut root_provenance = RootProvenanceOutput {
             ranked_root_count,
             ranked_roots: ranked
@@ -1656,6 +1677,7 @@ impl NativeGpuSearchEngine {
             pruned_root_count: pruned_roots.len(),
             pruned_roots,
             root_evidence,
+            strategy_shadow,
             horizon_escalation,
             trade_hard_veto_threshold: HARD_VETO_POSTERIOR,
             search_winner: Some(action(chosen_root.action.clone())),

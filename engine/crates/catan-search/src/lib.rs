@@ -15,10 +15,12 @@ mod model;
 mod opening;
 mod planner;
 mod policy;
+mod reachability;
 mod resilience;
 mod rollout_cutoff;
 mod root_impact;
 mod shared;
+mod strategy;
 mod tactical;
 mod threats;
 mod trade_model;
@@ -68,6 +70,7 @@ pub use policy::{
     ActionClass, action_prior, actor_proposal_actions, allocate_root_node_budgets,
     choose_rollout_action, trade_acceptance_probability,
 };
+pub use reachability::{ReachabilityDiagnostic, optimistic_reachability};
 pub use rollout_cutoff::{
     ROLLOUT_CUTOFF_SCALE, rollout_cutoff_margin, rollout_cutoff_player_score,
 };
@@ -84,6 +87,11 @@ pub use shared::{
     EXPERIMENTAL_STRATEGIC_PARTICLE_TARGET, STRATEGIC_ROOT_WIDTH, admit_promoted_roots,
     coalesce_identical_particles, group_particles_by_observation, immediate_winning_roots,
     select_experimental_strategic_particles, shared_root_candidates,
+};
+pub use strategy::{
+    DecisionFailureClass, STRATEGY_SHADOW_POLICY_VERSION, StrategyContext, StrategyId,
+    StrategyProposalDiagnostic, StrategyProposalReason, StrategyShadowDiagnostics,
+    shadow_strategy_diagnostics,
 };
 pub use tactical::{
     TacticalResult, solve_belief_current_turn, solve_belief_current_turn_timed, solve_current_turn,

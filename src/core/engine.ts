@@ -261,6 +261,72 @@ export interface DeepSearchRootCausalEvidence {
   tradeHardVeto: boolean;
 }
 
+export type DeepSearchStrategyId =
+  | "production-growth"
+  | "expansion-race"
+  | "development-access"
+  | "award-race"
+  | "closeout-recovery";
+
+export type DeepSearchStrategyProposalReason =
+  | "city-production"
+  | "settlement-production"
+  | "spatial-race"
+  | "future-development-vp-required"
+  | "development-option-value"
+  | "longest-road-race"
+  | "largest-army-race"
+  | "immediate-win";
+
+export type DeepSearchDecisionFailureClass =
+  | "coverage"
+  | "valuation"
+  | "horizon"
+  | "continuation"
+  | "belief-model";
+
+export interface DeepSearchStrategyContext {
+  actor: number;
+  playerCount: number;
+  opponentCount: number;
+  victoryTarget: number;
+  turn: number;
+  responseWindowsBeforeNextTurn: number;
+}
+
+export interface DeepSearchReachabilityDiagnostic {
+  exactVictoryPoints: number;
+  victoryTarget: number;
+  optimisticBuildingGain: number;
+  optimisticAwardGain: number;
+  optimisticWithoutFutureDevelopmentVp: number;
+  minimumFutureDevelopmentVpRequired: number;
+  futureDevelopmentVpNecessary: boolean;
+  remainingDevelopmentVpMin: number;
+  remainingDevelopmentVpMax: number;
+  remainingDevelopmentVpExpected: number;
+  optimisticWithMinFutureDevelopmentVp: number;
+  optimisticWithMaxFutureDevelopmentVp: number;
+  targetReachableInAllCompatibleWorlds: boolean;
+  targetReachableInSomeCompatibleWorld: boolean;
+}
+
+export interface DeepSearchStrategyProposalDiagnostic {
+  strategy: DeepSearchStrategyId;
+  action: DeepSearchAction;
+  reason: DeepSearchStrategyProposalReason;
+  baselineRank?: number;
+  retained: boolean;
+  failureClass?: DeepSearchDecisionFailureClass;
+}
+
+export interface DeepSearchStrategyShadowDiagnostics {
+  policyVersion: string;
+  context: DeepSearchStrategyContext;
+  reachability: DeepSearchReachabilityDiagnostic;
+  proposals: DeepSearchStrategyProposalDiagnostic[];
+}
+
 export interface DeepSearchHorizonEscalation {
   reason:
     | "fragile-award-low-terminal-completion"
@@ -282,6 +348,7 @@ export interface DeepSearchRootProvenance {
   prunedRootCount: number;
   prunedRoots: DeepSearchPrunedRoot[];
   rootEvidence?: DeepSearchRootCausalEvidence[];
+  strategyShadow?: DeepSearchStrategyShadowDiagnostics;
   horizonEscalation?: DeepSearchHorizonEscalation;
   tradeHardVetoThreshold?: number;
   searchWinner?: DeepSearchAction;

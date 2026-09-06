@@ -29,6 +29,7 @@ use crate::shared::{
     admit_promoted_roots, coalesce_identical_particles, immediate_winning_roots,
     select_experimental_strategic_particles,
 };
+use crate::strategy::{StrategyShadowDiagnostics, shadow_strategy_diagnostics};
 use crate::threats::{
     RoadCutContinuationAssessment, belief_road_cut_continuation_assessment, forced_loss_weight,
     posterior_immediate_threat_weight,
@@ -144,6 +145,7 @@ pub struct BeliefSearchProvenance {
     pub pruned_root_count: usize,
     pub pruned_roots: Vec<PrunedRootDiagnostic>,
     pub root_evidence: Vec<RootCausalEvidence>,
+    pub strategy_shadow: Option<StrategyShadowDiagnostics>,
     pub trade_hard_veto_threshold: f32,
     /// Ordinary backed-up search winner before any later safety replacement.
     pub search_winner: Option<Action>,
@@ -161,6 +163,7 @@ impl Default for BeliefSearchProvenance {
             pruned_root_count: 0,
             pruned_roots: Vec::new(),
             root_evidence: Vec::new(),
+            strategy_shadow: None,
             trade_hard_veto_threshold: HARD_VETO_POSTERIOR,
             search_winner: None,
             exact_family_replacement: None,
@@ -168,6 +171,39 @@ impl Default for BeliefSearchProvenance {
             safety_replacement: None,
         }
     }
+}
+
+fn attach_strategy_shadow(
+    provenance: &mut BeliefSearchProvenance,
+    particles: &[BeliefParticle],
+    actor: u8,
+    ranked_actions: &[Action],
+    requested_depth: u8,
+    completed_depth: u8,
+    deadline_reached: bool,
+) {
+    let retained_actions = provenance
+        .retained_roots
+        .iter()
+        .map(|candidate| candidate.action.clone())
+        .collect::<Vec<_>>();
+    let promoted_actions = provenance
+        .root_evidence
+        .iter()
+        .filter(|evidence| evidence.promotion_reason.is_some())
+        .map(|evidence| evidence.action.clone())
+        .collect::<Vec<_>>();
+    provenance.strategy_shadow = shadow_strategy_diagnostics(
+        particles,
+        actor,
+        ranked_actions,
+        &retained_actions,
+        &promoted_actions,
+        provenance.search_winner.as_ref(),
+        requested_depth,
+        completed_depth,
+        deadline_reached,
+    );
 }
 
 fn road_cut_continuation_for_root(
@@ -1682,6 +1718,7 @@ fn belief_search(
         pruned_root_count,
         pruned_roots,
         root_evidence,
+        strategy_shadow: None,
         trade_hard_veto_threshold: HARD_VETO_POSTERIOR,
         search_winner: None,
         exact_family_replacement: None,
@@ -2009,6 +2046,19 @@ fn belief_search(
         .get(chosen_index)
         .map(|entry| entry.value)
         .unwrap_or_else(|| evaluate(first));
+    let strategy_ranked_actions = ranked_diagnostics
+        .iter()
+        .map(|candidate| candidate.action.clone())
+        .collect::<Vec<_>>();
+    attach_strategy_shadow(
+        &mut provenance,
+        posterior,
+        observer,
+        &strategy_ranked_actions,
+        maximum_depth,
+        depth,
+        deadline_reached,
+    );
     Ok(BeliefDepthResult {
         chosen,
         value,
@@ -3628,6 +3678,7 @@ fn cuda_belief_search_with_batch(
         pruned_root_count,
         pruned_roots,
         root_evidence,
+        strategy_shadow: None,
         trade_hard_veto_threshold: HARD_VETO_POSTERIOR,
         search_winner: None,
         exact_family_replacement,
@@ -3922,6 +3973,19 @@ fn cuda_belief_search_with_batch(
             .map(|entry| entry.value)
             .or_else(|| fallback_lane.map(|lane_id| lanes[lane_id].value))
             .expect("CUDA linear belief search must have a root value");
+        let strategy_ranked_actions = ranked_diagnostics
+            .iter()
+            .map(|candidate| candidate.action.clone())
+            .collect::<Vec<_>>();
+        attach_strategy_shadow(
+            &mut provenance,
+            posterior,
+            observer,
+            &strategy_ranked_actions,
+            maximum_depth,
+            depth,
+            false,
+        );
         record_cuda_duration(&CUDA_BACKUP_NANOS, backup_started.elapsed());
         record_cuda_duration(&CUDA_SEARCH_TOTAL_NANOS, search_started.elapsed());
         CUDA_SEARCH_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4111,6 +4175,19 @@ fn cuda_belief_search_with_batch(
         .map(|entry| entry.value)
         .or_else(|| fallback_node.map(|node| tree.backup(node, &leaf_values)))
         .expect("CUDA belief search must have a root value");
+    let strategy_ranked_actions = ranked_diagnostics
+        .iter()
+        .map(|candidate| candidate.action.clone())
+        .collect::<Vec<_>>();
+    attach_strategy_shadow(
+        &mut provenance,
+        posterior,
+        observer,
+        &strategy_ranked_actions,
+        maximum_depth,
+        depth,
+        false,
+    );
     record_cuda_duration(&CUDA_BACKUP_NANOS, backup_started.elapsed());
     record_cuda_duration(&CUDA_SEARCH_TOTAL_NANOS, search_started.elapsed());
     CUDA_DEFERRED_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

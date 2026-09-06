@@ -1156,6 +1156,18 @@ describe("deep-search state adapter", () => {
         (candidate) => candidate.allocatedNodes > 0,
       ),
     ).toBe(true);
+    if (response.rootProvenance.rankedRootCount > 0) {
+      expect(response.rootProvenance.strategyShadow).toBeDefined();
+      expect(response.rootProvenance.strategyShadow?.policyVersion).toBe(
+        "adaptive-strategy-shadow-v1",
+      );
+      expect(response.rootProvenance.strategyShadow?.context.playerCount).toBe(
+        built.request.state.players.length,
+      );
+      expect(
+        response.rootProvenance.strategyShadow?.reachability.victoryTarget,
+      ).toBe(built.request.state.victoryTarget);
+    }
     expect([
       "exact-mandatory",
       "tactical-proven",

@@ -198,6 +198,72 @@ export interface WasmRootCausalEvidence {
   tradeHardVeto: boolean;
 }
 
+export type WasmStrategyId =
+  | "production-growth"
+  | "expansion-race"
+  | "development-access"
+  | "award-race"
+  | "closeout-recovery";
+
+export type WasmStrategyProposalReason =
+  | "city-production"
+  | "settlement-production"
+  | "spatial-race"
+  | "future-development-vp-required"
+  | "development-option-value"
+  | "longest-road-race"
+  | "largest-army-race"
+  | "immediate-win";
+
+export type WasmDecisionFailureClass =
+  | "coverage"
+  | "valuation"
+  | "horizon"
+  | "continuation"
+  | "belief-model";
+
+export interface WasmStrategyContext {
+  actor: number;
+  playerCount: number;
+  opponentCount: number;
+  victoryTarget: number;
+  turn: number;
+  responseWindowsBeforeNextTurn: number;
+}
+
+export interface WasmReachabilityDiagnostic {
+  exactVictoryPoints: number;
+  victoryTarget: number;
+  optimisticBuildingGain: number;
+  optimisticAwardGain: number;
+  optimisticWithoutFutureDevelopmentVp: number;
+  minimumFutureDevelopmentVpRequired: number;
+  futureDevelopmentVpNecessary: boolean;
+  remainingDevelopmentVpMin: number;
+  remainingDevelopmentVpMax: number;
+  remainingDevelopmentVpExpected: number;
+  optimisticWithMinFutureDevelopmentVp: number;
+  optimisticWithMaxFutureDevelopmentVp: number;
+  targetReachableInAllCompatibleWorlds: boolean;
+  targetReachableInSomeCompatibleWorld: boolean;
+}
+
+export interface WasmStrategyProposalDiagnostic {
+  strategy: WasmStrategyId;
+  action: WasmAction;
+  reason: WasmStrategyProposalReason;
+  baselineRank?: number;
+  retained: boolean;
+  failureClass?: WasmDecisionFailureClass;
+}
+
+export interface WasmStrategyShadowDiagnostics {
+  policyVersion: string;
+  context: WasmStrategyContext;
+  reachability: WasmReachabilityDiagnostic;
+  proposals: WasmStrategyProposalDiagnostic[];
+}
+
 export interface WasmHorizonEscalation {
   reason:
     | "fragile-award-low-terminal-completion"
@@ -219,6 +285,7 @@ export interface WasmRootProvenance {
   prunedRootCount: number;
   prunedRoots: WasmPrunedRoot[];
   rootEvidence: WasmRootCausalEvidence[];
+  strategyShadow?: WasmStrategyShadowDiagnostics;
   horizonEscalation?: WasmHorizonEscalation;
   tradeHardVetoThreshold: number;
   searchWinner?: WasmAction;

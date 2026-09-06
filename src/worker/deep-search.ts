@@ -837,6 +837,27 @@ const mapRootProvenance = (
       tradeHardVetoPosterior: evidence.tradeHardVetoPosterior,
       tradeHardVeto: evidence.tradeHardVeto,
     })),
+    ...(provenance.strategyShadow
+      ? {
+          strategyShadow: {
+            policyVersion: provenance.strategyShadow.policyVersion,
+            context: { ...provenance.strategyShadow.context },
+            reachability: { ...provenance.strategyShadow.reachability },
+            proposals: provenance.strategyShadow.proposals.map((proposal) => ({
+              strategy: proposal.strategy,
+              action: mapAction(proposal.action, players, board),
+              reason: proposal.reason,
+              ...(typeof proposal.baselineRank === "number"
+                ? { baselineRank: proposal.baselineRank }
+                : {}),
+              retained: proposal.retained,
+              ...(proposal.failureClass
+                ? { failureClass: proposal.failureClass }
+                : {}),
+            })),
+          },
+        }
+      : {}),
     ...(provenance.horizonEscalation
       ? {
           horizonEscalation: {

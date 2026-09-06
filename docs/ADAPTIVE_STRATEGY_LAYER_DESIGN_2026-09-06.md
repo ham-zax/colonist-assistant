@@ -1,6 +1,6 @@
 # Adaptive strategy layer for Colonist Assistant
 
-Status: Revised design for review. Milestone 0 is implemented in the current working tree as a bounded pre-strategy baseline repair; it is not yet gameplay-evaluated, independently reviewed, committed or promoted. Milestones 1–6 remain proposed by this document.
+Status: Milestone 0 is committed at `c21e4ae` as the bounded pre-strategy controlled-player continuation baseline. Milestone 1 is implemented in the current working tree as shadow-only reachability, strategy-proposal, player-count/response-window, and failure-classification diagnostics; focused Rust, native-feature, TypeScript, and packaged-WASM checks pass. Strategy proposals still do not alter candidate admission or action authority. A four-block-per-stratum matched arena screen found favorable directional Milestone-0 results at 2, 3, and 4 players (17/36 current MaxN wins versus 9/36 pre-M0), with overlapping blocked intervals; this is positive pilot evidence, not promotion-level proof.
 
 Date: 2026-09-06. Source investigation began at `d80e4b40601411b6cb848471978dbe1799c2045a` and continued against the current working tree. This document does not claim demonstrated playing-strength improvement.
 
@@ -367,15 +367,15 @@ The ROI order is intentionally asymmetric. Fix the comparator's model of our own
 
 | Milestone | Reviewable deliverable | Authority boundary |
 | --- | --- | --- |
-| **0. Baseline reasoning repair** | **Implemented in working tree:** controlled-player identity carried through CPU/GPU continuation; future self no longer uses opponent-style stochastic behavior; opponents remain observation-safe modeled policies | Build/static checks complete; gameplay evaluation, independent review, commit and promotion still pending before freezing the repaired baseline |
-| **1. Reachability + shadow strategy evidence** | Shared context, sound optimistic point-source bounds, failure taxonomy, static catalog, bounded generators and trace output on frozen scenarios | No strategy-driven action changes; repaired baseline remains authoritative |
+| **0. Baseline reasoning repair** | **Committed at `c21e4ae`:** controlled-player identity carried through CPU/GPU continuation; future self no longer uses opponent-style stochastic behavior; opponents remain observation-safe modeled policies | Build/static checks complete; the reduced-effort matched arena screen is directionally favorable in 2p/3p/4p but too small for promotion; independent review and a larger preregistered held-out run remain separate gates |
+| **1. Reachability + shadow strategy evidence** | **Implemented in working tree:** shared player-count/response-window context, optimistic point-source bounds, five proposal families, baseline rank/retention evidence, and coverage/valuation/horizon classification recorded under root provenance | Shadow-only: no strategy-driven root admission, evaluator bonus, or final-action authority change; focused tests and packaged-WASM boundary checks pass |
 | **2. Experimental candidate admission** | At most three evidence-backed challengers admitted into the existing root cap and compared by the common search | Opt-in offline experiment; no default promotion |
 | **3. Adaptive candidate reconsideration** | Bounded queue of omitted proposals with common-horizon re-entry only at completed comparison boundaries | Independent ablation; no shallow-vs-deep comparisons |
 | **4. Transition-aware economic forecasting** | Mref/fair chance-consistent build-readiness and opponent-response forecasts where static pips are inadequate | Separate probability/economic experiment; do not silently alter chance law or evaluator weights |
 | **5. Full contingent continuation** | Observation-equivalent-history grouping with conditional-posterior optimization for future controlled-player decisions | Stronger than Milestone 0; independent algorithm review and evidence required |
 | **6. Backend integration and promotion** | Native capability/version handling, packaged checks, held-out evaluation and any later schema-v2 learned-model experiment | Promotion only after each independently changed mechanism meets frozen criteria |
 
-The first strategy implementation plan should cover **Milestone 1 only**, after Milestone 0's working-tree repair has been evaluated and accepted as the frozen baseline. Milestone 1 includes hard reachability diagnostics and failure classification because those are needed to tell whether later bad decisions are coverage, valuation, horizon, continuation or belief/model failures.
+Milestone 1 is now implemented at the shadow-only boundary described above. It includes hard optimistic reachability diagnostics and evidence-backed failure classification because those are needed to distinguish coverage, valuation and horizon failures before Milestone 2 is allowed to change candidate admission. `continuation` and `belief-model` remain explicit taxonomy values but are not guessed from insufficient evidence. Milestone 2 must not begin until the Milestone-0 empirical screen and Milestone-1 review evidence are interpreted separately.
 
 Do not start by training or enabling the learned heads. Their current checkpoint is schema-incompatible and unpromoted, and native rollout cutoff reasoning is separately hand-written. Revisit learning only after the baseline decision semantics and teacher/evidence contracts are stable.
 
@@ -401,5 +401,6 @@ Remaining empirical questions are which proposals improve decisions, whether poi
 - [Schema-v2 learning evidence](SESSION_ENGINEERING_SUMMARY_2026-09-03.md)
 - [Existing threat-strategy design](latent-threat-strategy.md)
 - [Benchmark methodology](BENCHMARKS.md)
+- [Milestone 0/1 empirical screen](MILESTONE_0_1_EMPIRICAL_SCREEN_2026-09-06.md)
 
 Source navigation used Codebase Memory with direct-source verification. Satori's earlier publication reported pending source changes, so stale publication line ranges were not treated as current source authority. Recorded graph coverage had no reported gaps for the relied-on engine paths; that is a best-effort signal, not proof of complete behavioral verification.
