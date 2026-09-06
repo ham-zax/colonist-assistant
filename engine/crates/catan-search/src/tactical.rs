@@ -54,18 +54,27 @@ impl Solver {
         let result = match state.node_kind() {
             NodeKind::Terminal => (0.0, Vec::new()),
             NodeKind::Chance => {
-                let total = exact_actions
+                let weighted_actions = exact_actions
+                    .into_iter()
+                    .filter_map(|action| {
+                        let weight = state.chance_weight(&action) as f32;
+                        (weight > 0.0).then_some((action, weight))
+                    })
+                    .collect::<Vec<_>>();
+                let total = weighted_actions
                     .iter()
-                    .map(|action| state.chance_weight(action) as f32)
+                    .map(|(_, weight)| *weight)
                     .sum::<f32>();
+                if total <= f32::EPSILON {
+                    return (0.0, Vec::new());
+                }
                 let mut expected = 0.0;
                 let mut principal = Vec::new();
                 let mut principal_mass = -1.0;
-                for action in exact_actions {
-                    let weight = state.chance_weight(&action) as f32;
+                for (action, weight) in weighted_actions {
                     let mut next = state.clone();
                     next.apply(&action)
-                        .expect("legal chance outcome must transition");
+                        .expect("positive-weight chance outcome must transition");
                     let (value, tail) = self.visit(&next, depth + 1);
                     expected += value * weight / total;
                     let mass = value * weight;
