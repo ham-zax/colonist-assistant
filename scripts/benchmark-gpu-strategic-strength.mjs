@@ -16,8 +16,9 @@ const value = (name) => {
 if (args.includes("--help") || args.includes("-h")) {
   console.log(
     "benchmark-gpu-strategic-strength\n" +
-      "\nRuns the Wave 4 D68/D71 native-GPU strategic-strength regression.\n" +
-      "The 96-step run is the acceptance contract; other horizons are diagnostic only.\n" +
+      "\nRuns the D68/D71 production-pipeline native-GPU regression and same-request CPU/GPU parity diagnostic.\n" +
+      "This is a captured-decision diagnostic, not a browser win-rate benchmark.\n" +
+      "The 96-step run remains the historical D68 regression contract; other horizons are diagnostic only.\n" +
       "\nOptions:\n" +
       "  --binary=PATH       Native colonist-assistant-gpu binary (required)\n" +
       "  --horizon=N         Rollout horizon (default: 96)\n" +

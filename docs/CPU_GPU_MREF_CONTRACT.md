@@ -48,16 +48,97 @@ roll. It does not draw every future roll from a static root distribution, sample
 a hidden controller into actor-facing authority, or multiply TypeScript resource
 worlds by a separate dice-world population.
 
-Eligible own-turn midgame decisions use native CUDA when the companion advertises
-the requested stochastic model. Opening and opponent-turn pondering retain their
-existing CPU/WASM owners. An unavailable or non-Mref-capable companion leaves an
-Mref decision on CPU/WASM with Mref semantics intact.
+Production browser decisions currently do **not** route to native
+`gpu-root-rollout`. CPU/WASM Deep MaxN remains authoritative for opening,
+opponent-turn pondering, incoming-trade decisions, and own-turn midgame decisions.
+This is intentional: the rollout backend is a different search policy, and
+same-observation diagnostics have demonstrated that hardware availability can
+change the selected action. The companion remains available for local parity,
+benchmark, and protocol diagnostics; production routing may be re-enabled only
+after a native backend satisfies the production strategic-parity contract. Mref
+semantics remain unchanged on CPU/WASM. The experimental
+`adaptive-candidate-admission-v1` policy is likewise not implemented by native
+rollout GPU; the native parser rejects such a request rather than silently
+pretending support.
+
+## Mechanical parity versus strategic parity
+
+The original parity gate establishes **mechanical parity**: shared rules and state
+transitions, stochastic/Mref law, terminal semantics, packed-state integrity, and
+the required observation boundary. That remains necessary, but it is not enough to
+show that CUDA is functioning as an acceleration backend for the same Strategist.
+
+**Strategic parity** is the stronger diagnostic contract. For one identical adapter
+observation and joint posterior, compare the strongest common semantic layer rather
+than requiring bitwise equality between different search algorithms:
+
+- identical observation and stochastic-model identity;
+- comparable posterior/effective particle populations;
+- baseline candidate-domain and retained-root overlap;
+- protected/promoted/admitted roots and their provenance;
+- controlled-player continuation meaning: deterministic best action under each
+  backend's observation-safe policy, while opponents retain weighted modeled play;
+- root ordering and chosen-action agreement/disagreement;
+- completed depth/rollout work, deadline/cutoff state, and any exact/safety final
+  replacement;
+- the explicit strategy-policy identity.
+
+CPU Deep MaxN and native GPU rollouts still use different policy/evaluator value
+scales and search mechanics. A numeric value correlation is therefore not part of
+the contract unless a future common value representation is introduced. Persistent
+root-coverage or action-direction disagreement under the same observation is a
+strategic-parity finding even when mechanical parity is green; exact action equality
+on every decision is not required.
+
+### Current decision-pipeline map
+
+| Surface | Packaged CPU/WASM Deep MaxN | Native GPU diagnostic analyzer (browser routing disabled) | `gpu-sim-agent-benchmark` |
+| --- | --- | --- | --- |
+| Input information | Adapter actor-visible state plus joint hidden-world posterior | The same serialized request/posterior for eligible native decisions | One resident authoritative `GameState`; no live posterior reconstruction |
+| Posterior handling | Rust belief particles; weighted belief MaxN | Posterior normalization/allocation across resident CUDA states | None: one realized state per simulated game |
+| Root generation | Observation-safe actor proposal domain plus exact/mandatory handling | Observation-safe proposal domain across posterior particles | Resident benchmark root sampling |
+| Root admission | Baseline quota/root cap; optional `adaptive-candidate-admission-v1` only when explicitly requested | Exact-family collapse, verified blockers, spatial/closeout promotion and bounded native admission; adaptive strategy policy unsupported | Benchmark-specific sampled roots; no production admission contract |
+| Safety filters | Exact mandatory/tactical ownership, root exclusions, exact-family and final safety arbitration | Exact mandatory/tactical ownership, forced-loss checks, domestic-trade hard vetoes, exact-family and final safety arbitration | Rules legality only; no live trade-hard-veto/final safety pipeline |
+| Controlled-player continuation | Pre-quota argmax of the observation-safe policy score | Greedy maximum weight in native CUDA rollout policy | Searched candidate roots followed by fixed-step `gpu-weighted` continuations |
+| Opponent continuation | Top observation-safe quota mixture | Weighted observation-safe native rollout policy | Lightweight `gpu-weighted` opponents/continuations |
+| Chance/Mref | Authoritative chance nodes; M0 and Mref supported | Authoritative packed chance law; M0 and Mref supported | Resident simulator's benchmark stochastic stream; no live Mref posterior input |
+| Horizon/budget | Iterative bounded MaxN depth/node/deadline effort | Rollout budget/horizon, posterior allocation, adaptive racing/escalation, deadline | Fixed benchmark root samples × rollouts × continuation steps |
+| Opening | CPU/WASM owner | Routed away from native GPU | Simulated by benchmark policy/search rather than the extension's opening route |
+| Domestic/maritime trade | Full rules plus adapter exclusions/safety and final arbitration | Full rules plus native domestic-trade hard-veto path and arbitration | Controlled by benchmark trade toggle and resident policy; not live trade safety |
+| Final arbitration | Exact-family/safety replacement after search | Exact-family, forced-loss/safety, and safer-EndTurn arbitration after GPU evidence | Benchmark search winner; no live post-search arbitration |
+| Strategy policy | Baseline plus explicit M2 experimental admission | Baseline only; M2 request rejected/routed to CPU/WASM | No adaptive-strategy policy contract |
+| Output owner | Packaged WASM `analyze` response and current browser recommendation | Native companion `analyze` response used by diagnostic/benchmark tooling | Arena benchmark JSON, not a browser recommendation |
+
+`scripts/benchmark-gpu-strategic-strength.mjs` now exercises packaged WASM and the
+native production analyzer on the same constructed request and emits a
+`same-observation-cpu-gpu-strategic-parity-diagnostic` block. It reports an
+adapter observation digest, posterior identity/counts, candidate and retained-root
+overlap, ordering, chosen actions, work/deadline state, and final replacements.
+The report marks `productionEquivalent: false` and `browserWinRateEstimate: false`:
+it is a production-pipeline decision diagnostic on one captured fixture, not a
+whole-game strength estimate.
+
+The A2 D68 diagnostic found a real strategic-parity gap under the current adapter
+request. CPU/WASM and native GPU saw the same 12-root candidate domain and the same
+8-particle posterior/effective sample size, but only 4 of 12 roots retained the same
+rank; mean absolute rank delta was 1.5 and the maximum was 4. At a 96-step native
+rollout horizon, CPU chose the strong eastern road while native GPU chose the
+historical weak road. At 48 rollout steps, both chose the strong road. Native GPU
+reported `deadlineReached` in both probes, so the deadline flag alone does not
+explain the reversal. The persistent ranking difference is source-backed: CPU
+belief-root ordering includes plan-adjusted priors plus quota-score aggregation,
+while native GPU begins from plain observation-safe shared priors before its own
+promotion/admission path. The 48/96 result shows that this ordering mismatch is not
+sufficient by itself to force action disagreement; native rollout horizon/valuation
+also materially affects D68. The exact internal cause of the 96-step reversal
+remains an unresolved strategic-parity question, not evidence that GPU is stronger.
 
 The native `hello` response adds `stochasticModels`. Missing capabilities mean
 M0-only, preserving old protocol-6 companion compatibility without giving those
-companions Mref authority. The client checks capabilities before sending an
-analysis request and rejects an Mref response with absent or different model
-identity. The native parser still rejects unknown models and unusable evidence.
+companions Mref authority. Native diagnostic/experimental clients check
+capabilities before sending an analysis request and reject an Mref response with
+absent or different model identity. The native parser still rejects unknown models
+and unusable evidence.
 
 ## CUDA posterior contract
 
@@ -164,8 +245,12 @@ Observed on the RTX 3070 Ti during implementation:
 | Native 64-particle suffix Mref search | 280 rollouts; about 4.03 seconds |
 
 Rollout counts and elapsed time depend on deadline scheduling. Identical final
-strategic actions are not the parity criterion: CPU Deep MaxN and GPU rollouts
-remain different search policies over the same game-model semantics.
+strategic actions are not the mechanical parity criterion: CPU Deep MaxN and GPU
+rollouts remain different search policies over the same game-model semantics.
+Strategic parity is assessed separately with the same-observation contract above;
+a disagreement must be classified as expected algorithmic variation, root/admission
+mismatch, continuation-policy mismatch, deadline/cutoff effect, or final-arbitration
+replacement rather than being hidden by a green transition-parity result.
 
 ### Startup and packaging
 

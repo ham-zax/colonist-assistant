@@ -7,12 +7,13 @@ import type { BoardSnapshot, DevelopmentCardVector } from "../src/core/placement
 import { RESOURCE_ORDER, emptyResources, type ResourceVector } from "../src/core/resources";
 import type { PlayerMeta, TrackerState } from "../src/core/types";
 import { buildDeepSearchRequest } from "../src/worker/deep-search";
-import type {
-  WasmAction,
-  WasmActionStatistics,
-  WasmRankedRoot,
-  WasmRetainedRoot,
-  WasmSearchResponse,
+import initWasm, {
+  analyze as analyzeWasm,
+  type WasmAction,
+  type WasmActionStatistics,
+  type WasmRankedRoot,
+  type WasmRetainedRoot,
+  type WasmSearchResponse,
 } from "../src/generated/wasm/colonist_search.js";
 
 interface FixturePlayer {
@@ -320,6 +321,21 @@ const sortedNumbers = (values: number[]): number[] => [...values].sort((a, b) =>
 const near = (left: number, right: number, tolerance = 1e-6): boolean =>
   Math.abs(left - right) <= tolerance;
 
+const actionKey = (action: WasmAction | undefined): string =>
+  action
+    ? JSON.stringify([
+        action.kind,
+        action.first,
+        action.second,
+        action.player,
+        action.resource,
+        action.otherResource,
+        action.cards,
+        action.receiveCards,
+        action.accept,
+      ])
+    : "none";
+
 const semanticAction = (action: WasmAction | undefined, board: BoardSnapshot): string => {
   if (!action) return "none";
   if (action.kind === "build-road" || action.kind === "place-road") {
@@ -336,6 +352,188 @@ const semanticAction = (action: WasmAction | undefined, board: BoardSnapshot): s
 
 const actionIs = (action: WasmAction, kind: string, index: number): boolean =>
   action.kind === kind && action.first === index;
+
+const adapterObservationDigest = (
+  request: ReturnType<typeof buildDeepSearchRequest>["request"],
+  root: number,
+): string => {
+  const state = structuredClone(request.state) as typeof request.state & {
+    worlds?: unknown;
+  };
+  delete state.worlds;
+  const developmentTotal = state.developmentDeck.reduce((sum, value) => sum + value, 0);
+  state.developmentDeck = [developmentTotal, 0, 0, 0, 0];
+  if (!state.bankVisible) {
+    const bankTotal = state.bank.reduce((sum, value) => sum + value, 0);
+    state.bank = [bankTotal, 0, 0, 0, 0];
+  }
+  return createHash("sha256")
+    .update(JSON.stringify({ root, state, stochastic: request.stochastic ?? null }))
+    .digest("hex");
+};
+
+const orderedRoots = (response: WasmSearchResponse, board: BoardSnapshot) =>
+  response.rootProvenance.rankedRoots.map((root) => ({
+    action: root.action,
+    semanticAction: semanticAction(root.action, board),
+    rank: root.rank,
+    prior: root.prior,
+  }));
+
+const retainedRoots = (response: WasmSearchResponse, board: BoardSnapshot) =>
+  response.rootProvenance.retainedRoots.map((root) => ({
+    action: root.action,
+    semanticAction: semanticAction(root.action, board),
+    preTruncationRank: root.preTruncationRank ?? null,
+    finalRank: root.finalRank ?? null,
+  }));
+
+const overlap = (left: WasmAction[], right: WasmAction[]) => {
+  const leftKeys = new Set(left.map(actionKey));
+  const rightKeys = new Set(right.map(actionKey));
+  const intersection = [...leftKeys].filter((key) => rightKeys.has(key)).length;
+  const union = new Set([...leftKeys, ...rightKeys]).size;
+  return {
+    left: leftKeys.size,
+    right: rightKeys.size,
+    intersection,
+    union,
+    jaccard: union === 0 ? 1 : intersection / union,
+  };
+};
+
+const orderingAgreement = (
+  left: WasmRankedRoot[],
+  right: WasmRankedRoot[],
+) => {
+  const rightRanks = new Map(right.map((root) => [actionKey(root.action), root.rank]));
+  const deltas = left.flatMap((root) => {
+    const rightRank = rightRanks.get(actionKey(root.action));
+    return rightRank === undefined ? [] : [Math.abs(root.rank - rightRank)];
+  });
+  return {
+    sharedRoots: deltas.length,
+    sameRankCount: deltas.filter((delta) => delta === 0).length,
+    meanAbsoluteRankDelta:
+      deltas.length === 0 ? null : deltas.reduce((sum, delta) => sum + delta, 0) / deltas.length,
+    maximumAbsoluteRankDelta: deltas.length === 0 ? null : Math.max(...deltas),
+  };
+};
+
+const chosenSearchValue = (response: WasmSearchResponse, root: number) => {
+  const chosen = response.chosen;
+  if (!chosen) return null;
+  const row = response.actions.find((candidate) => actionKey(candidate.action) === actionKey(chosen));
+  return row?.value[root] ?? null;
+};
+
+const parityReport = (
+  request: ReturnType<typeof buildDeepSearchRequest>["request"],
+  root: number,
+  board: BoardSnapshot,
+  cpu: WasmSearchResponse,
+  gpu: WasmSearchResponse,
+  cpuElapsedMs: number,
+  gpuElapsedMs: number,
+) => ({
+  kind: "same-observation-cpu-gpu-strategic-parity-diagnostic",
+  productionEquivalent: false,
+  browserWinRateEstimate: false,
+  productionDecisionContract: true,
+  informationMode: "same-adapter-observation-and-joint-posterior-request",
+  adapterObservationDigest: adapterObservationDigest(request, root),
+  stochasticModel: request.stochastic?.model ?? "m0-fair-iid-2d6-v1",
+  stochasticBeliefIdentity: {
+    cpuDigest: cpu.stochasticBeliefDigest ?? null,
+    gpuDigest: gpu.stochasticBeliefDigest ?? null,
+    digestAgreement:
+      cpu.stochasticBeliefDigest && gpu.stochasticBeliefDigest
+        ? cpu.stochasticBeliefDigest === gpu.stochasticBeliefDigest
+        : null,
+    cpuPosteriorParticles: cpu.rustPosteriorParticles,
+    gpuPosteriorParticles: gpu.rustPosteriorParticles,
+    cpuSearchParticles: cpu.rustSearchParticles,
+    gpuSearchParticles: gpu.rustSearchParticles,
+    cpuEffectiveParticleCount: cpu.effectiveParticleCount,
+    gpuEffectiveParticleCount: gpu.effectiveParticleCount,
+  },
+  strategyPolicy: request.strategyPolicy ?? "baseline",
+  baselineCandidateDomain: {
+    cpu: orderedRoots(cpu, board),
+    gpu: orderedRoots(gpu, board),
+    overlap: overlap(
+      cpu.rootProvenance.rankedRoots.map((candidate) => candidate.action),
+      gpu.rootProvenance.rankedRoots.map((candidate) => candidate.action),
+    ),
+    orderingAgreement: orderingAgreement(
+      cpu.rootProvenance.rankedRoots,
+      gpu.rootProvenance.rankedRoots,
+    ),
+  },
+  retainedCandidateSet: {
+    cpu: retainedRoots(cpu, board),
+    gpu: retainedRoots(gpu, board),
+    overlap: overlap(
+      cpu.rootProvenance.retainedRoots.map((candidate) => candidate.action),
+      gpu.rootProvenance.retainedRoots.map((candidate) => candidate.action),
+    ),
+  },
+  promotedOrProtectedRoots: {
+    cpuPromoted: cpu.rootProvenance.rootEvidence
+      .filter((evidence) => evidence.admittedByPromotion)
+      .map((evidence) => evidence.action),
+    gpuPromoted: gpu.rootProvenance.rootEvidence
+      .filter((evidence) => evidence.admittedByPromotion)
+      .map((evidence) => evidence.action),
+    cpuStrategyProtectedCount:
+      cpu.rootProvenance.strategyShadow?.admission.protectedRootCount ?? 0,
+    gpuStrategyProtectedCount:
+      gpu.rootProvenance.strategyShadow?.admission.protectedRootCount ?? 0,
+  },
+  chosen: {
+    cpu: cpu.chosen ?? null,
+    gpu: gpu.chosen ?? null,
+    agreement: actionKey(cpu.chosen) === actionKey(gpu.chosen),
+    disagreementClass:
+      actionKey(cpu.chosen) === actionKey(gpu.chosen)
+        ? null
+        : cpu.deadlineReached || gpu.deadlineReached
+          ? "deadline-limited-strategic-disagreement"
+          : "algorithmic-strategic-disagreement",
+  },
+  values: {
+    comparableScale: false,
+    note: "CPU Deep MaxN and native GPU rollout values are algorithm-specific; compare candidate coverage, ordering, authority, and chosen actions rather than numeric correlation.",
+    cpuChosenSearchValue: chosenSearchValue(cpu, root),
+    gpuChosenSearchValue: chosenSearchValue(gpu, root),
+  },
+  work: {
+    cpu: {
+      algorithm: cpu.algorithm,
+      deepestDecisionDepth: cpu.deepestDecisionDepth,
+      nodes: cpu.nodes,
+      deadlineReached: cpu.deadlineReached,
+      elapsedMs: cpuElapsedMs,
+    },
+    gpu: {
+      algorithm: gpu.algorithm,
+      rollouts: gpu.rollouts,
+      rolloutSteps: gpu.effectiveEffort.gpu.rolloutSteps,
+      deadlineReached: gpu.deadlineReached,
+      elapsedMs: gpuElapsedMs,
+    },
+  },
+  finalArbitration: {
+    cpuAuthority: cpu.authority,
+    gpuAuthority: gpu.authority,
+    cpuSearchWinner: cpu.rootProvenance.searchWinner ?? null,
+    gpuSearchWinner: gpu.rootProvenance.searchWinner ?? null,
+    cpuExactFamilyReplacement: cpu.rootProvenance.exactFamilyReplacement ?? null,
+    gpuExactFamilyReplacement: gpu.rootProvenance.exactFamilyReplacement ?? null,
+    cpuSafetyReplacement: cpu.rootProvenance.safetyReplacement ?? null,
+    gpuSafetyReplacement: gpu.rootProvenance.safetyReplacement ?? null,
+  },
+});
 
 const rootSummary = (
   response: WasmSearchResponse,
@@ -516,6 +714,18 @@ const main = async (): Promise<void> => {
   applyNativeStrengthProfile(built.request, fixture, args.horizon);
   const sampling = inspectSampling(fixture, built.request);
   assertFixtureContract(fixture, board, built.request, built.root, sampling);
+  await initWasm({
+    module_or_path: readFileSync(
+      resolve(args.repoRoot, "src/generated/wasm/colonist_search_bg.wasm"),
+    ),
+  });
+  const cpuStarted = performance.now();
+  // Native messaging crosses a JSON boundary, which removes object properties
+  // whose value is `undefined`. Feed WASM the same wire representation rather
+  // than a structured clone that preserves JS `undefined` as a serde unit.
+  const cpuRequest = JSON.parse(JSON.stringify(built.request));
+  const cpuResponse = analyzeWasm(cpuRequest) as WasmSearchResponse;
+  const cpuElapsedMs = performance.now() - cpuStarted;
 
   const strongRoadIndex = board.edges.findIndex((edge) => edge.id === fixture.expected.strongRoad);
   const weakRoadIndex = board.edges.findIndex((edge) => edge.id === fixture.expected.weakRoad);
@@ -535,7 +745,9 @@ const main = async (): Promise<void> => {
   if (hello.error) throw new Error(hello.error);
   assertCondition(hello.runtime === "gpu-native", `unexpected native runtime ${hello.runtime}`);
 
+  const gpuStarted = performance.now();
   const response = await requestNative(host, 2, built.request);
+  const gpuElapsedMs = performance.now() - gpuStarted;
   const selectedRoot = semanticAction(response.chosen, board);
   const strong = rootSummary(response, "build-road", strongRoadIndex, built.root, board);
   const weak = rootSummary(response, "build-road", weakRoadIndex, built.root, board);
@@ -620,6 +832,15 @@ const main = async (): Promise<void> => {
       particleCount: response.rustSearchParticles,
       effectiveSampleSize: response.effectiveParticleCount,
     },
+    cpuGpuParity: parityReport(
+      built.request,
+      built.root,
+      board,
+      cpuResponse,
+      response,
+      cpuElapsedMs,
+      gpuElapsedMs,
+    ),
     d68: {
       selectedRoot,
       expectedStrongRoot: fixture.expected.strongRoad,

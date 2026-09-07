@@ -8,7 +8,9 @@ Authoritative benchmark implementation:
 - `engine/crates/catan-arena/src/bin/gpu-sim-agent-benchmark.rs` — paired searched candidate vs resident weighted opponents.
 - Benchmark implementation commit: `763c5c8` (`Add paired GPU searched strength benchmark`).
 
-The searched benchmark is not live MaxN. Its reported `searchSemantics` are `sampled-root-actions + fixed-step gpu-weighted continuations`. Use it to measure strategy priors and GPU search strength, not as a calibrated estimate of the browser agent's win rate.
+The searched benchmark is not the live browser agent. Its reported `searchSemantics` are `sampled-root-actions + fixed-step gpu-weighted continuations`: the candidate receives root search while its opponents remain lightweight `gpu-weighted` policies on one resident authoritative `GameState`. It does not reconstruct the live posterior, production root preparation, trade hard-veto path, adaptive racing/deadline handling, or final native arbitration. Use it for rollout/search screening and policy-prior regression only; it is **not** a calibrated browser win-rate estimate and must not be used to tune production GPU budgets as though 90–100% were a product-strength target.
+
+Current benchmark JSON makes that boundary machine-readable with `productionEquivalent: false`, `informationMode: resident-authoritative-game-state`, `posteriorMode: none-single-realized-state`, `opponentClass: gpu-weighted-rollout-policy`, `rootPreparationMode: benchmark-sampled-root-actions`, and `finalArbitrationMode: benchmark-search-winner-no-live-post-search-arbitration`. Historical frozen JSON in this directory predates those added provenance fields; this README is the authoritative claim boundary for those artifacts.
 
 ## Profiles
 
@@ -116,9 +118,9 @@ Common contract:
 - max actions: `20000`
 - zero truncations in every reported run
 
-### Maximum-strength canonical run
+### Highest-scoring screening run
 
-`gpu-agent-p3-canonical-102-12x32x96.json` uses 12 sampled roots, 32 rollouts per root, and 96 continuation steps.
+`gpu-agent-p3-canonical-102-12x32x96.json` uses 12 sampled roots, 32 rollouts per root, and 96 continuation steps. “Highest-scoring” refers only to this searched-vs-`gpu-weighted` screening contract; it does not mean strongest live extension configuration.
 
 | Metric | Result |
 | --- | ---: |
@@ -132,7 +134,7 @@ Common contract:
 | Mean turns | 83.87 |
 | Complete games/s | **0.256** |
 
-This is the maximum-strength reference for this fresh cohort. It is deliberately compute-heavy and should not be treated as the default live latency budget.
+This is the highest-scoring rollout/search **screen** for this fresh cohort. It is deliberately compute-heavy and is neither a live win-rate estimate nor a production latency/budget recommendation.
 
 ### Budget sweep
 
@@ -152,9 +154,9 @@ The same 102 matched games were used to locate the practical speed/strength knee
 
 The useful horizon on this cohort is around 48 rollout steps. Extending `8×16` from 48 to 64 steps reduced win rate while also slowing the run. Increasing root width without enough rollout confidence also failed to help: `10×16×48` and `12×20×48` were fast, but both won fewer games than the 8-root balanced region.
 
-`8×20×48` is the current balanced preset: it matched `8×16×48` at 97/102 wins, improved mean victory margin from +5.265 to +5.676, and ran at essentially the same measured throughput (0.562 vs 0.563 complete games/s). `12×20×48` was only about 3.7% faster at 0.583 games/s but dropped to 96/102 wins and a +5.343 VP margin, so that extra root width is not a better overall trade. The much heavier `12×32×96` configuration bought four additional wins on this 102-game cohort, but at less than half the throughput.
+`8×20×48` is the balanced **screening** preset: it matched `8×16×48` at 97/102 wins, improved mean victory margin from +5.265 to +5.676, and ran at essentially the same measured throughput (0.562 vs 0.563 complete games/s). `12×20×48` was only about 3.7% faster at 0.583 games/s but dropped to 96/102 wins and a +5.343 VP margin, so that extra root width was not a better trade under this simulator contract. The much heavier `12×32×96` configuration bought four additional wins on this 102-game cohort, but at less than half the throughput.
 
-Treat differences of one or two games in this 102-game sweep as screening evidence, not a precise population ordering. Use the balanced preset for practical live-search tuning and the maximum-strength preset for quality/reference campaigns until a larger multi-seed sweep supersedes this screen.
+Treat differences of one or two games in this 102-game sweep as screening evidence, not a precise population ordering. These presets remain useful for resident rollout/search regression campaigns only. Production GPU budgets must be justified against the production decision pipeline and same-observation diagnostics, not this historical win-rate screen.
 
 ## Reproduce
 
@@ -208,5 +210,5 @@ The JSON files serialize the board/game/search seeds and matching semantics. Re-
 - `gpu-agent-screen3-hybrid.json` — 63-game P3 hybrid screening run.
 - `gpu-agent-screen3-ows.json` — 63-game P3 OWS screening run.
 - `gpu-agent-screen3-expansion.json` — 63-game P3 expansion screening run.
-- `gpu-agent-p3-canonical-102-12x32x96.json` — fresh-seed 102-game P3 maximum-strength reference, 101/102 wins.
-- `gpu-agent-p3-balanced-102-8x20x48.json` — fresh-seed 102-game P3 balanced speed/strength preset, 97/102 wins.
+- `gpu-agent-p3-canonical-102-12x32x96.json` — fresh-seed 102-game P3 highest-scoring screening reference, 101/102 wins against `gpu-weighted` opponents; not production-equivalent.
+- `gpu-agent-p3-balanced-102-8x20x48.json` — fresh-seed 102-game P3 balanced screening preset, 97/102 wins against `gpu-weighted` opponents; not production-equivalent.
