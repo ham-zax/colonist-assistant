@@ -19,13 +19,13 @@ pub struct ReachabilityDiagnostic {
     pub optimistic_without_future_development_vp: u8,
     pub minimum_future_development_vp_required: u8,
     pub future_development_vp_necessary: bool,
-    pub remaining_development_vp_min: u8,
-    pub remaining_development_vp_max: u8,
-    pub remaining_development_vp_expected: f32,
+    pub sampled_belief_remaining_development_vp_min: u8,
+    pub sampled_belief_remaining_development_vp_max: u8,
+    pub sampled_belief_remaining_development_vp_expected: f32,
     pub optimistic_with_min_future_development_vp: u8,
     pub optimistic_with_max_future_development_vp: u8,
-    pub target_reachable_in_all_compatible_worlds: bool,
-    pub target_reachable_in_some_compatible_world: bool,
+    pub target_not_ruled_out_by_optimistic_bound_in_all_sampled_belief_worlds: bool,
+    pub target_not_ruled_out_by_optimistic_bound_in_some_sampled_belief_world: bool,
 }
 
 pub fn optimistic_reachability(
@@ -91,15 +91,15 @@ pub fn optimistic_reachability(
         optimistic_without_future_development_vp,
         minimum_future_development_vp_required,
         future_development_vp_necessary: minimum_future_development_vp_required > 0,
-        remaining_development_vp_min,
-        remaining_development_vp_max,
-        remaining_development_vp_expected,
+        sampled_belief_remaining_development_vp_min: remaining_development_vp_min,
+        sampled_belief_remaining_development_vp_max: remaining_development_vp_max,
+        sampled_belief_remaining_development_vp_expected: remaining_development_vp_expected,
         optimistic_with_min_future_development_vp,
         optimistic_with_max_future_development_vp,
-        target_reachable_in_all_compatible_worlds: optimistic_with_min_future_development_vp
-            >= victory_target,
-        target_reachable_in_some_compatible_world: optimistic_with_max_future_development_vp
-            >= victory_target,
+        target_not_ruled_out_by_optimistic_bound_in_all_sampled_belief_worlds:
+            optimistic_with_min_future_development_vp >= victory_target,
+        target_not_ruled_out_by_optimistic_bound_in_some_sampled_belief_world:
+            optimistic_with_max_future_development_vp >= victory_target,
     })
 }
 
@@ -128,7 +128,7 @@ mod tests {
         assert_eq!(diagnostic.optimistic_without_future_development_vp, 10);
         assert_eq!(diagnostic.minimum_future_development_vp_required, 5);
         assert!(diagnostic.future_development_vp_necessary);
-        assert!(!diagnostic.target_reachable_in_some_compatible_world);
+        assert!(!diagnostic.target_not_ruled_out_by_optimistic_bound_in_some_sampled_belief_world);
     }
 
     #[test]
@@ -162,8 +162,8 @@ mod tests {
 
         let diagnostic =
             optimistic_reachability(&[particle(left, 0.25), particle(right, 0.75)], 0).unwrap();
-        assert_eq!(diagnostic.remaining_development_vp_min, 1);
-        assert_eq!(diagnostic.remaining_development_vp_max, 4);
-        assert!((diagnostic.remaining_development_vp_expected - 3.25).abs() < 1e-6);
+        assert_eq!(diagnostic.sampled_belief_remaining_development_vp_min, 1);
+        assert_eq!(diagnostic.sampled_belief_remaining_development_vp_max, 4);
+        assert!((diagnostic.sampled_belief_remaining_development_vp_expected - 3.25).abs() < 1e-6);
     }
 }

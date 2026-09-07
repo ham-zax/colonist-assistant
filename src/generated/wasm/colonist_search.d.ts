@@ -252,13 +252,13 @@ export interface WasmReachabilityDiagnostic {
   optimisticWithoutFutureDevelopmentVp: number;
   minimumFutureDevelopmentVpRequired: number;
   futureDevelopmentVpNecessary: boolean;
-  remainingDevelopmentVpMin: number;
-  remainingDevelopmentVpMax: number;
-  remainingDevelopmentVpExpected: number;
+  sampledBeliefRemainingDevelopmentVpMin: number;
+  sampledBeliefRemainingDevelopmentVpMax: number;
+  sampledBeliefRemainingDevelopmentVpExpected: number;
   optimisticWithMinFutureDevelopmentVp: number;
   optimisticWithMaxFutureDevelopmentVp: number;
-  targetReachableInAllCompatibleWorlds: boolean;
-  targetReachableInSomeCompatibleWorld: boolean;
+  targetNotRuledOutByOptimisticBoundInAllSampledBeliefWorlds: boolean;
+  targetNotRuledOutByOptimisticBoundInSomeSampledBeliefWorld: boolean;
 }
 
 export interface WasmStrategyProposalDiagnostic {

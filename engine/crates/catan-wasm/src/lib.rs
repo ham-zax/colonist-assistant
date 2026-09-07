@@ -635,13 +635,13 @@ struct ReachabilityOutput {
     optimistic_without_future_development_vp: u8,
     minimum_future_development_vp_required: u8,
     future_development_vp_necessary: bool,
-    remaining_development_vp_min: u8,
-    remaining_development_vp_max: u8,
-    remaining_development_vp_expected: f32,
+    sampled_belief_remaining_development_vp_min: u8,
+    sampled_belief_remaining_development_vp_max: u8,
+    sampled_belief_remaining_development_vp_expected: f32,
     optimistic_with_min_future_development_vp: u8,
     optimistic_with_max_future_development_vp: u8,
-    target_reachable_in_all_compatible_worlds: bool,
-    target_reachable_in_some_compatible_world: bool,
+    target_not_ruled_out_by_optimistic_bound_in_all_sampled_belief_worlds: bool,
+    target_not_ruled_out_by_optimistic_bound_in_some_sampled_belief_world: bool,
 }
 
 #[derive(Serialize)]
@@ -765,13 +765,18 @@ fn reachability_output(value: ReachabilityDiagnostic) -> ReachabilityOutput {
         optimistic_without_future_development_vp: value.optimistic_without_future_development_vp,
         minimum_future_development_vp_required: value.minimum_future_development_vp_required,
         future_development_vp_necessary: value.future_development_vp_necessary,
-        remaining_development_vp_min: value.remaining_development_vp_min,
-        remaining_development_vp_max: value.remaining_development_vp_max,
-        remaining_development_vp_expected: value.remaining_development_vp_expected,
+        sampled_belief_remaining_development_vp_min: value
+            .sampled_belief_remaining_development_vp_min,
+        sampled_belief_remaining_development_vp_max: value
+            .sampled_belief_remaining_development_vp_max,
+        sampled_belief_remaining_development_vp_expected: value
+            .sampled_belief_remaining_development_vp_expected,
         optimistic_with_min_future_development_vp: value.optimistic_with_min_future_development_vp,
         optimistic_with_max_future_development_vp: value.optimistic_with_max_future_development_vp,
-        target_reachable_in_all_compatible_worlds: value.target_reachable_in_all_compatible_worlds,
-        target_reachable_in_some_compatible_world: value.target_reachable_in_some_compatible_world,
+        target_not_ruled_out_by_optimistic_bound_in_all_sampled_belief_worlds: value
+            .target_not_ruled_out_by_optimistic_bound_in_all_sampled_belief_worlds,
+        target_not_ruled_out_by_optimistic_bound_in_some_sampled_belief_world: value
+            .target_not_ruled_out_by_optimistic_bound_in_some_sampled_belief_world,
     }
 }
 

@@ -6,12 +6,12 @@ use colonist_catan_core::{Action, GameState, NodeKind, Phase};
 
 use crate::deadline::CooperativeDeadline;
 use crate::eval::{RoadIntent, evaluate, road_intent, strategic_utility};
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+use crate::exact::solve_exact_belief;
 use crate::exact::{
     DEVELOPMENT_EXACT_FAMILIES, ExactActionFamily, ExactDecisionResult, exact_family_for_action,
     solve_exact_belief_excluding_controlled,
 };
-#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
-use crate::exact::solve_exact_belief;
 use crate::mcts::BeliefParticle;
 use crate::opening::opening_adjusted_priors;
 use crate::opening::{OpeningConfig, solve_opening};
@@ -451,6 +451,28 @@ fn recursive_observation_policy(
     ranked
 }
 
+fn recursive_observation_best_policy_action(
+    state: &GameState,
+    actions: &[Action],
+    actor: u8,
+) -> Vec<(Action, f32)> {
+    let observed = state.observed_state(actor);
+    let mut ranked = normalize_priors(&observed, actions, actor);
+    if ranked.is_empty() {
+        ranked = actions
+            .iter()
+            .cloned()
+            .map(|action| (action, 1.0))
+            .collect();
+    }
+    canonicalize_equal_prior_siblings(&mut ranked);
+    ranked.truncate(1);
+    if let Some((_, prior)) = ranked.first_mut() {
+        *prior = 1.0;
+    }
+    ranked
+}
+
 struct Searcher {
     algorithm: Algorithm,
     maximum_depth: u8,
@@ -873,7 +895,9 @@ impl Searcher {
                 if actions.is_empty() {
                     return self.evaluate_cached(state);
                 }
-                let mut ranked = if observation_safe {
+                let mut ranked = if observation_safe && self.controlled_player == Some(actor) {
+                    recursive_observation_best_policy_action(state, actions, actor)
+                } else if observation_safe {
                     recursive_observation_policy(state, actions, actor, self.branch_cap)
                 } else {
                     let observed_ranked = normalize_observed_priors(state, actions, actor);
@@ -896,7 +920,6 @@ impl Searcher {
                 // continuation action. Full contingent belief optimization is a
                 // separate, later search problem.
                 if observation_safe && self.controlled_player == Some(actor) {
-                    ranked.truncate(1);
                     return self
                         .visit_ranked_decision(
                             state,
@@ -1016,8 +1039,7 @@ impl Searcher {
                 let mut next = state.clone();
                 let ends_game = next.apply(action).is_ok() && next.is_terminal();
                 ends_game
-                    || belief_domestic_trade_threat(std::iter::once((state, 1.0)), action)
-                        .is_none()
+                    || belief_domestic_trade_threat(std::iter::once((state, 1.0)), action).is_none()
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -1199,11 +1221,8 @@ fn belief_search(
     let branch_cap = config.branch_cap;
     let maximum_nodes = config.maximum_nodes;
     let deadline = CooperativeDeadline::start(config.time_budget_ms);
-    let hard_deadline = deadline.with_budget_ms(
-        config
-            .time_budget_ms
-            .saturating_add(evidence_escalation_ms),
-    );
+    let hard_deadline =
+        deadline.with_budget_ms(config.time_budget_ms.saturating_add(evidence_escalation_ms));
     let particle_preparation_started = deadline.elapsed_ms();
     let Some(first_particle) = particles.first() else {
         return Err(DepthBeliefError::Empty);
@@ -3249,18 +3268,15 @@ impl CudaLinearSearcher<'_, '_> {
                     return self.batch.emit(state, self.lane_id, path_weight);
                 }
                 let policy_started = std::time::Instant::now();
-                let mut ranked =
-                    recursive_observation_policy(state, &actions, actor, self.branch_cap);
+                let mut ranked = if actor == self.controlled_player {
+                    recursive_observation_best_policy_action(state, &actions, actor)
+                } else {
+                    recursive_observation_policy(state, &actions, actor, self.branch_cap)
+                };
                 self.policy_nanos = self.policy_nanos.saturating_add(
                     policy_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
                 );
                 ranked.truncate(ranked.len().min(remaining as usize));
-                if actor == self.controlled_player {
-                    ranked.truncate(1);
-                    if let Some((_, weight)) = ranked.first_mut() {
-                        *weight = 1.0;
-                    }
-                }
                 let budget_started = std::time::Instant::now();
                 let budgets = allocate_root_node_budgets(ranked.len(), remaining);
                 self.budget_nanos = self.budget_nanos.saturating_add(
@@ -3415,15 +3431,12 @@ impl CudaDeferredSearcher<'_> {
                 if remaining == 0 {
                     return self.tree.leaf(state);
                 }
-                let mut ranked =
-                    recursive_observation_policy(state, &actions, actor, self.branch_cap);
+                let mut ranked = if actor == self.controlled_player {
+                    recursive_observation_best_policy_action(state, &actions, actor)
+                } else {
+                    recursive_observation_policy(state, &actions, actor, self.branch_cap)
+                };
                 ranked.truncate(ranked.len().min(remaining as usize));
-                if actor == self.controlled_player {
-                    ranked.truncate(1);
-                    if let Some((_, weight)) = ranked.first_mut() {
-                        *weight = 1.0;
-                    }
-                }
                 let budgets = allocate_root_node_budgets(ranked.len(), remaining);
                 let mut carry = 0_u32;
                 let mut children = Vec::with_capacity(ranked.len());
@@ -4483,9 +4496,9 @@ mod tests {
 
     use super::{
         BeliefNodeBudgetMode, apply_action_friction, evidence_escalation_node_budget,
-        evidence_escalation_target_depth, normalize_belief_root_priors, search_belief_maxn,
-        search_belief_maxn_bounded, search_maxn, search_paranoid,
-        realized_root_evidence_strengthened, search_weighted_belief_maxn_bounded,
+        evidence_escalation_target_depth, normalize_belief_root_priors,
+        realized_root_evidence_strengthened, search_belief_maxn, search_belief_maxn_bounded,
+        search_maxn, search_paranoid, search_weighted_belief_maxn_bounded,
         search_weighted_belief_maxn_bounded_timed,
         search_weighted_belief_maxn_iterative_timed_excluding,
         should_escalate_binary_root_evidence,
@@ -4576,6 +4589,39 @@ mod tests {
         state
     }
 
+    fn controlled_city_settlement_fixture() -> GameState {
+        let mut state = binary_preroll_fixture(733);
+        state.phase = Phase::Main;
+        for resource in 0..5 {
+            let amount = 5.min(state.bank[resource]);
+            state.bank[resource] -= amount;
+            state.players[0].resources[resource] += amount;
+        }
+        if state
+            .legal_actions()
+            .iter()
+            .any(|action| matches!(action, Action::BuildSettlement { .. }))
+        {
+            return state;
+        }
+        for edge in 0..state.roads.len() {
+            if state.roads[edge].is_some() {
+                continue;
+            }
+            let mut candidate = state.clone();
+            candidate.roads[edge] = Some(0);
+            candidate.players[0].roads_left = candidate.players[0].roads_left.saturating_sub(1);
+            if candidate
+                .legal_actions()
+                .iter()
+                .any(|action| matches!(action, Action::BuildSettlement { .. }))
+            {
+                return candidate;
+            }
+        }
+        panic!("fixture must expose a legal settlement alongside a city");
+    }
+
     fn run_binary_preroll(
         state: &GameState,
         maximum_depth: u8,
@@ -4628,6 +4674,126 @@ mod tests {
         assert!(!timings.evidence_escalation_strengthened);
         assert_eq!(timings.evidence_escalation_baseline_nodes, shallow.nodes);
         assert_eq!(timings.evidence_escalation_nodes, shallow.nodes);
+    }
+
+    #[test]
+    fn controlled_preroll_chooses_knight_when_policy_score_exceeds_roll() {
+        let mut state = binary_preroll_fixture(727);
+        state.victory_target = 30;
+        let lumber = Resource::Lumber.index();
+        let amount = state.bank[lumber].min(19);
+        state.bank[lumber] -= amount;
+        state.players[1].resources[lumber] += amount;
+        state.players[1].public_victory_points = 25;
+        let actions = state.legal_actions();
+        let roll = Action::Roll;
+        let observed = state.observed_state(0);
+        let knight = actions
+            .iter()
+            .filter(|action| {
+                matches!(
+                    action,
+                    Action::PlayKnight {
+                        victim: Some(1),
+                        ..
+                    }
+                )
+            })
+            .max_by(|left, right| {
+                crate::policy::action_prior(&observed, left, 0)
+                    .total_cmp(&crate::policy::action_prior(&observed, right, 0))
+            })
+            .cloned()
+            .expect("fixture must expose a playable Knight against player 1");
+        let pair = vec![roll.clone(), knight.clone()];
+        let policy = crate::policy::normalize_priors(&observed, &pair, 0);
+        assert_eq!(policy.first().map(|entry| &entry.0), Some(&knight));
+        let quota_ordered = super::recursive_observation_policy(&state, &pair, 0, 8);
+        assert_eq!(quota_ordered.first().map(|entry| &entry.0), Some(&Action::Roll));
+        let selected = super::recursive_observation_best_policy_action(&state, &pair, 0);
+        assert_eq!(selected, vec![(knight, 1.0)]);
+    }
+
+    #[test]
+    fn controlled_preroll_chooses_roll_when_policy_score_exceeds_knight() {
+        let state = binary_preroll_fixture(729);
+        let actions = state.legal_actions();
+        let observed = state.observed_state(0);
+        let knight = actions
+            .iter()
+            .filter(|action| matches!(action, Action::PlayKnight { .. }))
+            .min_by(|left, right| {
+                crate::policy::action_prior(&observed, left, 0)
+                    .total_cmp(&crate::policy::action_prior(&observed, right, 0))
+            })
+            .cloned()
+            .expect("fixture must expose a playable Knight");
+        let pair = vec![Action::Roll, knight];
+        let policy = crate::policy::normalize_priors(&observed, &pair, 0);
+        assert_eq!(policy.first().map(|entry| &entry.0), Some(&Action::Roll));
+        let selected = super::recursive_observation_best_policy_action(&state, &pair, 0);
+        assert_eq!(selected, vec![(Action::Roll, 1.0)]);
+    }
+
+    #[test]
+    fn controlled_main_phase_chooses_higher_scored_city_despite_settlement_quota_order() {
+        let state = controlled_city_settlement_fixture();
+        let observed = state.observed_state(0);
+        let legal = state.legal_actions();
+        let city = legal
+            .iter()
+            .filter(|action| matches!(action, Action::BuildCity { .. }))
+            .max_by(|left, right| {
+                crate::policy::action_prior(&observed, left, 0)
+                    .total_cmp(&crate::policy::action_prior(&observed, right, 0))
+            })
+            .cloned()
+            .expect("fixture must expose a city");
+        let settlement = legal
+            .iter()
+            .filter(|action| matches!(action, Action::BuildSettlement { .. }))
+            .min_by(|left, right| {
+                crate::policy::action_prior(&observed, left, 0)
+                    .total_cmp(&crate::policy::action_prior(&observed, right, 0))
+            })
+            .cloned()
+            .expect("fixture must expose a settlement");
+        let actions = vec![settlement.clone(), city.clone()];
+        assert!(
+            crate::policy::action_prior(&observed, &city, 0)
+                > crate::policy::action_prior(&observed, &settlement, 0)
+        );
+        let opponent_style = super::recursive_observation_policy(&state, &actions, 0, 8);
+        assert_eq!(
+            opponent_style.first().map(|entry| &entry.0),
+            Some(&settlement)
+        );
+        let controlled = super::recursive_observation_best_policy_action(&state, &actions, 0);
+        assert_eq!(controlled, vec![(city, 1.0)]);
+    }
+
+    #[test]
+    fn controlled_policy_ties_use_stable_canonical_action_order() {
+        let mut tied = vec![
+            (Action::BuildRoad { edge: 9 }, 0.5),
+            (Action::BuildRoad { edge: 2 }, 0.5),
+            (Action::BuildRoad { edge: 7 }, 0.4),
+        ];
+        super::canonicalize_equal_prior_siblings(&mut tied);
+        let once = tied.clone();
+        super::canonicalize_equal_prior_siblings(&mut tied);
+        assert_eq!(tied, once);
+        assert_eq!(tied[0].0, Action::BuildRoad { edge: 2 });
+    }
+
+    #[test]
+    fn opponent_observation_policy_keeps_weighted_quota_mixture() {
+        let state = controlled_city_settlement_fixture();
+        let actions = state.legal_actions();
+        let ranked = super::recursive_observation_policy(&state, &actions, 0, 8);
+        assert!(ranked.len() > 1);
+        assert!((ranked.iter().map(|(_, weight)| *weight).sum::<f32>() - 1.0).abs() < 1e-6);
+        assert!(ranked.iter().all(|(_, weight)| *weight > 0.0));
     }
 
     #[test]
@@ -4834,7 +5000,10 @@ mod tests {
                 .any(|candidate| candidate.action == target),
         );
         assert!(
-            !report.actions.iter().any(|candidate| candidate.action == target),
+            !report
+                .actions
+                .iter()
+                .any(|candidate| candidate.action == target),
         );
     }
 

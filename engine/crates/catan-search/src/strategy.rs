@@ -333,13 +333,17 @@ fn add_award_race(
     state: &GameState,
     actor: u8,
 ) {
-    let player = &state.players[actor as usize];
-    if !player.has_longest_road
+    let observed = state.observed_state(actor);
+    if observed.longest_road_holder != Some(actor)
         && let Some(action) = inputs.ranked_actions.iter().find(|action| {
-            matches!(
+            if !matches!(
                 action,
                 Action::BuildRoad { .. } | Action::PlayRoadBuilding { .. }
-            )
+            ) {
+                return false;
+            }
+            let mut next = observed.clone();
+            next.apply(action).is_ok() && next.longest_road_holder == Some(actor)
         })
     {
         push_proposal(
@@ -350,11 +354,14 @@ fn add_award_race(
             inputs,
         );
     }
-    if !player.has_largest_army
-        && let Some(action) = inputs
-            .ranked_actions
-            .iter()
-            .find(|action| matches!(action, Action::PlayKnight { .. }))
+    if observed.largest_army_holder != Some(actor)
+        && let Some(action) = inputs.ranked_actions.iter().find(|action| {
+            if !matches!(action, Action::PlayKnight { .. }) {
+                return false;
+            }
+            let mut next = observed.clone();
+            next.apply(action).is_ok() && next.largest_army_holder == Some(actor)
+        })
     {
         push_proposal(
             proposals,
@@ -738,6 +745,192 @@ mod tests {
         BeliefParticle { state, weight: 1.0 }
     }
 
+    fn road_award_state(existing_roads: usize) -> GameState {
+        let mut state = GameState::standard(811, 2);
+        state.phase = Phase::Main;
+        state.current_player = 0;
+        for edge in 0..existing_roads {
+            state.roads[edge] = Some(0);
+            state.players[0].roads_left -= 1;
+        }
+        state.players[0].resources[0] = 1;
+        state.players[0].resources[1] = 1;
+        state.bank[0] -= 1;
+        state.bank[1] -= 1;
+        state.update_longest_road();
+        state
+    }
+
+    fn knight_award_state(played_knights: u8) -> GameState {
+        let mut state = GameState::standard(813, 2);
+        state.phase = Phase::Main;
+        state.current_player = 0;
+        state.players[0].played_knights = played_knights;
+        state.players[0].development[DevCard::Knight.index()] = 1;
+        state.development_deck[DevCard::Knight.index()] -= 1;
+        state
+    }
+
+    #[test]
+    fn award_race_omits_road_without_concrete_longest_road_transfer() {
+        let state = road_award_state(1);
+        let road = Action::BuildRoad { edge: 1 };
+        assert!(state.legal_actions().contains(&road));
+        let diagnostics = shadow_strategy_diagnostics(
+            &[particle(state)],
+            0,
+            &[Action::EndTurn, road],
+            &[Action::EndTurn],
+            &[],
+            Some(&Action::EndTurn),
+            3,
+            3,
+            false,
+        )
+        .unwrap();
+        assert!(
+            diagnostics
+                .proposals
+                .iter()
+                .all(|proposal| proposal.reason != StrategyProposalReason::LongestRoadRace)
+        );
+    }
+
+    #[test]
+    fn award_race_keeps_road_that_claims_longest_road() {
+        let state = road_award_state(4);
+        let road = Action::BuildRoad { edge: 4 };
+        assert!(state.legal_actions().contains(&road));
+        let mut after = state.clone();
+        after.apply(&road).unwrap();
+        assert_eq!(after.longest_road_holder, Some(0));
+        let diagnostics = shadow_strategy_diagnostics(
+            &[particle(state)],
+            0,
+            &[Action::EndTurn, road.clone()],
+            &[Action::EndTurn],
+            &[],
+            Some(&Action::EndTurn),
+            3,
+            3,
+            false,
+        )
+        .unwrap();
+        let proposal = diagnostics
+            .proposals
+            .iter()
+            .find(|proposal| proposal.reason == StrategyProposalReason::LongestRoadRace)
+            .expect("award transfer must remain concrete contested evidence");
+        assert_eq!(proposal.action, road);
+        assert_eq!(
+            proposal.evidence_tier,
+            StrategyEvidenceTier::ContestedOpportunity
+        );
+    }
+
+    #[test]
+    fn award_race_omits_knight_without_concrete_largest_army_transfer() {
+        let state = knight_award_state(0);
+        let knight = state
+            .legal_actions()
+            .into_iter()
+            .find(|action| matches!(action, Action::PlayKnight { .. }))
+            .expect("fixture must expose a playable Knight");
+        let diagnostics = shadow_strategy_diagnostics(
+            &[particle(state)],
+            0,
+            &[Action::EndTurn, knight],
+            &[Action::EndTurn],
+            &[],
+            Some(&Action::EndTurn),
+            3,
+            3,
+            false,
+        )
+        .unwrap();
+        assert!(
+            diagnostics
+                .proposals
+                .iter()
+                .all(|proposal| proposal.reason != StrategyProposalReason::LargestArmyRace)
+        );
+    }
+
+    #[test]
+    fn award_race_keeps_knight_that_claims_largest_army() {
+        let state = knight_award_state(2);
+        let knight = state
+            .legal_actions()
+            .into_iter()
+            .find(|action| matches!(action, Action::PlayKnight { .. }))
+            .expect("fixture must expose a playable Knight");
+        let mut after = state.clone();
+        after.apply(&knight).unwrap();
+        assert_eq!(after.largest_army_holder, Some(0));
+        let diagnostics = shadow_strategy_diagnostics(
+            &[particle(state)],
+            0,
+            &[Action::EndTurn, knight.clone()],
+            &[Action::EndTurn],
+            &[],
+            Some(&Action::EndTurn),
+            3,
+            3,
+            false,
+        )
+        .unwrap();
+        let proposal = diagnostics
+            .proposals
+            .iter()
+            .find(|proposal| proposal.reason == StrategyProposalReason::LargestArmyRace)
+            .expect("army award transfer must remain concrete contested evidence");
+        assert_eq!(proposal.action, knight);
+        assert_eq!(
+            proposal.evidence_tier,
+            StrategyEvidenceTier::ContestedOpportunity
+        );
+    }
+
+    #[test]
+    fn false_award_evidence_cannot_displace_an_ordinary_baseline_root() {
+        let state = road_award_state(1);
+        let road = Action::BuildRoad { edge: 1 };
+        let ranked = vec![
+            (Action::EndTurn, 0.4),
+            (Action::BuildCity { vertex: 0 }, 0.3),
+            (Action::BuildSettlement { vertex: 1 }, 0.2),
+            (road.clone(), 0.1),
+        ];
+        let baseline = ranked[..3].to_vec();
+        let ranked_actions = ranked
+            .iter()
+            .map(|(action, _)| action.clone())
+            .collect::<Vec<_>>();
+        let baseline_actions = baseline
+            .iter()
+            .map(|(action, _)| action.clone())
+            .collect::<Vec<_>>();
+        let particles = [particle(state)];
+        let mut diagnostics = strategy_diagnostics_for_admission(
+            &particles,
+            0,
+            &ranked_actions,
+            &baseline_actions,
+            &[],
+            3,
+        )
+        .unwrap();
+        let roster = admit_strategy_challengers(&mut diagnostics, &ranked, &baseline, &[], 3);
+        assert_eq!(roster, baseline);
+        assert!(!roster.iter().any(|(action, _)| action == &road));
+        assert!(
+            diagnostics
+                .proposals
+                .iter()
+                .all(|proposal| proposal.reason != StrategyProposalReason::LongestRoadRace)
+        );
+    }
+
     #[test]
     fn two_player_context_reports_one_opponent_response_window() {
         let state = GameState::standard(31, 2);
@@ -856,8 +1049,8 @@ mod tests {
 
     #[test]
     fn admission_deduplicates_shared_support_and_preserves_cap_and_protected_roots() {
-        let particles = [particle(GameState::standard(47, 2))];
-        let road = Action::BuildRoad { edge: 0 };
+        let particles = [particle(road_award_state(4))];
+        let road = Action::BuildRoad { edge: 4 };
         let city = Action::BuildCity { vertex: 0 };
         let settlement = Action::BuildSettlement { vertex: 1 };
         let ranked = vec![
@@ -967,13 +1160,8 @@ mod tests {
             4,
         )
         .unwrap();
-        let roster = admit_strategy_challengers(
-            &mut diagnostics,
-            &ranked,
-            &baseline,
-            &baseline_actions,
-            4,
-        );
+        let roster =
+            admit_strategy_challengers(&mut diagnostics, &ranked, &baseline, &baseline_actions, 4);
 
         assert!(diagnostics.admission.challenger_candidates_considered > 3);
         assert_eq!(diagnostics.admission.challengers_selected, 3);

@@ -29,7 +29,10 @@ struct Solver {
 impl Solver {
     fn visit(&mut self, state: &GameState, depth: u8) -> (f32, Vec<Action>) {
         if self.nodes >= self.maximum_nodes
-            || self.deadline.as_ref().is_some_and(CooperativeDeadline::has_elapsed)
+            || self
+                .deadline
+                .as_ref()
+                .is_some_and(CooperativeDeadline::has_elapsed)
         {
             self.aborted = true;
             return (0.0, Vec::new());
@@ -276,9 +279,85 @@ fn solve_belief_current_turn_with_deadline(
 
 #[cfg(test)]
 mod tests {
-    use colonist_catan_core::{GameState, Phase};
+    use colonist_catan_core::{
+        Action, DiceHistoryProvenance, GameState, Phase, PublicRollObservation, StochasticBelief,
+        StochasticState,
+    };
 
-    use super::solve_belief_current_turn;
+    use super::{Solver, solve_belief_current_turn};
+
+    #[test]
+    fn mref_tactical_solver_skips_zero_weight_roll_before_transition() {
+        let history = [
+            PublicRollObservation {
+                ordinal: 0,
+                actor: 0,
+                total: 8,
+            },
+            PublicRollObservation {
+                ordinal: 1,
+                actor: 1,
+                total: 8,
+            },
+            PublicRollObservation {
+                ordinal: 2,
+                actor: 0,
+                total: 8,
+            },
+        ];
+        let belief = StochasticBelief::from_public_history(
+            2,
+            &history,
+            &DiceHistoryProvenance::CompleteFromFirstGameplayRoll,
+            0,
+        )
+        .unwrap();
+        let mut state = GameState::standard(719, 2);
+        state.current_player = 1;
+        state.phase = Phase::PreRoll;
+        state.stochastic = StochasticState::reference(belief);
+        state.apply(&Action::Roll).unwrap();
+
+        let impossible = Action::ResolveRoll { value: 8 };
+        assert!(state.legal_actions().contains(&impossible));
+        assert_eq!(state.chance_weight(&impossible), 0);
+        let positive = state
+            .legal_actions()
+            .into_iter()
+            .filter_map(|action| {
+                let weight = state.chance_weight(&action) as f64;
+                (weight > 0.0).then_some((action, weight))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(positive.len(), 10);
+        let total = positive.iter().map(|(_, weight)| *weight).sum::<f64>();
+        let normalized = positive
+            .iter()
+            .map(|(action, weight)| (action, weight / total))
+            .collect::<Vec<_>>();
+        assert!((normalized.iter().map(|(_, weight)| *weight).sum::<f64>() - 1.0).abs() < 1e-12);
+        let (_, first_raw) = &positive[0];
+        let (_, second_raw) = &positive[1];
+        let (_, first_normalized) = &normalized[0];
+        let (_, second_normalized) = &normalized[1];
+        assert!(
+            (first_normalized / second_normalized - first_raw / second_raw).abs() < 1e-12,
+            "renormalization must preserve surviving relative chance weights"
+        );
+
+        let mut solver = Solver {
+            root_player: 1,
+            maximum_depth: 1,
+            maximum_nodes: 64,
+            ..Solver::default()
+        };
+        let _ = solver.visit(&state, 0);
+        assert!(!solver.aborted);
+        assert_eq!(
+            solver.nodes, 11,
+            "one chance node plus ten positive Mref descendants; the impossible total must never transition"
+        );
+    }
 
     #[test]
     fn belief_tactical_solver_respects_one_global_node_budget() {
