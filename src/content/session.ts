@@ -111,6 +111,7 @@ const classifyUnmatchedLog = (
     /^happy settling!|\blist of commands:\s*\/help\b/iu.test(normalized) ||
     /\bhas disconnected\. a bot will take over next turn unless .+ reconnects\.?$/iu.test(normalized) ||
     /\bhas reconnected\.?$/iu.test(normalized) ||
+    /^.+ (?:won the game!|has left the game\.?|resigned\.?)$/iu.test(normalized) ||
     /^you are the last player remaining\. you will be awarded the win in \d+ seconds if your opponent does not reconnect\.?$/iu.test(normalized)
   ) {
     return { reason: "known-ignored-system-message", affectsIntegrity: false };
@@ -1142,13 +1143,6 @@ export class GameSession {
         } else if (candidate.logIndex !== undefined) {
           observeLogCoverage(this.diceHistory, [candidate.logIndex]);
         }
-        if (
-          candidate.logIndex === 0 &&
-          isGameStartBoundaryText(snapshot.serialText) &&
-          this.acceptGameStartBoundary()
-        ) {
-          changed = true;
-        }
         this.recordUnmatched(snapshot.serialText, snapshot.index, classification);
         changed = true;
         continue;
@@ -1293,6 +1287,19 @@ export class GameSession {
       if (!journalReplayRequired) {
         this.state = reduceTracker(this.state, stored, stored);
       }
+      changed = true;
+    }
+
+    // The start banner and first settlement can hydrate in different scans.
+    // Reuse the retained banner after processing this batch, when the first
+    // semantic event needed to prove the narrow setup prefix is available.
+    if (
+      this.setupLogPrefixEnd !== undefined &&
+      this.unmatchedSamples.some(
+        (sample) => sample.firstLogIndex === 0 && isGameStartBoundaryText(sample.sample),
+      ) &&
+      this.acceptGameStartBoundary()
+    ) {
       changed = true;
     }
 

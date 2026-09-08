@@ -63,6 +63,28 @@ describe("Balanced setup dice authority", () => {
     expect(session.diceHistory.coverage.ranges).toEqual([]);
   });
 
+  it("does not classify grain8695 end-of-game notices as missing card events", async () => {
+    const root = document.createElement("div");
+    root.append(message(0, "Happy settling!"), message(1, "hamzax won the game!"),
+      message(2, "Zalas has left the game"), message(3, "Zalas Resigned"));
+    const session = sessionFor(root);
+    await session.start();
+    expect(session.unmatchedIntegrityCount).toBe(0);
+    expect(session.unmatchedSamples.every(sample => !sample.affectsIntegrity)).toBe(true);
+  });
+
+  it("retains the observed start boundary when the first settlement hydrates later", async () => {
+    const root = document.createElement("div");
+    root.append(message(0, "Happy settling!"));
+    const session = sessionFor(root);
+    await session.start();
+    root.append(placement(2, "Alice", "settlement"));
+    await vi.waitFor(() => expect(session.events.some(event => event.type === "spend")).toBe(true));
+    session.setInitialPlacement(false, gameKey);
+    expect(session.events.some(event => event.type === "spend")).toBe(true);
+    expect(session.partialHistory).toBe(false);
+  });
+
   it("ignores blank setup positions but continues to reject gaps after gameplay starts", async () => {
     const root = document.createElement("div");
     root.append(message(0, "Happy settling!"), message(2, "Alice placed a Settlement"), message(3, "Alice placed a Road"), message(5, "Bob placed a Settlement"), message(6, "Bob placed a Road"), message(12, "Bot is placing a road for Alice"), message(13, "Alice placed a Road"));

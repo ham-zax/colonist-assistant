@@ -89,7 +89,7 @@ pub use shared::{
 };
 pub use strategy::{
     ADAPTIVE_CANDIDATE_ADMISSION_V1, DecisionFailureClass, MAX_STRATEGY_CHALLENGERS,
-    STRATEGY_SHADOW_POLICY_VERSION, StrategyAdmissionDiagnostic, StrategyContext,
+    STRATEGY_SHADOW_POLICY_VERSION, ShadowInputs, StrategyAdmissionDiagnostic, StrategyContext,
     StrategyEvidenceTier, StrategyId, StrategyOmissionReason, StrategyPolicy,
     StrategyProposalDiagnostic, StrategyProposalReason, StrategyProposalStatus,
     StrategyShadowDiagnostics, shadow_strategy_diagnostics,

@@ -242,7 +242,7 @@ const visible = (element: HTMLElement): boolean =>
   !element.closest("[disabled], [aria-disabled='true'], [class*='isDisabled-']");
 
 const CONTROL_SELECTOR =
-  "button, [role='button'], input[type='button'], input[type='submit'], [class*='actionButton-'], [class*='tradeButton-'], [class*='confirmButton-']";
+  "button, [role='button'], input[type='button'], input[type='submit'], [class*='actionButton-' i], [class*='tradeButton-' i], [class*='confirmButton-' i]";
 
 const allControls = (): HTMLElement[] =>
   [
@@ -380,7 +380,7 @@ const resourceCardEnum: Record<Resource, number> = {
 
 const nearestClickable = (element: Element | null): HTMLElement | undefined => {
   const clickable = element?.closest<HTMLElement>(
-    "button, [role='button'], [tabindex], [class*='actionButton-'], [class*='tradeButton-'], [class*='confirmButton-'], [class*='cardContainer-']",
+    "button, [role='button'], [tabindex], [class*='actionButton-' i], [class*='tradeButton-' i], [class*='confirmButton-' i], [class*='cardContainer-' i]",
   );
   return clickable && visible(clickable) ? clickable : undefined;
 };
@@ -389,10 +389,10 @@ const activeColonistControl = (
   element: HTMLElement | undefined,
 ): HTMLElement | undefined => {
   if (!element) return undefined;
-  const control = element.matches("[class*='actionButton-'], [class*='tradeButton-']")
+  const control = element.matches("[class*='actionButton-' i], [class*='tradeButton-' i]")
     ? element
     : element.querySelector<HTMLElement>(
-        "[class*='actionButton-'], [class*='tradeButton-']",
+        "[class*='actionButton-' i], [class*='tradeButton-' i]",
       ) ?? element;
   if (
     !control ||
@@ -417,7 +417,7 @@ const findPieceBuildControl = (
       continue;
     }
     const control = activeColonistControl(
-      image.closest<HTMLElement>("[class*='actionButton-']") ?? undefined,
+      image.closest<HTMLElement>("[class*='actionButton-' i]") ?? undefined,
     );
     if (control) return control;
   }
@@ -498,8 +498,8 @@ const tradeExecutionDiagnostic = (
   if (action.kind === "trade-builder") {
     const controls = [...document.querySelectorAll<HTMLElement>(
       "#action-button-trade, #action-button-trade-bank, #action-button-trade-players, " +
-      "#player-card-inventory [data-card-enum], [class*='wantedCardSelectorContainer-'] [data-card-enum], " +
-      "[class*='bankTradeAvailableCards-'] button, [class*='bankTradeReceiveCards-'] button",
+      "#player-card-inventory [data-card-enum], [class*='wantedCardSelectorContainer-' i] [data-card-enum], " +
+      "[class*='bankTradeAvailableCards-' i] button, [class*='bankTradeReceiveCards-' i] button",
     )].filter(displayed).slice(0, 24);
     return {
       ...diagnostic,
@@ -515,20 +515,20 @@ const tradeExecutionDiagnostic = (
   }
   const nestedOffers = [
     ...document.querySelectorAll<HTMLElement>(
-      "[class*='gameTradeOffersWrapper-'] [class*='tradeContainer-']",
+      "[class*='gameTradeOffersWrapper-' i] [class*='tradeContainer-' i]",
     ),
   ].filter(visible);
   const offers = nestedOffers.length
     ? nestedOffers
     : [
-        ...document.querySelectorAll<HTMLElement>("[class*='tradeContainer-']"),
+        ...document.querySelectorAll<HTMLElement>("[class*='tradeContainer-' i]"),
       ].filter(visible);
   const controls = offers
     .slice(0, 8)
     .flatMap((offer, offerIndex) =>
       [
         ...offer.querySelectorAll<HTMLElement>(
-          "[class*='tradeButton-'], button, [role='button']",
+          "[class*='tradeButton-' i], button, [role='button']",
         ),
       ]
         .filter((control, index, all) => all.indexOf(control) === index)
@@ -555,14 +555,14 @@ const tradeExecutionDiagnostic = (
 const visibleTradeContainers = (): HTMLElement[] => {
   const nestedOffers = [
     ...document.querySelectorAll<HTMLElement>(
-      "[class*='gameTradeOffersWrapper-'] [class*='tradeContainer-']",
+      "[class*='gameTradeOffersWrapper-' i] [class*='tradeContainer-' i]",
     ),
   ].filter(visible);
   return nestedOffers.length
     ? nestedOffers
     : [
         ...document.querySelectorAll<HTMLElement>(
-          "[class*='tradeContainer-']",
+          "[class*='tradeContainer-' i]",
         ),
       ].filter(visible);
 };
@@ -576,10 +576,10 @@ const tradeResourceCount = (
     .map((image) => {
       const stack =
         image.closest<HTMLElement>(
-          "[class*='cardStackContainer-'], [class*='cardContainer-'], [data-card-enum], button, [role='button']",
+          "[class*='cardStackContainer-' i], [class*='cardContainer-' i], [data-card-enum], button, [role='button']",
         ) ?? image;
       const badge = stack.querySelector<HTMLElement>(
-        "[class*='countBadge-'], [class*='cardCount-'], [class*='amount-']",
+        "[class*='countBadge-' i], [class*='cardCount-' i], [class*='amount-']",
       );
       const value = Number.parseInt(
         normalized(badge?.textContent ?? "").match(/\d+/u)?.[0] ?? "1",
@@ -613,10 +613,10 @@ const tradeContainerResourceMatch = (
 ): boolean | undefined => {
   if (!give || !receive) return undefined;
   const offered = offer.querySelector<HTMLElement>(
-    "[class*='proposalOfferedHalfContainer-']",
+    "[class*='proposalOfferedHalfContainer-' i]",
   );
   const wanted = offer.querySelector<HTMLElement>(
-    "[class*='proposalWantedHalfContainer-']",
+    "[class*='proposalWantedHalfContainer-' i]",
   );
   if (offered && wanted) {
     const offeredCounts = tradeResourceCounts(offered);
@@ -716,7 +716,7 @@ const findTradeControl = (
   ]
     .map((image) =>
       activeColonistControl(
-        image.closest<HTMLElement>("[class*='tradeButton-']") ?? undefined,
+        image.closest<HTMLElement>("[class*='tradeButton-' i]") ?? undefined,
       ),
     )
     .filter((element): element is HTMLElement => Boolean(element))
@@ -725,7 +725,7 @@ const findTradeControl = (
 
   const tradeButtons = [
     ...offer.querySelectorAll<HTMLElement>(
-      "[class*='tradeButton-'], button, [role='button']",
+      "[class*='tradeButton-' i], button, [role='button']",
     ),
   ]
     .map((element) => activeColonistControl(element) ?? element)
@@ -769,7 +769,7 @@ const findTradeCancelControl = (
   ]
     .map((image) =>
       activeColonistControl(
-        image.closest<HTMLElement>("[class*='tradeButton-']") ?? undefined,
+        image.closest<HTMLElement>("[class*='tradeButton-' i]") ?? undefined,
       ),
     )
     .filter((element): element is HTMLElement => Boolean(element))
@@ -853,8 +853,8 @@ const findTradeResourceChoice = (
   mode: "player" | "bank",
 ): HTMLElement | undefined => {
   const selector = side === "give"
-    ? "[id='player-card-inventory']" + (mode === "bank" ? ", [class*='bankTradeAvailableCards-']" : "")
-    : "[class*='wantedCardSelectorContainer-']" + (mode === "bank" ? ", [class*='bankTradeReceiveCards-']" : "");
+    ? "[id='player-card-inventory']" + (mode === "bank" ? ", [class*='bankTradeAvailableCards-' i]" : "")
+    : "[class*='wantedCardSelectorContainer-' i]" + (mode === "bank" ? ", [class*='bankTradeReceiveCards-' i]" : "");
   // Colonist can retain an outgoing animated tree while mounting the current
   // trade tree. IDs/classes are therefore not guaranteed to identify the
   // first DOM node. Resolve the first *visible resource control* across all
@@ -906,7 +906,7 @@ const findTradePartnerControl = (
     ...offer.querySelectorAll<HTMLImageElement>("img[src*='icon_check']"),
   ]
     .map((image) =>
-      image.closest<HTMLElement>("[class*='tradeButton-']"),
+      image.closest<HTMLElement>("[class*='tradeButton-' i]"),
     )
     .filter((element): element is HTMLElement =>
       Boolean(
@@ -981,13 +981,13 @@ const selectedDiscardResource = (
     .map(
       (element) =>
         element.closest<HTMLElement>(
-          "[data-card-enum], [class*='cardStackContainer-'], [class*='cardContainer-'], button, [role='button']",
+          "[data-card-enum], [class*='cardStackContainer-' i], [class*='cardContainer-' i], button, [role='button']",
         ) ?? element,
     )
     .filter((element, index, all) => all.indexOf(element) === index);
   const explicitCounts = selected.flatMap((element) => {
     const badge = element.querySelector<HTMLElement>(
-      "[class*='countBadge-'], [class*='cardCount-'], [class*='amount-']",
+      "[class*='countBadge-' i], [class*='cardCount-' i], [class*='amount-']",
     );
     const count = Number.parseInt(
       normalized(badge?.textContent ?? "").match(/\d+/u)?.[0] ?? "",
@@ -1076,7 +1076,7 @@ const findConfirmationControl = (
   root: ParentNode = document,
 ): HTMLElement | undefined => {
   const exact = [
-    ...root.querySelectorAll<HTMLElement>("[class*='confirmButton-']"),
+    ...root.querySelectorAll<HTMLElement>("[class*='confirmButton-' i]"),
   ].filter(visible).at(-1);
   return (
     exact ??
@@ -1726,12 +1726,12 @@ const selectedTradeCards = (): HTMLElement[] =>
     ...new Set(
       [
         ...document.querySelectorAll<HTMLImageElement>(
-          "[class*='proposalWantedHalfContainer-'] img[src*='card_'], [class*='proposalOfferedHalfContainer-'] img[src*='card_']",
+          "[class*='proposalWantedHalfContainer-' i] img[src*='card_'], [class*='proposalOfferedHalfContainer-' i] img[src*='card_']",
         ),
       ]
         .filter((image) => {
           const root = image.closest<HTMLElement>(
-            "[class*='proposalWantedHalfContainer-'], [class*='proposalOfferedHalfContainer-']",
+            "[class*='proposalWantedHalfContainer-' i], [class*='proposalOfferedHalfContainer-' i]",
           );
           return Boolean(root && rendered(root) && visible(image));
         })
@@ -1751,8 +1751,8 @@ const proposalResourceCount = (
 ): number => {
   const selector =
     side === "give"
-      ? "[class*='proposalOfferedHalfContainer-']"
-      : "[class*='proposalWantedHalfContainer-']";
+      ? "[class*='proposalOfferedHalfContainer-' i]"
+      : "[class*='proposalWantedHalfContainer-' i]";
   const counts = [...document.querySelectorAll<HTMLElement>(selector)]
     .filter(rendered)
     .map((root) => {
@@ -1762,12 +1762,12 @@ const proposalResourceCount = (
         )]
           .filter((element) => displayed(element) && resourceEvidence(element, resource))
           .map((element) => element.closest<HTMLElement>(
-            "[data-card-enum], [class*='cardContainer-'], button, [role='button']",
+            "[data-card-enum], [class*='cardContainer-' i], button, [role='button']",
           ) ?? element),
       );
       const badgeCounts = [...cards].flatMap((card) => {
         const badge = card.querySelector<HTMLElement>(
-          "[class*='countBadge-'], [class*='cardCount-'], [class*='amount-']",
+          "[class*='countBadge-' i], [class*='cardCount-' i], [class*='amount-']",
         );
         if (!badge) return [];
         const count = Number.parseInt(normalized(badge.textContent ?? ""), 10);
@@ -2036,7 +2036,7 @@ const developmentWorkflow = (
 ): WorkflowStep[] => {
   const actionPanelOpen = (): boolean =>
     modalRoots().some((root) =>
-      Boolean(root.querySelector("[class*='confirmButton-']")),
+      Boolean(root.querySelector("[class*='confirmButton-' i]")),
     );
   const steps: WorkflowStep[] = [
     {

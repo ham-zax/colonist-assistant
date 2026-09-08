@@ -4,7 +4,7 @@ use colonist_catan_search::{
     ActionStats, BeliefParticle, CudaExactEvaluator, CudaSimEngine, CudaSimError,
     CudaSimRootActionStats, DEVELOPMENT_EXACT_FAMILIES, ExactActionFamily, ExactDecisionResult,
     HARD_VETO_POSTERIOR, IntroducedRoadFragility, RoadCutContinuationAssessment, SearchReport,
-    SearchStatistics, StrategyPolicy, actor_proposal_actions, admit_promoted_roots,
+    SearchStatistics, ShadowInputs, StrategyPolicy, actor_proposal_actions, admit_promoted_roots,
     apply_closeout_root_impacts, belief_domestic_trade_assessment,
     belief_road_cut_continuation_assessment, belief_root_closeout_plans,
     compute_spatial_root_impacts, exact_family_for_action, forced_loss_weight,
@@ -1689,13 +1689,15 @@ impl NativeGpuSearchEngine {
         let strategy_shadow = shadow_strategy_diagnostics(
             &particles,
             actor,
-            &ranked_actions,
-            &retained_actions,
             &promoted_spatial_actions,
-            Some(&chosen_root.action),
-            1,
-            1,
-            decision_clock.remaining_ms() == 0,
+            ShadowInputs {
+                ranked_actions: &ranked_actions,
+                retained_actions: &retained_actions,
+                search_winner: Some(&chosen_root.action),
+                requested_depth: 1,
+                completed_depth: 1,
+                deadline_reached: decision_clock.remaining_ms() == 0,
+            },
         )
         .map(strategy_shadow_output);
         let mut root_provenance = RootProvenanceOutput {

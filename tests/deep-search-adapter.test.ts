@@ -356,14 +356,27 @@ describe("deep-search state adapter", () => {
     built.request.effort = {
       ...built.request.effort!,
       decisionTimeMs: 0,
+      tactical: {
+        maxDepth: 4,
+        nodeBudget: 100,
+      },
       cpu: {
         ...built.request.effort!.cpu,
+        maxDepth: 2,
+        rootCap: 4,
+        nodesPerDepthWave: 1_000,
         evidenceEscalationMs: 0,
       },
     };
     const first = analyzeWasm(built.request);
     const second = analyzeWasm(built.request);
 
+    expect(first.effectiveEffort.decisionTimeMs).toBe(0);
+    expect(first.effectiveEffort.cpu).toMatchObject({
+      maxDepth: 2,
+      rootCap: 4,
+      nodesPerDepthWave: 1_000,
+    });
     expect(first.stochasticModel).toBe(MREF_COLONIST_LINKED_2024_V1);
     expect(first.beliefPolicy).toBe(PUBLIC_HISTORY_BELIEF_V1);
     expect(first.diceHistoryProvenance).toBe("complete-from-first-gameplay-roll");

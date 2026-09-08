@@ -1107,3 +1107,220 @@ fn late_two_player_opening_budgets_are_equal_and_exhaust_the_budget() {
     let maximum = budgets.iter().copied().max().unwrap();
     assert!(maximum - minimum <= 1, "budgets={budgets:?}");
 }
+
+// Recorded public grain8695 geometry uses the same canonical labels as the
+// existing fixtures. No hidden cards or inferred player trades are supplied.
+fn grain8695_state() -> GameState {
+    use Resource::*;
+    let hexes = [
+        ((0, -2), Some(Brick), 12),
+        ((-1, -1), Some(Lumber), 9),
+        ((-2, 0), None, 0),
+        ((-2, 1), Some(Ore), 10),
+        ((-2, 2), Some(Lumber), 8),
+        ((-1, 2), Some(Brick), 3),
+        ((0, 2), Some(Brick), 6),
+        ((1, 1), Some(Wool), 2),
+        ((2, 0), Some(Lumber), 5),
+        ((2, -1), Some(Wool), 8),
+        ((2, -2), Some(Grain), 4),
+        ((1, -2), Some(Grain), 11),
+        ((0, -1), Some(Wool), 6),
+        ((-1, 0), Some(Grain), 5),
+        ((-1, 1), Some(Ore), 4),
+        ((0, 1), Some(Wool), 9),
+        ((1, 0), Some(Ore), 10),
+        ((1, -1), Some(Grain), 3),
+        ((0, 0), Some(Lumber), 11),
+    ];
+    let ports = [
+        ("e:0,-2,0", Port::Resource(Grain)),
+        ("e:-1,-1,1", Port::Resource(Brick)),
+        ("e:-2,1,1", Port::Resource(Ore)),
+        ("e:-2,2,2", Port::Generic),
+        ("e:-1,3,0", Port::Resource(Wool)),
+        ("e:1,2,0", Port::Resource(Lumber)),
+        ("e:3,0,1", Port::Generic),
+        ("e:3,-2,2", Port::Generic),
+        ("e:2,-3,2", Port::Generic),
+    ];
+    recorded_state_with_rules(&hexes, &ports, 0, 2, 15)
+}
+
+#[test]
+fn grain8695_final_settlement_matches_exhaustive_endpoints_with_either_trade_policy() {
+    let mut state = grain8695_state();
+    place_settlement(&mut state, "v:-1,1,1");
+    place_road(&mut state, "e:-1,1,2");
+    place_settlement(&mut state, "v:0,1,1");
+    place_road(&mut state, "e:0,1,2");
+    place_settlement(&mut state, "v:-1,0,0");
+    place_road(&mut state, "e:0,-1,2");
+    assert_setup_turn(&state, 0, 3);
+    let mut policy_results = Vec::new();
+    for disabled in [0, 1] {
+        state.domestic_trade_disabled = disabled;
+        let report = solve_opening(&state, 0, live_opening_config());
+        assert!(report.complete);
+        assert!(!report.deadline_reached);
+        assert_eq!(report.actions.len(), state.legal_actions().len());
+        let mut best = f32::NEG_INFINITY;
+        for settlement in state.legal_actions() {
+            let mut placed = state.clone();
+            placed.apply(&settlement).unwrap();
+            let mut endpoint_best = f32::NEG_INFINITY;
+            for road in placed.legal_actions() {
+                let mut endpoint = placed.clone();
+                endpoint.apply(&road).unwrap();
+                assert_eq!(endpoint.phase, Phase::PreRoll);
+                let value = super::opening_position_value(&endpoint, 0)
+                    - super::opening_position_value(&endpoint, 1);
+                endpoint_best = endpoint_best.max(value);
+            }
+            let candidate = report
+                .actions
+                .iter()
+                .find(|c| c.action == settlement)
+                .unwrap();
+            assert!(candidate.authoritative && candidate.endpoint_complete);
+            assert!((candidate.value - endpoint_best).abs() < 1e-5);
+            best = best.max(endpoint_best);
+        }
+        let chosen = report.chosen.as_ref().unwrap();
+        assert!((candidate_value(&report, chosen) - best).abs() < 1e-5);
+        let evidence = report
+            .actions
+            .iter()
+            .find(|c| &c.action == chosen)
+            .unwrap()
+            .evidence
+            .unwrap();
+        assert_eq!(evidence.starting_hand, [0, 1, 1, 1, 0]);
+        assert_eq!(evidence.production_pips, [5.0, 3.0, 5.0, 2.0, 3.0]);
+        assert_eq!(evidence.maritime_ratios, [4; 5]);
+        policy_results.push((chosen.clone(), best));
+    }
+    // Enabling offers supplies no guaranteed counterparty or extra starting cards.
+    assert_eq!(policy_results[0], policy_results[1]);
+}
+// Research-only comparison. It cannot change the production opening policy.
+// Both arms retain the same top-four policy candidates and a 100,000 transition
+// allowance. Count actual work separately; a cheaper arm need not burn its cap.
+#[test]
+#[ignore = "bounded opponent-portfolio experiment; run explicitly with --ignored --nocapture"]
+fn recorded_opponent_portfolio_experiment() {
+    fn continue_actor(
+        state: &GameState,
+        actor: u8,
+        portfolio: bool,
+        work: &mut u32,
+    ) -> (GameState, f32) {
+        if state.actor() != actor
+            || !matches!(
+                state.phase,
+                Phase::SetupSettlement | Phase::SetupRoad { .. }
+            )
+        {
+            // Compare at completed setup, after the unchanged production
+            // policy has selected the final own settlement and anchored road.
+            let reply = solve_opening(state, state.actor(), live_opening_config());
+            *work += reply.nodes;
+            assert!(
+                *work <= 100_000,
+                "experiment exhausted its transition allowance"
+            );
+            let endpoint = reply
+                .actions
+                .iter()
+                .find(|c| Some(&c.action) == reply.chosen.as_ref())
+                .unwrap()
+                .evidence
+                .unwrap();
+            return (state.clone(), endpoint.rival_value);
+        }
+        let ranked = crate::policy::normalize_priors(state, &state.legal_actions(), actor);
+        let mut best = None;
+        for (action, _) in ranked.into_iter().take(4) {
+            assert!(
+                *work < 100_000,
+                "experiment exhausted its transition allowance"
+            );
+            *work += 1;
+            let mut next = state.clone();
+            next.apply(&action).unwrap();
+            let candidate = if portfolio {
+                continue_actor(&next, actor, true, work)
+            } else {
+                let value = super::opening_position_value(&next, actor);
+                (next, value)
+            };
+            if best.as_ref().is_none_or(|(_, value)| candidate.1 > *value) {
+                best = Some(candidate);
+            }
+        }
+        let (next, value) = best.expect("setup has a legal continuation");
+        if portfolio {
+            (next, value)
+        } else {
+            continue_actor(&next, actor, false, work)
+        }
+    }
+    for (name, initial) in [
+        ("grain8695", grain8695_state()),
+        (
+            "hand2325",
+            recorded_state_with_rules(&HAND2325_HEXES, &HAND2325_PORTS, 0, 2, 15),
+        ),
+        (
+            "trade5301",
+            recorded_state_with_rules(&TRADE5301_HEXES, &TRADE5301_PORTS, 0, 2, 15),
+        ),
+        (
+            "town1088",
+            recorded_state_with_rules(&TOWN1088_HEXES, &TOWN1088_PORTS, 0, 2, 15),
+        ),
+        (
+            "task394",
+            recorded_state_with_rules(&TASK394_HEXES, &TASK394_PORTS, 0, 2, 15),
+        ),
+    ] {
+        for trades in [false, true] {
+            let mut state = initial.clone();
+            state.domestic_trade_disabled = u8::from(!trades);
+            // Select our unchanged production opening once for both arms.
+            for _ in 0..2 {
+                let report = solve_opening(&state, 0, live_opening_config());
+                state.apply(&report.chosen.unwrap()).unwrap();
+            }
+            assert_eq!(state.actor(), 1);
+            assert_eq!(state.setup_step, 1);
+            for portfolio in [false, true] {
+                let mut work = 0;
+                let (opponent_setup, opponent_value) =
+                    continue_actor(&state, 1, portfolio, &mut work);
+                assert_eq!(opponent_setup.actor(), 0);
+                assert_eq!(opponent_setup.setup_step, 3);
+                assert_eq!(opponent_setup.phase, Phase::SetupSettlement);
+                let positions = opponent_setup
+                    .buildings
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, b)| b.is_some_and(|b| b.player() == 1))
+                    .map(|(v, _)| VERTEX_LABELS[v])
+                    .collect::<Vec<_>>();
+                let report = solve_opening(&opponent_setup, 0, live_opening_config());
+                let evidence = report
+                    .actions
+                    .iter()
+                    .find(|c| Some(&c.action) == report.chosen.as_ref())
+                    .unwrap()
+                    .evidence
+                    .unwrap();
+                eprintln!(
+                    "PORTFOLIO board={name} trades={trades} portfolio={portfolio} work={work} opponent_score={opponent_value:.6} endpoint_own={:.6} endpoint_rival={:.6} positions={positions:?}",
+                    evidence.own_value, evidence.rival_value
+                );
+            }
+        }
+    }
+}

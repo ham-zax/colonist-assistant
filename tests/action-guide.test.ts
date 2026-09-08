@@ -1545,19 +1545,20 @@ describe("action guide autopilot", () => {
     expect(cancelClick).toHaveBeenCalledOnce();
   });
 
-  it("opens and completes a recommended counteroffer", async () => {
+  it.each([false, true])("completes a counteroffer with lowercase classes=%s", async (lowercase) => {
+    const css = (name: string): string => lowercase ? name.toLowerCase() : name;
     const wrapper = document.createElement("div");
-    wrapper.className = "gameTradeOffersWrapper-fixture";
+    wrapper.className = css("gameTradeOffersWrapper-fixture");
     const offer = document.createElement("div");
-    offer.className = "tradeContainer-fixture";
+    offer.className = css("tradeContainer-fixture");
     const counter = document.createElement("button");
-    counter.className = "tradeButton-fixture";
+    counter.className = css("tradeButton-fixture");
     counter.setAttribute("aria-label", "Counter trade");
     const decline = document.createElement("button");
-    decline.className = "tradeButton-fixture";
+    decline.className = css("tradeButton-fixture");
     decline.setAttribute("aria-label", "Decline trade");
     const accept = document.createElement("button");
-    accept.className = "tradeButton-fixture";
+    accept.className = css("tradeButton-fixture");
     accept.setAttribute("aria-label", "Accept trade");
     const clicks: string[] = [];
     counter.addEventListener("click", () => {
@@ -1565,18 +1566,18 @@ describe("action guide autopilot", () => {
       const inventory = document.createElement("div");
       inventory.id = "player-card-inventory";
       inventory.innerHTML =
-        '<button class="card"><img src="card_brick.svg"></button>';
+        `<div class="${css("cardContainer-fixture")}"><img src="card_brick.svg"></div>`;
       const offeredProposal = document.createElement("div");
-      offeredProposal.className = "proposalOfferedHalfContainer-fixture";
+      offeredProposal.className = css("proposalOfferedHalfContainer-fixture");
       const wantedProposal = document.createElement("div");
-      wantedProposal.className = "proposalWantedHalfContainer-fixture";
-      inventory.querySelector("button")?.addEventListener("click", () => {
+      wantedProposal.className = css("proposalWantedHalfContainer-fixture");
+      inventory.querySelector("div")?.addEventListener("click", () => {
         clicks.push("give-brick");
         offeredProposal.innerHTML =
           '<button data-card-enum="2"><img src="card_brick.svg"></button>';
       });
       const wanted = document.createElement("div");
-      wanted.className = "wantedCardSelectorContainer-fixture";
+      wanted.className = css("wantedCardSelectorContainer-fixture");
       wanted.innerHTML =
         '<button class="card"><img src="card_lumber.svg"></button>';
       wanted.querySelector("button")?.addEventListener("click", () => {

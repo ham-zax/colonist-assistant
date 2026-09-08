@@ -367,6 +367,7 @@ export class AssistantOverlay {
   private lastRejectedDomesticTrade?: DomesticTradeState;
   private readonly rootTradeActionExclusions: RootTradeActionExclusion[] = [];
   private readonly failedTradeActions = new Set<string>();
+  private readonly unavailableTradeControls = new Set<string>();
   private readonly completedIncomingTradeIds = new Set<string>();
   private readonly outgoingTradeSeenAt = new Map<string, number>();
   private readonly outgoingTradeWatchdogs = new Map<string, number>();
@@ -507,6 +508,7 @@ export class AssistantOverlay {
       this.lastRejectedDomesticTrade = undefined;
       this.rootTradeActionExclusions.length = 0;
       this.failedTradeActions.clear();
+      this.unavailableTradeControls.clear();
       this.completedIncomingTradeIds.clear();
       this.outgoingTradeSeenAt.clear();
       this.tradeOfferSnapshots.clear();
@@ -522,6 +524,7 @@ export class AssistantOverlay {
         this.lastRejectedDomesticTrade = undefined;
         this.rootTradeActionExclusions.length = 0;
         this.failedTradeActions.clear();
+        this.unavailableTradeControls.clear();
         this.completedIncomingTradeIds.clear();
         this.outgoingTradeSeenAt.clear();
         this.tradeOfferSnapshots.clear();
@@ -674,6 +677,7 @@ export class AssistantOverlay {
       this.lastRejectedDomesticTrade = undefined;
       this.rootTradeActionExclusions.length = 0;
       this.failedTradeActions.clear();
+      this.unavailableTradeControls.clear();
       this.completedIncomingTradeIds.clear();
       this.outgoingTradeSeenAt.clear();
       this.clearOutgoingTradeWatchdogs();
@@ -973,6 +977,7 @@ export class AssistantOverlay {
     this.lastRejectedDomesticTrade = undefined;
     this.rootTradeActionExclusions.length = 0;
     this.failedTradeActions.clear();
+    this.unavailableTradeControls.clear();
     this.completedIncomingTradeIds.clear();
     this.outgoingTradeSeenAt.clear();
     this.tradeOfferSnapshots.clear();
@@ -1595,7 +1600,10 @@ export class AssistantOverlay {
       )
         ? this.renderBoardMarker(spatial.action, spatial.recommendation)
         : "";
-    const advice = this.renderAdvice(state, spatial, report, next);
+    const executionNotice = next && this.unavailableTradeControls.has(next.signature)
+      ? '<p class="why" role="status">Automatic trade paused: the required Colonist control was not found. You can complete this step manually.</p>'
+      : "";
+    const advice = executionNotice + this.renderAdvice(state, spatial, report, next);
     const panel = this.activeView === "settings"
       ? this.renderSettings()
       : `<div class="overview">
@@ -1841,7 +1849,7 @@ export class AssistantOverlay {
       highlight: this.settings.highlightNextAction,
       autonomous: autonomousExecutionAllowed(
         this.settings.autonomousPrivateGames,
-      ),
+      ) && !this.unavailableTradeControls.has(nextSignature),
       autopilotDelayMs: this.settings.autopilotDelaySeconds * 1_000,
       validate: () =>
         Boolean(next && nextSignature) &&
@@ -1913,6 +1921,19 @@ export class AssistantOverlay {
                 }
               : undefined,
           );
+        }
+        if (
+          !succeeded && next &&
+          (next.kind === "trade" || next.kind === "trade-builder" ||
+            next.kind === "trade-partner" || next.kind === "trade-cancel") &&
+          (reason?.startsWith("Workflow control not found:") ||
+            reason === "Recommended Colonist control was not present after bounded retries")
+        ) {
+          // Missing UI controls do not invalidate the search or establish that
+          // the trade is bad. Keep its advice, but stop repeating this action.
+          this.unavailableTradeControls.add(next.signature);
+          this.render();
+          return;
         }
         if (!succeeded && next?.kind === "trade-builder") {
           if (strategicTradeFailure) this.rememberRootTradeFailure();

@@ -39,6 +39,17 @@ Production browser decisions currently remain on CPU/WASM `deep-maxn-v14`. Compa
 
 For offline CPU/exact-MaxN parity, explicit `effort.decisionTimeMs: 0` (or legacy `timeBudgetMs: 0` when no effort object is supplied) disables the wall-clock deadline and evidence escalation. Node and depth limits remain active, and native cancellation remains supported. Positive decision times retain the 50–10,000 ms normalization; omitted effort retains the existing defaults. Live requests supply positive budgets. Experimental rollout and other modes retain their positive time floor. Parity tooling must assert the returned zero decision time and matching effective effort before comparing fixed work.
 
+For timed MaxN, the search budget is a cooperative target, not a promise of an
+exact elapsed-time ceiling. On 2026-09-08 Hamza explicitly prioritized robust,
+fully arbitrated results over discarding completed work at that target. Root
+preparation and the complete one-ply table may overrun it; final safety/exact-family
+arbitration must still finish and report `deadlineReached=true` if the total
+target expired. Explicit cancellation remains authoritative. The browser's
+separate 12-second safety limit, supersession and board-signature checks still
+reject late/stale work. This does not increase search depth/node budgets or
+promote a larger production time profile. Requests that never establish valid
+decision evidence can still fail closed.
+
 Exact CUDA accepts the same M0/Mref posterior input, root exclusions, trade rules and explicit `adaptive-candidate-admission-v1` identity as CPU MaxN. The rollout parser still rejects the adaptive strategy policy rather than silently pretending support. An old rollout-only companion cannot satisfy the protocol-7 exact capability check.
 
 ## Mechanical parity versus strategic parity

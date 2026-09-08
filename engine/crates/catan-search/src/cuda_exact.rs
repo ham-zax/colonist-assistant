@@ -391,7 +391,7 @@ impl CudaExactEvaluator {
         }
         for (index, (state, values)) in states
             .iter()
-            .zip(self.output_host.chunks_exact(MAX_PLAYERS))
+            .zip(self.output_host.as_chunks::<MAX_PLAYERS>().0)
             .enumerate()
         {
             for (player, value) in values.iter().copied().enumerate() {

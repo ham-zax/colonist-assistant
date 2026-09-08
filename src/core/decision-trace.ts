@@ -357,7 +357,21 @@ export class DecisionTraceRecorder {
     this.supersedePending(stateHash, startedAt);
     const existing = this.traces.get(stateHash);
     if (existing) {
-      if (existing.deepStatus === "pending") return;
+      if (existing.deepStatus === "pending") {
+        if (context?.replayRequestContext && !existing.replayRequestContext) {
+          existing.replayRequestContext = {
+            representation: "reconstructed-request-v1",
+            playerTradesEnabled: context.replayRequestContext.playerTradesEnabled,
+            stochastic: structuredClone(context.replayRequestContext.stochastic),
+            searchConstraints: structuredClone(context.replayRequestContext.searchConstraints),
+            ...(context.replayRequestContext.strategyPolicy
+              ? { strategyPolicy: context.replayRequestContext.strategyPolicy }
+              : {}),
+          };
+          this.schedulePersist();
+        }
+        return;
+      }
       existing.deepRequestStartedAt = startedAt;
       existing.deepRequestFinishedAt = undefined;
       existing.deepLatencyMs = undefined;

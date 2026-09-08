@@ -10,7 +10,7 @@ The candidate was developed from `d77935fda984e3006b8a8ad9d65eb58a6d162eaf`. Raw
 
 ## Gate summary
 
-The PASS entries below describe the recorded v13 implementation session, not acceptance of the current v14 request/search orchestration. The v14 review found replay effort normalization and untimed native parity request defects. Their repairs require focused verification; older parity artifacts must not be relabeled as v14 results. Packaged execution and strength gates remain unfulfilled.
+The historical artifact rows below describe the recorded v13 implementation session. Focused v14 replay/native repair verification is complete, as recorded in “Focused v14 repair verification” below: exact M0+trades, Mref and M2 checks passed, including cancellation/recovery and invalid-evidence rejection. This is not full release acceptance. Current-revision matched performance, packaged execution and strength gates remain unfulfilled; older artifacts must not be relabeled as v14 results.
 
 | Gate | Evidence | Result |
 | --- | --- | --- |
@@ -29,6 +29,87 @@ The PASS entries below describe the recorded v13 implementation session, not acc
 | Product strength | held-out matched complete-game campaign for the actual production route | NOT RUN / NOT CLAIMED |
 
 ## Correctness findings that changed the implementation
+
+### T4 integration and cooperative cutoff policy — 2026-09-08
+
+Hamza explicitly prioritized robust, fully arbitrated results over the engine's
+wall-clock search target. Shared CPU/exact-MaxN finalization now preserves a
+completed report through safety/exact-family arbitration after that target
+expires. It still honors explicit cancellation during and after arbitration,
+and sets `deadlineReached` when the total engine target has expired. The
+browser's separate 12-second safety limit and stale-result rejection remain
+authoritative. Untimed fixed-work settings and strategic budgets are unchanged.
+
+The failing 50 ms fixture spent 278 ms in root scoring, 24 ms in safety
+preparation, 5 ms in the one-ply floor and no time in deeper waves in one local
+diagnostic probe. Thus finalization headroom alone could not satisfy an exact
+50 ms ceiling. The temporary instrumentation was removed before rebuilding.
+
+On `401956f425b3af68e4e7e57060d6f01b6c74d2fb` plus the uncommitted T1/T3/T4
+repairs, the strict compiler check including the otherwise-excluded replay
+script passed. The full TypeScript suite passed 416/416 tests after repairing
+the protocol assertion, reducing the untimed Mref fixture's work, and supplying
+the stale-Mref fixture's known board roll count and matching reconciliation
+error expectation. Its late-result rejection assertions remain intact. The
+adapter file passed 30/30 tests, including the formerly failing cooperative
+cutoff case (about 340 ms) and untimed Mref case (about 1.1 seconds).
+
+`npm run build` succeeded, producing `main@401956f425b3+dirty` at
+`2026-09-08T02:35:20.837Z`. The packaged WASM SHA-256 is
+`f631e81d82710fa51a4d907a73e1e64d75a41cde4de1ff716d32649529e1327d`.
+These results do not constitute full Rust, CUDA, browser, or strength acceptance.
+
+The two previously throwing replay fixtures, `hidden-dev-seed-stability` and
+`f14-monopoly-posterior`, completed against that WASM with the existing task14
+proxy gate passing and no material task15 omission reported. This was a bounded
+two-fixture replay, not a new full-corpus or canonical-request-lane result.
+
+`npm run verify:rust` subsequently passed, including Clippy. The seed-22
+fixture now verifies the observed floor/wave agreement and absence of unnecessary
+escalation; seed 25 retains the positive escalation case with its disagreement
+precondition asserted. Mechanical Clippy repairs reuse existing configuration
+and diagnostic-input structs. Full release acceptance remains incomplete.
+
+### road4311 user-provided live logs — 2026-09-08
+
+Evidence: `colonist-evidence-road4311-1-2026-09-08T09-28-36-648Z.txt` and
+`colonist-investigation-road4311-1-2026-09-08T09-33-51-164Z.txt`, retained locally
+in the user's Downloads folder, not committed. Build: the 02:35:20 artifact above.
+The game is a four-player bot game; autopilot was enabled in the evidence export.
+
+- 27 search attempts: 23 completed, four superseded. Both settlement placements
+  and both road placements report successful execution. Superseded decisions
+  have no recorded execution. This is bounded evidence, not exhaustive stale-action proof.
+- Trade execution failed at counteroffer/decline control lookup and at offering
+  grain. D15 recorded eight completed searches for one decision. Missing-control
+  callbacks reset search state without new strategic evidence.
+- Local repairs accept casing variations in the existing semantic class-prefix
+  selectors, preserving resource/offer matching and disabled-control checks.
+  This is selector hardening, not a proven explanation of D15: its recorded
+  evidence already contained a `foreground-disabled` control.
+  Missing trade controls retain completed advice and pause automatic execution
+  for the failed signature, with a visible manual-completion notice. They do not
+  create strategic exclusions. Existing trade-memory scope changes clear the pause.
+- Focused action-guide, overlay, and duplicate-history tests passed 88/88;
+  type checking passed. A lowercase-class counteroffer regression and the
+  missing-control search-retention regressions failed before their repairs.
+- Replaying the exact exported dice history through the live constructor yields
+  three canonical rolls (7, 10, 10) from six raw board/log observations. A changed
+  board total is rejected. Raw-source uncertainty in the export is compatible
+  with validated canonical decision evidence; no dice-engine repair was made.
+- The separate pasted `tile5854` error has one observed player and a four-point
+  victory target. These exports do not contain that game. Tutorial versus
+  incomplete roster is unresolved; do not infer a four-player parser failure.
+
+The repaired extension was rebuilt successfully at `2026-09-08T11:40:37.905Z`
+(`main@401956f425b3+dirty`). Its packaged WASM SHA-256 is
+`e2f228f706ab9779039714d75419dd727fda9520e47007573ce3a23183f90b90`.
+This includes the previously verified Rust/Clippy changes; the earlier live
+logs and replay timings remain tied to the 02:35:20 artifact.
+
+The repaired trade paths still require a fresh user-run live check. Browser
+control is prohibited by the user's current instruction; verification uses local
+fixtures and user-provided exports. This does not close T5 or prove stronger play.
 
 ### Focused v14 repair verification — 2026-09-08
 
@@ -95,3 +176,21 @@ Record per-root completed work, future-self reach mass, cutoffs, latency and mat
 **no evidence of improvement**
 
 This candidate improves reproducibility, backend correctness, routing discipline and evidence quality. It does not establish a playing-strength gain, a live win-rate increase, or a reason to promote M2, learned models, rollout GPU, or a larger production time budget.
+
+
+## Grain8695 follow-up — 2026-09-08 14:46 UTC
+
+Three live-evidence defects are locally repaired: delayed public board rolls in human games, start-banner/first-settlement hydration ordering, and non-mutating lifecycle notices classified as missing card events. Focused TypeScript checks passed (39 tests, followed by a strengthened third-roll integration case); opening Rust tests passed 30/30; type check and extension build passed. Build: `main@401956f425b3+dirty · 2026-09-08T14:46:42.254Z`.
+
+Opening reproduction matches the recorded choices and node counts. Independent final-placement enumeration verifies the current evaluator's argmax with player trades enabled and disabled. This establishes implementation consistency, not stronger play or optimal opening quality. No opening scoring or GPU promotion change was made. See [the investigation ledger](OPENING_AND_LIVE_EVIDENCE_INVESTIGATION_2026-09-08.md) for opponent-model sensitivity, remaining quality work, and exact verification evidence. Overall stabilization is not newly marked complete by these results.
+
+
+## Direct trade-control review repair — 2026-09-08
+
+The missing-control pause now renders immediately from the failure callback for incoming trades, builders, partner confirmation, and cancellation. It retains completed advice and disables autonomous execution for the failed signature. Real executor timer regressions cover the direct-control paths without a manually injected failure or post-failure render; action-guide plus overlay tests passed 88/88, and type checking passed. This repairs a local UI-state publication defect, not the outstanding installed-artifact browser acceptance gate.
+
+## Current v14 exact performance smoke — in progress
+
+The current dirty v14 arena was rebuilt with CUDA exact support and run through the existing matched 3P/4P smoke protocol, seed 9100001, one block per lane, four threads, all-MaxN lineup, player trades disabled, maritime trades enabled, transition validation enabled. Raw temporary output: `/tmp/colonist-v14-exact-smoke-2026-09-08.json` and sibling `.checkpoints/` (report is written only after both lanes complete).
+
+3P checkpoint comparison passed with three completed games and zero cutoffs. Checkpoint engine times were CPU 175,902 ms and CUDA 115,829 ms (~1.52×), below the 2× requirement. Final harness timings and 4P disposition remain pending. No full campaign or strength claim is made, and production promotion stays disabled.

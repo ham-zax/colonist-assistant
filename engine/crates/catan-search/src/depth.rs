@@ -28,7 +28,7 @@ use crate::shared::{
     select_experimental_strategic_particles,
 };
 use crate::strategy::{
-    StrategyPolicy, StrategyShadowDiagnostics, admit_strategy_challengers,
+    ShadowInputs, StrategyPolicy, StrategyShadowDiagnostics, admit_strategy_challengers,
     finalize_strategy_diagnostics, shadow_strategy_diagnostics, strategy_diagnostics_for_admission,
 };
 use crate::threats::{
@@ -193,7 +193,6 @@ impl Default for BeliefSearchProvenance {
 fn attach_strategy_shadow(
     provenance: &mut BeliefSearchProvenance,
     particles: &[BeliefParticle],
-    actor: u8,
     ranked_actions: &[Action],
     searched_actions: &[Action],
     requested_depth: u8,
@@ -201,6 +200,9 @@ fn attach_strategy_shadow(
     deadline_reached: bool,
 ) {
     if provenance.strategy_shadow.is_none() {
+        let actor = particles
+            .first()
+            .map_or(0, |particle| particle.state.actor());
         let retained_actions = provenance
             .retained_roots
             .iter()
@@ -215,13 +217,15 @@ fn attach_strategy_shadow(
         provenance.strategy_shadow = shadow_strategy_diagnostics(
             particles,
             actor,
-            ranked_actions,
-            &retained_actions,
             &promoted_actions,
-            provenance.search_winner.as_ref(),
-            requested_depth,
-            completed_depth,
-            deadline_reached,
+            ShadowInputs {
+                ranked_actions,
+                retained_actions: &retained_actions,
+                search_winner: provenance.search_winner.as_ref(),
+                requested_depth,
+                completed_depth,
+                deadline_reached,
+            },
         );
     }
     if let Some(diagnostics) = provenance.strategy_shadow.as_mut() {
@@ -2359,7 +2363,6 @@ fn belief_search_backend(
     attach_strategy_shadow(
         &mut provenance,
         posterior,
-        observer,
         &strategy_ranked_actions,
         &strategy_search_actions,
         maximum_depth,
@@ -2841,36 +2844,28 @@ pub fn search_weighted_belief_maxn_iterative_timed_excluding(
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
     search_weighted_belief_maxn_iterative_timed_excluding_with_strategy_policy(
         particles,
-        depth,
-        branch_cap,
-        nodes_per_depth_wave,
-        time_budget_ms,
+        BeliefDepthConfig {
+            maximum_depth: depth,
+            branch_cap,
+            maximum_nodes: nodes_per_depth_wave,
+            time_budget_ms,
+            strategy_policy: StrategyPolicy::Baseline,
+            strategic_particle_limit: usize::MAX,
+        },
         evidence_escalation_ms,
-        StrategyPolicy::Baseline,
         root_exclusions,
     )
 }
 
 pub fn search_weighted_belief_maxn_iterative_timed_excluding_with_strategy_policy(
     particles: &[BeliefParticle],
-    depth: u8,
-    branch_cap: usize,
-    nodes_per_depth_wave: u32,
-    time_budget_ms: u32,
+    config: BeliefDepthConfig,
     evidence_escalation_ms: u32,
-    strategy_policy: StrategyPolicy,
     root_exclusions: &[Action],
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
     belief_search(
         particles,
-        BeliefDepthConfig {
-            maximum_depth: depth,
-            branch_cap,
-            maximum_nodes: nodes_per_depth_wave,
-            time_budget_ms,
-            strategy_policy,
-            strategic_particle_limit: usize::MAX,
-        },
+        config,
         false,
         root_exclusions,
         BeliefNodeBudgetMode::PerDepthWave,
@@ -3292,16 +3287,17 @@ fn cuda_release_state(pool: &mut Vec<GameState>, state: GameState) {
 }
 
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+type CudaBatchEvaluator<'a> = dyn FnMut(&[crate::CudaExactPackedState], &mut Vec<[f32; 4]>) -> Result<(), DepthBeliefError>
+    + 'a;
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
 struct CudaLinearBatch<'a> {
     packed: &'a mut Vec<crate::CudaExactPackedState>,
     lane_ids: &'a mut Vec<usize>,
     path_weights: &'a mut Vec<f32>,
     results: &'a mut Vec<[f32; 4]>,
     lanes: &'a mut Vec<CudaLinearLane>,
-    evaluate_batch: &'a mut dyn FnMut(
-        &[crate::CudaExactPackedState],
-        &mut Vec<[f32; 4]>,
-    ) -> Result<(), DepthBeliefError>,
+    evaluate_batch: &'a mut CudaBatchEvaluator<'a>,
     packing_nanos: u64,
     evaluation_nanos: u64,
     leaves_emitted: u64,
@@ -3341,7 +3337,7 @@ impl CudaLinearBatch<'_> {
         }
         let evaluation_started = std::time::Instant::now();
         self.results.clear();
-        (self.evaluate_batch)(&self.packed, self.results)?;
+        (self.evaluate_batch)(self.packed, self.results)?;
         self.flushes = self.flushes.saturating_add(1);
         self.evaluation_nanos = self.evaluation_nanos.saturating_add(
             evaluation_started
@@ -3363,8 +3359,8 @@ impl CudaLinearBatch<'_> {
                 .lanes
                 .get_mut(lane_id)
                 .expect("CUDA linear leaf must reference an existing lane");
-            for player in 0..4 {
-                lane.value[player] += value[player] * path_weight;
+            for (total, value) in lane.value.iter_mut().zip(value) {
+                *total += value * path_weight;
             }
         }
         self.packed.clear();
@@ -3769,10 +3765,7 @@ fn cuda_belief_search_with_batch(
     reference_maximum_nodes: u32,
     root_exclusions: &[Action],
     should_stop: &dyn Fn() -> Option<DepthBeliefError>,
-    evaluate_batch: &mut dyn FnMut(
-        &[crate::CudaExactPackedState],
-        &mut Vec<[f32; 4]>,
-    ) -> Result<(), DepthBeliefError>,
+    evaluate_batch: &mut CudaBatchEvaluator<'_>,
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
     let search_started = std::time::Instant::now();
     let config = config.normalized();
@@ -4337,7 +4330,6 @@ fn cuda_belief_search_with_batch(
                 policy_nanos = policy_nanos.saturating_add(searcher.policy_nanos);
                 budget_nanos = budget_nanos.saturating_add(searcher.budget_nanos);
                 apply_nanos = apply_nanos.saturating_add(searcher.apply_nanos);
-                drop(searcher);
                 cuda_release_state(states, next);
                 visit_result?;
                 nodes += searched_nodes;
@@ -4371,7 +4363,6 @@ fn cuda_belief_search_with_batch(
         let evaluation_nanos = batch.evaluation_nanos;
         let leaves_emitted = batch.leaves_emitted;
         let flushes = batch.flushes;
-        drop(batch);
         record_cuda_duration(
             &CUDA_HOST_PACKING_NANOS,
             std::time::Duration::from_nanos(packing_nanos),
@@ -4516,7 +4507,6 @@ fn cuda_belief_search_with_batch(
         attach_strategy_shadow(
             &mut provenance,
             posterior,
-            observer,
             &strategy_ranked_actions,
             &strategy_search_actions,
             maximum_depth,
@@ -4748,7 +4738,6 @@ fn cuda_belief_search_with_batch(
     attach_strategy_shadow(
         &mut provenance,
         posterior,
-        observer,
         &strategy_ranked_actions,
         &strategy_search_actions,
         maximum_depth,
@@ -4780,10 +4769,7 @@ fn cuda_belief_search_iterative_with_batch(
     config: BeliefDepthConfig,
     root_exclusions: &[Action],
     should_stop: &dyn Fn() -> Option<DepthBeliefError>,
-    evaluate_batch: &mut dyn FnMut(
-        &[crate::CudaExactPackedState],
-        &mut Vec<[f32; 4]>,
-    ) -> Result<(), DepthBeliefError>,
+    evaluate_batch: &mut CudaBatchEvaluator<'_>,
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
     let config = config.normalized();
     let reference_maximum_nodes = config.maximum_nodes;
@@ -5016,6 +5002,38 @@ pub fn search_weighted_belief_maxn_cuda_with_config_mutex_excluding(
     cuda_belief_search_mutex(evaluator, particles, config, root_exclusions)
 }
 
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+pub fn search_weighted_belief_maxn_cuda_iterative_controlled(
+    evaluator: &mut crate::CudaExactEvaluator,
+    particles: &[BeliefParticle],
+    config: BeliefDepthConfig,
+    evidence_escalation_ms: u32,
+    root_exclusions: &[Action],
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<BeliefDepthResult, DepthBeliefError> {
+    let first = particles.first().ok_or(DepthBeliefError::Empty)?;
+    evaluator
+        .prepare_topology(first.state.board.as_ref())
+        .map_err(|_| DepthBeliefError::CudaEvaluationFailed)?;
+    for particle in particles {
+        if !evaluator
+            .topology_matches(particle.state.board.as_ref())
+            .map_err(|_| DepthBeliefError::CudaEvaluationFailed)?
+        {
+            return Err(DepthBeliefError::CudaEvaluationFailed);
+        }
+    }
+    belief_search_backend(
+        particles,
+        config,
+        false,
+        root_exclusions,
+        BeliefNodeBudgetMode::PerDepthWave,
+        evidence_escalation_ms,
+        &mut BeliefBackend::Cuda(evaluator, should_cancel),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -5228,9 +5246,31 @@ mod tests {
         assert!(deep_work.cutoff_depth_counts.get(3).copied().unwrap_or(0) > 0);
     }
 
+    fn binary_preroll_floor_winner(state: &GameState, report: &super::BeliefDepthResult) -> Action {
+        assert_eq!(report.actions.len(), 2);
+        report
+            .actions
+            .iter()
+            .map(|candidate| {
+                let mut next = state.clone();
+                next.apply(&candidate.action).unwrap();
+                let mut value = super::evaluate_after_forced_chance(&next, 0);
+                apply_action_friction(&mut value, state, &candidate.action, state.actor());
+                (candidate.action.clone(), value[state.actor() as usize])
+            })
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+            .unwrap()
+            .0
+    }
+
     fn assert_saturated_escalation_resumes_iterative_depth(seed: u64) {
         let state = binary_preroll_fixture(seed);
         let shallow = run_binary_preroll(&state, 1, 8_000, 2_000, 0);
+        assert_ne!(
+            Some(binary_preroll_floor_winner(&state, &shallow)),
+            shallow.chosen,
+            "positive escalation fixture requires disagreement with the one-ply floor"
+        );
         let wider_shallow = run_binary_preroll(&state, 1, 24_000, 4_500, 0);
         assert_eq!(shallow.nodes, wider_shallow.nodes);
         assert_eq!(shallow.actions.len(), wider_shallow.actions.len());
@@ -5384,8 +5424,22 @@ mod tests {
     }
 
     #[test]
-    fn saturated_seed_22_escalation_resumes_iterative_depth() {
-        assert_saturated_escalation_resumes_iterative_depth(22);
+    fn saturated_seed_22_agreement_avoids_unnecessary_escalation() {
+        let state = binary_preroll_fixture(22);
+        let shallow = run_binary_preroll(&state, 1, 8_000, 2_000, 0);
+        assert_eq!(binary_preroll_floor_winner(&state, &shallow), Action::Roll);
+        assert_eq!(shallow.chosen, Some(Action::Roll));
+
+        let ordinary = run_binary_preroll(&state, 2, 8_000, 10_000, 0);
+        let with_reserve = run_binary_preroll(&state, 2, 8_000, 10_000, 2_500);
+        assert_eq!(with_reserve.chosen, ordinary.chosen);
+        assert_eq!(with_reserve.nodes, ordinary.nodes);
+        assert_eq!(with_reserve.depth, ordinary.depth);
+        assert!(with_reserve.depth >= 2);
+        let timings = with_reserve.stage_timings.as_ref().unwrap();
+        assert!(!timings.evidence_escalation_triggered);
+        assert!(!timings.evidence_escalation_completed);
+        assert_eq!(timings.evidence_escalation_nodes, 0);
     }
 
     #[test]
@@ -6480,36 +6534,4 @@ mod tests {
         .unwrap();
         assert_eq!(perfect.chosen, belief.chosen);
     }
-}
-
-#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
-pub fn search_weighted_belief_maxn_cuda_iterative_controlled(
-    evaluator: &mut crate::CudaExactEvaluator,
-    particles: &[BeliefParticle],
-    config: BeliefDepthConfig,
-    evidence_escalation_ms: u32,
-    root_exclusions: &[Action],
-    should_cancel: &dyn Fn() -> bool,
-) -> Result<BeliefDepthResult, DepthBeliefError> {
-    let first = particles.first().ok_or(DepthBeliefError::Empty)?;
-    evaluator
-        .prepare_topology(first.state.board.as_ref())
-        .map_err(|_| DepthBeliefError::CudaEvaluationFailed)?;
-    for particle in particles {
-        if !evaluator
-            .topology_matches(particle.state.board.as_ref())
-            .map_err(|_| DepthBeliefError::CudaEvaluationFailed)?
-        {
-            return Err(DepthBeliefError::CudaEvaluationFailed);
-        }
-    }
-    belief_search_backend(
-        particles,
-        config,
-        false,
-        root_exclusions,
-        BeliefNodeBudgetMode::PerDepthWave,
-        evidence_escalation_ms,
-        &mut BeliefBackend::Cuda(evaluator, should_cancel),
-    )
 }

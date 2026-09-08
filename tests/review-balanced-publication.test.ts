@@ -236,7 +236,7 @@ describe("independent win3576 publication review", () => {
     const { root, session } = await fixture();
     session.observeBoardDiceSnapshot(board(1, true, "Chapin7947", { lastRoll: 6 }));
     session.observeBoardDiceSnapshot(board(2, true, "hamzax", { lastRoll: 5 }));
-    // Human game's virtualizer attaches now. index.ts stops board roll capture.
+    // A sparse DOM suffix arrives before the next board publication.
     // Chapin's 9 cannot be ordinal 0 (independently observed as 6), so ordinal 2
     // is the only compatible placement under public count 3.
     await appendRoll(root, 2);
@@ -279,7 +279,7 @@ describe("independent win3576 publication review", () => {
     await appendRoll(root, 0);
     await appendRoll(root, 1);
     sendMessage.mockClear();
-    // index.ts does not call observeBoardDiceSnapshot for a mounted human log.
+    // Exercise the overlay guard independently of session board ingestion.
     overlay!.updateBoard(board(2, true, "hamzax", { lastRoll: 6, botOnlyGame: false }));
     await flush();
     expect(internals!.decisionAnalysis).toBeUndefined();

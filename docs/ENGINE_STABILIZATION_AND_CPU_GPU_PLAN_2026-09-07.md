@@ -6,6 +6,8 @@ Status: **v14 implementation candidate; acceptance incomplete and production GPU
 
 ## Decision to make
 
+For continuation assignments and review, use [Engine stabilization: bounded subagent tasks](ENGINE_STABILIZATION_SUBAGENT_TASKS_2026-09-08.md). It records the committed baseline, remaining acceptance work, file ownership, dependencies, verification, and stopping rules. The implementation appendix below records completed candidate work; do not redispatch Steps 1–7 as unimplemented features.
+
 Adopt **one production decision policy, with interchangeable verified computation backends**. Use repaired observation-safe weighted-belief MaxN as the initial reference, consistent with the repository's stated default. Keep `gpu-root-rollout` as an explicitly named experimental algorithm until it earns a separate promotion decision.
 
 This does not assert that MaxN currently plays well. It establishes one reproducible behavior to repair and measure. At the investigated checkout, the product's single `deep-search` setting selected different algorithms depending on companion availability, while the strength benchmarks and replay tools did not consistently reproduce that product behavior. The stabilization candidate removes that algorithm switch; remaining GPU work is backend promotion, not a second default strategist.
@@ -242,7 +244,7 @@ This appendix is retained as the implementation checklist. Steps 1–7 are imple
 4. Make native profile floors respect the overall limit. Report requested work, completed work, elapsed time, cutoff and cancellation separately.
 5. Exercise an escalating CPU decision, delayed native response, transport failure and board change while work is running. The client must reject stale results, and fallback must not restart a full independent allowance after the original deadline is exhausted.
 
-**Acceptance:** No authorized search schedule exceeds the client allowance by construction; cancellation and stale-result rejection work at the boundary. Select any later 4p budget from measured end-to-end latency and quality, not campaign throughput or nominal samples per root.
+**Acceptance (clarified by Hamza on 2026-09-08):** Engine search time is a cooperative target. Preserve completed results through required final arbitration even when root preparation or search overruns that target, and report the cutoff honestly. The separate client safety limit, cancellation and stale-result rejection remain authoritative; fallback cannot restart a full allowance. Do not claim an exact engine elapsed-time ceiling by construction. Select any later 4p budget from measured end-to-end latency and quality, not campaign throughput or nominal samples per root.
 
 ### Step 5 — Give the production extension one decision policy
 

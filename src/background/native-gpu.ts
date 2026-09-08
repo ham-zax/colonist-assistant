@@ -11,11 +11,13 @@ export const NATIVE_GPU_EXACT_ALGORITHM =
 export const NATIVE_GPU_STOCHASTIC_MODELS: readonly string[] = [
   M0_FAIR_IID_2D6_V1, MREF_COLONIST_LINKED_2024_V1,
 ];
+const canonicalNativeGpuStochasticModel = (model: string | undefined): string =>
+  model === "fair-iid-2d6" ? M0_FAIR_IID_2D6_V1 : model ?? M0_FAIR_IID_2D6_V1;
 export const nativeGpuSupportsStochasticModel = (
   model: string | undefined,
   advertisedModels: readonly string[] = NATIVE_GPU_STOCHASTIC_MODELS,
 ): boolean => {
-  const effective = model === "fair-iid-2d6" ? M0_FAIR_IID_2D6_V1 : model ?? M0_FAIR_IID_2D6_V1;
+  const effective = canonicalNativeGpuStochasticModel(model);
   return NATIVE_GPU_STOCHASTIC_MODELS.includes(effective) && advertisedModels.includes(effective);
 };
 const EXPECTED_ENGINE_REVISION = "deep-maxn-v14";
@@ -218,6 +220,7 @@ export class NativeGpuClient {
     }
     const requestedModel = (request as { stochastic?: { model?: string } } | null)
       ?.stochastic?.model;
+    const expectedStochasticModel = canonicalNativeGpuStochasticModel(requestedModel);
     if (!nativeGpuSupportsStochasticModel(requestedModel, status.stochasticModels)) {
       throw new NativeGpuCompatibilityError(
         `GPU companion does not support stochastic model ${requestedModel}`,
@@ -240,12 +243,14 @@ export class NativeGpuClient {
           `GPU companion returned algorithm ${result.response.algorithm}; expected ${expectedAlgorithm}`,
         );
       }
-      if (
-        requestedModel === MREF_COLONIST_LINKED_2024_V1 &&
-        result.response.stochasticModel !== MREF_COLONIST_LINKED_2024_V1
-      ) {
+      if (result.response.stochasticModel !== expectedStochasticModel) {
+        if (expectedStochasticModel === MREF_COLONIST_LINKED_2024_V1) {
+          throw new NativeGpuCompatibilityError(
+            "GPU companion returned mismatched Mref stochastic authority",
+          );
+        }
         throw new NativeGpuCompatibilityError(
-          "GPU companion returned mismatched Mref stochastic authority",
+          `GPU companion returned stochastic model ${String(result.response.stochasticModel)}; expected ${expectedStochasticModel}`,
         );
       }
       return result.response;

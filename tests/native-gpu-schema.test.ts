@@ -6,8 +6,8 @@ import {
 } from "../src/background/native-gpu";
 
 describe("native GPU compatibility contract", () => {
-  it("bumps only the state JSON schema for dice-mode metadata", () => {
-    expect(NATIVE_GPU_PROTOCOL_VERSION).toBe(6);
+  it("requires protocol 7 with state schema 3", () => {
+    expect(NATIVE_GPU_PROTOCOL_VERSION).toBe(7);
     expect(NATIVE_GPU_STATE_SCHEMA_VERSION).toBe(3);
   });
 });

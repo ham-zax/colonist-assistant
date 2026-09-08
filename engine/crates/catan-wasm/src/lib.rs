@@ -2316,12 +2316,8 @@ impl MaxnBackend<'_> {
         }
         search_weighted_belief_maxn_iterative_timed_excluding_with_strategy_policy(
             particles,
-            config.maximum_depth,
-            config.branch_cap,
-            config.maximum_nodes,
-            config.time_budget_ms,
+            config,
             escalation_ms,
-            config.strategy_policy,
             exclusions,
         )
         .map_err(|error| format!("MaxN {error:?}"))
@@ -2340,8 +2336,9 @@ fn analyze_maxn_request(
     let strategy_policy = StrategyPolicy::parse(request.strategy_policy.as_deref())?;
     let effort = request.resolved_effort(true);
     let evidence_reserve_ms = effort.cpu.evidence_escalation_ms.unwrap_or(0);
-    // Final arbitration consumes the same transaction allowance. A search
-    // cutoff must leave time to publish its last complete wave.
+    // Leave headroom for arbitration inside the cooperative search target.
+    // Root preparation can overrun that target; a complete report must still
+    // finish safety arbitration unless the caller explicitly cancels it.
     let finalization_reserve_ms = (effort.decision_time_ms / 10).min(100);
     let base_clock = DecisionClock::start(if effort.decision_time_ms == 0 {
         0
@@ -2483,22 +2480,20 @@ fn analyze_maxn_request(
         &root_exclusions,
         should_cancel,
     )?;
-    let (report, authority, diagnostics) = finalize_maxn_depth_report_controlled(
+    let (mut report, authority, diagnostics) = finalize_maxn_depth_report_controlled(
         &particles,
         &root_exclusions,
         tactical,
         effort,
         strategy_policy,
         depth_report,
-        || should_cancel() || hard_clock.remaining_ms() == 0,
+        should_cancel,
     )
-    .ok_or_else(|| {
-        if should_cancel() {
-            "MaxN cancelled during final arbitration".to_string()
-        } else {
-            "MaxN deadline expired during final arbitration".to_string()
-        }
-    })?;
+    .ok_or_else(|| "MaxN cancelled during final arbitration".to_string())?;
+    if should_cancel() {
+        return Err("MaxN cancelled during final arbitration".into());
+    }
+    report.statistics.deadline_reached |= hard_clock.remaining_ms() == 0;
     Ok(response(
         report,
         particles.len(),
@@ -2661,12 +2656,15 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
             } else {
                 search_weighted_belief_maxn_iterative_timed_excluding_with_strategy_policy(
                     &particles,
-                    depth,
-                    branch_cap,
-                    maximum_nodes,
-                    remaining_time_ms,
+                    colonist_catan_search::BeliefDepthConfig {
+                        maximum_depth: depth,
+                        branch_cap,
+                        maximum_nodes,
+                        time_budget_ms: remaining_time_ms,
+                        strategy_policy,
+                        strategic_particle_limit: usize::MAX,
+                    },
                     cpu_evidence_escalation_ms,
-                    strategy_policy,
                     &root_exclusions,
                 )
             }

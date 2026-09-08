@@ -171,13 +171,13 @@ fn proposal_status(
     StrategyProposalStatus::SearchedNotSelected
 }
 
-struct ShadowInputs<'a> {
-    ranked_actions: &'a [Action],
-    retained_actions: &'a [Action],
-    search_winner: Option<&'a Action>,
-    requested_depth: u8,
-    completed_depth: u8,
-    deadline_reached: bool,
+pub struct ShadowInputs<'a> {
+    pub ranked_actions: &'a [Action],
+    pub retained_actions: &'a [Action],
+    pub search_winner: Option<&'a Action>,
+    pub requested_depth: u8,
+    pub completed_depth: u8,
+    pub deadline_reached: bool,
 }
 
 fn evidence_tier(reason: StrategyProposalReason) -> StrategyEvidenceTier {
@@ -415,14 +415,17 @@ fn add_closeout_recovery(
 pub fn shadow_strategy_diagnostics(
     particles: &[BeliefParticle],
     actor: u8,
-    ranked_actions: &[Action],
-    retained_actions: &[Action],
     promoted_actions: &[Action],
-    search_winner: Option<&Action>,
-    requested_depth: u8,
-    completed_depth: u8,
-    deadline_reached: bool,
+    inputs: ShadowInputs<'_>,
 ) -> Option<StrategyShadowDiagnostics> {
+    let ShadowInputs {
+        ranked_actions,
+        retained_actions,
+        search_winner,
+        requested_depth,
+        completed_depth,
+        deadline_reached,
+    } = inputs;
     let first = particles.first()?;
     if actor >= first.state.board.num_players || actor as usize >= first.state.players.len() {
         return None;
@@ -513,13 +516,15 @@ pub(crate) fn strategy_diagnostics_for_admission(
     let mut diagnostics = shadow_strategy_diagnostics(
         particles,
         actor,
-        ranked_actions,
-        baseline_retained_actions,
         promoted_actions,
-        None,
-        0,
-        0,
-        false,
+        ShadowInputs {
+            ranked_actions,
+            retained_actions: baseline_retained_actions,
+            search_winner: None,
+            requested_depth: 0,
+            completed_depth: 0,
+            deadline_reached: false,
+        },
     )?;
     diagnostics.strategy_policy = Some(ADAPTIVE_CANDIDATE_ADMISSION_V1);
     diagnostics.admission.root_cap = Some(root_cap.max(1));
@@ -788,13 +793,15 @@ mod tests {
         let diagnostics = shadow_strategy_diagnostics(
             &[particle(state)],
             0,
-            &[Action::EndTurn, road],
-            &[Action::EndTurn],
             &[],
-            Some(&Action::EndTurn),
-            3,
-            3,
-            false,
+            ShadowInputs {
+                ranked_actions: &[Action::EndTurn, road],
+                retained_actions: &[Action::EndTurn],
+                search_winner: Some(&Action::EndTurn),
+                requested_depth: 3,
+                completed_depth: 3,
+                deadline_reached: false,
+            },
         )
         .unwrap();
         assert!(
@@ -816,13 +823,15 @@ mod tests {
         let diagnostics = shadow_strategy_diagnostics(
             &[particle(state)],
             0,
-            &[Action::EndTurn, road.clone()],
-            &[Action::EndTurn],
             &[],
-            Some(&Action::EndTurn),
-            3,
-            3,
-            false,
+            ShadowInputs {
+                ranked_actions: &[Action::EndTurn, road.clone()],
+                retained_actions: &[Action::EndTurn],
+                search_winner: Some(&Action::EndTurn),
+                requested_depth: 3,
+                completed_depth: 3,
+                deadline_reached: false,
+            },
         )
         .unwrap();
         let proposal = diagnostics
@@ -848,13 +857,15 @@ mod tests {
         let diagnostics = shadow_strategy_diagnostics(
             &[particle(state)],
             0,
-            &[Action::EndTurn, knight],
-            &[Action::EndTurn],
             &[],
-            Some(&Action::EndTurn),
-            3,
-            3,
-            false,
+            ShadowInputs {
+                ranked_actions: &[Action::EndTurn, knight],
+                retained_actions: &[Action::EndTurn],
+                search_winner: Some(&Action::EndTurn),
+                requested_depth: 3,
+                completed_depth: 3,
+                deadline_reached: false,
+            },
         )
         .unwrap();
         assert!(
@@ -879,13 +890,15 @@ mod tests {
         let diagnostics = shadow_strategy_diagnostics(
             &[particle(state)],
             0,
-            &[Action::EndTurn, knight.clone()],
-            &[Action::EndTurn],
             &[],
-            Some(&Action::EndTurn),
-            3,
-            3,
-            false,
+            ShadowInputs {
+                ranked_actions: &[Action::EndTurn, knight.clone()],
+                retained_actions: &[Action::EndTurn],
+                search_winner: Some(&Action::EndTurn),
+                requested_depth: 3,
+                completed_depth: 3,
+                deadline_reached: false,
+            },
         )
         .unwrap();
         let proposal = diagnostics
@@ -946,13 +959,15 @@ mod tests {
         let diagnostics = shadow_strategy_diagnostics(
             &[particle(state)],
             0,
-            &[Action::EndTurn],
-            &[Action::EndTurn],
             &[],
-            Some(&Action::EndTurn),
-            3,
-            3,
-            false,
+            ShadowInputs {
+                ranked_actions: &[Action::EndTurn],
+                retained_actions: &[Action::EndTurn],
+                search_winner: Some(&Action::EndTurn),
+                requested_depth: 3,
+                completed_depth: 3,
+                deadline_reached: false,
+            },
         )
         .unwrap();
         assert_eq!(diagnostics.context.player_count, 2);
@@ -973,13 +988,15 @@ mod tests {
         let diagnostics = shadow_strategy_diagnostics(
             &[particle(state)],
             0,
-            &[Action::BuyDevelopment, Action::EndTurn],
-            &[Action::EndTurn],
             &[],
-            Some(&Action::EndTurn),
-            3,
-            3,
-            false,
+            ShadowInputs {
+                ranked_actions: &[Action::BuyDevelopment, Action::EndTurn],
+                retained_actions: &[Action::EndTurn],
+                search_winner: Some(&Action::EndTurn),
+                requested_depth: 3,
+                completed_depth: 3,
+                deadline_reached: false,
+            },
         )
         .unwrap();
         let proposal = diagnostics
@@ -1001,13 +1018,15 @@ mod tests {
         let diagnostics = shadow_strategy_diagnostics(
             &[particle(state)],
             0,
-            &[Action::BuyDevelopment, Action::EndTurn],
-            &[Action::BuyDevelopment, Action::EndTurn],
             &[],
-            Some(&Action::EndTurn),
-            3,
-            3,
-            false,
+            ShadowInputs {
+                ranked_actions: &[Action::BuyDevelopment, Action::EndTurn],
+                retained_actions: &[Action::BuyDevelopment, Action::EndTurn],
+                search_winner: Some(&Action::EndTurn),
+                requested_depth: 3,
+                completed_depth: 3,
+                deadline_reached: false,
+            },
         )
         .unwrap();
         let proposal = diagnostics
@@ -1025,13 +1044,15 @@ mod tests {
         let diagnostics = shadow_strategy_diagnostics(
             &[particle(state)],
             0,
-            &[Action::BuyDevelopment, Action::EndTurn],
-            &[Action::BuyDevelopment, Action::EndTurn],
             &[],
-            Some(&Action::EndTurn),
-            4,
-            2,
-            true,
+            ShadowInputs {
+                ranked_actions: &[Action::BuyDevelopment, Action::EndTurn],
+                retained_actions: &[Action::BuyDevelopment, Action::EndTurn],
+                search_winner: Some(&Action::EndTurn),
+                requested_depth: 4,
+                completed_depth: 2,
+                deadline_reached: true,
+            },
         )
         .unwrap();
         let proposal = diagnostics

@@ -6,6 +6,7 @@ import {
   AssistantOverlay,
   autonomousExecutionAllowed,
 } from "../src/content/overlay";
+import * as actionGuide from "../src/content/action-guide";
 import type { NextClick } from "../src/content/action-guide";
 import { DEFAULT_SETTINGS } from "../src/content/settings";
 import {
@@ -81,6 +82,105 @@ afterEach(() => {
 });
 
 describe("overlay settings interaction", () => {
+  it.each(["trade", "trade-partner", "trade-cancel"] as const)("publishes the manual pause from real missing %s retries", async (kind) => {
+    vi.useFakeTimers();
+    const guide = vi.spyOn(actionGuide, "renderActionGuide");
+    const overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS, autonomousPrivateGames: true, autopilotDelaySeconds: 0 },
+      { reset: vi.fn() },
+    );
+    const internals = overlay as unknown as {
+      board: unknown; decisionAnalysis: unknown; decisionKey: string;
+      decisionWorker: { reset: () => void }; nextClick: () => NextClick;
+      nextClickStillLegal: () => boolean; scheduleDecisionAnalysis: () => void;
+      render: () => void;
+    };
+    const common = { offerIndex: 0, tradeId: "missing-control", label: "Trade control",
+      signature: `missing-${kind}`, confidence: 1 };
+    const action: NextClick = kind === "trade" ? { ...common, kind, verdict: "decline" }
+      : kind === "trade-partner" ? { ...common, kind, acceptedIndex: 0, player: "Bob" }
+      : { ...common, kind };
+    internals.board = { hexes: [], vertices: [], edges: [], gameKey: "trade-pause",
+      localSeatDiagnostics: { identity: { status: "resolved" } } };
+    vi.spyOn(internals, "nextClick").mockReturnValue(action);
+    vi.spyOn(internals, "nextClickStillLegal").mockReturnValue(true);
+    vi.spyOn(internals, "scheduleDecisionAnalysis").mockImplementation(() => {});
+    const reset = vi.spyOn(internals.decisionWorker, "reset");
+    const analysis = { engine: "deep-search", players: [] };
+    internals.decisionAnalysis = analysis;
+    internals.decisionKey = "completed-decision";
+    // Simulate the bridge responding only to refresh requests emitted by the
+    // actual executor. No failure callback or post-failure render is injected.
+    const refresh = () => internals.render();
+    window.addEventListener("colonist-assistant-board-refresh", refresh);
+    try {
+      internals.render();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(document.querySelector("#colonist-assistant-root")?.shadowRoot?.textContent)
+        .toContain("Automatic trade paused");
+      expect(guide.mock.calls.at(-1)![1].autonomous).toBe(false);
+      expect(internals.decisionAnalysis).toBe(analysis);
+      expect(internals.decisionKey).toBe("completed-decision");
+      expect(reset).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener("colonist-assistant-board-refresh", refresh);
+      overlay.destroy();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["builder", "decline"] as const)("does not restart search or autopilot after a missing %s control", (kind) => {
+    const guide = vi.spyOn(actionGuide, "renderActionGuide").mockImplementation(() => {});
+    const overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS, autonomousPrivateGames: true }, { reset: vi.fn() },
+    );
+    const internals = overlay as unknown as {
+      board: unknown;
+      decisionAnalysis: unknown;
+      decisionKey: string;
+      decisionWorker: { reset: () => void };
+      nextClick: () => NextClick;
+      scheduleDecisionAnalysis: () => void;
+      render: () => void;
+    };
+    const action: NextClick = kind === "decline" ? {
+      kind: "trade", offerIndex: 0, tradeId: "x4kA", verdict: "decline",
+      label: "Decline trade", signature: "road4311-D10", confidence: 1,
+    } : {
+      kind: "trade-builder", mode: "player", give: { ...emptyResources(), grain: 1 },
+      receive: { ...emptyResources(), lumber: 1 }, label: "Offer grain",
+      signature: "road4311-D15", confidence: 1,
+    };
+    internals.board = {
+      hexes: [], vertices: [], edges: [], gameKey: "road4311",
+      localSeatDiagnostics: { identity: { status: "resolved" } },
+    };
+    vi.spyOn(internals, "nextClick").mockReturnValue(action);
+    vi.spyOn(internals, "scheduleDecisionAnalysis").mockImplementation(() => {});
+    const reset = vi.spyOn(internals.decisionWorker, "reset");
+    const analysis = { engine: "deep-search", players: [] };
+    internals.decisionAnalysis = analysis;
+    internals.decisionKey = "completed-decision";
+    try {
+      internals.render();
+      const options = guide.mock.calls.at(-1)![1];
+      expect(options.autonomous).toBe(true);
+      options.onExecution?.({ succeeded: false, signature: action.signature,
+        reason: kind === "builder" ? "Workflow control not found: Offer grain"
+          : "Recommended Colonist control was not present after bounded retries" });
+      expect(internals.decisionAnalysis).toBe(analysis);
+      expect(internals.decisionKey).toBe("completed-decision");
+      expect(reset).not.toHaveBeenCalled();
+      expect(guide.mock.calls.at(-1)![1].autonomous).toBe(false);
+      expect(guide.mock.calls.at(-1)![0]).toEqual(action);
+      expect(document.querySelector("#colonist-assistant-root")?.shadowRoot?.textContent)
+        .toContain("Automatic trade paused");
+      vi.mocked(internals.nextClick).mockReturnValue({ ...action, signature: "changed-board" });
+      internals.render();
+      expect(guide.mock.calls.at(-1)![1].autonomous).toBe(true);
+    } finally { overlay.destroy(); }
+  });
+
   it("does not reread the extension manifest when settings rerender after context invalidation", () => {
     const getManifest = vi.fn(() => ({
       manifest_version: 3 as const,
@@ -1067,6 +1167,7 @@ describe("overlay settings interaction", () => {
     internals.board = {
       hexes: [], vertices: [], edges: [],
       diceMode: "balanced", gameKey: "stochastic-revocation-game",
+      gameplayRollCount: 1,
       myPlayer: "Alice", currentPlayer: "Alice", playerOrder: ["Alice"],
       isMyTurn: true, hasRolled: true, action: "none",
       localSeatDiagnostics: {
@@ -1100,11 +1201,11 @@ describe("overlay settings interaction", () => {
         actor: "Alice", total: 9, dice: [4, 5], eventId: "conflict-0", logIndex: 0,
       })).toThrow(/Conflicting public dice evidence/);
       internals.scheduleDecisionAnalysis(tracker, "Alice");
-      expect(internals.decisionRuntimeError).toMatch(/usable public reference-dice history/);
+      expect(internals.decisionRuntimeError).toMatch(/public roll sequence does not reconcile with public turn progress/);
       finishDecision!();
       await vi.waitFor(() => expect(internals.decisionWorker.active).toBeUndefined());
       expect(internals.decisionAnalysis).toBeUndefined();
-      expect(internals.decisionRuntimeError).toMatch(/usable public reference-dice history/);
+      expect(internals.decisionRuntimeError).toMatch(/public roll sequence does not reconcile with public turn progress/);
       expect(internals.decisionKey).not.toBe(originalKey);
     } finally {
       overlay.destroy();

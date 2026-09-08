@@ -189,6 +189,13 @@ const assertEffectiveEffort = (
   }
 };
 
+const normalizedReplayBoard = (board: BoardSnapshot): BoardSnapshot => {
+  const diceMode = (board as { diceMode?: unknown }).diceMode;
+  return diceMode === undefined || diceMode === null
+    ? { ...board, diceMode: "unknown" }
+    : board;
+};
+
 const buildReplayRequest = (
   trace: ReplayTrace,
   particleLimit: number,
@@ -196,7 +203,7 @@ const buildReplayRequest = (
   const context = trace.replayRequestContext;
   const built = buildDeepSearchRequest(
     trace.replayState!,
-    trace.replayBoard!,
+    normalizedReplayBoard(trace.replayBoard!),
     trace.rootPlayer!,
     context?.searchConstraints ?? {},
     context?.playerTradesEnabled ?? true,
@@ -449,7 +456,14 @@ for (const trace of traces) {
     scoreDifference48 > regretThreshold &&
     scoreDifference96 > regretThreshold;
   const gatePassed = !familyUnsafe && !scoreDifferenceUnsafe;
-  const calibrationRuns = [
+  type CalibrationRun = {
+    configuration: (typeof task15Configurations)[number];
+    root: number;
+    response: WasmSearchResponse;
+    latencyMs: number;
+    constructedParticles: number;
+  };
+  const calibrationRuns: CalibrationRun[] = [
     {
       configuration: task15Configurations[0],
       root: live.root,
@@ -529,7 +543,7 @@ for (const trace of traces) {
     ? (() => {
         const seedRuns = [];
         for (let seedIndex = 0; seedIndex < 8; seedIndex += 1) {
-          const board = structuredClone(trace.replayBoard!);
+          const board = structuredClone(normalizedReplayBoard(trace.replayBoard!));
           board.gameKey = `${board.gameKey ?? trace.fixtureId ?? trace.stateHash}:seed-${seedIndex}`;
           const context = trace.replayRequestContext;
           const built = buildDeepSearchRequest(
