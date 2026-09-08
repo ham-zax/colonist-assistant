@@ -10,6 +10,12 @@ The candidate was developed from `d77935fda984e3006b8a8ad9d65eb58a6d162eaf`. Raw
 
 ## Gate summary
 
+**Loot4438 blockers (source and packaged-WASM repairs verified; installed live acceptance still pending):** the belief-search wave now uses the shared parent deadline instead of per-cell wall-clock slices, and submitted trades retain an explicit pending outcome until authoritative commit or rejection evidence arrives. Focused Rust/TypeScript regressions pass, including the executor and overlay replanning boundary; the generated WASM was rebuilt, and the packaged deep-search adapter passes 30/30 tests. The installed browser build has not yet produced a post-repair consensual live game, so these repairs do not complete release acceptance. The complete export is available locally at `/mnt/c/Users/Hamza/Downloads/colonist-evidence-loot4438-1-2026-09-08T15-16-31-747Z (3).txt`. See the [investigation ledger](OPENING_AND_LIVE_EVIDENCE_INVESTIGATION_2026-09-08.md#loot4438-review-intake--document-before-implementation) for the reproduced mechanisms, repair evidence, and remaining recorder limitation.
+
+Current rebuilt package: `0.9.1 · main@b3b92c31e687+dirty · 2026-09-08T17:23:01.208Z`; packaged WASM SHA-256 `9e805753ebf5fad491f65a2d11e848ef7dc36715846d77db597442704e4ceea8`. The rejected-trade packaged regression now performs three sequential ordinary strategic searches in 5.73 s after the B1 repair; its former 5 s test timeout was therefore stale and was raised locally to 10 s without reducing engine effort. This is evidence that the repaired search no longer abandons the available quality allowance at the old per-cell cutoff, not evidence that every live decision should consume two seconds.
+
+Global no-player-trades benchmark lanes do not exactly match the live policy that disables domestic trading only for our seat. They must not be relabeled as product-route or strength evidence.
+
 The historical artifact rows below describe the recorded v13 implementation session. Focused v14 replay/native repair verification is complete, as recorded in “Focused v14 repair verification” below: exact M0+trades, Mref and M2 checks passed, including cancellation/recovery and invalid-evidence rejection. This is not full release acceptance. Current-revision matched performance, packaged execution and strength gates remain unfulfilled; older artifacts must not be relabeled as v14 results.
 
 | Gate | Evidence | Result |

@@ -1280,6 +1280,8 @@ fn belief_search(
 // have one owner. Only evaluation of a continuation cell changes backend.
 enum BeliefBackend<'a> {
     Cpu,
+    #[cfg(test)]
+    BeforeVisit(&'a mut dyn FnMut(&mut Searcher)),
     #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
     Cuda(&'a mut crate::CudaExactEvaluator, &'a dyn Fn() -> bool),
     #[cfg(not(all(feature = "cuda-exact", not(target_arch = "wasm32"))))]
@@ -1305,6 +1307,10 @@ impl BeliefBackend<'_> {
         actions_in_turn: u8,
     ) -> Result<[f32; 4], DepthBeliefError> {
         self.check_cancelled()?;
+        #[cfg(test)]
+        if let Self::BeforeVisit(before_visit) = self {
+            before_visit(searcher);
+        }
         #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
         if let Self::Cuda(evaluator, cancel) = self {
             let mut tree = CudaDeferredTree::new();
@@ -2103,8 +2109,6 @@ fn belief_search_backend(
         let mut wave_particles = 0usize;
         let mut wave_depth = 0u8;
         let mut wave_complete = true;
-        let total_wave_cells = positive_particle_count as usize * root_actions.len().max(1);
-        let mut completed_wave_cells = 0usize;
         let wave_start_nodes = nodes;
         let mut wave_root_nodes = vec![0u32; root_actions.len()];
         let mut wave_root_future_self_mass = vec![0.0f32; root_actions.len()];
@@ -2134,7 +2138,6 @@ fn belief_search_backend(
                         },
                         weight,
                     );
-                    completed_wave_cells += 1;
                     continue;
                 }
                 let completed_turn = next.turn != particle.state.turn
@@ -2144,18 +2147,6 @@ fn belief_search_backend(
                     .copied()
                     .unwrap_or(1)
                     .max(1);
-                let remaining_cells =
-                    total_wave_cells.saturating_sub(completed_wave_cells).max(1) as u32;
-                let remaining_ms = active_deadline.remaining_ms();
-                if remaining_ms != u32::MAX && remaining_ms < remaining_cells {
-                    wave_complete = false;
-                    break 'particles;
-                }
-                let child_deadline = if evidence_escalation_pending || remaining_ms == u32::MAX {
-                    active_deadline.clone()
-                } else {
-                    CooperativeDeadline::start((remaining_ms / remaining_cells).max(1))
-                };
                 let mut searcher = Searcher {
                     algorithm: if paranoid {
                         Algorithm::Paranoid { root: observer }
@@ -2169,7 +2160,10 @@ fn belief_search_backend(
                     nodes: 0,
                     cutoffs: 0,
                     deepest_depth: 0,
-                    deadline: child_deadline,
+                    // Node quotas bound each cell's work. Only the shared
+                    // deadline can abort the wave: a slow cell must not turn
+                    // its private time slice into an early parent cutoff.
+                    deadline: active_deadline.clone(),
                     deadline_reached: false,
                     observation_safe_recursive: true,
                     controlled_player: Some(observer),
@@ -2221,7 +2215,6 @@ fn belief_search_backend(
                     },
                     weight,
                 );
-                completed_wave_cells += 1;
             }
         }
 
@@ -5213,6 +5206,45 @@ mod tests {
             &[],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn continuation_cells_share_the_parent_deadline_budget() {
+        let mut state = empty_main_cycle_fixture(739);
+        state.players[0].resources[0] = 1;
+        state.players[0].resources[1] = 1;
+        state.bank[0] -= 1;
+        state.bank[1] -= 1;
+        state.validate().unwrap();
+        assert!(state.legal_actions().len() > 1);
+
+        let mut child_budgets = Vec::new();
+        let mut capture_deadline = |searcher: &mut super::Searcher| {
+            if searcher.maximum_depth >= 2 {
+                child_budgets.push(searcher.deadline.budget_ms_for_test());
+            }
+        };
+        let report = super::belief_search_backend(
+            &[BeliefParticle { state, weight: 1.0 }],
+            super::BeliefDepthConfig {
+                maximum_depth: 2,
+                branch_cap: 10,
+                maximum_nodes: 100,
+                time_budget_ms: 10_000,
+                strategy_policy: Default::default(),
+                strategic_particle_limit: usize::MAX,
+            },
+            false,
+            &[],
+            BeliefNodeBudgetMode::PerDepthWave,
+            0,
+            &mut super::BeliefBackend::BeforeVisit(&mut capture_deadline),
+        ).unwrap();
+
+        assert!(!report.deadline_reached);
+        assert_eq!(report.depth, 2);
+        assert!(child_budgets.len() > 1);
+        assert!(child_budgets.iter().all(|budget| *budget == 10_000));
     }
 
     #[test]

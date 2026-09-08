@@ -74,6 +74,11 @@ impl CooperativeDeadline {
         self.budget_ms.saturating_sub(self.elapsed_ms())
     }
 
+    #[cfg(test)]
+    pub(crate) fn budget_ms_for_test(&self) -> u32 {
+        self.budget_ms
+    }
+
     pub(crate) fn expired_at_checkpoint(&self, completed_units: u32, interval: u32) -> bool {
         completed_units > 0 && completed_units.is_multiple_of(interval.max(1)) && self.has_elapsed()
     }

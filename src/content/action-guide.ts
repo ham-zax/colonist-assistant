@@ -149,6 +149,9 @@ export interface ActionGuideOptions {
   /// clicked. The owner must observe the resulting outgoing offer or exact
   /// bank-hand transfer before the workflow may report success.
   validateTransactionCommit?: () => boolean;
+  /** Retain submit observation across hand/turn changes, but never another game. */
+  validateTransactionContinuation?: () => boolean;
+  onExecutionPending?: (result: { signature: string }) => void;
   /// Development-card workflows may exhaust every visible modal control before
   /// the bridge publishes the card-specific semantic result. DOM exhaustion is
   /// not success; the owner must observe the exact initiated card commit.
@@ -182,6 +185,7 @@ let workflowGeneration = 0;
 let workflowOptions: ActionGuideOptions | undefined;
 let workflowCurrentElement: HTMLElement | undefined;
 let workflowHasDispatchedStep = false;
+let workflowTradeSubmitted = false;
 let currentGuideOptions: ActionGuideOptions | undefined;
 let currentGuideAction: NextClick | undefined;
 let manualExecutionCleanup: (() => void) | undefined;
@@ -1680,6 +1684,7 @@ const later = (callback: () => void, delay: number): void => {
 
 interface WorkflowStep {
   label: string;
+  submitsTrade?: boolean;
   resolve: () => HTMLElement | undefined;
   /** The step has already reached its intended state and can be skipped. */
   ready?: () => boolean;
@@ -1916,6 +1921,7 @@ const tradeWorkflow = (
       action.mode === "bank"
         ? "Confirm bank trade"
         : "Send this offer",
+    submitsTrade: true,
     resolve: () => tradeDraftMatches(action.give, action.receive)
       ? findTradeSubmit(action.mode)
       : undefined,
@@ -1956,6 +1962,7 @@ const counterWorkflow = (
     ...tradeResourceSteps(action.counterReceive, "receive", "Request"),
     {
       label: "Send counteroffer",
+      submitsTrade: true,
       resolve: () => action.counterGive && action.counterReceive
         && tradeDraftMatches(action.counterGive, action.counterReceive)
         ? findTradeSubmit("player")
@@ -2093,6 +2100,16 @@ const cancelWorkflow = (): void => {
   workflowOptions = undefined;
   workflowCurrentElement = undefined;
   workflowHasDispatchedStep = false;
+  workflowTradeSubmitted = false;
+};
+
+export const hasPendingTradeOutcome = (): boolean => {
+  if (!workflowTradeSubmitted || !workflowOptions?.validateTransactionCommit) return false;
+  if (workflowOptions.validateTransactionContinuation?.() === false) {
+    cancelWorkflow();
+    return false;
+  }
+  return true;
 };
 
 const cancelAutonomousContinuations = (): void => {
@@ -2119,6 +2136,7 @@ export const activeWorkflowAction = (
   robberVictimSelection = false,
 ): NextClick | undefined => {
   if (!workflowSignature || !workflowAction) return undefined;
+  if (hasPendingTradeOutcome()) return workflowAction;
   if (
     workflowAction.kind === "development" &&
     workflowHasDispatchedStep &&
@@ -2214,6 +2232,40 @@ const startWorkflow = (
   };
 
   const startedAt = Date.now();
+  let pendingReported = false;
+  const observeSubmittedTrade = (): boolean => {
+    if (!workflowTradeSubmitted || !workflowOptions?.validateTransactionCommit) return false;
+    if (!hasPendingTradeOutcome()) return true;
+    const activeOptions = workflowOptions;
+    if (activeOptions.validateTransactionCommit?.()) {
+      lastClickSignature = action.signature;
+      // A confirmed transfer is successful even if the panel cannot close.
+      // The existing panel preflight owns any remaining cleanup before a new action.
+      const close = activeOptions.autonomous && tradePanelIsOpen()
+        ? findTradePanelControl() : undefined;
+      cancelWorkflow();
+      close?.click();
+      activeOptions.onExecution?.({ succeeded: true, signature: action.signature });
+      document.getElementById(ROOT_ID)?.remove();
+      requestBoardRefresh();
+      return true;
+    }
+    const rejection = visibleTradeFailure(ignoredTradeFailureLogKeys, ignoredTradeFailures);
+    if (rejection) {
+      fail(`Colonist rejected the trade workflow: ${rejection}`);
+      return true;
+    }
+    workflowCurrentElement = undefined;
+    if (!pendingReported) {
+      pendingReported = true;
+      activeOptions.onExecutionPending?.({ signature: action.signature });
+    }
+    requestBoardRefresh();
+    later(() => {
+      if (generation === workflowGeneration) observeSubmittedTrade();
+    }, 250);
+    return true;
+  };
   let activeStep = -1;
   let stepStartedAt = startedAt;
   // All retries share a deadline, including controls replaced before clicking.
@@ -2235,7 +2287,7 @@ const startWorkflow = (
     ) {
       return;
     }
-    if (expired(index)) return;
+    if (observeSubmittedTrade() || expired(index)) return;
     const tradeFailure = tradeTransaction
       ? visibleTradeFailure(
           ignoredTradeFailureLogKeys,
@@ -2338,7 +2390,7 @@ const startWorkflow = (
         ) {
           return;
         }
-        if (expired(index)) return;
+        if (observeSubmittedTrade() || expired(index)) return;
         const failure = tradeTransaction
           ? visibleTradeFailure(
               ignoredTradeFailureLogKeys,
@@ -2413,6 +2465,7 @@ const startWorkflow = (
     element.addEventListener("click", () => {
       if (generation === workflowGeneration && workflowSignature === action.signature) {
         workflowHasDispatchedStep = true;
+        if (step.submitsTrade) workflowTradeSubmitted = true;
       }
     }, { once: true, capture: true });
     element.addEventListener(
@@ -2745,6 +2798,13 @@ export const renderActionGuide = (
   action: NextClick | undefined,
   options: ActionGuideOptions,
 ): void => {
+  // A rerender, changed recommendation, or autopilot toggle cannot retract a
+  // submitted transaction. Keep its original commit/game validators and trace.
+  if (hasPendingTradeOutcome()) {
+    workflowOptions = { ...workflowOptions!, autonomous: options.autonomous, highlight: options.highlight };
+    currentGuideOptions = options;
+    return;
+  }
   const activatingAutopilot =
     !currentGuideOptions?.autonomous && options.autonomous;
   const deactivatingAutopilot =

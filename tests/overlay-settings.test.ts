@@ -82,6 +82,62 @@ afterEach(() => {
 });
 
 describe("overlay settings interaction", () => {
+  it("keeps a submitted trade pending without restarting search", () => {
+    vi.spyOn(actionGuide, "hasPendingTradeOutcome").mockReturnValue(true);
+    vi.spyOn(actionGuide, "renderActionGuide").mockImplementation(() => {});
+    const overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS, autonomousPrivateGames: true },
+      { reset: vi.fn() },
+    );
+    const internals = overlay as unknown as {
+      board: unknown;
+      decisionAnalysis: unknown;
+      decisionKey: string;
+      decisionWorker: { reset: () => void };
+      nextClick: () => NextClick;
+      scheduleDecisionAnalysis: (
+        state: ReturnType<typeof createTrackerState> | undefined,
+        player: string | undefined,
+      ) => void;
+      render: () => void;
+    };
+    const action: NextClick = {
+      kind: "trade-builder",
+      mode: "bank",
+      give: { ...emptyResources(), grain: 3 },
+      receive: { ...emptyResources(), ore: 1 },
+      label: "Trade 3 grain for ore",
+      signature: "loot4438-D41-pending",
+      confidence: 1,
+    };
+    internals.board = {
+      hexes: [], vertices: [], edges: [], gameKey: "loot4438",
+      localSeatDiagnostics: { identity: { status: "resolved" } },
+    };
+    vi.spyOn(internals, "nextClick").mockReturnValue(action);
+    const reset = vi.spyOn(internals.decisionWorker, "reset");
+    const analysis = { engine: "deep-search", players: [] };
+    internals.decisionAnalysis = analysis;
+    internals.decisionKey = "completed-D41";
+    try {
+      internals.scheduleDecisionAnalysis(undefined, undefined);
+      expect(internals.decisionAnalysis).toBe(analysis);
+      expect(internals.decisionKey).toBe("completed-D41");
+      expect(reset).not.toHaveBeenCalled();
+      expect(
+        sendMessage.mock.calls.filter(
+          ([message]) => message.type === "colonist-assistant:decision",
+        ),
+      ).toHaveLength(0);
+
+      internals.render();
+      expect(document.querySelector("#colonist-assistant-root")?.shadowRoot?.textContent)
+        .toContain("Trade submitted; awaiting confirmation");
+    } finally {
+      overlay.destroy();
+    }
+  });
+
   it.each(["trade", "trade-partner", "trade-cancel"] as const)("publishes the manual pause from real missing %s retries", async (kind) => {
     vi.useFakeTimers();
     const guide = vi.spyOn(actionGuide, "renderActionGuide");

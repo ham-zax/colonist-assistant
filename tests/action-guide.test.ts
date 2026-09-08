@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   activeWorkflowAction,
+  hasPendingTradeOutcome,
   destroyActionGuide,
   renderActionGuide,
   visibleTurnControl,
@@ -1857,12 +1858,14 @@ describe("action guide autopilot", () => {
     });
   });
 
-  it("executes a repeated bank trade in a modal layout without legacy inventory IDs", async () => {
+  it.each(["immediate", "delayed", "rejected"])("observes %s bank-trade confirmation without repeating a submitted trade", async (confirmation) => {
     let submitted = false;
     const open = document.createElement("button");
     open.id = "action-button-trade";
     const clicks: string[] = [];
     open.addEventListener("click", () => {
+      // Reproduce a panel that refuses to close while the commit is unresolved.
+      if (document.querySelector(".bankTradePanel-fixture")) return;
       clicks.push("open");
       const modal = document.createElement("div");
       modal.className = "bankTradePanel-fixture";
@@ -1902,8 +1905,15 @@ describe("action guide autopilot", () => {
       grain.addEventListener("click", () => { submit.disabled = lumberCount !== 3; });
       submit.addEventListener("click", () => {
         clicks.push("submit-bank");
-        submitted = true;
-        modal.remove();
+        if (confirmation === "immediate") {
+          submitted = true;
+          modal.remove();
+        } else if (confirmation === "rejected") {
+          const alert = document.createElement("div");
+          alert.setAttribute("role", "alert");
+          alert.textContent = "Not enough resources for this trade";
+          document.body.append(alert);
+        }
       });
       modal.append(
         available,
@@ -1921,6 +1931,7 @@ describe("action guide autopilot", () => {
     const receive = emptyResources();
     receive.grain = 1;
     const onExecution = vi.fn();
+    const onExecutionPending = vi.fn();
     renderActionGuide(
       {
         kind: "trade-builder",
@@ -1935,11 +1946,27 @@ describe("action guide autopilot", () => {
         highlight: true,
         autonomous: true,
         validateTransactionCommit: () => submitted,
+        validateTransactionContinuation: () => true,
+        onExecutionPending,
         onExecution,
       },
     );
 
     await vi.advanceTimersByTimeAsync(4_500);
+
+    if (confirmation === "delayed") {
+      expect(hasPendingTradeOutcome()).toBe(true);
+      expect(activeWorkflowAction("none")?.kind).toBe("trade-builder");
+      // A rerender and disabling autopilot must retain the original observer.
+      renderActionGuide(undefined, { highlight: false, autonomous: false });
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(onExecution).not.toHaveBeenCalled();
+      expect(onExecutionPending).toHaveBeenCalledTimes(1);
+      expect(hasPendingTradeOutcome()).toBe(true);
+      submitted = true;
+      await vi.advanceTimersByTimeAsync(500);
+      expect(hasPendingTradeOutcome()).toBe(false);
+    }
 
     expect(clicks).toEqual([
       "open",
@@ -1949,10 +1976,91 @@ describe("action guide autopilot", () => {
       "get-grain",
       "submit-bank",
     ]);
+    if (confirmation === "rejected") {
+      expect(hasPendingTradeOutcome()).toBe(false);
+      expect(onExecution).toHaveBeenCalledWith(expect.objectContaining({
+        succeeded: false,
+        reason: "Colonist rejected the trade workflow: Not enough resources for this trade",
+      }));
+      expect(onExecution).toHaveBeenCalledTimes(1);
+      return;
+    }
     expect(onExecution).toHaveBeenCalledWith({
       succeeded: true,
       signature: "bank-trade-alternate-layout",
     });
+    expect(onExecution).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not mark a bank trade submitted when the submit control cannot dispatch", async () => {
+    const open = document.createElement("button");
+    open.id = "action-button-trade";
+    open.addEventListener("click", () => {
+      const modal = document.createElement("div");
+      modal.className = "bankTradePanel-fixture";
+      const available = document.createElement("div");
+      available.className = "bankTradeAvailableCards-fixture";
+      const lumber = document.createElement("button");
+      lumber.innerHTML = '<img src="card_lumber.svg">';
+      const offered = document.createElement("div");
+      offered.className = "proposalOfferedHalfContainer-fixture";
+      lumber.addEventListener("click", () => {
+        offered.innerHTML = '<button data-card-enum="1"><img src="card_lumber.svg"></button>';
+      });
+      available.append(lumber);
+      const choices = document.createElement("div");
+      choices.className = "bankTradeReceiveCards-fixture";
+      const grain = document.createElement("button");
+      grain.innerHTML = '<img src="card_grain.svg">';
+      const wanted = document.createElement("div");
+      wanted.className = "proposalWantedHalfContainer-fixture";
+      grain.addEventListener("click", () => {
+        wanted.innerHTML = '<button data-card-enum="4"><img src="card_grain.svg"></button>';
+      });
+      choices.append(grain);
+      const submit = document.createElement("button");
+      submit.id = "action-button-trade-bank";
+      submit.click = () => { throw new Error("dispatch failed"); };
+      modal.append(available, choices, offered, wanted, submit);
+      document.body.append(modal);
+    });
+    document.body.append(open);
+
+    const give = emptyResources();
+    give.lumber = 1;
+    const receive = emptyResources();
+    receive.grain = 1;
+    const pendingAtFailure: boolean[] = [];
+    const onExecution = vi.fn(() => {
+      pendingAtFailure.push(hasPendingTradeOutcome());
+    });
+    renderActionGuide(
+      {
+        kind: "trade-builder",
+        mode: "bank",
+        give,
+        receive,
+        label: "Trade lumber for grain",
+        signature: "bank-submit-dispatch-failure",
+        confidence: 1,
+      },
+      {
+        highlight: true,
+        autonomous: true,
+        validateTransactionCommit: () => false,
+        validateTransactionContinuation: () => true,
+        onExecution,
+      },
+    );
+
+    await vi.advanceTimersByTimeAsync(4_500);
+
+    expect(onExecution).toHaveBeenCalledWith(expect.objectContaining({
+      succeeded: false,
+      reason: "Colonist control could not be dispatched",
+    }));
+    expect(pendingAtFailure).toEqual([false]);
+    expect(hasPendingTradeOutcome()).toBe(false);
   });
 
   it("replans promptly when the D123 grain offer control is absent", async () => {

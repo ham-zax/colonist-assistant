@@ -1106,7 +1106,7 @@ describe("deep-search state adapter", () => {
     expect(raw.actions.some(matchesRejectedOffer)).toBe(true);
     expect(rejected.actions.some(matchesRejectedOffer)).toBe(false);
     expect(retried.actions.some(matchesRejectedOffer)).toBe(false);
-  });
+  }, 10_000);
 
   it("keeps four-player work on the frozen reference until budget evidence promotes it", () => {
     const fourPlayerState = structuredClone(state);

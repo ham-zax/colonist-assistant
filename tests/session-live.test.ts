@@ -214,14 +214,17 @@ describe("live log session scanning", () => {
 
   it("keeps public awards and rendered counteroffers out of dice uncertainty", async () => {
     const longestRoad = "hamzax received Longest Road :road: (+2 VPs)";
+    const transferredLongestRoad =
+      "Longest Road :road: passed from hamzax to Neala (+2 VPs)";
     const counter =
       "Grandetorino proposed counter offer to NJDgaming, offering :wool: for :grain:";
     const root = document.createElement("div");
     root.append(
       diceMessage(0, "Alice", 3, 5),
       message(1, longestRoad),
-      message(2, counter),
-      diceMessage(3, "Bob", 6, 1),
+      message(2, transferredLongestRoad),
+      message(3, counter),
+      diceMessage(4, "Bob", 6, 1),
     );
     document.body.append(root);
     const session = new GameSession(root, vi.fn(), "harmless-public-log-game");
@@ -235,6 +238,11 @@ describe("live log session scanning", () => {
           reason: "known-redundant-award",
           affectsIntegrity: false,
           sample: longestRoad,
+        }),
+        expect.objectContaining({
+          reason: "known-redundant-award",
+          affectsIntegrity: false,
+          sample: transferredLongestRoad,
         }),
         expect.objectContaining({
           reason: "known-redundant-trade-offer",

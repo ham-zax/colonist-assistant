@@ -124,6 +124,7 @@ import {
 } from "./trade-verdicts";
 import {
   activeWorkflowAction,
+  hasPendingTradeOutcome,
   developmentFollowupAction,
   destroyActionGuide,
   renderActionGuide,
@@ -1600,7 +1601,9 @@ export class AssistantOverlay {
       )
         ? this.renderBoardMarker(spatial.action, spatial.recommendation)
         : "";
-    const executionNotice = next && this.unavailableTradeControls.has(next.signature)
+    const executionNotice = hasPendingTradeOutcome()
+      ? '<p class="why" role="status">Trade submitted; awaiting confirmation. Automatic actions are paused. Do not submit the trade again.</p>'
+      : next && this.unavailableTradeControls.has(next.signature)
       ? '<p class="why" role="status">Automatic trade paused: the required Colonist control was not found. You can complete this step manually.</p>'
       : "";
     const advice = executionNotice + this.renderAdvice(state, spatial, report, next);
@@ -1870,7 +1873,7 @@ export class AssistantOverlay {
         this.actionGuideSignature === nextSignature &&
         Boolean(next && this.workflowContinuationStillLegal(next)),
       ...(transactionCommit
-        ? { validateTransactionCommit: transactionCommit }
+        ? { validateTransactionCommit: transactionCommit, validateTransactionContinuation: stillInGuideGame }
         : {}),
       ...(developmentCommit
         ? { validateDevelopmentCommit: developmentCommit }
@@ -1884,6 +1887,7 @@ export class AssistantOverlay {
       onExecutionStart: () => {
         if (traceKey) this.decisionTraces.executionStarted(traceKey);
       },
+      onExecutionPending: () => this.render(),
       onExecution: ({ succeeded, reason, diagnostic }) => {
         const strategicTradeFailure = Boolean(
           !succeeded &&
@@ -2842,6 +2846,7 @@ export class AssistantOverlay {
     state: TrackerState | undefined,
     player: string | undefined,
   ): void {
+    if (hasPendingTradeOutcome()) return;
     const board = this.board;
     const hasPendingIncomingTrade = unansweredIncomingTrades(
       board?.activeTrades,

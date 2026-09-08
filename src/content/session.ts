@@ -141,7 +141,10 @@ const classifyUnmatchedLog = (
   if (/\bmoved robber to\b/iu.test(normalized)) {
     return { reason: "known-redundant-robber-move", affectsIntegrity: false };
   }
-  if (/\b(?:received|lost)\s+(?:the\s+)?(?:longest road|largest army)\b/iu.test(normalized)) {
+  if (
+    /\b(?:received|lost)\s+(?:the\s+)?(?:longest road|largest army)\b/iu.test(normalized) ||
+    /\b(?:longest road|largest army)\b.*\bpassed from\b.+\bto\b/iu.test(normalized)
+  ) {
     // Award ownership and VP totals come from the validated board snapshot.
     // The rendered announcement is useful audit text, not an extra state transition.
     return { reason: "known-redundant-award", affectsIntegrity: false };
