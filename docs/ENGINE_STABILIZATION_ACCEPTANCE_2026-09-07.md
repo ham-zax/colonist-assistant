@@ -4,7 +4,7 @@
 
 **Current v14 candidate: acceptance incomplete. Recorded v13 correctness results are historical evidence. Production exact-CUDA promotion: not accepted. Strategy-strength claim: no evidence of improvement.**
 
-The governing contract is [Engine stabilization and CPU/GPU decision contract](ENGINE_STABILIZATION_AND_CPU_GPU_PLAN_2026-09-07.md). The current source and generated WASM identify the policy as `deep-maxn-v14`; the artifacts below record the earlier `deep-maxn-v13` candidate. Browser `deep-search` remains CPU/WASM-authoritative. The native companion exposes `gpu-root-rollout` only as a distinct experimental algorithm and exposes `deep-maxn-cuda-exact-fixed-work-v1` as a same-policy backend candidate through protocol 7 / state schema 3.
+The governing contract is [Engine stabilization and CPU/GPU decision contract](ENGINE_STABILIZATION_AND_CPU_GPU_PLAN_2026-09-07.md). The current source and generated WASM identify the policy as `deep-maxn-v14`; most focused correctness artifacts below record the earlier `deep-maxn-v13` candidate, while a clean revision-matched v14 exact arena smoke is retained separately. Browser `deep-search` remains CPU/WASM-authoritative. The native companion exposes `gpu-root-rollout` only as a distinct experimental algorithm and exposes `deep-maxn-cuda-exact-fixed-work-v1` as a same-policy backend candidate through protocol 7 / state schema 3.
 
 The candidate was developed from `d77935fda984e3006b8a8ad9d65eb58a6d162eaf`. Raw artifacts produced before the final isolated commit are therefore labeled as working-tree evidence rather than pretending to carry the final commit SHA.
 
@@ -16,7 +16,7 @@ Current rebuilt package: `0.9.1 · main@b3b92c31e687+dirty · 2026-09-08T17:23:0
 
 Global no-player-trades benchmark lanes do not exactly match the live policy that disables domestic trading only for our seat. They must not be relabeled as product-route or strength evidence.
 
-The historical artifact rows below describe the recorded v13 implementation session. Focused v14 replay/native repair verification is complete, as recorded in “Focused v14 repair verification” below: exact M0+trades, Mref and M2 checks passed, including cancellation/recovery and invalid-evidence rejection. This is not full release acceptance. Current-revision matched performance, packaged execution and strength gates remain unfulfilled; older artifacts must not be relabeled as v14 results.
+The historical artifact rows below describe the recorded v13 implementation session. Focused v14 replay/native repair verification is complete, as recorded in “Focused v14 repair verification” below: exact M0+trades, Mref and M2 checks passed, including cancellation/recovery and invalid-evidence rejection. This is not full release acceptance. Current-revision matched performance is now measured and fails the 2× promotion threshold; packaged execution and strength gates remain unfulfilled. Older artifacts must not be relabeled as v14 results.
 
 | Gate | Evidence | Result |
 | --- | --- | --- |
@@ -30,7 +30,7 @@ The historical artifact rows below describe the recorded v13 implementation sess
 | Production-shaped native exact parity | `benchmarks/engine-stabilization-2026-09-07/native-host-exact-parity.jsonl` | PASS: M0+trades, Mref, explicit M2; max abs error `3.8743019e-7`; invalid evidence rejected; cancellation recovered |
 | Live/recorded board topology | same native exact parity lane | PASS after repair: exact evaluator prepares the actual request adjacency topology instead of assuming canonical generated indices |
 | Frozen arena product route | `benchmarks/engine-stabilization-2026-09-07/native-exact-takeover-smoke.jsonl` | PASS: protocol 7 exact capability required, exact algorithm recorded, 7,987 nodes, depth 2, zero protocol/illegal-action failures, terminal completion |
-| Exact end-to-end 2× retention | `benchmarks/engine-stabilization-2026-09-07/exact-gpu-arena-smoke.json` | FAIL for recorded v13 smoke: 1.370× (3P), 1.272× (4P) |
+| Exact end-to-end 2× retention | `benchmarks/engine-stabilization-2026-09-07/exact-gpu-arena-smoke-v14-ff7b9b7.json` | FAIL on clean `ff7b9b7` v14 smoke with parity: 1.455× (3P), 1.375× (4P) |
 | Packaged browser recommendation → click → confirmed transition | consensual live browser fixture | NOT RUN: no consensual live-game/browser-installed artifact fixture was available in this session |
 | Product strength | held-out matched complete-game campaign for the actual production route | NOT RUN / NOT CLAIMED |
 
@@ -153,7 +153,9 @@ Exact CUDA supporting explicit M2 in parity tooling does not promote either M2 o
 
 The exact-backend correctness gates are necessary but not sufficient. The existing acceleration contract requires at least **2× end-to-end elapsed speedup in both the 3P and 4P matched arena lanes**. The candidate must also retain cancellation/deadline semantics and obtain packaged browser execution evidence before any production exact routing is enabled.
 
-The recorded RTX 3070 Ti smoke completed one matched block per player count, with three seat rotations in 3P and four in 4P. Elapsed CPU/CUDA times were 152,873.6 / 111,593.8 ms (1.3699×) for 3P and 247,970.9 / 194,935.2 ms (1.2721×) for 4P. Both lanes reported matching game results and zero cutoffs, but neither met 2×. This small smoke provides no confidence interval or strength claim and does not measure the later v14 candidate. The historical artifact is retained unchanged.
+The historical v13 RTX 3070 Ti smoke completed one matched block per player count, with three seat rotations in 3P and four in 4P. Elapsed CPU/CUDA times were 152,873.6 / 111,593.8 ms (1.3699×) for 3P and 247,970.9 / 194,935.2 ms (1.2721×) for 4P. Both lanes reported matching game results and zero cutoffs, but neither met 2×. That artifact is retained unchanged.
+
+A clean revision-matched v14 smoke was then run from `ff7b9b717bd8bcd07d23b08bf13428b8efac2f6e` with the same 3P/4P smoke profile, seed 9100001, four threads, all-MaxN lineup, player trades disabled, maritime trades enabled and transition validation enabled. Deterministic checkpoint parity passed for all 3P and 4P games. Harness elapsed CPU/CUDA times were 160,185.2 / 110,079.6 ms (1.4552×) for 3P and 281,303.0 / 204,593.2 ms (1.3749×) for 4P. Both sides reported `deep-maxn-v14`, the exact `ff7b9b7...` build SHA and `buildDirty=false`. The result independently fails the 2× gate on the current revision, so production exact-CUDA routing remains disabled. This smoke is a parity/performance gate only; it is not a strength campaign and provides no confidence interval for gameplay quality.
 
 If the 2× gate is not met, exact CUDA remains experimental/fixed-work parity tooling and production stays CPU/WASM. The gate is not weakened after observing the result.
 
@@ -195,8 +197,8 @@ Opening reproduction matches the recorded choices and node counts. Independent f
 
 The missing-control pause now renders immediately from the failure callback for incoming trades, builders, partner confirmation, and cancellation. It retains completed advice and disables autonomous execution for the failed signature. Real executor timer regressions cover the direct-control paths without a manually injected failure or post-failure render; action-guide plus overlay tests passed 88/88, and type checking passed. This repairs a local UI-state publication defect, not the outstanding installed-artifact browser acceptance gate.
 
-## Current v14 exact performance smoke — in progress
+## Current v14 exact performance smoke — completed
 
-The current dirty v14 arena was rebuilt with CUDA exact support and run through the existing matched 3P/4P smoke protocol, seed 9100001, one block per lane, four threads, all-MaxN lineup, player trades disabled, maritime trades enabled, transition validation enabled. Raw temporary output: `/tmp/colonist-v14-exact-smoke-2026-09-08.json` and sibling `.checkpoints/` (report is written only after both lanes complete).
+The clean `ff7b9b717bd8bcd07d23b08bf13428b8efac2f6e` arena was rebuilt with CUDA exact support and run through the existing matched 3P/4P smoke protocol: seed 9100001, one block per lane, four threads, all-MaxN lineup, player trades disabled, maritime trades enabled and transition validation enabled. The retained report is `benchmarks/engine-stabilization-2026-09-07/exact-gpu-arena-smoke-v14-ff7b9b7.json` with sibling checkpoint files.
 
-3P checkpoint comparison passed with three completed games and zero cutoffs. Checkpoint engine times were CPU 175,902 ms and CUDA 115,829 ms (~1.52×), below the 2× requirement. Final harness timings and 4P disposition remain pending. No full campaign or strength claim is made, and production promotion stays disabled.
+Deterministic parity passed in both lanes: 3/3 3P games and 4/4 4P games matched. Final harness elapsed speedups were 1.455× for 3P and 1.375× for 4P, below the required 2× in both cases. All recorded lane builds identify `deep-maxn-v14`, the exact `ff7b9b7...` SHA and `buildDirty=false`. No full campaign or strength claim is made, and production exact-CUDA promotion remains disabled.
