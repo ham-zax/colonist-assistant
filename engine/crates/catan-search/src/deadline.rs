@@ -55,7 +55,11 @@ impl CooperativeDeadline {
 
     pub(crate) fn elapsed_ms(&self) -> u32 {
         #[cfg(not(target_arch = "wasm32"))]
-        let elapsed = self.started_at.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
+        let elapsed = self
+            .started_at
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u32::MAX)) as u32;
         #[cfg(target_arch = "wasm32")]
         let elapsed = (browser_now_ms() - self.started_at_ms)
             .max(0.0)

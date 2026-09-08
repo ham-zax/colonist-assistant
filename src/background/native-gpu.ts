@@ -3,8 +3,11 @@ import type { WasmSearchResponse } from "../generated/wasm/colonist_search.js";
 import { M0_FAIR_IID_2D6_V1, MREF_COLONIST_LINKED_2024_V1 } from "../core/dice-history";
 
 export const NATIVE_GPU_HOST = "io.colonist_assistant.gpu";
-export const NATIVE_GPU_PROTOCOL_VERSION = 6;
+export const NATIVE_GPU_PROTOCOL_VERSION = 7;
 export const NATIVE_GPU_STATE_SCHEMA_VERSION = 3;
+export const NATIVE_GPU_ROLLOUT_ALGORITHM = "gpu-root-rollout";
+export const NATIVE_GPU_EXACT_ALGORITHM =
+  "deep-maxn-cuda-exact-fixed-work-v1";
 export const NATIVE_GPU_STOCHASTIC_MODELS: readonly string[] = [
   M0_FAIR_IID_2D6_V1, MREF_COLONIST_LINKED_2024_V1,
 ];
@@ -15,11 +18,27 @@ export const nativeGpuSupportsStochasticModel = (
   const effective = model === "fair-iid-2d6" ? M0_FAIR_IID_2D6_V1 : model ?? M0_FAIR_IID_2D6_V1;
   return NATIVE_GPU_STOCHASTIC_MODELS.includes(effective) && advertisedModels.includes(effective);
 };
-const EXPECTED_ENGINE_REVISION = "deep-maxn-v12";
+const EXPECTED_ENGINE_REVISION = "deep-maxn-v14";
+
+export interface NativeGpuExactCapability {
+  algorithm: string;
+  available: boolean;
+  supportsDeadline: boolean;
+  supportsCancellation: boolean;
+  supportsOpening: boolean;
+  fixedWorkParityOnly: boolean;
+  unavailableReason?: string;
+}
+
+export interface NativeGpuCapabilities {
+  algorithms: readonly string[];
+  exactMaxn: NativeGpuExactCapability;
+}
 
 export interface NativeGpuStatus {
   runtime: "gpu-native";
   stochasticModels: readonly string[];
+  capabilities: NativeGpuCapabilities;
   engineRevision: string;
   build?: NativeGpuBuildIdentity;
   device: {
@@ -36,6 +55,7 @@ interface NativeGpuResponse {
   protocolVersion?: number;
   stateSchemaVersion?: number;
   stochasticModels?: string[];
+  capabilities?: NativeGpuCapabilities;
   engineRevision?: string;
   build?: NativeGpuBuildIdentity;
   device?: NativeGpuStatus["device"];
@@ -49,6 +69,39 @@ interface PendingNativeRequest {
 }
 
 class NativeGpuCompatibilityError extends Error {}
+
+const isNativeGpuCapabilities = (
+  value: NativeGpuCapabilities | undefined,
+): value is NativeGpuCapabilities =>
+  Boolean(
+    value &&
+      Array.isArray(value.algorithms) &&
+      value.algorithms.every((algorithm) => typeof algorithm === "string") &&
+      value.exactMaxn &&
+      typeof value.exactMaxn.algorithm === "string" &&
+      typeof value.exactMaxn.available === "boolean" &&
+      typeof value.exactMaxn.supportsDeadline === "boolean" &&
+      typeof value.exactMaxn.supportsCancellation === "boolean" &&
+      typeof value.exactMaxn.supportsOpening === "boolean" &&
+      typeof value.exactMaxn.fixedWorkParityOnly === "boolean" &&
+      (value.exactMaxn.unavailableReason === undefined ||
+        typeof value.exactMaxn.unavailableReason === "string"),
+  );
+
+export const nativeGpuSupportsExactMaxn = (
+  status: NativeGpuStatus,
+): boolean =>
+  status.capabilities.exactMaxn.available &&
+  status.capabilities.exactMaxn.algorithm === NATIVE_GPU_EXACT_ALGORITHM &&
+  status.capabilities.algorithms.includes(NATIVE_GPU_EXACT_ALGORITHM);
+
+export const nativeGpuSupportsProductionExactMaxn = (
+  status: NativeGpuStatus,
+): boolean =>
+  nativeGpuSupportsExactMaxn(status) &&
+  status.capabilities.exactMaxn.supportsDeadline &&
+  status.capabilities.exactMaxn.supportsCancellation &&
+  !status.capabilities.exactMaxn.fixedWorkParityOnly;
 
 const isNativeGpuBuildIdentity = (
   value: NativeGpuBuildIdentity | undefined,
@@ -115,23 +168,65 @@ export class NativeGpuClient {
     }
   }
 
-  async analyze(request: unknown, decisionId?: number): Promise<WasmSearchResponse> {
-    const requestedStrategyPolicy = (request as { strategyPolicy?: unknown } | null)?.strategyPolicy;
+  async analyzeRollout(
+    request: unknown,
+    decisionId?: number,
+  ): Promise<WasmSearchResponse> {
+    const requestedStrategyPolicy = (request as { strategyPolicy?: unknown } | null)
+      ?.strategyPolicy;
     if (requestedStrategyPolicy !== undefined) {
       throw new NativeGpuCompatibilityError(
-        `GPU companion does not support strategy policy ${String(requestedStrategyPolicy)}`,
+        `GPU rollout does not support strategy policy ${String(requestedStrategyPolicy)}`,
       );
     }
+    return this.analyzeWithType(
+      "analyze",
+      NATIVE_GPU_ROLLOUT_ALGORITHM,
+      request,
+      decisionId,
+      false,
+    );
+  }
+
+  async analyzeExact(
+    request: unknown,
+    decisionId?: number,
+  ): Promise<WasmSearchResponse> {
+    return this.analyzeWithType(
+      "analyze-exact",
+      NATIVE_GPU_EXACT_ALGORITHM,
+      request,
+      decisionId,
+      true,
+    );
+  }
+
+  private async analyzeWithType(
+    type: "analyze" | "analyze-exact",
+    expectedAlgorithm: string,
+    request: unknown,
+    decisionId: number | undefined,
+    requireExactCapability: boolean,
+  ): Promise<WasmSearchResponse> {
     const status = await this.status();
     if (!status) throw new Error("GPU companion is not installed");
-    const requestedModel = (request as { stochastic?: { model?: string } } | null)?.stochastic?.model;
+    if (requireExactCapability && !nativeGpuSupportsExactMaxn(status)) {
+      throw new NativeGpuCompatibilityError(
+        status.capabilities.exactMaxn.unavailableReason ??
+          "GPU companion does not expose exact MaxN",
+      );
+    }
+    const requestedModel = (request as { stochastic?: { model?: string } } | null)
+      ?.stochastic?.model;
     if (!nativeGpuSupportsStochasticModel(requestedModel, status.stochasticModels)) {
-      throw new NativeGpuCompatibilityError(`GPU companion does not support stochastic model ${requestedModel}`);
+      throw new NativeGpuCompatibilityError(
+        `GPU companion does not support stochastic model ${requestedModel}`,
+      );
     }
     if (this.activeAnalyzeId !== undefined) {
       this.cancelAnalyze(this.activeAnalyzeId, "GPU search superseded by a newer decision");
     }
-    const { id, response } = this.beginRequest({ type: "analyze", request });
+    const { id, response } = this.beginRequest({ type, request });
     this.activeAnalyzeId = id;
     this.activeDecisionId = decisionId;
     try {
@@ -140,9 +235,18 @@ export class NativeGpuClient {
       if (!result.response) {
         throw new Error("GPU companion returned no search response");
       }
-      if (requestedModel === MREF_COLONIST_LINKED_2024_V1 &&
-          result.response.stochasticModel !== MREF_COLONIST_LINKED_2024_V1) {
-        throw new NativeGpuCompatibilityError("GPU companion returned mismatched Mref stochastic authority");
+      if (result.response.algorithm !== expectedAlgorithm) {
+        throw new NativeGpuCompatibilityError(
+          `GPU companion returned algorithm ${result.response.algorithm}; expected ${expectedAlgorithm}`,
+        );
+      }
+      if (
+        requestedModel === MREF_COLONIST_LINKED_2024_V1 &&
+        result.response.stochasticModel !== MREF_COLONIST_LINKED_2024_V1
+      ) {
+        throw new NativeGpuCompatibilityError(
+          "GPU companion returned mismatched Mref stochastic authority",
+        );
       }
       return result.response;
     } finally {
@@ -193,16 +297,23 @@ export class NativeGpuClient {
       if (hello.build !== undefined && !isNativeGpuBuildIdentity(hello.build)) {
         throw new NativeGpuCompatibilityError("Native GPU build identity is invalid");
       }
-      if (hello.stochasticModels !== undefined &&
-          (!Array.isArray(hello.stochasticModels) ||
-           !hello.stochasticModels.every((model) => typeof model === "string"))) {
-        throw new NativeGpuCompatibilityError("Native GPU stochastic capabilities are invalid");
+      if (
+        !Array.isArray(hello.stochasticModels) ||
+        !hello.stochasticModels.every((model) => typeof model === "string")
+      ) {
+        throw new NativeGpuCompatibilityError(
+          "Native GPU stochastic capabilities are invalid",
+        );
+      }
+      if (!isNativeGpuCapabilities(hello.capabilities)) {
+        throw new NativeGpuCompatibilityError(
+          "Native GPU algorithm capabilities are invalid",
+        );
       }
       const status: NativeGpuStatus = {
         runtime: hello.runtime,
-        // Protocol-6 companions predating Mref remain wire-compatible for M0.
-        // Missing capability evidence must never authorize Mref on that host.
-        stochasticModels: hello.stochasticModels ?? [M0_FAIR_IID_2D6_V1],
+        stochasticModels: hello.stochasticModels,
+        capabilities: hello.capabilities,
         engineRevision: hello.engineRevision,
         ...(hello.build ? { build: hello.build } : {}),
         device: hello.device,

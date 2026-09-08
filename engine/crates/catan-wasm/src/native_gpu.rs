@@ -1,14 +1,15 @@
 use super::road_intent_output;
 use colonist_catan_core::{Action, GameState};
 use colonist_catan_search::{
-    ActionStats, BeliefParticle, CudaSimEngine, CudaSimError, CudaSimRootActionStats,
-    DEVELOPMENT_EXACT_FAMILIES, ExactActionFamily, ExactDecisionResult, HARD_VETO_POSTERIOR,
-    IntroducedRoadFragility, RoadCutContinuationAssessment, SearchReport, SearchStatistics,
-    StrategyPolicy, actor_proposal_actions, admit_promoted_roots, apply_closeout_root_impacts,
-    belief_domestic_trade_assessment, belief_road_cut_continuation_assessment,
-    belief_root_closeout_plans, compute_spatial_root_impacts, exact_family_for_action,
-    forced_loss_weight, posterior_immediate_threat_weight, safer_end_turn_alternative,
-    shadow_strategy_diagnostics, shared_root_candidates, solve_belief_current_turn_timed,
+    ActionStats, BeliefParticle, CudaExactEvaluator, CudaSimEngine, CudaSimError,
+    CudaSimRootActionStats, DEVELOPMENT_EXACT_FAMILIES, ExactActionFamily, ExactDecisionResult,
+    HARD_VETO_POSTERIOR, IntroducedRoadFragility, RoadCutContinuationAssessment, SearchReport,
+    SearchStatistics, StrategyPolicy, actor_proposal_actions, admit_promoted_roots,
+    apply_closeout_root_impacts, belief_domestic_trade_assessment,
+    belief_road_cut_continuation_assessment, belief_root_closeout_plans,
+    compute_spatial_root_impacts, exact_family_for_action, forced_loss_weight,
+    posterior_immediate_threat_weight, safer_end_turn_alternative, shadow_strategy_diagnostics,
+    shared_root_candidates, solve_belief_current_turn_timed,
     solve_exact_belief_excluding_controlled,
 };
 use colonist_catan_search::{road_intent, rollout_cutoff_margin};
@@ -26,7 +27,9 @@ use super::{
     weighted_policy_report_for_actions_controlled,
 };
 
-const GPU_ALGORITHM: &str = "gpu-root-rollout";
+pub const NATIVE_GPU_ROLLOUT_ALGORITHM: &str = "gpu-root-rollout";
+pub const NATIVE_GPU_EXACT_ALGORITHM: &str = "deep-maxn-cuda-exact-fixed-work-v1";
+const GPU_ALGORITHM: &str = NATIVE_GPU_ROLLOUT_ALGORITHM;
 const HORIZON_ESCALATION_MIN_UNRESOLVED_CUT_MASS: f32 = 0.20;
 const HORIZON_ESCALATION_MIN_STEPS: usize = 192;
 const HORIZON_ESCALATION_MAX_STEPS: usize = 768;
@@ -34,7 +37,7 @@ const HORIZON_ESCALATION_MAX_STAGES: usize = 3;
 const HORIZON_ESCALATION_MIN_REMAINING_MS: u32 = 40;
 const HORIZON_ESCALATION_MIN_SAMPLES_PER_ROOT: usize = 16;
 const HORIZON_ESCALATION_MAX_SAMPLES_PER_ROOT: usize = 32;
-pub const NATIVE_GPU_PROTOCOL_VERSION: u32 = 6;
+pub const NATIVE_GPU_PROTOCOL_VERSION: u32 = 7;
 pub const NATIVE_GPU_STATE_SCHEMA_VERSION: u32 = 3;
 pub const NATIVE_GPU_STOCHASTIC_MODELS: [&str; 2] = [
     colonist_catan_core::M0_FAIR_IID_2D6_V1,
@@ -50,8 +53,30 @@ pub struct NativeGpuDeviceIdentity {
     pub compute_capability: [i32; 2],
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeGpuExactCapability {
+    pub algorithm: &'static str,
+    pub available: bool,
+    pub supports_deadline: bool,
+    pub supports_cancellation: bool,
+    pub supports_opening: bool,
+    pub fixed_work_parity_only: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeGpuCapabilities {
+    pub algorithms: Vec<&'static str>,
+    pub exact_maxn: NativeGpuExactCapability,
+}
+
 pub struct NativeGpuSearchEngine {
     cuda: CudaSimEngine,
+    exact: Option<CudaExactEvaluator>,
+    exact_unavailable_reason: Option<String>,
 }
 
 #[derive(Clone)]
@@ -366,7 +391,8 @@ fn terminal_bounds(root: &AggregatedRoot) -> (f32, f32) {
     } else {
         // Bounded-outcome Hoeffding interval; unlike empirical variance, this
         // retains uncertainty when a small batch contains only wins or losses.
-        (2.0 * 40.0_f32.ln() / valid as f32).sqrt()
+        (2.0 * 40.0_f32.ln() / valid as f32)
+            .sqrt()
             .max(confidence_width(root.terminal_variance, valid))
     };
     (
@@ -446,22 +472,34 @@ fn racing_contenders(active: &[usize], roots: &[AggregatedRoot]) -> Vec<usize> {
     if active.len() <= 1 {
         return active.to_vec();
     }
-    let best_terminal_lower = active.iter()
+    let best_terminal_lower = active
+        .iter()
         .map(|index| terminal_bounds(&roots[*index]).0)
-        .max_by(f32::total_cmp).unwrap();
-    let terminal_contenders = active.iter().copied()
+        .max_by(f32::total_cmp)
+        .unwrap();
+    let terminal_contenders = active
+        .iter()
+        .copied()
         .filter(|index| terminal_bounds(&roots[*index]).1 + 1e-6 >= best_terminal_lower)
         .collect::<Vec<_>>();
-    let best_margin_lower = terminal_contenders.iter().map(|index| {
-        let root = &roots[*index];
-        root.strategic_margin - confidence_width(root.strategic_margin_variance, root.samples)
-    }).max_by(f32::total_cmp).unwrap();
-    terminal_contenders.into_iter().filter(|index| {
-        let root = &roots[*index];
-        root.strategic_margin
-            + confidence_width(root.strategic_margin_variance, root.samples) + 1e-6
-            >= best_margin_lower
-    }).collect()
+    let best_margin_lower = terminal_contenders
+        .iter()
+        .map(|index| {
+            let root = &roots[*index];
+            root.strategic_margin - confidence_width(root.strategic_margin_variance, root.samples)
+        })
+        .max_by(f32::total_cmp)
+        .unwrap();
+    terminal_contenders
+        .into_iter()
+        .filter(|index| {
+            let root = &roots[*index];
+            root.strategic_margin
+                + confidence_width(root.strategic_margin_variance, root.samples)
+                + 1e-6
+                >= best_margin_lower
+        })
+        .collect()
 }
 
 fn horizon_escalation_schedule(initial_horizon: usize) -> Vec<usize> {
@@ -570,7 +608,35 @@ fn horizon_escalation_contenders(
 impl NativeGpuSearchEngine {
     pub fn new() -> Result<Self, String> {
         let cuda = CudaSimEngine::new().map_err(|error| error.to_string())?;
-        Ok(Self { cuda })
+        let (exact, exact_unavailable_reason) = match CudaExactEvaluator::new() {
+            Ok(exact) => (Some(exact), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
+        Ok(Self {
+            cuda,
+            exact,
+            exact_unavailable_reason,
+        })
+    }
+
+    pub fn capabilities(&self) -> NativeGpuCapabilities {
+        let exact_available = self.exact.is_some();
+        let mut algorithms = vec![NATIVE_GPU_ROLLOUT_ALGORITHM];
+        if exact_available {
+            algorithms.push(NATIVE_GPU_EXACT_ALGORITHM);
+        }
+        NativeGpuCapabilities {
+            algorithms,
+            exact_maxn: NativeGpuExactCapability {
+                algorithm: NATIVE_GPU_EXACT_ALGORITHM,
+                available: exact_available,
+                supports_deadline: exact_available,
+                supports_cancellation: exact_available,
+                supports_opening: false,
+                fixed_work_parity_only: true,
+                unavailable_reason: self.exact_unavailable_reason.clone(),
+            },
+        }
     }
 
     pub fn device_identity(&self) -> NativeGpuDeviceIdentity {
@@ -581,6 +647,33 @@ impl NativeGpuSearchEngine {
             name: identity.name.clone(),
             compute_capability: [identity.compute_capability.0, identity.compute_capability.1],
         }
+    }
+
+    pub fn analyze_exact_json(&mut self, value: Value) -> Result<Value, String> {
+        self.analyze_exact_json_controlled(value, || false)
+    }
+
+    pub fn analyze_exact_json_controlled<F>(
+        &mut self,
+        value: Value,
+        should_cancel: F,
+    ) -> Result<Value, String>
+    where
+        F: Fn() -> bool,
+    {
+        let request: Request = serde_json::from_value(value).map_err(|error| error.to_string())?;
+        let evaluator = self.exact.as_mut().ok_or_else(|| {
+            self.exact_unavailable_reason
+                .clone()
+                .unwrap_or_else(|| "GPU exact MaxN evaluator is unavailable".into())
+        })?;
+        let report = super::analyze_maxn_request(
+            request,
+            super::MaxnBackend::Cuda(evaluator),
+            NATIVE_GPU_EXACT_ALGORITHM,
+            &should_cancel,
+        )?;
+        serde_json::to_value(report).map_err(|error| error.to_string())
     }
 
     pub fn analyze_json(&mut self, value: Value) -> Result<Value, String> {
@@ -609,7 +702,7 @@ impl NativeGpuSearchEngine {
                 "GPU native search does not accept speculative opponent-turn pondering".into(),
             );
         }
-        let effort = request.resolved_effort();
+        let effort = request.resolved_effort(false);
         let decision_clock = DecisionClock::start(effort.decision_time_ms);
         if should_cancel() {
             return Err("GPU native search cancelled".into());
@@ -1261,10 +1354,9 @@ impl NativeGpuSearchEngine {
         // and deeper arbitration. Pairwise overlap comparisons are not transitive.
         shallow_final_root_order =
             escalated_root_order(&shallow_final_root_order, &shallow_aggregated);
-        let shallow_chosen_index = shallow_final_root_order.first().copied()
-            .ok_or_else(|| {
-                "GPU native search had no error-free surviving root candidate".to_string()
-            })?;
+        let shallow_chosen_index = shallow_final_root_order.first().copied().ok_or_else(|| {
+            "GPU native search had no error-free surviving root candidate".to_string()
+        })?;
 
         let mut aggregated = shallow_aggregated.clone();
         let mut final_root_order = shallow_final_root_order.clone();
@@ -1684,6 +1776,7 @@ impl NativeGpuSearchEngine {
             pruned_root_count: pruned_roots.len(),
             pruned_roots,
             root_evidence,
+            root_search_work: Vec::new(),
             strategy_shadow,
             horizon_escalation,
             trade_hard_veto_threshold: HARD_VETO_POSTERIOR,

@@ -191,6 +191,7 @@ pub struct CudaExactEvaluator {
     _module: Arc<CudaModule>,
     stream: Arc<cudarc::driver::CudaStream>,
     kernel: CudaFunction,
+    topology_host: Vec<u32>,
     topology_device: CudaSlice<u32>,
     state_device: CudaSlice<u32>,
     output_device: CudaSlice<f32>,
@@ -211,8 +212,9 @@ impl CudaExactEvaluator {
             return Err(CudaExactError::LearnedValuePromoted);
         }
 
-        // Tile labels are irrelevant here; this board supplies only the immutable
-        // base topology. Keep legacy V1 explicit until topology has its own type.
+        // Start with the canonical generated topology so the resident buffer is
+        // initialized. Request/search entry points replace it when the actual
+        // board uses a different valid vertex/edge indexing.
         let topology_board = Board::randomized_base_v1(0, 4);
         let topology_host = topology_words(&topology_board)?;
         let context = CudaContext::new(ordinal)?;
@@ -237,6 +239,7 @@ impl CudaExactEvaluator {
             _module: module,
             stream,
             kernel,
+            topology_host,
             topology_device,
             state_device,
             output_device,
@@ -264,12 +267,39 @@ impl CudaExactEvaluator {
         self.stats = CudaExactStats::default();
     }
 
+    pub fn prepare_topology(&mut self, board: &Board) -> Result<(), CudaExactError> {
+        let topology = topology_words(board)?;
+        self.prepare_topology_words(topology)
+    }
+
+    pub fn topology_matches(&self, board: &Board) -> Result<bool, CudaExactError> {
+        Ok(topology_words(board)? == self.topology_host)
+    }
+
+    fn prepare_topology_words(&mut self, topology: Vec<u32>) -> Result<(), CudaExactError> {
+        if topology == self.topology_host {
+            return Ok(());
+        }
+        self.topology_device = self.stream.clone_htod(&topology)?;
+        self.topology_host = topology;
+        Ok(())
+    }
+
     pub fn evaluate_batch(
         &mut self,
         states: &[GameState],
     ) -> Result<Vec<[f32; 4]>, CudaExactError> {
         let batch_started = Instant::now();
         let pack_started = Instant::now();
+        if let Some(first) = states.first() {
+            let topology = topology_words(first.board.as_ref())?;
+            for state in states.iter().skip(1) {
+                if topology_words(state.board.as_ref())? != topology {
+                    return Err(CudaExactError::TopologyMismatch);
+                }
+            }
+            self.prepare_topology_words(topology)?;
+        }
         let packed = states
             .iter()
             .map(CudaExactPackedState::new)
@@ -278,14 +308,7 @@ impl CudaExactEvaluator {
         self.evaluate_packed_batch_inner(&packed, batch_started, pack_nanos)
     }
 
-    pub fn evaluate_packed_batch(
-        &mut self,
-        states: &[CudaExactPackedState],
-    ) -> Result<Vec<[f32; 4]>, CudaExactError> {
-        self.evaluate_packed_batch_inner(states, Instant::now(), 0)
-    }
-
-    pub fn evaluate_packed_batch_into(
+    pub(crate) fn evaluate_packed_batch_into(
         &mut self,
         states: &[CudaExactPackedState],
         result: &mut Vec<[f32; 4]>,
@@ -450,11 +473,10 @@ fn pack_state_words(
     {
         return Err(CudaExactError::TopologyMismatch);
     }
-    // `new_on_device` uploads the canonical standard topology once. The
-    // arena's state generator preserves that immutable graph topology;
-    // only the per-seed hex labels and ports are packed below. Keep this
-    // hot path allocation-free and reserve topology validation for the
-    // evaluator construction boundary.
+    // Topology adjacency lives in the evaluator's resident topology buffer;
+    // per-state tile labels, ports, pieces and player state are packed here.
+    // Search entry points prepare and validate the request topology before
+    // evaluating packed descendants.
 
     words[STATE_NUM_PLAYERS] = players as u32;
     words[STATE_PHASE] = phase_tag(state.phase);
@@ -465,7 +487,9 @@ fn pack_state_words(
     words[STATE_BANK_PUBLIC] = u32::from(state.bank_is_public);
     words[STATE_DOMESTIC_TRADE_DISABLED] = if state.player_trades_enabled {
         u32::from(state.domestic_trade_disabled)
-    } else { (1u32 << players) - 1 };
+    } else {
+        (1u32 << players) - 1
+    };
     words[STATE_LONGEST_HOLDER] = holder_code(state.longest_road_holder);
     words[STATE_LARGEST_HOLDER] = holder_code(state.largest_army_holder);
 

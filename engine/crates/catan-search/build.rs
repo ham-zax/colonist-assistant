@@ -1,5 +1,5 @@
-use std::{env, fs, path::PathBuf};
 use sha2::{Digest, Sha256};
+use std::{env, fs, path::PathBuf};
 
 fn main() {
     if env::var_os("CARGO_FEATURE_CUDA_SIM").is_none() {

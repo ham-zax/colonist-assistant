@@ -89,8 +89,7 @@ fn compare_introduced_road_fragility(
         let before_expansion_loss = before_cut.map_or(0.0, |cut| cut.expansion_loss);
         let additional_road_loss = after_cut.road_loss.saturating_sub(before_road_loss);
         let award_loss_introduced = after_cut.award_loss && !before_award_loss;
-        let additional_expansion_loss =
-            (after_cut.expansion_loss - before_expansion_loss).max(0.0);
+        let additional_expansion_loss = (after_cut.expansion_loss - before_expansion_loss).max(0.0);
 
         if additional_road_loss == 0
             && !award_loss_introduced
@@ -223,10 +222,9 @@ pub fn compute_spatial_root_impacts(
 
                 // Existing bypass protection remains coverage-only behavior.
                 if after_res.maximum_longest_road_loss < baseline_road.maximum_longest_road_loss {
-                    road_delta.longest_road_loss_prevented = (baseline_road
-                        .maximum_longest_road_loss
-                        - after_res.maximum_longest_road_loss)
-                        as i8;
+                    road_delta.longest_road_loss_prevented =
+                        (baseline_road.maximum_longest_road_loss
+                            - after_res.maximum_longest_road_loss) as i8;
                     if promotion.is_none() {
                         promotion = Some(RootPromotionReason::RoadAwardProtection);
                     }

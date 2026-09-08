@@ -1,6 +1,6 @@
 # Windows Colonist GPU Runtime
 
-Windows Chrome and Edge use one permanent Native Messaging runtime while the current strategy engine remains in WSL.
+Windows Chrome and Edge can use one permanent Native Messaging runtime while the native GPU companion remains in WSL. The companion exposes experimental `gpu-root-rollout` separately from the same-policy `deep-maxn-cuda-exact-fixed-work-v1` backend candidate. Production `deep-search` currently stays on CPU/WASM; browser recommendations never substitute rollout search merely because the companion is connected, and exact CUDA remains gated on correctness, performance and packaged-execution evidence.
 
 ```text
 Chrome / Edge extension
@@ -56,9 +56,9 @@ HKCU\Software\Microsoft\Edge\NativeMessagingHosts\io.colonist_assistant.gpu
 
 The extension cannot choose a WSL distribution, executable path, shell command, PTX payload, or native code. Those values come only from the local runtime configuration written during setup. If the configured WSL distribution or binary is missing, the runtime fails rather than falling back to another strategy executable.
 
-## Normal GPU iteration
+## Native GPU diagnostic iteration
 
-After setup, strategy/search changes stay entirely in WSL:
+After setup, native parity/benchmark strategy changes stay entirely in WSL:
 
 ```text
 edit Rust/CUDA
@@ -67,7 +67,7 @@ edit Rust/CUDA
 -> reconnect/reload the extension if needed
 ```
 
-Do not rerun the Windows runtime installer for an ordinary Linux host rebuild. Each new Native Messaging connection executes the configured Linux path, so the next connection uses the newly built binary at that path.
+Do not rerun the Windows runtime installer for an ordinary Linux host rebuild. Each new Native Messaging connection executes the configured Linux path, so the next diagnostic/experimental connection uses the newly built binary at that path. Rebuilding the companion does not promote either GPU algorithm: rollout remains experimental, and exact MaxN requires an explicit product-promotion gate before browser routing can use it.
 
 The `hello` response still comes from the Linux `colonist-assistant-gpu`. Its existing runtime, protocol/state versions, engine revision, CUDA device, Git SHA/dirty state, build timestamp, and embedded PTX SHA-256 remain authoritative. The Windows runtime has no strategy-engine identity in that protocol.
 

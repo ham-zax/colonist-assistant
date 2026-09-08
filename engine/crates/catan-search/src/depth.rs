@@ -6,8 +6,6 @@ use colonist_catan_core::{Action, GameState, NodeKind, Phase};
 
 use crate::deadline::CooperativeDeadline;
 use crate::eval::{RoadIntent, evaluate, road_intent, strategic_utility};
-#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
-use crate::exact::solve_exact_belief;
 use crate::exact::{
     DEVELOPMENT_EXACT_FAMILIES, ExactActionFamily, ExactDecisionResult, exact_family_for_action,
     solve_exact_belief_excluding_controlled,
@@ -140,6 +138,20 @@ fn road_intent_for_root(state: &GameState, actor: u8, action: &Action) -> Option
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct RootSearchWorkDiagnostic {
+    pub action: Action,
+    pub nodes: u32,
+    pub completed_wave_depth: u8,
+    pub cutoff_depth_counts: Vec<u32>,
+    /// Posterior particle mass for which at least one expanded continuation
+    /// reached the controlled player's next turn decision.
+    pub posterior_mass_reaching_controlled_next_decision: f32,
+    /// Posterior particle mass for which at least one expanded continuation
+    /// reached a terminal state. Kept separate from depth/budget cutoffs.
+    pub posterior_mass_reaching_terminal: f32,
+}
+
 #[derive(Clone, Debug)]
 pub struct BeliefSearchProvenance {
     pub ranked_root_count: usize,
@@ -148,6 +160,7 @@ pub struct BeliefSearchProvenance {
     pub pruned_root_count: usize,
     pub pruned_roots: Vec<PrunedRootDiagnostic>,
     pub root_evidence: Vec<RootCausalEvidence>,
+    pub root_search_work: Vec<RootSearchWorkDiagnostic>,
     pub strategy_shadow: Option<StrategyShadowDiagnostics>,
     pub trade_hard_veto_threshold: f32,
     /// Ordinary backed-up search winner before any later safety replacement.
@@ -166,6 +179,7 @@ impl Default for BeliefSearchProvenance {
             pruned_root_count: 0,
             pruned_roots: Vec::new(),
             root_evidence: Vec::new(),
+            root_search_work: Vec::new(),
             strategy_shadow: None,
             trade_hard_veto_threshold: HARD_VETO_POSTERIOR,
             search_winner: None,
@@ -319,7 +333,9 @@ pub enum DepthBeliefError {
     Empty,
     PublicStateMismatch,
     #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
-    CudaTimeBudgetUnsupported,
+    CudaSearchCancelled,
+    #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+    CudaDeadlineExceeded,
     #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
     CudaOpeningUnsupported,
     #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
@@ -492,6 +508,9 @@ struct Searcher {
     /// the observation-safe stochastic policy; this player uses one deliberate
     /// observation-safe continuation action instead of an opponent-style mix.
     controlled_player: Option<u8>,
+    controlled_next_decision_reached: bool,
+    terminal_reached: bool,
+    cutoff_depth_counts: Vec<u32>,
     evaluation_cache: Rc<RefCell<HashMap<u64, [f32; 4]>>>,
 }
 
@@ -668,6 +687,14 @@ fn normalize_belief_root_priors(
 }
 
 impl Searcher {
+    fn mark_cutoff(&mut self, depth: u8) {
+        let index = depth as usize;
+        if self.cutoff_depth_counts.len() <= index {
+            self.cutoff_depth_counts.resize(index + 1, 0);
+        }
+        self.cutoff_depth_counts[index] = self.cutoff_depth_counts[index].saturating_add(1);
+    }
+
     fn evaluate_cached(&self, state: &GameState) -> [f32; 4] {
         let hash = state.state_hash();
         if let Some(value) = self.evaluation_cache.borrow().get(&hash) {
@@ -802,23 +829,40 @@ impl Searcher {
     ) -> [f32; 4] {
         let subtree_limit = subtree_limit.min(self.node_limit).min(self.maximum_nodes);
         if self.nodes >= subtree_limit {
+            self.mark_cutoff(depth);
             return self.evaluate_cached(state);
         }
         if self.deadline.expired_at_checkpoint(self.nodes, 8) {
             self.deadline_reached = true;
+            self.mark_cutoff(depth);
             return self.evaluate_cached(state);
         }
         self.nodes += 1;
         self.deepest_depth = self.deepest_depth.max(depth);
-        if state.is_terminal() || depth >= self.maximum_depth || actions_in_turn >= 18 {
+        if state.is_terminal() {
+            self.terminal_reached = true;
+            return self.evaluate_cached(state);
+        }
+        let node_kind = state.node_kind();
+        if let NodeKind::Decision { actor } = node_kind
+            && self.controlled_player == Some(actor)
+            && depth > 0
+        {
+            self.controlled_next_decision_reached = true;
+        }
+        if depth >= self.maximum_depth || actions_in_turn >= 18 {
+            self.mark_cutoff(depth);
             return self.evaluate_cached(state);
         }
         let exact_actions = state.legal_actions();
         if exact_actions.is_empty() {
             return self.evaluate_cached(state);
         }
-        match state.node_kind() {
-            NodeKind::Terminal => self.evaluate_cached(state),
+        match node_kind {
+            NodeKind::Terminal => {
+                self.terminal_reached = true;
+                self.evaluate_cached(state)
+            }
             NodeKind::Chance => {
                 let total = exact_actions
                     .iter()
@@ -882,6 +926,7 @@ impl Searcher {
                 // keeps the exact legal domain.
                 let remaining = subtree_limit.saturating_sub(self.nodes);
                 if remaining == 0 {
+                    self.mark_cutoff(depth);
                     return self.evaluate_cached(state);
                 }
                 let observation_safe = self.observation_safe_recursive;
@@ -1216,6 +1261,115 @@ fn belief_search(
     node_budget_mode: BeliefNodeBudgetMode,
     evidence_escalation_ms: u32,
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
+    belief_search_backend(
+        particles,
+        config,
+        paranoid,
+        root_exclusions,
+        node_budget_mode,
+        evidence_escalation_ms,
+        &mut BeliefBackend::Cpu,
+    )
+}
+
+// Root preparation, admission, wave budgets, escalation and final arbitration
+// have one owner. Only evaluation of a continuation cell changes backend.
+enum BeliefBackend<'a> {
+    Cpu,
+    #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+    Cuda(&'a mut crate::CudaExactEvaluator, &'a dyn Fn() -> bool),
+    #[cfg(not(all(feature = "cuda-exact", not(target_arch = "wasm32"))))]
+    _Lifetime(std::marker::PhantomData<&'a ()>),
+}
+
+impl BeliefBackend<'_> {
+    fn check_cancelled(&self) -> Result<(), DepthBeliefError> {
+        #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+        if let Self::Cuda(_, cancel) = self
+            && cancel()
+        {
+            return Err(DepthBeliefError::CudaSearchCancelled);
+        }
+        Ok(())
+    }
+
+    fn visit(
+        &mut self,
+        searcher: &mut Searcher,
+        state: &GameState,
+        depth: u8,
+        actions_in_turn: u8,
+    ) -> Result<[f32; 4], DepthBeliefError> {
+        self.check_cancelled()?;
+        #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+        if let Self::Cuda(evaluator, cancel) = self {
+            let mut tree = CudaDeferredTree::new();
+            let deadline = searcher.deadline.clone();
+            let stop = || {
+                if cancel() {
+                    Some(DepthBeliefError::CudaSearchCancelled)
+                } else if deadline.has_elapsed() {
+                    Some(DepthBeliefError::CudaDeadlineExceeded)
+                } else {
+                    None
+                }
+            };
+            let mut deferred = CudaDeferredSearcher {
+                tree: &mut tree,
+                maximum_depth: searcher.maximum_depth,
+                maximum_nodes: searcher.maximum_nodes,
+                node_limit: searcher.node_limit,
+                branch_cap: searcher.branch_cap,
+                controlled_player: searcher
+                    .controlled_player
+                    .expect("belief controlled player"),
+                nodes: 0,
+                deepest_depth: 0,
+                controlled_next_decision_reached: false,
+                terminal_reached: false,
+                cutoff_depth_counts: Vec::new(),
+            };
+            let node = deferred.visit(state, depth, actions_in_turn, searcher.node_limit, &stop);
+            searcher.nodes = deferred.nodes;
+            searcher.deepest_depth = deferred.deepest_depth;
+            searcher.controlled_next_decision_reached = deferred.controlled_next_decision_reached;
+            searcher.terminal_reached = deferred.terminal_reached;
+            searcher.cutoff_depth_counts = deferred.cutoff_depth_counts;
+            let node = match node {
+                Ok(node) => node,
+                Err(DepthBeliefError::CudaDeadlineExceeded) => {
+                    searcher.deadline_reached = true;
+                    return Ok([0.0; 4]); // Incomplete cells never enter a completed wave.
+                }
+                Err(error) => return Err(error),
+            };
+            if tree.packing_failed {
+                return Err(DepthBeliefError::CudaEvaluationFailed);
+            }
+            let mut values = Vec::new();
+            evaluator
+                .evaluate_packed_batch_into(&tree.leaves, &mut values)
+                .map_err(|_| DepthBeliefError::CudaEvaluationFailed)?;
+            if cancel() {
+                return Err(DepthBeliefError::CudaSearchCancelled);
+            }
+            searcher.deadline_reached = deadline.has_elapsed();
+            return Ok(tree.backup(node, &values));
+        }
+        Ok(searcher.visit(state, depth, actions_in_turn, 0.0, 1.0, searcher.node_limit))
+    }
+}
+
+fn belief_search_backend(
+    particles: &[BeliefParticle],
+    config: BeliefDepthConfig,
+    paranoid: bool,
+    root_exclusions: &[Action],
+    node_budget_mode: BeliefNodeBudgetMode,
+    evidence_escalation_ms: u32,
+    backend: &mut BeliefBackend<'_>,
+) -> Result<BeliefDepthResult, DepthBeliefError> {
+    backend.check_cancelled()?;
     let config = config.normalized();
     let maximum_depth = config.maximum_depth;
     let branch_cap = config.branch_cap;
@@ -1810,6 +1964,7 @@ fn belief_search(
         pruned_root_count,
         pruned_roots,
         root_evidence,
+        root_search_work: Vec::new(),
         strategy_shadow: strategy_admission,
         trade_hard_veto_threshold: HARD_VETO_POSTERIOR,
         search_winner: None,
@@ -1823,6 +1978,18 @@ fn belief_search(
         .collect::<Vec<_>>();
     let threat_safety_ms = elapsed_stage_ms(&deadline, threat_safety_started);
     let one_ply_floor_started = deadline.elapsed_ms();
+    let mut completed_root_work = root_actions
+        .iter()
+        .cloned()
+        .map(|action| RootSearchWorkDiagnostic {
+            action,
+            nodes: 0,
+            completed_wave_depth: 0,
+            cutoff_depth_counts: Vec::new(),
+            posterior_mass_reaching_controlled_next_decision: 0.0,
+            posterior_mass_reaching_terminal: 0.0,
+        })
+        .collect::<Vec<_>>();
 
     // Always retain one complete posterior-wide one-ply table. Deeper search
     // may replace it only after an entire depth wave completes across every
@@ -1841,9 +2008,12 @@ fn belief_search(
             continue;
         }
         particles_searched += 1;
-        for action in &root_actions {
+        for (action_index, action) in root_actions.iter().enumerate() {
             let mut next = particle.state.clone();
             let entry = if next.apply(action).is_ok() {
+                if next.is_terminal() {
+                    completed_root_work[action_index].posterior_mass_reaching_terminal += weight;
+                }
                 let mut value = evaluate_after_forced_chance(&next, 0);
                 apply_action_friction(&mut value, &particle.state, action, observer);
                 RowEntry {
@@ -1893,6 +2063,7 @@ fn belief_search(
     let mut target_depth = 1u8;
 
     while target_depth <= maximum_depth {
+        backend.check_cancelled()?;
         let active_deadline = if evidence_escalation_pending {
             &hard_deadline
         } else {
@@ -1932,6 +2103,9 @@ fn belief_search(
         let mut completed_wave_cells = 0usize;
         let wave_start_nodes = nodes;
         let mut wave_root_nodes = vec![0u32; root_actions.len()];
+        let mut wave_root_future_self_mass = vec![0.0f32; root_actions.len()];
+        let mut wave_root_terminal_mass = vec![0.0f32; root_actions.len()];
+        let mut wave_root_cutoff_depth_counts = vec![Vec::<u32>::new(); root_actions.len()];
 
         'particles: for particle in particles {
             let weight = particle.weight.max(0.0) / total_weight;
@@ -1995,24 +2169,42 @@ fn belief_search(
                     deadline_reached: false,
                     observation_safe_recursive: true,
                     controlled_player: Some(observer),
+                    controlled_next_decision_reached: false,
+                    terminal_reached: false,
+                    cutoff_depth_counts: Vec::new(),
                     evaluation_cache: Rc::clone(&evaluation_cache),
                 };
-                let mut candidate_value = searcher.visit(
+                let mut candidate_value = backend.visit(
+                    &mut searcher,
                     &next,
                     u8::from(completed_turn),
                     if completed_turn { 0 } else { 1 },
-                    0.0,
-                    1.0,
-                    searcher.node_limit,
-                );
+                )?;
                 apply_action_friction(&mut candidate_value, &particle.state, action, observer);
                 wave_root_nodes[action_index] =
                     wave_root_nodes[action_index].saturating_add(searcher.nodes);
+                if searcher.controlled_next_decision_reached {
+                    wave_root_future_self_mass[action_index] += weight;
+                }
+                if searcher.terminal_reached || next.is_terminal() {
+                    wave_root_terminal_mass[action_index] += weight;
+                }
+                if wave_root_cutoff_depth_counts[action_index].len()
+                    < searcher.cutoff_depth_counts.len()
+                {
+                    wave_root_cutoff_depth_counts[action_index]
+                        .resize(searcher.cutoff_depth_counts.len(), 0);
+                }
+                for (cutoff_depth, count) in searcher.cutoff_depth_counts.iter().enumerate() {
+                    wave_root_cutoff_depth_counts[action_index][cutoff_depth] =
+                        wave_root_cutoff_depth_counts[action_index][cutoff_depth]
+                            .saturating_add(*count);
+                }
                 nodes += searcher.nodes;
                 cutoffs += searcher.cutoffs;
                 wave_depth = wave_depth.max(searcher.deepest_depth);
                 if searcher.deadline_reached || active_deadline.has_elapsed() {
-                    deadline_reached |= active_deadline.has_elapsed();
+                    deadline_reached |= searcher.deadline_reached || active_deadline.has_elapsed();
                     wave_complete = false;
                     break 'particles;
                 }
@@ -2040,6 +2232,21 @@ fn belief_search(
         }
         let wave_winner = aggregate_winner(&wave);
         let wave_realized_nodes = nodes.saturating_sub(wave_start_nodes);
+        let wave_root_work = root_actions
+            .iter()
+            .enumerate()
+            .map(|(action_index, action)| RootSearchWorkDiagnostic {
+                action: action.clone(),
+                nodes: wave_root_nodes[action_index],
+                completed_wave_depth: wave_target_depth,
+                cutoff_depth_counts: wave_root_cutoff_depth_counts[action_index].clone(),
+                posterior_mass_reaching_controlled_next_decision: wave_root_future_self_mass
+                    [action_index]
+                    .clamp(0.0, 1.0),
+                posterior_mass_reaching_terminal: wave_root_terminal_mass[action_index]
+                    .clamp(0.0, 1.0),
+            })
+            .collect::<Vec<_>>();
 
         if evidence_escalation_pending {
             evidence_escalation_completed = true;
@@ -2056,6 +2263,7 @@ fn belief_search(
                 aggregate = wave;
                 particles_searched = wave_particles;
                 depth = wave_depth;
+                completed_root_work = wave_root_work;
                 break;
             }
             continue;
@@ -2064,6 +2272,7 @@ fn belief_search(
         aggregate = wave;
         particles_searched = wave_particles;
         depth = wave_depth;
+        completed_root_work = wave_root_work;
         if target_depth == 1
             && should_escalate_binary_root_evidence(
                 node_budget_mode,
@@ -2146,6 +2355,7 @@ fn belief_search(
         .iter()
         .map(|candidate| candidate.action.clone())
         .collect::<Vec<_>>();
+    provenance.root_search_work = completed_root_work;
     attach_strategy_shadow(
         &mut provenance,
         posterior,
@@ -2403,6 +2613,9 @@ pub fn search_maxn_hostility_stress_bounded(
         deadline_reached: false,
         observation_safe_recursive: false,
         controlled_player: None,
+        controlled_next_decision_reached: false,
+        terminal_reached: false,
+        cutoff_depth_counts: Vec::new(),
         evaluation_cache: Rc::new(RefCell::new(HashMap::new())),
     }
     .root(state))
@@ -2441,6 +2654,9 @@ pub fn search_maxn_bounded_timed(
         deadline_reached: false,
         observation_safe_recursive: false,
         controlled_player: None,
+        controlled_next_decision_reached: false,
+        terminal_reached: false,
+        cutoff_depth_counts: Vec::new(),
         evaluation_cache: Rc::new(RefCell::new(HashMap::new())),
     }
     .root(state)
@@ -2499,6 +2715,9 @@ pub fn search_paranoid_bounded_timed(
         deadline_reached: false,
         observation_safe_recursive: false,
         controlled_player: None,
+        controlled_next_decision_reached: false,
+        terminal_reached: false,
+        cutoff_depth_counts: Vec::new(),
         evaluation_cache: Rc::new(RefCell::new(HashMap::new())),
     }
     .root(state)
@@ -3182,7 +3401,11 @@ impl CudaLinearSearcher<'_, '_> {
         actions_in_turn: u8,
         subtree_limit: u32,
         path_weight: f32,
+        should_stop: &dyn Fn() -> Option<DepthBeliefError>,
     ) -> Result<(), DepthBeliefError> {
+        if let Some(reason) = should_stop() {
+            return Err(reason);
+        }
         let subtree_limit = subtree_limit.min(self.node_limit).min(self.maximum_nodes);
         if self.nodes >= subtree_limit {
             return self.batch.emit(state, self.lane_id, path_weight);
@@ -3251,6 +3474,7 @@ impl CudaLinearSearcher<'_, '_> {
                             actions_in_turn.saturating_add(1),
                             child_limit,
                             path_weight * weight,
+                            should_stop,
                         )
                     } else {
                         self.batch.emit(&next, self.lane_id, path_weight * weight)
@@ -3267,11 +3491,15 @@ impl CudaLinearSearcher<'_, '_> {
                 if remaining == 0 {
                     return self.batch.emit(state, self.lane_id, path_weight);
                 }
+                let proposal_actions = actor_proposal_actions(state);
+                if proposal_actions.is_empty() {
+                    return self.batch.emit(state, self.lane_id, path_weight);
+                }
                 let policy_started = std::time::Instant::now();
                 let mut ranked = if actor == self.controlled_player {
-                    recursive_observation_best_policy_action(state, &actions, actor)
+                    recursive_observation_best_policy_action(state, &proposal_actions, actor)
                 } else {
-                    recursive_observation_policy(state, &actions, actor, self.branch_cap)
+                    recursive_observation_policy(state, &proposal_actions, actor, self.branch_cap)
                 };
                 self.policy_nanos = self.policy_nanos.saturating_add(
                     policy_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
@@ -3315,6 +3543,7 @@ impl CudaLinearSearcher<'_, '_> {
                             },
                             child_limit,
                             path_weight * weight,
+                            should_stop,
                         )
                     } else {
                         self.batch.emit(&next, self.lane_id, path_weight * weight)
@@ -3353,32 +3582,55 @@ struct CudaDeferredSearcher<'a> {
     controlled_player: u8,
     nodes: u32,
     deepest_depth: u8,
+    controlled_next_decision_reached: bool,
+    terminal_reached: bool,
+    cutoff_depth_counts: Vec<u32>,
 }
 
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
 impl CudaDeferredSearcher<'_> {
+    fn mark_cutoff(&mut self, depth: u8) {
+        self.cutoff_depth_counts
+            .resize(self.cutoff_depth_counts.len().max(depth as usize + 1), 0);
+        self.cutoff_depth_counts[depth as usize] += 1;
+    }
     fn visit(
         &mut self,
         state: &GameState,
         depth: u8,
         actions_in_turn: u8,
         subtree_limit: u32,
-    ) -> usize {
+        should_stop: &dyn Fn() -> Option<DepthBeliefError>,
+    ) -> Result<usize, DepthBeliefError> {
+        if let Some(reason) = should_stop() {
+            return Err(reason);
+        }
         let subtree_limit = subtree_limit.min(self.node_limit).min(self.maximum_nodes);
         if self.nodes >= subtree_limit {
-            return self.tree.leaf(state);
+            self.mark_cutoff(depth);
+            return Ok(self.tree.leaf(state));
         }
         self.nodes += 1;
         self.deepest_depth = self.deepest_depth.max(depth);
-        if state.is_terminal() || depth >= self.maximum_depth || actions_in_turn >= 18 {
-            return self.tree.leaf(state);
+        if state.is_terminal() {
+            self.terminal_reached = true;
+            return Ok(self.tree.leaf(state));
+        }
+        if matches!(state.node_kind(), NodeKind::Decision { actor } if actor == self.controlled_player)
+            && depth > 0
+        {
+            self.controlled_next_decision_reached = true;
+        }
+        if depth >= self.maximum_depth || actions_in_turn >= 18 {
+            self.mark_cutoff(depth);
+            return Ok(self.tree.leaf(state));
         }
         let actions = state.legal_actions();
         if actions.is_empty() {
-            return self.tree.leaf(state);
+            return Ok(self.tree.leaf(state));
         }
         match state.node_kind() {
-            NodeKind::Terminal => self.tree.leaf(state),
+            NodeKind::Terminal => Ok(self.tree.leaf(state)),
             NodeKind::Chance => {
                 let total = actions
                     .iter()
@@ -3412,7 +3664,13 @@ impl CudaDeferredSearcher<'_> {
                     next.apply(&action)
                         .expect("legal chance action must transition");
                     let node = if allowance > 0 && self.nodes < child_limit {
-                        self.visit(&next, depth, actions_in_turn.saturating_add(1), child_limit)
+                        self.visit(
+                            &next,
+                            depth,
+                            actions_in_turn.saturating_add(1),
+                            child_limit,
+                            should_stop,
+                        )?
                     } else {
                         self.tree.leaf(&next)
                     };
@@ -3424,17 +3682,22 @@ impl CudaDeferredSearcher<'_> {
                         friction: None,
                     });
                 }
-                self.tree.weighted(children)
+                Ok(self.tree.weighted(children))
             }
             NodeKind::Decision { actor } => {
                 let remaining = subtree_limit.saturating_sub(self.nodes);
                 if remaining == 0 {
-                    return self.tree.leaf(state);
+                    self.mark_cutoff(depth);
+                    return Ok(self.tree.leaf(state));
+                }
+                let proposal_actions = actor_proposal_actions(state);
+                if proposal_actions.is_empty() {
+                    return Ok(self.tree.leaf(state));
                 }
                 let mut ranked = if actor == self.controlled_player {
-                    recursive_observation_best_policy_action(state, &actions, actor)
+                    recursive_observation_best_policy_action(state, &proposal_actions, actor)
                 } else {
-                    recursive_observation_policy(state, &actions, actor, self.branch_cap)
+                    recursive_observation_policy(state, &proposal_actions, actor, self.branch_cap)
                 };
                 ranked.truncate(ranked.len().min(remaining as usize));
                 let budgets = allocate_root_node_budgets(ranked.len(), remaining);
@@ -3466,7 +3729,8 @@ impl CudaDeferredSearcher<'_> {
                                 actions_in_turn.saturating_add(1)
                             },
                             child_limit,
-                        )
+                            should_stop,
+                        )?
                     } else {
                         self.tree.leaf(&next)
                     };
@@ -3478,7 +3742,7 @@ impl CudaDeferredSearcher<'_> {
                         friction: Some((actor, cuda_action_friction(state, &action, actor))),
                     });
                 }
-                self.tree.weighted(children)
+                Ok(self.tree.weighted(children))
             }
         }
     }
@@ -3502,7 +3766,9 @@ struct CudaDeferredRootRow {
 fn cuda_belief_search_with_batch(
     particles: &[BeliefParticle],
     config: BeliefDepthConfig,
+    reference_maximum_nodes: u32,
     root_exclusions: &[Action],
+    should_stop: &dyn Fn() -> Option<DepthBeliefError>,
     evaluate_batch: &mut dyn FnMut(
         &[crate::CudaExactPackedState],
         &mut Vec<[f32; 4]>,
@@ -3510,8 +3776,8 @@ fn cuda_belief_search_with_batch(
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
     let search_started = std::time::Instant::now();
     let config = config.normalized();
-    if config.time_budget_ms != 0 {
-        return Err(DepthBeliefError::CudaTimeBudgetUnsupported);
+    if let Some(reason) = should_stop() {
+        return Err(reason);
     }
     let Some(first_particle) = particles.first() else {
         return Err(DepthBeliefError::Empty);
@@ -3536,9 +3802,17 @@ fn cuda_belief_search_with_batch(
     let maximum_depth = config.maximum_depth;
     let branch_cap = config.branch_cap;
     let maximum_nodes = config.maximum_nodes;
+    let reference_maximum_nodes = reference_maximum_nodes.max(1);
     let posterior_particles = particles.len();
-    let posterior = particles;
-    let coalesced_storage = coalesce_identical_particles(particles);
+    let mut posterior_storage = particles.to_vec();
+    posterior_storage.sort_by(|left, right| {
+        left.state
+            .state_hash()
+            .cmp(&right.state.state_hash())
+            .then_with(|| left.weight.total_cmp(&right.weight))
+    });
+    let posterior = posterior_storage.as_slice();
+    let coalesced_storage = coalesce_identical_particles(posterior);
     let coalesced = coalesced_storage.as_slice();
     let strategic_storage;
     let particles = if coalesced.len() > config.strategic_particle_limit {
@@ -3554,10 +3828,9 @@ fn cuda_belief_search_with_batch(
         .map(|particle| particle.weight.max(0.0))
         .sum::<f32>()
         .max(f32::EPSILON);
-    let planner_nodes = (maximum_nodes / 12).clamp(300, 4_000);
-    let ranked_diagnostics =
+    let planner_nodes = (reference_maximum_nodes / 12).clamp(300, 4_000);
+    let mut ranked_diagnostics =
         normalize_belief_root_priors_with_diagnostics(particles, observer, planner_nodes);
-    let ranked_root_count = ranked_diagnostics.len();
     let mut pruned_roots = Vec::<PrunedRootDiagnostic>::new();
     for candidate in &ranked_diagnostics {
         if root_exclusions.contains(&candidate.action) {
@@ -3568,9 +3841,83 @@ fn cuda_belief_search_with_batch(
             });
         }
     }
+    ranked_diagnostics.retain(|candidate| !root_exclusions.contains(&candidate.action));
+    let mut exact_family_results = Vec::<(ExactActionFamily, ExactDecisionResult)>::new();
+    let mut exact_family_fallbacks = Vec::<(ExactActionFamily, Action)>::new();
+    for family in DEVELOPMENT_EXACT_FAMILIES {
+        if let Some(reason) = should_stop() {
+            return Err(reason);
+        }
+        let family_members = ranked_diagnostics
+            .iter()
+            .filter(|candidate| exact_family_for_action(&candidate.action) == Some(family))
+            .cloned()
+            .collect::<Vec<_>>();
+        let Some(fallback) = family_members
+            .first()
+            .map(|candidate| candidate.action.clone())
+        else {
+            continue;
+        };
+        let exact =
+            solve_exact_belief_excluding_controlled(posterior, family, root_exclusions, || {
+                should_stop().is_some()
+            })
+            .ok_or_else(|| should_stop().unwrap_or(DepthBeliefError::CudaDeadlineExceeded))?;
+        let Some(representative) = exact.chosen.clone() else {
+            continue;
+        };
+        let family_prior = family_members
+            .iter()
+            .map(|candidate| candidate.prior.max(0.0))
+            .sum::<f32>();
+        let quota_score = family_members
+            .iter()
+            .map(|candidate| candidate.quota_score)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let representative_diagnostic = family_members
+            .iter()
+            .find(|candidate| candidate.action == representative)
+            .or_else(|| family_members.first())
+            .expect("non-empty exact family has a representative diagnostic");
+        for candidate in &family_members {
+            if candidate.action != representative {
+                pruned_roots.push(PrunedRootDiagnostic {
+                    action: candidate.action.clone(),
+                    pre_truncation_rank: Some(candidate.rank),
+                    reason: RootPruneReason::ExactFamilyCollapsed,
+                });
+            }
+        }
+        ranked_diagnostics
+            .retain(|candidate| exact_family_for_action(&candidate.action) != Some(family));
+        ranked_diagnostics.push(RankedRootDiagnostic {
+            action: representative,
+            rank: 0,
+            prior: family_prior,
+            planner_value: representative_diagnostic.planner_value,
+            planner_completion_mass: representative_diagnostic.planner_completion_mass,
+            planner_decisive_completion_mass: representative_diagnostic
+                .planner_decisive_completion_mass,
+            planner_response_windows: representative_diagnostic.planner_response_windows,
+            quota_score,
+        });
+        exact_family_fallbacks.push((family, fallback));
+        exact_family_results.push((family, exact));
+    }
+    ranked_diagnostics.sort_by(|left, right| {
+        right
+            .quota_score
+            .total_cmp(&left.quota_score)
+            .then_with(|| right.prior.total_cmp(&left.prior))
+            .then_with(|| format!("{:?}", left.action).cmp(&format!("{:?}", right.action)))
+    });
+    for (index, candidate) in ranked_diagnostics.iter_mut().enumerate() {
+        candidate.rank = index + 1;
+    }
+    let ranked_root_count = ranked_diagnostics.len();
     let root_scored = ranked_diagnostics
         .iter()
-        .filter(|candidate| !root_exclusions.contains(&candidate.action))
         .map(|candidate| (candidate.action.clone(), candidate.prior))
         .collect::<Vec<_>>();
     let immediate_threat_weight = posterior_immediate_threat_weight(
@@ -3750,44 +4097,7 @@ fn cuda_belief_search_with_batch(
             });
         }
     }
-    let mut root_actions = retained;
-    let mut exact_family_replacement = None;
-    if let Some(monopoly_slot) = root_actions
-        .iter()
-        .position(|(action, _)| matches!(action, Action::PlayMonopoly { .. }))
-    {
-        let (fallback, fallback_prior) = root_actions[monopoly_slot].clone();
-        let replacement = solve_exact_belief(particles, ExactActionFamily::Monopoly)
-            .chosen
-            .unwrap_or_else(|| fallback.clone());
-        for (action, _) in root_actions
-            .iter()
-            .filter(|(action, _)| matches!(action, Action::PlayMonopoly { .. }))
-        {
-            if action != &replacement {
-                pruned_roots.push(PrunedRootDiagnostic {
-                    action: action.clone(),
-                    pre_truncation_rank: ranked_diagnostics
-                        .iter()
-                        .find(|candidate| candidate.action == *action)
-                        .map(|candidate| candidate.rank),
-                    reason: RootPruneReason::ExactFamilyCollapsed,
-                });
-            }
-        }
-        if replacement != fallback {
-            exact_family_replacement = Some((fallback, replacement.clone()));
-        }
-        let replacement_prior = ranked_diagnostics
-            .iter()
-            .find(|candidate| candidate.action == replacement)
-            .map_or(fallback_prior, |candidate| candidate.prior);
-        root_actions.retain(|(action, _)| !matches!(action, Action::PlayMonopoly { .. }));
-        root_actions.insert(
-            monopoly_slot.min(root_actions.len()),
-            (replacement, replacement_prior),
-        );
-    }
+    let root_actions = retained;
     let mut unique_root_actions = Vec::with_capacity(root_actions.len());
     for candidate in root_actions {
         if !unique_root_actions
@@ -3831,6 +4141,10 @@ fn cuda_belief_search_with_batch(
         root_actions.len(),
         maximum_nodes / particles.len().max(1) as u32,
     );
+    let provenance_action_budgets = allocate_root_node_budgets(
+        root_actions.len(),
+        reference_maximum_nodes / particles.len().max(1) as u32,
+    );
     let positive_particle_count = particles
         .iter()
         .filter(|particle| particle.weight > 0.0)
@@ -3838,7 +4152,7 @@ fn cuda_belief_search_with_batch(
         .max(1) as u32;
     let retained_roots = root_actions
         .iter()
-        .zip(action_budgets.iter().copied())
+        .zip(provenance_action_budgets.iter().copied())
         .map(|((action, prior), node_budget_per_particle)| {
             let diagnostic = ranked_diagnostics
                 .iter()
@@ -3873,11 +4187,12 @@ fn cuda_belief_search_with_batch(
         pruned_root_count,
         pruned_roots,
         root_evidence,
+        root_search_work: Vec::new(),
         strategy_shadow: strategy_admission,
         trade_hard_veto_threshold: HARD_VETO_POSTERIOR,
         search_winner: None,
-        exact_family_replacement,
-        exact_family_results: Vec::new(),
+        exact_family_replacement: None,
+        exact_family_results,
         safety_replacement: None,
     };
     let root_actions = root_actions
@@ -3950,6 +4265,9 @@ fn cuda_belief_search_with_batch(
         };
 
         for particle in particles {
+            if let Some(reason) = should_stop() {
+                return Err(reason);
+            }
             let weight = particle.weight.max(0.0) / total_weight;
             if weight <= 0.0 {
                 continue;
@@ -3957,6 +4275,9 @@ fn cuda_belief_search_with_batch(
             particles_searched += 1;
             let mut entries = Vec::with_capacity(root_actions.len());
             for (action_index, action) in root_actions.iter().enumerate() {
+                if let Some(reason) = should_stop() {
+                    return Err(reason);
+                }
                 let lane_id = batch.lanes.len();
                 batch.lanes.push(CudaLinearLane::default());
                 let mut next = cuda_checkout_state(states, &particle.state);
@@ -4007,6 +4328,7 @@ fn cuda_belief_search_with_batch(
                     if completed_turn { 0 } else { 1 },
                     node_limit,
                     1.0,
+                    should_stop,
                 );
                 let searched_nodes = searcher.nodes;
                 let searched_depth = searcher.deepest_depth;
@@ -4038,7 +4360,13 @@ fn cuda_belief_search_with_batch(
             } else {
                 None
             };
+        if let Some(reason) = should_stop() {
+            return Err(reason);
+        }
         batch.flush()?;
+        if let Some(reason) = should_stop() {
+            return Err(reason);
+        }
         let packing_nanos = batch.packing_nanos;
         let evaluation_nanos = batch.evaluation_nanos;
         let leaves_emitted = batch.leaves_emitted;
@@ -4163,6 +4491,15 @@ fn cuda_belief_search_with_batch(
         }
         provenance.search_winner = actions.first().map(|entry| entry.action.clone());
         let chosen = actions.get(chosen_index).map(|entry| entry.action.clone());
+        if let Some(chosen_action) = chosen.as_ref()
+            && let Some(family) = exact_family_for_action(chosen_action)
+            && let Some((_, fallback)) = exact_family_fallbacks
+                .iter()
+                .find(|(candidate, _)| *candidate == family)
+            && fallback != chosen_action
+        {
+            provenance.exact_family_replacement = Some((fallback.clone(), chosen_action.clone()));
+        }
         let value = actions
             .get(chosen_index)
             .map(|entry| entry.value)
@@ -4211,6 +4548,9 @@ fn cuda_belief_search_with_batch(
     let mut depth = 0_u8;
     let mut particles_searched = 0_usize;
     for particle in particles {
+        if let Some(reason) = should_stop() {
+            return Err(reason);
+        }
         let weight = particle.weight.max(0.0) / total_weight;
         if weight <= 0.0 {
             continue;
@@ -4218,6 +4558,9 @@ fn cuda_belief_search_with_batch(
         particles_searched += 1;
         let mut entries = Vec::with_capacity(root_actions.len());
         for (action_index, action) in root_actions.iter().enumerate() {
+            if let Some(reason) = should_stop() {
+                return Err(reason);
+            }
             let mut next = particle.state.clone();
             if next.apply(action).is_err() {
                 entries.push(CudaDeferredRootEntry {
@@ -4244,6 +4587,9 @@ fn cuda_belief_search_with_batch(
                 controlled_player: observer,
                 nodes: 0,
                 deepest_depth: 0,
+                controlled_next_decision_reached: false,
+                terminal_reached: false,
+                cutoff_depth_counts: Vec::new(),
             };
             let node_limit = searcher.node_limit;
             let node = searcher.visit(
@@ -4251,7 +4597,8 @@ fn cuda_belief_search_with_batch(
                 u8::from(completed_turn),
                 if completed_turn { 0 } else { 1 },
                 node_limit,
-            );
+                should_stop,
+            )?;
             nodes += searcher.nodes;
             depth = depth.max(searcher.deepest_depth);
             entries.push(CudaDeferredRootEntry {
@@ -4279,10 +4626,16 @@ fn cuda_belief_search_with_batch(
         return Err(DepthBeliefError::CudaEvaluationFailed);
     }
 
+    if let Some(reason) = should_stop() {
+        return Err(reason);
+    }
     let evaluation_started = std::time::Instant::now();
     let mut leaf_values = Vec::with_capacity(tree.leaves.len());
     evaluate_batch(&tree.leaves, &mut leaf_values)?;
     record_cuda_duration(&CUDA_EVALUATION_NANOS, evaluation_started.elapsed());
+    if let Some(reason) = should_stop() {
+        return Err(reason);
+    }
     if leaf_values.len() != tree.leaves.len() {
         return Err(DepthBeliefError::CudaBatchLengthMismatch);
     }
@@ -4370,6 +4723,15 @@ fn cuda_belief_search_with_batch(
     }
     provenance.search_winner = actions.first().map(|entry| entry.action.clone());
     let chosen = actions.get(chosen_index).map(|entry| entry.action.clone());
+    if let Some(chosen_action) = chosen.as_ref()
+        && let Some(family) = exact_family_for_action(chosen_action)
+        && let Some((_, fallback)) = exact_family_fallbacks
+            .iter()
+            .find(|(candidate, _)| *candidate == family)
+        && fallback != chosen_action
+    {
+        provenance.exact_family_replacement = Some((fallback.clone(), chosen_action.clone()));
+    }
     let value = actions
         .get(chosen_index)
         .map(|entry| entry.value)
@@ -4413,19 +4775,138 @@ fn cuda_belief_search_with_batch(
 }
 
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
-fn cuda_belief_search(
+fn cuda_belief_search_iterative_with_batch(
+    particles: &[BeliefParticle],
+    config: BeliefDepthConfig,
+    root_exclusions: &[Action],
+    should_stop: &dyn Fn() -> Option<DepthBeliefError>,
+    evaluate_batch: &mut dyn FnMut(
+        &[crate::CudaExactPackedState],
+        &mut Vec<[f32; 4]>,
+    ) -> Result<(), DepthBeliefError>,
+) -> Result<BeliefDepthResult, DepthBeliefError> {
+    let config = config.normalized();
+    let reference_maximum_nodes = config.maximum_nodes;
+    let mut total_nodes = 0_u32;
+    let mut last_completed: Option<BeliefDepthResult> = None;
+
+    for target_depth in 1..=config.maximum_depth.max(1) {
+        if let Some(reason) = should_stop() {
+            if reason == DepthBeliefError::CudaDeadlineExceeded
+                && let Some(mut completed) = last_completed
+            {
+                completed.deadline_reached = true;
+                return Ok(completed);
+            }
+            return Err(reason);
+        }
+        let remaining_nodes = reference_maximum_nodes.saturating_sub(total_nodes);
+        if remaining_nodes == 0 {
+            break;
+        }
+        if let Some(completed) = last_completed.as_ref() {
+            let minimum_complete_wave_nodes = (completed.particles.max(1) as u32)
+                .saturating_mul(completed.provenance.retained_roots.len().max(1) as u32);
+            if remaining_nodes < minimum_complete_wave_nodes {
+                break;
+            }
+        }
+        let wave_config = BeliefDepthConfig {
+            maximum_depth: target_depth,
+            maximum_nodes: remaining_nodes,
+            time_budget_ms: 0,
+            ..config
+        };
+        match cuda_belief_search_with_batch(
+            particles,
+            wave_config,
+            reference_maximum_nodes,
+            root_exclusions,
+            should_stop,
+            evaluate_batch,
+        ) {
+            Ok(mut wave) => {
+                if wave.nodes > remaining_nodes {
+                    return Err(DepthBeliefError::CudaEvaluationFailed);
+                }
+                total_nodes = total_nodes.saturating_add(wave.nodes);
+                wave.nodes = total_nodes;
+                last_completed = Some(wave);
+            }
+            Err(DepthBeliefError::CudaDeadlineExceeded) => {
+                if let Some(mut completed) = last_completed {
+                    completed.deadline_reached = true;
+                    return Ok(completed);
+                }
+                return Err(DepthBeliefError::CudaDeadlineExceeded);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    last_completed.ok_or(DepthBeliefError::CudaEvaluationFailed)
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+fn cuda_belief_search_controlled<F>(
     evaluator: &mut crate::CudaExactEvaluator,
     particles: &[BeliefParticle],
     config: BeliefDepthConfig,
     root_exclusions: &[Action],
-) -> Result<BeliefDepthResult, DepthBeliefError> {
+    should_cancel: F,
+) -> Result<BeliefDepthResult, DepthBeliefError>
+where
+    F: Fn() -> bool,
+{
+    let Some(first_particle) = particles.first() else {
+        return Err(DepthBeliefError::Empty);
+    };
+    evaluator
+        .prepare_topology(first_particle.state.board.as_ref())
+        .map_err(|_| DepthBeliefError::CudaEvaluationFailed)?;
+    for particle in particles.iter().skip(1) {
+        if !evaluator
+            .topology_matches(particle.state.board.as_ref())
+            .map_err(|_| DepthBeliefError::CudaEvaluationFailed)?
+        {
+            return Err(DepthBeliefError::CudaEvaluationFailed);
+        }
+    }
+    let deadline = (config.time_budget_ms > 0).then(|| {
+        std::time::Instant::now() + std::time::Duration::from_millis(config.time_budget_ms as u64)
+    });
+    let should_stop = || {
+        if should_cancel() {
+            Some(DepthBeliefError::CudaSearchCancelled)
+        } else if deadline.is_some_and(|limit| std::time::Instant::now() >= limit) {
+            Some(DepthBeliefError::CudaDeadlineExceeded)
+        } else {
+            None
+        }
+    };
     let mut evaluate_batch = |states: &[crate::CudaExactPackedState],
                               result: &mut Vec<[f32; 4]>| {
         evaluator
             .evaluate_packed_batch_into(states, result)
             .map_err(|_| DepthBeliefError::CudaEvaluationFailed)
     };
-    cuda_belief_search_with_batch(particles, config, root_exclusions, &mut evaluate_batch)
+    cuda_belief_search_iterative_with_batch(
+        particles,
+        config,
+        root_exclusions,
+        &should_stop,
+        &mut evaluate_batch,
+    )
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+fn cuda_belief_search(
+    evaluator: &mut crate::CudaExactEvaluator,
+    particles: &[BeliefParticle],
+    config: BeliefDepthConfig,
+    root_exclusions: &[Action],
+) -> Result<BeliefDepthResult, DepthBeliefError> {
+    cuda_belief_search_controlled(evaluator, particles, config, root_exclusions, || false)
 }
 
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
@@ -4435,6 +4916,25 @@ fn cuda_belief_search_mutex(
     config: BeliefDepthConfig,
     root_exclusions: &[Action],
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
+    let Some(first_particle) = particles.first() else {
+        return Err(DepthBeliefError::Empty);
+    };
+    {
+        let mut evaluator = evaluator
+            .lock()
+            .map_err(|_| DepthBeliefError::CudaEvaluatorLockPoisoned)?;
+        evaluator
+            .prepare_topology(first_particle.state.board.as_ref())
+            .map_err(|_| DepthBeliefError::CudaEvaluationFailed)?;
+        for particle in particles.iter().skip(1) {
+            if !evaluator
+                .topology_matches(particle.state.board.as_ref())
+                .map_err(|_| DepthBeliefError::CudaEvaluationFailed)?
+            {
+                return Err(DepthBeliefError::CudaEvaluationFailed);
+            }
+        }
+    }
     let mut evaluate_batch = |states: &[crate::CudaExactPackedState],
                               result: &mut Vec<[f32; 4]>| {
         let wait_started = std::time::Instant::now();
@@ -4447,7 +4947,21 @@ fn cuda_belief_search_mutex(
         };
         evaluation.map_err(|_| DepthBeliefError::CudaEvaluationFailed)
     };
-    cuda_belief_search_with_batch(particles, config, root_exclusions, &mut evaluate_batch)
+    let deadline = (config.time_budget_ms > 0).then(|| {
+        std::time::Instant::now() + std::time::Duration::from_millis(config.time_budget_ms as u64)
+    });
+    let should_stop = || {
+        deadline
+            .filter(|limit| std::time::Instant::now() >= *limit)
+            .map(|_| DepthBeliefError::CudaDeadlineExceeded)
+    };
+    cuda_belief_search_iterative_with_batch(
+        particles,
+        config,
+        root_exclusions,
+        &should_stop,
+        &mut evaluate_batch,
+    )
 }
 
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
@@ -4476,6 +4990,20 @@ pub fn search_weighted_belief_maxn_cuda_with_config_excluding(
     root_exclusions: &[Action],
 ) -> Result<BeliefDepthResult, DepthBeliefError> {
     cuda_belief_search(evaluator, particles, config, root_exclusions)
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+pub fn search_weighted_belief_maxn_cuda_with_config_excluding_controlled<F>(
+    evaluator: &mut crate::CudaExactEvaluator,
+    particles: &[BeliefParticle],
+    config: BeliefDepthConfig,
+    root_exclusions: &[Action],
+    should_cancel: F,
+) -> Result<BeliefDepthResult, DepthBeliefError>
+where
+    F: Fn() -> bool,
+{
+    cuda_belief_search_controlled(evaluator, particles, config, root_exclusions, should_cancel)
 }
 
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
@@ -4622,6 +5150,31 @@ mod tests {
         panic!("fixture must expose a legal settlement alongside a city");
     }
 
+    fn empty_main_cycle_fixture(seed: u64) -> GameState {
+        let mut state = GameState::standard(seed, 3);
+        while matches!(
+            state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        ) {
+            let action = state.legal_actions()[0].clone();
+            state.apply(&action).unwrap();
+        }
+        state.phase = Phase::Main;
+        state.current_player = 0;
+        state.turn = 5;
+        state.player_trades_enabled = false;
+        for player in 0..state.players.len() {
+            for resource in 0..5 {
+                let count = state.players[player].resources[resource];
+                state.players[player].resources[resource] = 0;
+                state.bank[resource] = state.bank[resource].saturating_add(count);
+            }
+        }
+        state.validate().unwrap();
+        assert_eq!(state.legal_actions(), vec![Action::EndTurn]);
+        state
+    }
+
     fn run_binary_preroll(
         state: &GameState,
         maximum_depth: u8,
@@ -4642,6 +5195,37 @@ mod tests {
             &[],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn root_work_reports_future_self_reach_without_changing_fixed_work_choice() {
+        let state = empty_main_cycle_fixture(739);
+        let shallow = run_binary_preroll(&state, 2, 20_000, 10_000, 0);
+        let deep = run_binary_preroll(&state, 3, 20_000, 10_000, 0);
+        let repeated = run_binary_preroll(&state, 3, 20_000, 10_000, 0);
+
+        assert_eq!(deep.chosen, repeated.chosen);
+        assert_eq!(
+            deep.provenance.root_search_work,
+            repeated.provenance.root_search_work
+        );
+        assert_eq!(shallow.provenance.root_search_work.len(), 1);
+        assert_eq!(deep.provenance.root_search_work.len(), 1);
+        let shallow_work = &shallow.provenance.root_search_work[0];
+        let deep_work = &deep.provenance.root_search_work[0];
+        assert_eq!(shallow_work.action, Action::EndTurn);
+        assert_eq!(deep_work.action, Action::EndTurn);
+        assert!(shallow_work.nodes > 0);
+        assert!(deep_work.nodes > 0);
+        assert_eq!(
+            shallow_work.posterior_mass_reaching_controlled_next_decision,
+            0.0
+        );
+        assert_eq!(
+            deep_work.posterior_mass_reaching_controlled_next_decision,
+            1.0
+        );
+        assert!(deep_work.cutoff_depth_counts.get(3).copied().unwrap_or(0) > 0);
     }
 
     fn assert_saturated_escalation_resumes_iterative_depth(seed: u64) {
@@ -4709,7 +5293,10 @@ mod tests {
         let policy = crate::policy::normalize_priors(&observed, &pair, 0);
         assert_eq!(policy.first().map(|entry| &entry.0), Some(&knight));
         let quota_ordered = super::recursive_observation_policy(&state, &pair, 0, 8);
-        assert_eq!(quota_ordered.first().map(|entry| &entry.0), Some(&Action::Roll));
+        assert_eq!(
+            quota_ordered.first().map(|entry| &entry.0),
+            Some(&Action::Roll)
+        );
         let selected = super::recursive_observation_best_policy_action(&state, &pair, 0);
         assert_eq!(selected, vec![(knight, 1.0)]);
     }
@@ -5395,6 +5982,9 @@ mod tests {
             deadline_reached: false,
             observation_safe_recursive: false,
             controlled_player: None,
+            controlled_next_decision_reached: false,
+            terminal_reached: false,
+            cutoff_depth_counts: Vec::new(),
             evaluation_cache: std::rc::Rc::new(std::cell::RefCell::new(
                 std::collections::HashMap::new(),
             )),
@@ -5890,4 +6480,36 @@ mod tests {
         .unwrap();
         assert_eq!(perfect.chosen, belief.chosen);
     }
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+pub fn search_weighted_belief_maxn_cuda_iterative_controlled(
+    evaluator: &mut crate::CudaExactEvaluator,
+    particles: &[BeliefParticle],
+    config: BeliefDepthConfig,
+    evidence_escalation_ms: u32,
+    root_exclusions: &[Action],
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<BeliefDepthResult, DepthBeliefError> {
+    let first = particles.first().ok_or(DepthBeliefError::Empty)?;
+    evaluator
+        .prepare_topology(first.state.board.as_ref())
+        .map_err(|_| DepthBeliefError::CudaEvaluationFailed)?;
+    for particle in particles {
+        if !evaluator
+            .topology_matches(particle.state.board.as_ref())
+            .map_err(|_| DepthBeliefError::CudaEvaluationFailed)?
+        {
+            return Err(DepthBeliefError::CudaEvaluationFailed);
+        }
+    }
+    belief_search_backend(
+        particles,
+        config,
+        false,
+        root_exclusions,
+        BeliefNodeBudgetMode::PerDepthWave,
+        evidence_escalation_ms,
+        &mut BeliefBackend::Cuda(evaluator, should_cancel),
+    )
 }

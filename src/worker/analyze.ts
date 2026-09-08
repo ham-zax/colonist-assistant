@@ -2,6 +2,7 @@ import {
   analyzePublicEstimate,
   type DeepSearchStrategyPolicy,
   type DecisionAnalysis,
+  type DecisionBudget,
   type DecisionEngine,
   type DecisionSearchConstraints,
 } from "../core/engine";
@@ -23,12 +24,14 @@ export interface DecisionRequest {
   playerTradesEnabled?: boolean;
   stochastic?: PublicStochasticInput;
   strategyPolicy?: DeepSearchStrategyPolicy;
+  decisionBudget?: DecisionBudget;
 }
 
 export const analyzeDecisionRequest = async (
   request: DecisionRequest,
   executor?: DeepSearchExecutor,
 ): Promise<DecisionAnalysis> => {
+  const preparationStartedAt = performance.now();
   // This inexpensive public estimate stabilizes the presentation while the
   // Strategist's own root values arrive. It is never an action authority.
   const baseline = analyzePublicEstimate(
@@ -47,5 +50,10 @@ export const analyzeDecisionRequest = async (
     executor,
     request.stochastic,
     request.strategyPolicy,
+    request.decisionBudget ? {
+      ...request.decisionBudget,
+      remainingEngineMs: Math.max(0, request.decisionBudget.remainingEngineMs -
+        Math.max(0, performance.now() - preparationStartedAt)),
+    } : undefined,
   );
 };

@@ -853,8 +853,9 @@ impl EngineChoice {
     }
 }
 
-const NATIVE_GPU_PROTOCOL_VERSION: u32 = 6;
-const NATIVE_GPU_STATE_SCHEMA_VERSION: u32 = 2;
+const NATIVE_GPU_PROTOCOL_VERSION: u32 = 7;
+const NATIVE_GPU_STATE_SCHEMA_VERSION: u32 = 3;
+const NATIVE_GPU_EXACT_ALGORITHM: &str = "deep-maxn-cuda-exact-fixed-work-v1";
 
 struct NativeGpuClient {
     child: Child,
@@ -870,8 +871,9 @@ struct NativeGpuDecision {
     root_trace: RootDecisionTrace,
     action_count: usize,
     posterior_particles: usize,
-    rollouts: u64,
-    rollout_steps: u64,
+    search_particles: usize,
+    nodes: u64,
+    depth: u64,
     deadline_reached: bool,
 }
 
@@ -935,6 +937,17 @@ impl NativeGpuClient {
         if hello.get("runtime").and_then(Value::as_str) != Some("gpu-native") {
             return Err("native GPU hello did not identify gpu-native runtime".to_string());
         }
+        let exact = hello
+            .get("capabilities")
+            .and_then(|capabilities| capabilities.get("exactMaxn"))
+            .ok_or_else(|| "native GPU host did not advertise exact MaxN capability".to_string())?;
+        if exact.get("available").and_then(Value::as_bool) != Some(true)
+            || exact.get("algorithm").and_then(Value::as_str) != Some(NATIVE_GPU_EXACT_ALGORITHM)
+        {
+            return Err(
+                "native GPU host does not provide the required exact MaxN algorithm".to_string(),
+            );
+        }
         Ok(Self {
             child,
             stdin,
@@ -948,7 +961,7 @@ impl NativeGpuClient {
         &self.identity
     }
 
-    fn analyze(
+    fn analyze_exact(
         &mut self,
         state: &GameState,
         actor: usize,
@@ -957,7 +970,7 @@ impl NativeGpuClient {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         let request = native_gpu_request(state, actor as u8, config);
-        let message = json!({ "type": "analyze", "id": id, "request": request });
+        let message = json!({ "type": "analyze-exact", "id": id, "request": request });
         let payload = serde_json::to_vec(&message)
             .map_err(|error| format!("failed to encode native GPU request: {error}"))?;
         let length = u32::try_from(payload.len())
@@ -992,6 +1005,9 @@ impl NativeGpuClient {
         let action_value = response
             .get("chosen")
             .ok_or_else(|| "native GPU response omitted chosen action".to_string())?;
+        if response.get("algorithm").and_then(Value::as_str) != Some(NATIVE_GPU_EXACT_ALGORITHM) {
+            return Err("native GPU response did not run exact MaxN".to_string());
+        }
         let action = native_gpu_action(action_value)?;
         if !state.legal_actions().contains(&action) {
             return Err(format!(
@@ -1009,14 +1025,14 @@ impl NativeGpuClient {
             .and_then(Value::as_u64)
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or(0);
-        let rollouts = response
-            .get("rollouts")
+        let search_particles = response
+            .get("rustSearchParticles")
             .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let rollout_steps = response
-            .get("effectiveEffort")
-            .and_then(|effort| effort.get("gpu"))
-            .and_then(|gpu| gpu.get("rolloutSteps"))
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(posterior_particles);
+        let nodes = response.get("nodes").and_then(Value::as_u64).unwrap_or(0);
+        let depth = response
+            .get("deepestDecisionDepth")
             .and_then(Value::as_u64)
             .unwrap_or(0);
         let deadline_reached = response
@@ -1029,8 +1045,9 @@ impl NativeGpuClient {
             root_trace,
             action_count,
             posterior_particles,
-            rollouts,
-            rollout_steps,
+            search_particles,
+            nodes,
+            depth,
             deadline_reached,
         })
     }
@@ -1793,6 +1810,7 @@ struct ArenaSearchProfileSnapshot {
     opening_time_ms: u32,
     trade_response_nodes: u32,
     trade_response_time_ms: u32,
+    #[serde(default = "player_trades_enabled_default")]
     player_trades_enabled: bool,
     information_mode: String,
 }
@@ -2520,10 +2538,10 @@ fn native_gpu_expert_sample(
         let value = native_gpu_value_vector(entry, "value")?;
         parsed.push((action, visits, value));
     }
-    // Racing sample counts measure ambiguity, not preference: an ambiguous
-    // root receives more GPU samples precisely because it needed more
-    // measurement. The policy teacher is therefore one-hot on the final native
-    // decision, never visits/total_visits. Using `chosen` also covers protocol
+    // Work/availability counts are not policy preference. Historical rollout
+    // racing gave ambiguous roots more samples, while exact MaxN reports search
+    // work rather than a visit-distribution policy. Keep the teacher one-hot on
+    // the final authoritative decision. Using `chosen` also covers protocol
     // phases where root provenance intentionally has no search winner.
     let teacher_winner = response
         .get("chosen")
@@ -2572,7 +2590,7 @@ fn native_gpu_expert_sample(
         actor,
         actor_victory_points: state.players[actor as usize].victory_points(),
         players: state.board.num_players,
-        engine: "native-gpu-teacher".to_string(),
+        engine: "native-gpu-exact-maxn-teacher".to_string(),
         state_features: pool_heterogeneous_graph(&graph, actor).to_vec(),
         actions,
         root_search_value,
@@ -3228,7 +3246,7 @@ fn play_game_from_state(
                 let decision = native_gpu
                     .as_deref_mut()
                     .expect("native GPU takeover configured its host")
-                    .analyze(&state, actor, config)
+                    .analyze_exact(&state, actor, config)
                     .unwrap_or_else(|error| {
                         panic!(
                             "native GPU takeover failed at state {:016x}: {error}",
@@ -3238,12 +3256,14 @@ fn play_game_from_state(
                 metrics.first_decisions[actor] = Some(decision.root_trace.clone());
                 metrics.native_gpu_initial_diagnostics[actor] = Some(decision.response.clone());
                 metrics.search_decision_count[actor] += 1;
-                metrics.search_nodes[actor] = metrics.search_nodes[actor]
-                    .saturating_add(decision.rollouts.saturating_mul(decision.rollout_steps));
+                metrics.search_nodes[actor] =
+                    metrics.search_nodes[actor].saturating_add(decision.nodes);
+                metrics.search_depth[actor] =
+                    metrics.search_depth[actor].saturating_add(decision.depth);
                 metrics.posterior_particles[actor] = metrics.posterior_particles[actor]
                     .saturating_add(decision.posterior_particles as u64);
                 metrics.strategic_particles[actor] = metrics.strategic_particles[actor]
-                    .saturating_add(decision.posterior_particles as u64);
+                    .saturating_add(decision.search_particles as u64);
                 metrics.search_deadlines[actor] += u32::from(decision.deadline_reached);
                 metrics.search_action_values[actor] = metrics.search_action_values[actor]
                     .saturating_add(decision.action_count as u64);
@@ -3929,7 +3949,7 @@ fn run_takeover_mode(config: &Config) {
         let arm = if config.takeover_forced_root.is_some() {
             "forced-root".to_string()
         } else if config.takeover_native_gpu_host.is_some() {
-            "native-gpu".to_string()
+            "native-gpu-exact-maxn".to_string()
         } else if let Some(engine) = config.takeover_engine {
             engines[target] = engine;
             engine.as_str().to_string()
@@ -3971,7 +3991,7 @@ fn run_takeover_mode(config: &Config) {
         let victory_point_margin =
             i16::from(result.points[target]) - i16::from(best_opponent_victory_points);
         let outcome = TakeoverOutcome {
-            schema_version: 4,
+            schema_version: 5,
             kind: "colonist-native-takeover-outcome",
             snapshot_id: snapshot.snapshot_id,
             state_hash: snapshot.state_hash,
@@ -4000,7 +4020,7 @@ fn run_takeover_mode(config: &Config) {
             decision_backend: if config.takeover_forced_root.is_some() {
                 "forced-root"
             } else if config.takeover_native_gpu_host.is_some() {
-                "native-gpu"
+                "native-gpu-exact-maxn"
             } else {
                 "arena"
             },
@@ -4009,7 +4029,7 @@ fn run_takeover_mode(config: &Config) {
             continuation_mode: if config.takeover_forced_root.is_some() {
                 "forced-root-then-random"
             } else if config.takeover_native_gpu_host.is_some() && config.takeover_random_followup {
-                "native-gpu-first-root-then-random"
+                "native-gpu-exact-maxn-first-root-then-random"
             } else if config.takeover_random_followup {
                 "first-root-then-random"
             } else {
@@ -4717,7 +4737,7 @@ mod tests {
             &response,
         )
         .expect("final-choice teacher sample must convert");
-        assert_eq!(sample.engine, "native-gpu-teacher");
+        assert_eq!(sample.engine, "native-gpu-exact-maxn-teacher");
         assert_eq!(sample.board_generator, "classic4p-v1");
         assert_eq!(
             serde_json::to_value(&sample).unwrap()["boardGenerator"],

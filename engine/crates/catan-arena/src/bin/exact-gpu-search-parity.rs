@@ -9,13 +9,22 @@ use serde::Serialize;
 
 const PARTICLES: usize = 24;
 const VALUE_TOLERANCE: f32 = 1e-5;
-const CASES: [&str; 6] = [
+const CASES: [&str; 15] = [
+    "2p-development-cards",
+    "2p-longest-road-race",
+    "2p-no-player-trades",
+    "2p-victory-target-15",
+    "2p-mref-preroll",
     "3p-development-cards",
     "3p-longest-road-race",
     "3p-no-player-trades",
+    "3p-victory-target-15",
+    "3p-mref-preroll",
     "4p-development-cards",
     "4p-large-hands-discard-pressure",
     "4p-no-player-trades",
+    "4p-victory-target-15",
+    "4p-mref-preroll",
 ];
 
 #[derive(Serialize)]

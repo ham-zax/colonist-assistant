@@ -558,7 +558,11 @@ mod tests {
         let shared = state.board.edges[chain[1] as usize]
             .vertices
             .into_iter()
-            .find(|vertex| state.board.edges[chain[2] as usize].vertices.contains(vertex))
+            .find(|vertex| {
+                state.board.edges[chain[2] as usize]
+                    .vertices
+                    .contains(vertex)
+            })
             .expect("adjacent chain edges share a vertex");
         let action = Action::PlaceSettlement { vertex: shared };
         let actions = vec![action.clone(), Action::Roll];
@@ -576,7 +580,11 @@ mod tests {
         assert_eq!(encoded[0][BASE_ACTION_FEATURES..], expected);
         assert_eq!(encoded[0].len(), ACTION_FEATURES);
         assert!(encoded[0].iter().all(|value| value.is_finite()));
-        assert!(encoded[1][BASE_ACTION_FEATURES..].iter().all(|value| *value == 0.0));
+        assert!(
+            encoded[1][BASE_ACTION_FEATURES..]
+                .iter()
+                .all(|value| *value == 0.0)
+        );
     }
 
     #[test]

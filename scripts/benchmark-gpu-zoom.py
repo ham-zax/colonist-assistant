@@ -114,15 +114,16 @@ def teacher_records(paths: Iterable[Path]) -> list[dict]:
     if len(teacher_engines) != 1 or teacher_engines[0] not in {
         "puct-teacher",
         "native-gpu-teacher",
+        "native-gpu-exact-maxn-teacher",
     }:
         raise SystemExit(
             "GPU zoom requires a uniform single-teacher corpus "
-            "('puct-teacher' or 'native-gpu-teacher'); "
+            "('puct-teacher', 'native-gpu-teacher', or 'native-gpu-exact-maxn-teacher'); "
             f"got {teacher_engines}. Refusing to mix incompatible policy semantics."
         )
-    if teacher_engines[0] == "puct-teacher":
-        return [record for record in data if trainer.has_usable_teacher_value(record)]
-    return [record for record in data if trainer.has_usable_policy_teacher(record)]
+    if teacher_engines[0] == "native-gpu-teacher":
+        return [record for record in data if trainer.has_usable_policy_teacher(record)]
+    return [record for record in data if trainer.has_usable_teacher_value(record)]
 
 
 def held_out_groups(
@@ -465,11 +466,11 @@ def main() -> None:
     if len(data) < 50:
         raise SystemExit("Need at least 50 expert teacher samples")
     teacher_engine = str(data[0]["engine"])
-    value_teacher_available = teacher_engine == "puct-teacher"
+    value_teacher_available = teacher_engine != "native-gpu-teacher"
     if args.checkpoint and not value_teacher_available:
         raise SystemExit(
-            "--checkpoint requires puct-teacher value semantics; native-gpu-teacher "
-            "records are policy-only screening evidence"
+            "--checkpoint requires normalized value-teacher semantics; historical "
+            "native-gpu-teacher records are policy-only rollout screening evidence"
         )
 
     x = np.asarray([record["stateFeatures"] for record in data], dtype=np.float32)

@@ -37,7 +37,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .zip(&stepped_states)
             .position(|(left, right)| left != right)
             .unwrap_or(usize::MAX);
-        return Err(format!("bulk CUDA rollout diverged from stepped CUDA rollout at lane {lane}").into());
+        return Err(
+            format!("bulk CUDA rollout diverged from stepped CUDA rollout at lane {lane}").into(),
+        );
     }
 
     println!(

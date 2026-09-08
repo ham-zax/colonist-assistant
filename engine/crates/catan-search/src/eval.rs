@@ -2,8 +2,8 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 use colonist_catan_core::{
-    Action, Building, CITY_COST, DEVELOPMENT_COST, GameState, Phase, Port, ROAD_COST,
-    ResourceHand, SETTLEMENT_COST,
+    Action, Building, CITY_COST, DEVELOPMENT_COST, GameState, Phase, Port, ROAD_COST, ResourceHand,
+    SETTLEMENT_COST,
 };
 
 use crate::economy::build_eta_rolls;
@@ -43,7 +43,9 @@ pub struct RoadIntent {
 
 impl RoadIntent {
     pub fn ordering_score(self) -> f32 {
-        if self.target_vertex.is_none() { return 0.0; }
+        if self.target_vertex.is_none() {
+            return 0.0;
+        }
         let eta_access = if self.expected_rolls.is_finite() {
             1.0 / (1.0 + self.expected_rolls / 18.0)
         } else {
@@ -254,7 +256,8 @@ fn dynamic_resource_weights(state: &GameState, player: u8) -> [f32; 5] {
             3 => 1.08,
             _ => 1.0,
         };
-        let closed_economy = !state.player_trades_enabled || state.domestic_trade_disabled & (1 << player) != 0;
+        let closed_economy =
+            !state.player_trades_enabled || state.domestic_trade_disabled & (1 << player) != 0;
         let self_reliance = if closed_economy && production[index] <= f32::EPSILON {
             let ratio_steps = ratios[index].saturating_sub(2) as f32;
             1.0 + ratio_steps * if index < 4 { 0.12 } else { 0.07 }
@@ -262,12 +265,9 @@ fn dynamic_resource_weights(state: &GameState, player: u8) -> [f32; 5] {
             1.0
         };
         let surplus = player_state.resources[index].saturating_sub(4) as f32;
-        weights[index] = BASE_RESOURCE_WEIGHTS[index]
-            * scarcity
-            * bottleneck
-            * port_liquidity
-            * self_reliance
-            / (1.0 + surplus * 0.10);
+        weights[index] =
+            BASE_RESOURCE_WEIGHTS[index] * scarcity * bottleneck * port_liquidity * self_reliance
+                / (1.0 + surplus * 0.10);
     }
     weights
 }
@@ -700,9 +700,8 @@ fn expansion_option_value_with_routes_and_weights(
             vertex_value_with_weights(state, vertex as u8, resource_weights, player, &production);
         let road_cost = distance as f32 * 1.45;
         let immediate_window = turns_until_action(state, player) + distance as f32 * 0.08;
-        let economic_delay = (arrival_scores[player as usize][distance as usize]
-            - immediate_window)
-            .max(0.0);
+        let economic_delay =
+            (arrival_scores[player as usize][distance as usize] - immediate_window).max(0.0);
         let access_scale = 18.0 / state.board.num_players.max(1) as f32;
         let accessibility = if economic_delay.is_finite() {
             1.0 / (1.0 + economic_delay / access_scale.max(1.0))
@@ -1067,8 +1066,16 @@ fn strategic_utility_with_routes(state: &GameState, player: u8, route_maps: &[Ve
 fn closed_economy_value(state: &GameState, player: u8) -> f32 {
     let domestic_trades_disabled =
         !state.player_trades_enabled || state.domestic_trade_disabled & (1_u8 << player) != 0;
-    let closure_weight = if domestic_trades_disabled { 0.10 } else { 0.035 };
-    let independence_weight = if domestic_trades_disabled { 0.18 } else { 0.055 };
+    let closure_weight = if domestic_trades_disabled {
+        0.10
+    } else {
+        0.035
+    };
+    let independence_weight = if domestic_trades_disabled {
+        0.18
+    } else {
+        0.055
+    };
     crate::economy::immediate_build_closure_value(state, player) * closure_weight
         + crate::economy::self_sufficient_production_value(state, player) * independence_weight
 }
@@ -1329,10 +1336,7 @@ pub(crate) struct RobberDenialContext {
     actor_resource_weights: [f32; 5],
 }
 
-pub(crate) fn prepare_robber_denial_context(
-    state: &GameState,
-    actor: u8,
-) -> RobberDenialContext {
+pub(crate) fn prepare_robber_denial_context(state: &GameState, actor: u8) -> RobberDenialContext {
     let route_maps = all_route_maps(state);
     let mut public_logits = [f32::NEG_INFINITY; 4];
     let mut maximum = f32::NEG_INFINITY;
@@ -1414,10 +1418,7 @@ pub(crate) struct RoadFrontierContext {
     resource_weights: [f32; 5],
 }
 
-pub(crate) fn prepare_road_frontier_context(
-    state: &GameState,
-    actor: u8,
-) -> RoadFrontierContext {
+pub(crate) fn prepare_road_frontier_context(state: &GameState, actor: u8) -> RoadFrontierContext {
     let route_maps = all_route_maps(state);
     let resource_weights = dynamic_resource_weights(state, actor);
     let before = expansion_option_value_with_routes_and_weights(
@@ -1550,8 +1551,8 @@ mod tests {
         all_route_maps, dynamic_resource_weights, expansion_arrival_scores,
         expansion_site_survival, expected_discard_loss, marginal_development_value,
         prepare_road_frontier_context, production_pips, public_strategic_utility,
-        road_frontier_value, road_intent_with_context, robber_denial,
-        rolls_before_next_spend, vertex_value,
+        road_frontier_value, road_intent_with_context, robber_denial, rolls_before_next_spend,
+        vertex_value,
     };
 
     fn after_setup(seed: u64, players: u8) -> GameState {
@@ -1731,9 +1732,7 @@ mod tests {
         let complete_route_edge = 23;
         let local_number_decoy_edge = 12;
         for edge in [complete_route_edge, local_number_decoy_edge] {
-            assert!(state
-                .legal_actions()
-                .contains(&Action::BuildRoad { edge }));
+            assert!(state.legal_actions().contains(&Action::BuildRoad { edge }));
         }
         let local_score = |edge: u8| {
             state.board.edges[edge as usize]
@@ -1742,10 +1741,8 @@ mod tests {
                 .map(|vertex| vertex_value(&state, *vertex, 0))
                 .fold(0.0_f32, f32::max)
         };
-        let complete =
-            road_intent_with_context(&state, complete_route_edge, 0, &context);
-        let decoy =
-            road_intent_with_context(&state, local_number_decoy_edge, 0, &context);
+        let complete = road_intent_with_context(&state, complete_route_edge, 0, &context);
+        let decoy = road_intent_with_context(&state, local_number_decoy_edge, 0, &context);
 
         assert!(local_score(local_number_decoy_edge) > local_score(complete_route_edge));
         assert_eq!(complete.roads_remaining, 0);

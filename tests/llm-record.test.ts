@@ -349,6 +349,26 @@ describe("compact LLM game record", () => {
     expect(record.meta.integrityIssues).toContain("dice-mode-conflict");
   });
 
+  it("records tracker repair uncertainty without mislabeling structural partial history", () => {
+    const warning =
+      "Some earlier game history was unavailable; lower bounds were repaired.";
+    const record = new CompactGameBuilder().apply(
+      {
+        ...captureBase,
+        partialHistory: false,
+        trackerWarnings: [warning],
+        decisions: [],
+      },
+      false,
+    );
+
+    expect(record.partialHistory).toBe(false);
+    expect(record.meta.trackerWarnings).toEqual([warning]);
+    expect(record.meta.integrityIssues).toContain("tracker-state-warning");
+    expect(record.meta.integrityIssues).not.toContain("partial-history");
+    expect(formatCompactGameRecord(record)).toContain('"trackerWarnings"');
+  });
+
   it("treats different raw Unsupported values as contradictory evidence", () => {
     const builder = new CompactGameBuilder();
     builder.apply(

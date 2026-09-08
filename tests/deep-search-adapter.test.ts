@@ -18,6 +18,7 @@ import {
   type PublicStochasticInput,
 } from "../src/core/dice-history";
 import {
+  analyzeDeepSearch,
   buildDeepSearchRequest,
   selectRepresentativeWorlds,
 } from "../src/worker/deep-search";
@@ -323,7 +324,7 @@ describe("deep-search state adapter", () => {
     ).toThrow(/canonical engine player ordering/);
   });
 
-  it("executes M_ref deterministically in WASM and fails closed on unknown provenance", async () => {
+  it("executes M_ref deterministically under fixed work and fails closed on unknown provenance", async () => {
     const bytes = await readFile(
       new URL(
         "../src/generated/wasm/colonist_search_bg.wasm",
@@ -351,6 +352,15 @@ describe("deep-search state adapter", () => {
       24,
       reference,
     );
+    built.request.timeBudgetMs = 0;
+    built.request.effort = {
+      ...built.request.effort!,
+      decisionTimeMs: 0,
+      cpu: {
+        ...built.request.effort!.cpu,
+        evidenceEscalationMs: 0,
+      },
+    };
     const first = analyzeWasm(built.request);
     const second = analyzeWasm(built.request);
 
@@ -1085,6 +1095,96 @@ describe("deep-search state adapter", () => {
     expect(retried.actions.some(matchesRejectedOffer)).toBe(false);
   });
 
+  it("keeps four-player work on the frozen reference until budget evidence promotes it", () => {
+    const fourPlayerState = structuredClone(state);
+    const fourPlayerBoard = structuredClone(board);
+    for (const [name, color] of [
+      ["Rival2", "#0a0"],
+      ["Rival3", "#a0a"],
+    ] as const) {
+      fourPlayerState.players[name] = {
+        ...structuredClone(state.players.Rival!),
+        name,
+        color,
+      };
+      fourPlayerState.playerOrder.push(name);
+      for (const world of fourPlayerState.worlds) {
+        world.hands[name] = resources(0, 0, 0, 0, 0);
+      }
+      fourPlayerBoard.players![name] = {
+        ...structuredClone(board.players!.Rival!),
+        handSize: 0,
+        developmentCards: 0,
+      };
+    }
+
+    const built = buildDeepSearchRequest(
+      fourPlayerState,
+      fourPlayerBoard,
+      "You",
+    );
+
+    expect(built.players).toHaveLength(4);
+    expect(built.request.depth).toBe(5);
+    expect(built.request.branchCap).toBe(10);
+    expect(built.request.timeBudgetMs).toBe(2_000);
+    expect(built.request.maxNodes).toBe(8_000);
+    expect(built.request.effort?.decisionTimeMs).toBe(2_000);
+    expect(built.request.effort?.cpu.rootCap).toBe(10);
+    expect(built.request.effort?.cpu.nodesPerDepthWave).toBe(8_000);
+    expect(built.request.effort?.cpu.evidenceEscalationMs).toBe(2_500);
+    expect(built.request.effort?.gpu.rolloutBudget).toBe(320);
+  });
+
+  it("clamps base search and evidence escalation to the remaining engine allowance", async () => {
+    const bytes = await readFile(
+      new URL(
+        "../src/generated/wasm/colonist_search_bg.wasm",
+        import.meta.url,
+      ),
+    );
+    await initWasm({ module_or_path: bytes });
+    let captured: ReturnType<typeof buildDeepSearchRequest>["request"] | undefined;
+    const analysis = await analyzeDeepSearch(
+      state,
+      board,
+      "You",
+      {
+        engine: "deep-search",
+        players: [],
+        actionScores: { road: 0, settlement: 0, city: 0, development: 0 },
+        simulations: 0,
+        model: "deadline-fixture",
+      },
+      {},
+      true,
+      "deep-search",
+      async (request) => {
+        captured = structuredClone(
+          request as ReturnType<typeof buildDeepSearchRequest>["request"],
+        );
+        return analyzeWasm(request) as never;
+      },
+      undefined,
+      undefined,
+      {
+        contract: "client-end-to-end-v1",
+        totalMs: 12_000,
+        remainingEngineMs: 1_250,
+        transportReserveMs: 500,
+        finalizationReserveMs: 500,
+      },
+    );
+
+    expect(captured).toBeDefined();
+    expect(captured!.timeBudgetMs).toBeGreaterThan(0);
+    expect(captured!.timeBudgetMs).toBeLessThanOrEqual(1_250);
+    expect(captured!.effort?.decisionTimeMs).toBe(captured!.timeBudgetMs);
+    expect(analysis.deepSearch?.canonicalRequest?.request).toEqual(captured);
+    expect(analysis.deepSearch?.canonicalRequest?.representation).toBe("canonical-engine-request-v1");
+    expect(captured!.effort?.cpu.evidenceEscalationMs).toBe(0);
+  });
+
   it("crosses the packaged WASM boundary inside the cold smoke budget", async () => {
     const bytes = await readFile(
       new URL(
@@ -1121,7 +1221,7 @@ describe("deep-search state adapter", () => {
     const response = analyzeWasm(built.request);
     const elapsed = performance.now() - started;
     expect(response.algorithm).toBe("maxn");
-    expect(response.engineRevision).toBe("deep-maxn-v12");
+    expect(response.engineRevision).toBe("deep-maxn-v14");
     expect([
       "exact-mandatory",
       "tactical-proven",

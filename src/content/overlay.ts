@@ -1467,8 +1467,8 @@ export class AssistantOverlay {
       sessionId: this.session.id,
       ...(gameKey ? { gameKey } : {}),
       startedAt: this.session.startedAt,
-      partialHistory:
-        this.session.partialHistory || Boolean(this.session.state.warnings.length),
+      partialHistory: this.session.partialHistory,
+      trackerWarnings: [...this.session.state.warnings],
       unmatchedCount: this.session.unmatchedCount,
       unmatchedIntegrityCount: this.session.unmatchedIntegrityCount,
       unmatchedSamples: this.session.unmatchedSamples.map((sample) => ({ ...sample })),
@@ -2989,6 +2989,22 @@ export class AssistantOverlay {
       this.decisionWorker.reset();
       return;
     }
+    if (
+      board.action === "road" &&
+      board.isMyTurn &&
+      this.freeRoadPlan?.gameKey === board.gameKey &&
+      this.freeRoadPlan?.edgeIds.length
+    ) {
+      // Road Building is one parameterized transaction. If Colonist has
+      // entered its free-road subphase before the authoritative legal-edge set
+      // contains our retained target, wait for that evidence instead of
+      // reconstructing the prompt as a fresh paid BuildRoad decision.
+      this.decisionPendingKey = "";
+      this.decisionSlowKey = "";
+      this.decisionWaitingForPreviousSearch = false;
+      this.decisionWorker.reset();
+      return;
+    }
     const visibleControl = visibleTurnControl();
     if (
       shouldFastTrackRoll(board, visibleControl) ||
@@ -3227,6 +3243,11 @@ export class AssistantOverlay {
           autopilot: this.settings.autonomousPrivateGames,
         },
         searchConstraints,
+        replayRequestContext: {
+          playerTradesEnabled: !this.settings.disablePlayerTrades,
+          stochastic,
+          searchConstraints,
+        },
       });
       this.decisionPendingKey = key;
       this.decisionSlowKey = "";
@@ -4043,6 +4064,16 @@ export class AssistantOverlay {
         };
       }
       this.queuedPlacement = undefined;
+    }
+    if (
+      board.action === "road" &&
+      this.freeRoadPlan?.gameKey === board.gameKey &&
+      this.freeRoadPlan?.edgeIds.length
+    ) {
+      // The exact free-road target is temporarily unmappable. Keep the card
+      // transaction fail-closed; do not fall through to the stale
+      // play-road-building recommendation or an ordinary road heuristic.
+      return undefined;
     }
 
     if (shouldFastTrackRoll(board, visibleTurnControl())) {
@@ -5205,10 +5236,16 @@ export class AssistantOverlay {
     if (!state?.playerOrder.length) {
       return `<section class="empty compact-empty"><h1>No cards tracked yet</h1><p>Public card evidence appears after the first game-log action.</p></section>`;
     }
-    const warning =
-      this.session?.partialHistory || state.warnings.length
-        ? `<div class="notice">${warningIcon()}<span>Card-event history is incomplete. Opponent resource ranges stay conservative; Balanced-Dice history is tracked separately.</span></div>`
-        : "";
+    const structuralHistoryWarning = this.session?.partialHistory
+      ? `<div class="notice">${warningIcon()}<span>Card-event history is incomplete. Opponent resource ranges stay conservative; Balanced-Dice history is tracked separately.</span></div>`
+      : "";
+    const trackerWarnings = state.warnings
+      .map(
+        (message) =>
+          `<div class="notice">${warningIcon()}<span>${escapeHtml(message)}</span></div>`,
+      )
+      .join("");
+    const warning = `${structuralHistoryWarning}${trackerWarnings}`;
     const user = this.userPlayer(state);
     const headings = RESOURCE_ORDER.map(
       (resource) =>

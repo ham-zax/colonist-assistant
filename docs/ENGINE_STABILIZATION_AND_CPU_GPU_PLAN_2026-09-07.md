@@ -1,18 +1,18 @@
 # Engine stabilization and CPU/GPU decision contract
 
-Date: 2026-09-07. Investigated checkout: `main` at `dcf1a2c86ee09cc310038df7cf5f9749d84ab9da`.
+Date: 2026-09-07. Original investigated checkout: `main` at `dcf1a2c86ee09cc310038df7cf5f9749d84ab9da`. The implementation candidate described below was developed from `d77935fda984e3006b8a8ad9d65eb58a6d162eaf` and is recorded with dirty-working-tree artifact provenance until its final isolated commit is created.
 
-Status: investigation and proposed implementation plan. No engine changes, merges, deployments, or benchmark campaigns were performed for this document. No subagents were used. The working tree was clean before this document was added.
+Status: **v14 implementation candidate; acceptance incomplete and production GPU promotion blocked.** The repository implementation covers Steps 1–7, but the saved correctness artifacts describe v13 and do not certify the later v14 orchestration. The recorded v13 performance smoke failed the 2× retention gate (1.370× for 3P; 1.272× for 4P), and packaged browser execution evidence remains missing. Exact CUDA is exposed as `deep-maxn-cuda-exact-fixed-work-v1` under Native Messaging protocol 7 / state schema 3; CPU/WASM remains the production `deep-search` authority. `gpu-root-rollout` remains a separately named experimental algorithm. M2 remains opt-in; M3/M4/M5 were not started as part of stabilization.
 
 ## Decision to make
 
 Adopt **one production decision policy, with interchangeable verified computation backends**. Use repaired observation-safe weighted-belief MaxN as the initial reference, consistent with the repository's stated default. Keep `gpu-root-rollout` as an explicitly named experimental algorithm until it earns a separate promotion decision.
 
-This does not assert that MaxN currently plays well. It establishes one reproducible behavior to repair and measure. The immediate problem is that the product's single `deep-search` setting currently selects different algorithms depending on companion availability, while the strength benchmarks and replay tools do not consistently reproduce that product behavior.
+This does not assert that MaxN currently plays well. It establishes one reproducible behavior to repair and measure. At the investigated checkout, the product's single `deep-search` setting selected different algorithms depending on companion availability, while the strength benchmarks and replay tools did not consistently reproduce that product behavior. The stabilization candidate removes that algorithm switch; remaining GPU work is backend promotion, not a second default strategist.
 
 Reuse the existing `cuda-exact` implementation when investigating acceleration. Do not begin by building another strategy engine, rewriting the rules engine, or porting every component to CUDA. GPU availability must eventually change where the reference computation runs, not silently select a different player.
 
-## 1. What the extension actually selects today
+## 1. Baseline route at the investigated checkout
 
 | Situation | Current route and authority |
 | --- | --- |
@@ -32,14 +32,14 @@ The five M1 strategy families are diagnostics. M2 can affect candidate admission
 
 The search winner is also not necessarily the executed click. Rust applies mandatory/tactical/exact-family/safety authority; TypeScript maps the action to the live prompt; the overlay handles mandatory actions, trades and workflow continuations, waits for strategic results, and checks state/target validity. Investigation must retain the chain from search winner to final authority to mapped action to executed action. See [WASM arbitration](../engine/crates/catan-wasm/src/lib.rs) and [overlay decision and execution orchestration](../src/content/overlay.ts).
 
-These are checkout facts. The extension and companion actually loaded in the user's browser were not inspected; stale or mismatched installed artifacts remain an untested possibility, not a diagnosed cause.
+These are facts about the original investigated checkout, not the stabilized candidate. In the candidate, ordinary browser `deep-search` remains CPU/WASM MaxN; companion availability cannot substitute `gpu-root-rollout`. The companion advertises rollout and exact-MaxN capabilities separately, and an exact request is eligible for product use only after an explicit promotion gate. The extension and companion actually loaded in the user's browser were not inspected; stale or mismatched installed artifacts remain an untested possibility, not a diagnosed cause.
 
 ## 2. Which conversation claims survive verification
 
 | Claim | Finding |
 | --- | --- |
-| CPU and GPU are already the same strategist at different speeds | False for the production route. They currently use distinct algorithms and effort units. |
-| Existing parity allows different strategic choices | Confirmed by the current contract. It separates `deep-maxn-v12` from `gpu-root-rollout`. |
+| CPU and GPU are already the same strategist at different speeds | False at the investigated checkout: production could switch between MaxN and rollout. In the stabilization candidate, exact CUDA is a same-policy backend candidate while rollout remains a distinct algorithm. |
+| Existing parity allows different strategic choices | Historical rollout parity does; exact-backend parity does not. The current contract separates `deep-maxn-v14` / `deep-maxn-cuda-exact-fixed-work-v1` from `gpu-root-rollout`. |
 | The resident GPU win rate measures the extension | False. Its information, roots, continuation, opening, comparator and execution path differ. |
 | Weak opponents explain most of the GPU/CPU gap | Plausible, but not isolated. The inspected evidence cannot assign a dominant causal share among the confounders. |
 | One perfect-information CPU block falsifies hidden information as the main explanation | Unsupported. It changes information in a different algorithm on a tiny cohort; it is not a GPU belief-versus-realized-state ablation. |
@@ -144,11 +144,11 @@ Work sequentially in reviewable changes. The files below identify responsibility
 | 3. Establish product evidence | Existing arena, replay tooling, native regression harness and packaged execution checks | A reproducible report identifies actual routes/artifacts and separates decision consistency, game strength and execution reliability. |
 | 4. Resume adaptive strategy work | M2 admission first; then independently evaluated M3/M4/M5 work | Each mechanism has targeted cases and a held-out ablation. No promotion from generic scenario plausibility or a handful of favorable games. |
 
-Stage 1 is a proposed product behavior change, not something already applied. Repaired MaxN is the reference because it is the declared baseline and offers a controlled starting point, not because this investigation proved it is stronger than native rollout.
+Stage 1 is now applied in the candidate. Repaired MaxN is the reference because it is the declared baseline and offers a controlled starting point, not because this work proved it is stronger than native rollout. Production rollout substitution was removed; the browser route stays on CPU/WASM until an exact-MaxN backend is explicitly promoted.
 
-`cuda-exact` already exposes weighted-belief MaxN entry points in [depth.rs](../engine/crates/catan-search/src/depth.rs). It is **not** the feature used by the current native companion: [catan-wasm/Cargo.toml](../engine/crates/catan-wasm/Cargo.toml) maps `native-gpu` to `cuda-sim`. Integration requires a real adapter and capability contract; changing a display label or request `mode` is insufficient.
+`cuda-exact` now exposes weighted-belief MaxN through the native companion. [catan-wasm/Cargo.toml](../engine/crates/catan-wasm/Cargo.toml) enables both `cuda-sim` and `cuda-exact` under `native-gpu`; protocol 7 reports them as distinct algorithms. `analyze-exact` invokes the same MaxN decision contract and shared final arbitration, while `analyze` remains the rollout experiment. An old rollout-only companion cannot satisfy the exact capability check.
 
-The documented older exact smoke reports approximately 1.31×/1.36× elapsed speedup for 3p/4p, below its stated 2× retention gate. That report predates this reference and is not current acceptance. Reuse the implementation and its gates, verify support for current Mref/M2 semantics and cancellation, and measure before investing in optimization. Do not promise that exact GPU acceleration will solve weak strategy or provide a large speedup.
+The candidate fixed two correctness gaps that the older exact smoke did not cover: CUDA exact now follows the same global iterative fixed-work depth schedule as CPU MaxN, and the resident exact evaluator prepares the **actual request board topology** rather than assuming canonical generated vertex/edge indices. Historical v13 evaluator, search, host-request and frozen-takeover evidence is stored under `docs/benchmarks/engine-stabilization-2026-09-07/`; it does not certify v14. Exact CUDA remains unpromoted unless the separately measured 2× end-to-end retention gate passes; correctness parity alone does not justify promotion or a strength claim.
 
 Version the repaired policy/reference and record source SHA plus WASM/companion artifact identities. The current parity document pins an older reference, while M0 changed continuation semantics. Historical parity results cannot certify the modified policy automatically.
 
@@ -187,13 +187,13 @@ Do not merge the 10-second profile unchanged, promote M2, tune new evaluator bon
 
 Repository source, current branches/worktrees, the referenced documents, the budget commit diff, and the committed three-player GPU artifact were inspected. Codebase Memory Tier 2 coverage metadata matched the inspected paths, with no recorded gaps; material claims were checked against source. This is task-directed evidence, not an exhaustive audit of every file or proof of completeness.
 
-No Rust/CUDA/gameplay benchmark or new test suite was run in this investigation. Prior conversation test/benchmark claims remain historical reports. The earlier review's TypeScript check passed, but that is not evidence of GPU parity or game strength. Browser-installed artifact versions and the reported bad live game were not available for validation.
+The historical v13 implementation session reported focused Rust/TypeScript regressions, packaged WASM/native builds, CUDA evaluator/search parity, the production-shaped adapter/native exact parity gate, and a frozen arena takeover smoke. Those results are not acceptance of the later v14 orchestration or product-strength evidence. Current repair verification, the failed historical performance smoke, and the packaged browser execution limitation are recorded separately in the acceptance report. Browser-installed artifact versions and the reported bad live game were not available for direct validation.
 
-This document is the only repository change. Implementation and the acceptance gates above remain to be completed.
+The raw reproducible artifacts and current gate disposition are summarized in `ENGINE_STABILIZATION_ACCEPTANCE_2026-09-07.md` and `benchmarks/engine-stabilization-2026-09-07/`.
 
-## Appendix — Executable implementation plan
+## Appendix — Executed implementation plan
 
-This appendix specifies the proposed fixes. It does not mark them implemented. Deliver the steps as separate reviewable commits, in the order below. Use the existing domain types, request adapter, engine, arena and regression harnesses; introduce shared helpers only where they replace duplicated behavior.
+This appendix is retained as the implementation checklist. Steps 1–7 are implemented in the candidate subject to the explicit acceptance limitations above; Step 8 remains intentionally deferred until stabilization gates justify resuming strategy work. Use the existing domain types, request adapter, engine, arena and regression harnesses; introduce shared helpers only where they replace duplicated behavior.
 
 ### Step 1 — Repair replay and make effective requests verifiable
 

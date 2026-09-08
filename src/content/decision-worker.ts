@@ -28,6 +28,9 @@ import {
 
 const SLOW_DECISION_MS = 10_000;
 const HARD_DECISION_MS = 12_000;
+const DECISION_TRANSPORT_RESERVE_MS = 500;
+const DECISION_FINALIZATION_RESERVE_MS = 500;
+const MIN_ENGINE_ALLOWANCE_MS = 50;
 const HARD_DECISION_ERROR =
   "Strategist did not return before the 12-second safety limit";
 
@@ -196,6 +199,24 @@ export class DecisionWorkerClient {
     if (request.waitedForActive) request.startCallback?.();
     const startedAt = performance.now();
     const slowDecisionMs = SLOW_DECISION_MS;
+    const queueElapsedMs = Math.max(0, startedAt - request.enqueuedAt);
+    const remainingTransactionMs = Math.max(0, HARD_DECISION_MS - queueElapsedMs);
+    const remainingEngineMs = Math.floor(
+      remainingTransactionMs -
+        DECISION_TRANSPORT_RESERVE_MS -
+        DECISION_FINALIZATION_RESERVE_MS,
+    );
+    if (remainingEngineMs < MIN_ENGINE_ALLOWANCE_MS) {
+      this.active = undefined;
+      if (
+        request.generation === this.generation &&
+        request.key === this.desiredKey
+      ) {
+        request.failureCallback?.(HARD_DECISION_ERROR);
+      }
+      this.pump();
+      return;
+    }
     const message: DecisionMessage = {
       type: DECISION_MESSAGE_TYPE,
       id: request.id,
@@ -208,6 +229,13 @@ export class DecisionWorkerClient {
         : {}),
       playerTradesEnabled: request.playerTradesEnabled ?? true,
       stochastic: request.stochastic ?? { model: M0_FAIR_IID_2D6_V1 },
+      decisionBudget: {
+        contract: "client-end-to-end-v1",
+        totalMs: HARD_DECISION_MS,
+        remainingEngineMs,
+        transportReserveMs: DECISION_TRANSPORT_RESERVE_MS,
+        finalizationReserveMs: DECISION_FINALIZATION_RESERVE_MS,
+      },
     };
     const slowTimer = globalThis.setTimeout(() => {
       const elapsedMs = performance.now() - startedAt;
@@ -244,7 +272,7 @@ export class DecisionWorkerClient {
             id: request.id,
             error: HARD_DECISION_ERROR,
           });
-        }, HARD_DECISION_MS);
+        }, Math.max(0, remainingTransactionMs));
       }),
     ]);
     void response

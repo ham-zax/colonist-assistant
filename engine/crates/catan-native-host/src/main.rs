@@ -1,11 +1,15 @@
 use std::collections::HashSet;
 use std::io::{self, Read, Write};
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}, mpsc};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 use std::thread;
 
 use colonist_catan_wasm::{
-    NATIVE_GPU_PROTOCOL_VERSION, NATIVE_GPU_STATE_SCHEMA_VERSION, NATIVE_GPU_STOCHASTIC_MODELS, NativeGpuSearchEngine,
-    engine_version,
+    NATIVE_GPU_PROTOCOL_VERSION, NATIVE_GPU_STATE_SCHEMA_VERSION, NATIVE_GPU_STOCHASTIC_MODELS,
+    NativeGpuSearchEngine, engine_version,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -35,6 +39,10 @@ enum HostRequest {
         state_schema_version: Option<u32>,
     },
     Analyze {
+        id: u64,
+        request: Value,
+    },
+    AnalyzeExact {
         id: u64,
         request: Value,
     },
@@ -157,6 +165,7 @@ fn main() -> io::Result<()> {
                             "stateSchemaVersion": NATIVE_GPU_STATE_SCHEMA_VERSION,
                             "engineRevision": engine_version(),
                             "stochasticModels": NATIVE_GPU_STOCHASTIC_MODELS,
+                            "capabilities": engine.capabilities(),
                             "build": native_build_identity(),
                             "device": engine.device_identity(),
                         }),
@@ -170,9 +179,7 @@ fn main() -> io::Result<()> {
                         if shutdown.load(Ordering::Acquire) {
                             return true;
                         }
-                        cancelled
-                            .lock()
-                            .map_or(true, |ids| ids.contains(&id))
+                        cancelled.lock().map_or(true, |ids| ids.contains(&id))
                     }),
                     Err(error) => Err(error.clone()),
                 };
@@ -184,7 +191,27 @@ fn main() -> io::Result<()> {
                     Err(error) => json!({ "id": id, "error": error }),
                 }
             }
-            Inbound::Request(HostRequest::Cancel { .. }) => unreachable!("cancel is consumed by the reader thread"),
+            Inbound::Request(HostRequest::AnalyzeExact { id, request }) => {
+                let result = match engine.as_mut() {
+                    Ok(engine) => engine.analyze_exact_json_controlled(request, || {
+                        if shutdown.load(Ordering::Acquire) {
+                            return true;
+                        }
+                        cancelled.lock().map_or(true, |ids| ids.contains(&id))
+                    }),
+                    Err(error) => Err(error.clone()),
+                };
+                if let Ok(mut ids) = cancelled.lock() {
+                    ids.remove(&id);
+                }
+                match result {
+                    Ok(response) => json!({ "id": id, "response": response }),
+                    Err(error) => json!({ "id": id, "error": error }),
+                }
+            }
+            Inbound::Request(HostRequest::Cancel { .. }) => {
+                unreachable!("cancel is consumed by the reader thread")
+            }
         };
         write_message(&mut stdout, &response)?;
     }

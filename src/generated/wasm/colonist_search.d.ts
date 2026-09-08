@@ -181,6 +181,15 @@ export interface WasmRoadIntent {
   orderingScore: number;
 }
 
+export interface WasmRootSearchWork {
+  action: WasmAction;
+  nodes: number;
+  completedWaveDepth: number;
+  cutoffDepthCounts: number[];
+  posteriorMassReachingControlledNextDecision: number;
+  posteriorMassReachingTerminal: number;
+}
+
 export interface WasmRootCausalEvidence {
   action: WasmAction;
   promotionReason?: WasmRootPromotionReason;
@@ -221,6 +230,12 @@ export type WasmDecisionFailureClass =
   | "horizon"
   | "continuation"
   | "belief-model";
+
+export type WasmStrategyProposalStatus =
+  | "omitted"
+  | "searched-not-selected"
+  | "budget-limited"
+  | "selected";
 
 export type WasmStrategyPolicy = "adaptive-candidate-admission-v1";
 
@@ -274,7 +289,8 @@ export interface WasmStrategyProposalDiagnostic {
   displacedBaselineAction?: WasmAction;
   enteredCommonSearch: boolean;
   commonSearchRank?: number;
-  failureClass?: WasmDecisionFailureClass;
+  status: WasmStrategyProposalStatus;
+  causalAttribution?: WasmDecisionFailureClass;
 }
 
 export interface WasmStrategyAdmissionDiagnostic {
@@ -321,6 +337,7 @@ export interface WasmRootProvenance {
   prunedRootCount: number;
   prunedRoots: WasmPrunedRoot[];
   rootEvidence: WasmRootCausalEvidence[];
+  rootSearchWork: WasmRootSearchWork[];
   strategyShadow?: WasmStrategyShadowDiagnostics;
   horizonEscalation?: WasmHorizonEscalation;
   tradeHardVetoThreshold: number;

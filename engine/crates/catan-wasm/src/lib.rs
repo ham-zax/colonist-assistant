@@ -11,14 +11,14 @@ use colonist_catan_core::{
     Port, PublicRollObservation, Resource, StochasticBelief, StochasticState, TradeOffer, Vertex,
 };
 use colonist_catan_search::{
-    ActionStats, BeliefParticle, BeliefSearchProvenance, BeliefSearchStageTimings,
-    CooperativeDeadline, DecisionFailureClass, DomesticTradeThreat, ENGINE_REVISION,
-    ExactActionFamily, ExactActionValue, ExactDecisionResult, HARD_VETO_POSTERIOR,
+    ActionStats, BeliefDepthResult, BeliefParticle, BeliefSearchProvenance,
+    BeliefSearchStageTimings, CooperativeDeadline, DecisionFailureClass, DomesticTradeThreat,
+    ENGINE_REVISION, ExactActionFamily, ExactActionValue, ExactDecisionResult, HARD_VETO_POSTERIOR,
     IntroducedRoadFragility, Mcts, ReachabilityDiagnostic, RoadCutContinuationAssessment,
     RootPromotionReason, RootPruneReason, SearchConfig, SearchMode, SearchReport, SearchStatistics,
     StrategyAdmissionDiagnostic, StrategyEvidenceTier, StrategyId, StrategyOmissionReason,
-    StrategyPolicy, StrategyProposalReason, StrategyShadowDiagnostics, TacticalResult,
-    action_prior, evaluate, exact_action_comparator_score, exact_family_for_action,
+    StrategyPolicy, StrategyProposalReason, StrategyProposalStatus, StrategyShadowDiagnostics,
+    TacticalResult, action_prior, evaluate, exact_action_comparator_score, exact_family_for_action,
     learned_model_version, learned_trade_model_version, safer_end_turn_alternative,
     search_weighted_belief_maxn_iterative_timed_excluding_with_strategy_policy,
     search_weighted_belief_paranoid_iterative_timed_excluding_with_strategy_policy,
@@ -32,8 +32,9 @@ use wasm_bindgen::prelude::*;
 mod native_gpu;
 #[cfg(all(feature = "native-gpu", not(target_arch = "wasm32")))]
 pub use native_gpu::{
-    NATIVE_GPU_PROTOCOL_VERSION, NATIVE_GPU_STATE_SCHEMA_VERSION, NATIVE_GPU_STOCHASTIC_MODELS,
-    NativeGpuDeviceIdentity, NativeGpuSearchEngine,
+    NATIVE_GPU_EXACT_ALGORITHM, NATIVE_GPU_PROTOCOL_VERSION, NATIVE_GPU_ROLLOUT_ALGORITHM,
+    NATIVE_GPU_STATE_SCHEMA_VERSION, NATIVE_GPU_STOCHASTIC_MODELS, NativeGpuCapabilities,
+    NativeGpuDeviceIdentity, NativeGpuExactCapability, NativeGpuSearchEngine,
 };
 
 thread_local! {
@@ -278,7 +279,7 @@ struct Request {
 }
 
 impl Request {
-    fn resolved_effort(&self) -> SearchEffortInput {
+    fn resolved_effort(&self, allow_fixed_work: bool) -> SearchEffortInput {
         let effort = self.effort.unwrap_or(SearchEffortInput {
             decision_time_ms: self.time_budget_ms.unwrap_or(2_800),
             tactical: TacticalEffortInput {
@@ -297,8 +298,15 @@ impl Request {
                 rollout_steps: self.rollout_actions.unwrap_or(96),
             },
         });
+        // Only the shared MaxN entry point supports explicit untimed work.
+        // Live callers supply positive budgets; rollout retains its time floor.
+        let fixed_work = allow_fixed_work && effort.decision_time_ms == 0;
         SearchEffortInput {
-            decision_time_ms: effort.decision_time_ms.clamp(50, 10_000),
+            decision_time_ms: if fixed_work {
+                0
+            } else {
+                effort.decision_time_ms.clamp(50, 10_000)
+            },
             tactical: TacticalEffortInput {
                 max_depth: effort.tactical.max_depth.clamp(4, 32),
                 node_budget: effort.tactical.node_budget.clamp(100, 100_000),
@@ -307,9 +315,13 @@ impl Request {
                 max_depth: effort.cpu.max_depth.clamp(1, 6),
                 root_cap: effort.cpu.root_cap.clamp(2, 32),
                 nodes_per_depth_wave: effort.cpu.nodes_per_depth_wave.clamp(1_000, 250_000),
-                evidence_escalation_ms: effort.cpu.evidence_escalation_ms.and_then(
-                    |milliseconds| (milliseconds > 0).then(|| milliseconds.clamp(1, 3_000)),
-                ),
+                evidence_escalation_ms: effort
+                    .cpu
+                    .evidence_escalation_ms
+                    .filter(|_| !fixed_work)
+                    .and_then(|milliseconds| {
+                        (milliseconds > 0).then(|| milliseconds.clamp(1, 3_000))
+                    }),
             },
             gpu: GpuEffortInput {
                 root_cap: effort.gpu.root_cap.clamp(2, 24),
@@ -616,6 +628,17 @@ struct RootCausalEvidenceOutput {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct RootSearchWorkOutput {
+    action: ActionOutput,
+    nodes: u32,
+    completed_wave_depth: u8,
+    cutoff_depth_counts: Vec<u32>,
+    posterior_mass_reaching_controlled_next_decision: f32,
+    posterior_mass_reaching_terminal: f32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct StrategyContextOutput {
     actor: u8,
     player_count: u8,
@@ -659,7 +682,8 @@ struct StrategyProposalOutput {
     displaced_baseline_action: Option<ActionOutput>,
     entered_common_search: bool,
     common_search_rank: Option<usize>,
-    failure_class: Option<&'static str>,
+    status: &'static str,
+    causal_attribution: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -710,6 +734,15 @@ fn strategy_reason_label(value: StrategyProposalReason) -> &'static str {
         StrategyProposalReason::LongestRoadRace => "longest-road-race",
         StrategyProposalReason::LargestArmyRace => "largest-army-race",
         StrategyProposalReason::ImmediateWin => "immediate-win",
+    }
+}
+
+fn strategy_proposal_status_label(value: StrategyProposalStatus) -> &'static str {
+    match value {
+        StrategyProposalStatus::Omitted => "omitted",
+        StrategyProposalStatus::SearchedNotSelected => "searched-not-selected",
+        StrategyProposalStatus::BudgetLimited => "budget-limited",
+        StrategyProposalStatus::Selected => "selected",
     }
 }
 
@@ -810,7 +843,10 @@ fn strategy_shadow_output(value: StrategyShadowDiagnostics) -> StrategyShadowOut
                 displaced_baseline_action: proposal.displaced_baseline_action.map(action),
                 entered_common_search: proposal.entered_common_search,
                 common_search_rank: proposal.common_search_rank,
-                failure_class: proposal.failure_class.map(decision_failure_class_label),
+                status: strategy_proposal_status_label(proposal.status),
+                causal_attribution: proposal
+                    .causal_attribution
+                    .map(decision_failure_class_label),
             })
             .collect(),
     }
@@ -839,6 +875,7 @@ struct RootProvenanceOutput {
     pruned_root_count: usize,
     pruned_roots: Vec<PrunedRootOutput>,
     root_evidence: Vec<RootCausalEvidenceOutput>,
+    root_search_work: Vec<RootSearchWorkOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     strategy_shadow: Option<StrategyShadowOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -858,6 +895,7 @@ impl Default for RootProvenanceOutput {
             pruned_root_count: 0,
             pruned_roots: Vec::new(),
             root_evidence: Vec::new(),
+            root_search_work: Vec::new(),
             strategy_shadow: None,
             horizon_escalation: None,
             trade_hard_veto_threshold: HARD_VETO_POSTERIOR,
@@ -1647,6 +1685,19 @@ fn root_provenance_output(provenance: BeliefSearchProvenance) -> RootProvenanceO
                 }
             })
             .collect(),
+        root_search_work: provenance
+            .root_search_work
+            .into_iter()
+            .map(|work| RootSearchWorkOutput {
+                action: action(work.action),
+                nodes: work.nodes,
+                completed_wave_depth: work.completed_wave_depth,
+                cutoff_depth_counts: work.cutoff_depth_counts,
+                posterior_mass_reaching_controlled_next_decision: work
+                    .posterior_mass_reaching_controlled_next_decision,
+                posterior_mass_reaching_terminal: work.posterior_mass_reaching_terminal,
+            })
+            .collect(),
         strategy_shadow: provenance.strategy_shadow.map(strategy_shadow_output),
         horizon_escalation: None,
         trade_hard_veto_threshold: provenance.trade_hard_veto_threshold,
@@ -1801,6 +1852,153 @@ fn basic_response_diagnostics(
             safety_replacement: None,
         },
     }
+}
+
+fn finalize_maxn_depth_report_controlled<F>(
+    particles: &[BeliefParticle],
+    root_exclusions: &[Action],
+    tactical: TacticalResult,
+    effort: SearchEffortInput,
+    strategy_policy: StrategyPolicy,
+    depth_report: BeliefDepthResult,
+    mut should_stop: F,
+) -> Option<(SearchReport, DecisionAuthority, ResponseDiagnostics)>
+where
+    F: FnMut() -> bool,
+{
+    if should_stop() {
+        return None;
+    }
+    let rust_posterior_particles = depth_report.posterior_particles;
+    let rust_search_particles = depth_report.particles;
+    let search_stages = depth_report.stage_timings.map(SearchStagesOutput::from);
+    let depth_safety_replacement = depth_report.provenance.safety_replacement.clone();
+    let depth_exact_family_replacement = depth_report.provenance.exact_family_replacement.clone();
+    let exact_family_results = depth_report.provenance.exact_family_results.clone();
+    let retained_root_priors = depth_report.provenance.retained_roots.clone();
+    let root_provenance = root_provenance_output(depth_report.provenance.clone());
+    let actions = depth_report
+        .actions
+        .into_iter()
+        .map(|candidate| {
+            let prior = retained_root_priors
+                .iter()
+                .find(|root| root.action == candidate.action)
+                .map_or(0.0, |root| root.prior);
+            ActionStats {
+                action: candidate.action,
+                visits: particles.len() as u32,
+                availability: (candidate.legal_weight * particles.len() as f32).round() as u32,
+                availability_weight: candidate.legal_weight,
+                legal_weight: candidate.legal_weight,
+                prior,
+                value: candidate.value,
+                lower_confidence_value: candidate.lower_confidence_value,
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut exact = ExactDecisionResult::default();
+    let mut authority = if depth_safety_replacement.is_some() {
+        DecisionAuthority::SafetyOverride
+    } else {
+        DecisionAuthority::DeepMaxn
+    };
+    let initial_authority = authority;
+    let mut exact_family = None;
+    let exact_family_replacement = depth_exact_family_replacement.map(replacement_output);
+    let mut safety_replacement = depth_safety_replacement.map(replacement_output);
+    let mut chosen = depth_report.chosen;
+    if let Some(family) = chosen.as_ref().and_then(exact_family_for_action) {
+        let resolved = if let Some((_, cached)) = exact_family_results
+            .iter()
+            .find(|(candidate, _)| *candidate == family)
+        {
+            Some(cached.clone())
+        } else {
+            solve_exact_belief_excluding_controlled(particles, family, root_exclusions, || {
+                should_stop()
+            })
+        }?;
+        exact_family = Some(exact_family_label(family));
+        exact = resolved;
+        if let Some(exact_chosen) = exact.chosen.clone() {
+            chosen = Some(exact_chosen);
+            authority = DecisionAuthority::ExactFamily;
+        }
+    }
+    if should_stop() {
+        return None;
+    }
+    if chosen == Some(Action::EndTurn)
+        && let Some(safer) = safer_end_turn_alternative(
+            &particles[0].state,
+            particles[0].state.actor() as usize,
+            &actions,
+            Some(particles),
+        )
+    {
+        if safer != Action::EndTurn {
+            safety_replacement = Some(ActionReplacementOutput {
+                from: action(Action::EndTurn),
+                to: action(safer.clone()),
+            });
+        }
+        chosen = Some(safer);
+        authority = DecisionAuthority::SafetyOverride;
+    }
+    let diagnostics = ResponseDiagnostics {
+        rust_posterior_particles,
+        rust_search_particles,
+        strategy_policy: strategy_policy.explicit_identity(),
+        effective_effort: effort,
+        search_stages,
+        root_provenance,
+        authority_trace: AuthorityTraceOutput {
+            initial_authority,
+            exact_family,
+            exact_family_replacement,
+            safety_replacement,
+        },
+    };
+    Some((
+        SearchReport {
+            chosen,
+            root_value: depth_report.value,
+            actions,
+            tactical,
+            exact,
+            statistics: SearchStatistics {
+                iterations: particles.len() as u32,
+                nodes: depth_report.nodes as usize,
+                deepest_decision_depth: depth_report.depth as u16,
+                rollouts: 0,
+                effective_particle_count: effective_particle_count(particles),
+                deadline_reached: depth_report.deadline_reached,
+            },
+        },
+        authority,
+        diagnostics,
+    ))
+}
+
+fn finalize_maxn_depth_report(
+    particles: &[BeliefParticle],
+    root_exclusions: &[Action],
+    tactical: TacticalResult,
+    effort: SearchEffortInput,
+    strategy_policy: StrategyPolicy,
+    depth_report: BeliefDepthResult,
+) -> (SearchReport, DecisionAuthority, ResponseDiagnostics) {
+    finalize_maxn_depth_report_controlled(
+        particles,
+        root_exclusions,
+        tactical,
+        effort,
+        strategy_policy,
+        depth_report,
+        || false,
+    )
+    .expect("non-cancellable finalization must complete")
 }
 
 fn response(
@@ -2078,11 +2276,250 @@ fn root_exclusion_actions(
         .collect()
 }
 
+enum MaxnBackend<'a> {
+    Cpu,
+    #[cfg(all(feature = "native-gpu", not(target_arch = "wasm32")))]
+    Cuda(&'a mut colonist_catan_search::CudaExactEvaluator),
+    #[cfg(not(all(feature = "native-gpu", not(target_arch = "wasm32"))))]
+    _Lifetime(std::marker::PhantomData<&'a ()>),
+}
+impl MaxnBackend<'_> {
+    fn is_cuda(&self) -> bool {
+        #[cfg(all(feature = "native-gpu", not(target_arch = "wasm32")))]
+        if matches!(self, Self::Cuda(_)) {
+            return true;
+        }
+        false
+    }
+    fn search(
+        &mut self,
+        particles: &[BeliefParticle],
+        config: colonist_catan_search::BeliefDepthConfig,
+        escalation_ms: u32,
+        exclusions: &[Action],
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<BeliefDepthResult, String> {
+        if cancel() {
+            return Err("MaxN cancelled".into());
+        }
+        #[cfg(all(feature = "native-gpu", not(target_arch = "wasm32")))]
+        if let Self::Cuda(evaluator) = self {
+            return colonist_catan_search::search_weighted_belief_maxn_cuda_iterative_controlled(
+                evaluator,
+                particles,
+                config,
+                escalation_ms,
+                exclusions,
+                cancel,
+            )
+            .map_err(|error| format!("MaxN {error:?}"));
+        }
+        search_weighted_belief_maxn_iterative_timed_excluding_with_strategy_policy(
+            particles,
+            config.maximum_depth,
+            config.branch_cap,
+            config.maximum_nodes,
+            config.time_budget_ms,
+            escalation_ms,
+            config.strategy_policy,
+            exclusions,
+        )
+        .map_err(|error| format!("MaxN {error:?}"))
+    }
+}
+
+fn analyze_maxn_request(
+    request: Request,
+    mut backend: MaxnBackend<'_>,
+    algorithm: &'static str,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Response, String> {
+    if !matches!(request.mode.as_deref(), None | Some("maxn") | Some("deep")) {
+        return Err("MaxN backend supports only the MaxN reference policy".into());
+    }
+    let strategy_policy = StrategyPolicy::parse(request.strategy_policy.as_deref())?;
+    let effort = request.resolved_effort(true);
+    let evidence_reserve_ms = effort.cpu.evidence_escalation_ms.unwrap_or(0);
+    // Final arbitration consumes the same transaction allowance. A search
+    // cutoff must leave time to publish its last complete wave.
+    let finalization_reserve_ms = (effort.decision_time_ms / 10).min(100);
+    let base_clock = DecisionClock::start(if effort.decision_time_ms == 0 {
+        0
+    } else {
+        effort
+            .decision_time_ms
+            .saturating_sub(finalization_reserve_ms)
+            .max(1)
+    });
+    let hard_clock =
+        DecisionClock::start(effort.decision_time_ms.saturating_add(evidence_reserve_ms));
+    if should_cancel() {
+        return Err("MaxN cancelled".into());
+    }
+
+    let stochastic = resolve_stochastic(&request)?;
+    let particles = game_states(
+        request.state,
+        request.last_rejected_trade,
+        stochastic.state.clone(),
+    )?;
+    if particles.is_empty() {
+        return Err("MaxN received no belief particles".into());
+    }
+    if backend.is_cuda()
+        && matches!(
+            particles[0].state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        )
+    {
+        return Err("MaxN does not support opening placement; use CPU/WASM".into());
+    }
+    let root_exclusions = root_exclusion_actions(&request.root_exclusions, &particles[0].state)?;
+    if !request.ponder.unwrap_or(false) {
+        match exact_mandatory_report_controlled(&particles, &root_exclusions, || {
+            should_cancel() || hard_clock.remaining_ms() == 0
+        }) {
+            Ok(Some(report)) => {
+                return Ok(response(
+                    report,
+                    particles.len(),
+                    algorithm,
+                    DecisionAuthority::ExactMandatory,
+                    basic_response_diagnostics(
+                        particles.len(),
+                        DecisionAuthority::ExactMandatory,
+                        effort,
+                        strategy_policy,
+                    ),
+                    &stochastic,
+                ));
+            }
+            Ok(None) => {}
+            Err(()) if should_cancel() => return Err("MaxN cancelled".into()),
+            Err(()) => {
+                return Err("MaxN deadline expired during exact arbitration".into());
+            }
+        }
+    }
+    let tactical_particles = particles
+        .iter()
+        .map(|particle| (&particle.state, particle.weight))
+        .collect::<Vec<_>>();
+    let tactical_budget_ms = if effort.decision_time_ms == 0 {
+        0
+    } else {
+        base_clock.remaining_ms().max(1)
+    };
+    let tactical = solve_belief_current_turn_timed(
+        &tactical_particles,
+        effort.tactical.max_depth,
+        effort.tactical.node_budget,
+        tactical_budget_ms,
+    );
+    if should_cancel() {
+        return Err("MaxN cancelled".into());
+    }
+    if tactical.proven {
+        let total_weight = particles
+            .iter()
+            .map(|particle| particle.weight.max(0.0))
+            .sum::<f32>()
+            .max(f32::EPSILON);
+        let root_value = particles.iter().fold([0.0; 4], |mut total, particle| {
+            let weight = particle.weight.max(0.0) / total_weight;
+            let evaluated = colonist_catan_search::evaluate(&particle.state);
+            for player in 0..4 {
+                total[player] += evaluated[player] * weight;
+            }
+            total
+        });
+        let report = SearchReport {
+            chosen: tactical.principal_line.first().cloned(),
+            root_value,
+            actions: Vec::new(),
+            tactical: tactical.clone(),
+            exact: ExactDecisionResult::default(),
+            statistics: SearchStatistics {
+                iterations: 0,
+                nodes: tactical.nodes as usize,
+                deepest_decision_depth: 0,
+                rollouts: 0,
+                effective_particle_count: effective_particle_count(&particles),
+                deadline_reached: hard_clock.remaining_ms() == 0,
+            },
+        };
+        return Ok(response(
+            report,
+            particles.len(),
+            algorithm,
+            DecisionAuthority::TacticalProven,
+            basic_response_diagnostics(
+                particles.len(),
+                DecisionAuthority::TacticalProven,
+                effort,
+                strategy_policy,
+            ),
+            &stochastic,
+        ));
+    }
+
+    let remaining_ms = if effort.decision_time_ms == 0 {
+        0
+    } else {
+        base_clock.remaining_ms().max(1)
+    };
+    let config = colonist_catan_search::BeliefDepthConfig {
+        maximum_depth: effort.cpu.max_depth,
+        branch_cap: effort.cpu.root_cap,
+        maximum_nodes: effort.cpu.nodes_per_depth_wave,
+        time_budget_ms: remaining_ms,
+        strategy_policy,
+        strategic_particle_limit: usize::MAX,
+    };
+    let depth_report = backend.search(
+        &particles,
+        config,
+        evidence_reserve_ms,
+        &root_exclusions,
+        should_cancel,
+    )?;
+    let (report, authority, diagnostics) = finalize_maxn_depth_report_controlled(
+        &particles,
+        &root_exclusions,
+        tactical,
+        effort,
+        strategy_policy,
+        depth_report,
+        || should_cancel() || hard_clock.remaining_ms() == 0,
+    )
+    .ok_or_else(|| {
+        if should_cancel() {
+            "MaxN cancelled during final arbitration".to_string()
+        } else {
+            "MaxN deadline expired during final arbitration".to_string()
+        }
+    })?;
+    Ok(response(
+        report,
+        particles.len(),
+        algorithm,
+        authority,
+        diagnostics,
+        &stochastic,
+    ))
+}
+
 #[wasm_bindgen]
 pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
     let request: Request = serde_wasm_bindgen::from_value(request)
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let mode = RequestedMode::parse(request.mode.as_deref())?;
+    if mode == RequestedMode::Maxn {
+        let report = analyze_maxn_request(request, MaxnBackend::Cpu, "maxn", &|| false)
+            .map_err(|error| JsValue::from_str(&error))?;
+        return serde_wasm_bindgen::to_value(&report)
+            .map_err(|error| JsValue::from_str(&error.to_string()));
+    }
     let strategy_policy = StrategyPolicy::parse(request.strategy_policy.as_deref())
         .map_err(|error| JsValue::from_str(&error))?;
     if strategy_policy == StrategyPolicy::AdaptiveCandidateAdmissionV1
@@ -2095,7 +2532,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
         )));
     }
     let ponder = request.ponder.unwrap_or(false);
-    let effort = request.resolved_effort();
+    let effort = request.resolved_effort(false);
     let decision_time_ms = effort.decision_time_ms;
     let tactical_depth = effort.tactical.max_depth;
     let tactical_nodes = effort.tactical.node_budget;
@@ -2234,114 +2671,13 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
                 )
             }
             .map_err(|error| JsValue::from_str(&format!("{error:?}")))?;
-            let rust_posterior_particles = depth_report.posterior_particles;
-            let rust_search_particles = depth_report.particles;
-            let search_stages = depth_report.stage_timings.map(SearchStagesOutput::from);
-            let depth_safety_replacement = depth_report.provenance.safety_replacement.clone();
-            let depth_exact_family_replacement =
-                depth_report.provenance.exact_family_replacement.clone();
-            let exact_family_results = depth_report.provenance.exact_family_results.clone();
-            let retained_root_priors = depth_report.provenance.retained_roots.clone();
-            let root_provenance = root_provenance_output(depth_report.provenance.clone());
-            let actions = depth_report
-                .actions
-                .into_iter()
-                .map(|candidate| {
-                    let prior = retained_root_priors
-                        .iter()
-                        .find(|root| root.action == candidate.action)
-                        .map_or(0.0, |root| root.prior);
-                    ActionStats {
-                        action: candidate.action,
-                        visits: particles.len() as u32,
-                        availability: (candidate.legal_weight * particles.len() as f32).round()
-                            as u32,
-                        availability_weight: candidate.legal_weight,
-                        legal_weight: candidate.legal_weight,
-                        prior,
-                        value: candidate.value,
-                        lower_confidence_value: candidate.lower_confidence_value,
-                    }
-                })
-                .collect::<Vec<_>>();
-            // Mandatory exact authority was already checked before any
-            // expensive work. Development-family exact results were resolved
-            // before branch competition inside belief MaxN and are reused here.
-            let mut exact = ExactDecisionResult::default();
-            let mut authority = if depth_safety_replacement.is_some() {
-                DecisionAuthority::SafetyOverride
-            } else {
-                DecisionAuthority::DeepMaxn
-            };
-            let initial_authority = authority;
-            let mut exact_family = None;
-            let exact_family_replacement = depth_exact_family_replacement.map(replacement_output);
-            let mut safety_replacement = depth_safety_replacement.map(replacement_output);
-            let mut chosen = depth_report.chosen;
-            if let Some(family) = chosen.as_ref().and_then(exact_family_for_action)
-                && let Some((_, cached)) = exact_family_results
-                    .iter()
-                    .find(|(candidate, _)| *candidate == family)
-            {
-                exact_family = Some(exact_family_label(family));
-                exact = cached.clone();
-                if let Some(exact_chosen) = exact.chosen.clone() {
-                    chosen = Some(exact_chosen);
-                    authority = DecisionAuthority::ExactFamily;
-                }
-            }
-            // This is the final arbitration gate: when it changes the selected
-            // action, downstream telemetry/execution must retain safety-override
-            // authority rather than being relabeled by an earlier family solver.
-            if chosen == Some(Action::EndTurn)
-                && let Some(safer) = safer_end_turn_alternative(
-                    &particles[0].state,
-                    particles[0].state.actor() as usize,
-                    &actions,
-                    Some(&particles),
-                )
-            {
-                if safer != Action::EndTurn {
-                    safety_replacement = Some(ActionReplacementOutput {
-                        from: action(Action::EndTurn),
-                        to: action(safer.clone()),
-                    });
-                }
-                chosen = Some(safer);
-                authority = DecisionAuthority::SafetyOverride;
-            }
-            let diagnostics = ResponseDiagnostics {
-                rust_posterior_particles,
-                rust_search_particles,
-                strategy_policy: strategy_policy.explicit_identity(),
-                effective_effort: effort,
-                search_stages,
-                root_provenance,
-                authority_trace: AuthorityTraceOutput {
-                    initial_authority,
-                    exact_family,
-                    exact_family_replacement,
-                    safety_replacement,
-                },
-            };
-            (
-                SearchReport {
-                    chosen,
-                    root_value: depth_report.value,
-                    actions,
-                    tactical,
-                    exact,
-                    statistics: SearchStatistics {
-                        iterations: particles.len() as u32,
-                        nodes: depth_report.nodes as usize,
-                        deepest_decision_depth: depth_report.depth as u16,
-                        rollouts: 0,
-                        effective_particle_count: effective_particle_count(&particles),
-                        deadline_reached: depth_report.deadline_reached,
-                    },
-                },
-                authority,
-                diagnostics,
+            finalize_maxn_depth_report(
+                &particles,
+                &root_exclusions,
+                tactical,
+                effort,
+                strategy_policy,
+                depth_report,
             )
         } else if mode == RequestedMode::Weighted {
             let mut report = weighted_policy_report(&particles, &root_exclusions);
@@ -2612,6 +2948,33 @@ mod tests {
             "tradeCursor": 0,
             "domesticTradeUsed": false
         })
+    }
+
+    #[test]
+    fn fixed_work_effort_is_explicit_and_maxn_only() {
+        let mut request: super::Request = serde_json::from_value(json!({
+            "state": legacy_state_json(),
+            "timeBudgetMs": 0
+        }))
+        .unwrap();
+        assert_eq!(request.resolved_effort(true).decision_time_ms, 0);
+        assert_eq!(request.resolved_effort(false).decision_time_ms, 50);
+        request.time_budget_ms = None;
+        assert_eq!(request.resolved_effort(true).decision_time_ms, 2_800);
+        let mut effort = request.resolved_effort(true);
+        effort.decision_time_ms = 0;
+        effort.cpu.evidence_escalation_ms = Some(2_500);
+        request.effort = Some(effort);
+        assert_eq!(request.resolved_effort(true).decision_time_ms, 0);
+        assert_eq!(
+            request.resolved_effort(true).cpu.evidence_escalation_ms,
+            None
+        );
+        assert_eq!(request.resolved_effort(false).decision_time_ms, 50);
+        for (requested, expected) in [(1, 50), (2_000, 2_000), (20_000, 10_000)] {
+            request.effort.as_mut().unwrap().decision_time_ms = requested;
+            assert_eq!(request.resolved_effort(true).decision_time_ms, expected);
+        }
     }
 
     #[test]

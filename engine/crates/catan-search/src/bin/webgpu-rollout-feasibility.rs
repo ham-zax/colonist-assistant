@@ -114,7 +114,12 @@ fn representative_state() -> Result<(GameState, Vec<Action>, u64, usize), String
                     .filter(|action| matches!(action, Action::BuildRoad { .. }))
                     .count();
                 if legal.len() >= ROOT_LIMIT && road_roots >= 2 {
-                    return Ok((state, legal.into_iter().take(ROOT_LIMIT).collect(), board_seed, step));
+                    return Ok((
+                        state,
+                        legal.into_iter().take(ROOT_LIMIT).collect(),
+                        board_seed,
+                        step,
+                    ));
                 }
             }
             let legal = state.legal_actions();
@@ -134,11 +139,15 @@ fn development_closure_state(mut state: GameState) -> Result<GameState, String> 
         || state.players[current].bought_development != [0; 5]
         || state.players[current].played_development_this_turn
     {
-        return Err("development closure fixture expects a clean current-player development hand".into());
+        return Err(
+            "development closure fixture expects a clean current-player development hand".into(),
+        );
     }
     for card in [0usize, 2, 3, 4] {
         if state.development_deck[card] == 0 {
-            return Err(format!("development deck has no card {card} for closure fixture"));
+            return Err(format!(
+                "development deck has no card {card} for closure fixture"
+            ));
         }
         state.development_deck[card] -= 1;
         state.players[current].development[card] += 1;
@@ -159,7 +168,9 @@ fn select_development_roots(state: &GameState) -> Result<Vec<Action>, String> {
             .iter()
             .find(|action| matches(action) && !roots.contains(*action))
             .map(|action| (*action).clone())
-            .ok_or_else(|| "development closure fixture is missing a required root family".to_string())?;
+            .ok_or_else(|| {
+                "development closure fixture is missing a required root family".to_string()
+            })?;
         roots.push(action);
         Ok(())
     };
@@ -293,12 +304,7 @@ fn benchmark(
     for repetition in 0..repetitions {
         let started = Instant::now();
         let next = engine
-            .search_root_actions(
-                &rows,
-                rollouts_per_root,
-                steps,
-                SEED,
-            )
+            .search_root_actions(&rows, rollouts_per_root, steps, SEED)
             .map_err(|error| error.to_string())?;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
         times.push(elapsed_ms);
@@ -445,9 +451,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     report.push_str(&format!(
         "  \"seed\": {{\"lo\": {seed_lo}, \"hi\": {seed_hi}, \"hex\": \"0x123456789abcdef0\"}},\n"
     ));
-    report.push_str(&format!("  \"baseStateWords\": {},\n", vec_json(&base_state_words)));
-    report.push_str(&format!("  \"topologyWordsData\": {},\n", vec_json(&topology)));
-    report.push_str(&format!("  \"rootActionWords\": {},\n", vec_json(&root_action_words)));
+    report.push_str(&format!(
+        "  \"baseStateWords\": {},\n",
+        vec_json(&base_state_words)
+    ));
+    report.push_str(&format!(
+        "  \"topologyWordsData\": {},\n",
+        vec_json(&topology)
+    ));
+    report.push_str(&format!(
+        "  \"rootActionWords\": {},\n",
+        vec_json(&root_action_words)
+    ));
     report.push_str("  \"rootBaseIndices\": [0,0,0,0,0,0,0,0],\n");
     report.push_str(&format!("  \"rootLabels\": [{labels}],\n"));
     report.push_str("  \"cuda\": {\n");
@@ -460,7 +475,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     report.push_str(&format!("    \"warmupMs\": {warmup_ms:.6},\n"));
     report.push_str(&format!("    \"rolloutsPerRoot\": {rollouts_per_root},\n"));
     report.push_str(&format!("    \"repetitions\": {repetitions},\n"));
-    report.push_str(&format!("    \"h0ExpandReduceUpperBound\": {},\n", bench_json(&cuda0, &roots)));
+    report.push_str(&format!(
+        "    \"h0ExpandReduceUpperBound\": {},\n",
+        bench_json(&cuda0, &roots)
+    ));
     report.push_str(&format!("    \"h48\": {},\n", bench_json(&cuda48, &roots)));
     report.push_str(&format!("    \"h96\": {}\n", bench_json(&cuda96, &roots)));
     report.push_str("  }\n}\n");

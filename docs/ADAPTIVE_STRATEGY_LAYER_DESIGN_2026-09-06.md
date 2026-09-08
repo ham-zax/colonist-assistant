@@ -1,6 +1,10 @@
 # Adaptive strategy layer for Colonist Assistant
 
-Status: Milestone 0 is committed at `c21e4ae` as the bounded pre-strategy controlled-player continuation baseline, and Milestone 1 is committed at `06b14f8` as shadow-only reachability, strategy-proposal, player-count/response-window, and failure-classification diagnostics. Milestone 2 is implemented in this revision as the opt-in `adaptive-candidate-admission-v1` policy: at most three evidence-backed challengers can replace only unprotected baseline roots inside the existing cap before every retained root enters the same common search/evaluator. Missing policy remains baseline-authoritative; unsupported explicit policies fail closed. Native rollout GPU requests carrying a strategy policy are routed to CPU/WASM (and rejected defensively by the native client/host), while the existing CUDA-exact host path consumes the same fixed admitted roster. A bounded matched 2/3/4-player pilot found no strength gain or loss and no admitted challenger that became the common-search winner; this is neutral/non-positive pilot evidence, not promotion evidence.
+Status updated 2026-09-08: **implemented through Milestone 2, not through the full roadmap.** Milestone 0 is the pre-strategy baseline repair (`c21e4ae`); Milestone 1 adds shadow evidence (`06b14f8`); Milestone 2 adds opt-in candidate admission (`1420496`), with review corrections in `15f5051`. Thus two strategy-layer milestones are implemented in addition to the Milestone-0 prerequisite. Implementation does not mean demonstrated strength or production promotion.
+
+Milestone 2's `adaptive-candidate-admission-v1` policy admits at most three evidence-backed challengers by replacing only unprotected baseline roots inside the existing cap. Every retained root enters the same common search/evaluator. Missing policy remains baseline-authoritative. The small matched pilot supplied no evidence of improved strength: no admitted challenger became the common-search winner.
+
+**Milestones 3–5 are not started. Milestone 6 is partially implemented and not accepted for promotion.** The later [Engine stabilization and CPU/GPU decision contract](ENGINE_STABILIZATION_AND_CPU_GPU_PLAN_2026-09-07.md) takes priority: the current candidate uses `deep-maxn-v14` on CPU/WASM. Experimental native rollout rejects M2; exact CUDA supports explicit M2 in parity tooling but remains unpromoted. The repaired v14 native gate passed nine fixed-work CPU/CUDA comparisons plus timed cutoff and cancellation checks. Historical v13 artifacts do not certify all v14 behavior, and the recorded v13 GPU smoke failed the 2× retention gate (1.370× for 3P; 1.272× for 4P). Packaged browser execution and held-out strength evidence remain outstanding. See [the acceptance report](ENGINE_STABILIZATION_ACCEPTANCE_2026-09-07.md) for the exact verification scope.
 
 Date: 2026-09-06. Source investigation began at `d80e4b40601411b6cb848471978dbe1799c2045a` and continued against the current working tree. This document does not claim demonstrated playing-strength improvement.
 
@@ -14,7 +18,7 @@ The engine should answer:
 
 A strategy is a generator of concrete plans and alternatives. Examples are securing a contested settlement, growing city production, pursuing development-card points, acquiring an award, and completing a winning turn. A strategy does not own its own rules engine or directly click the UI.
 
-The requested deliverable is this design. Implementation should follow a separately reviewed, bounded plan.
+This document began as a design and now tracks implementation through Milestone 2. Remaining milestones require separately reviewed, bounded plans and their own evidence.
 
 ## 2. Existing behavior and the gaps this addresses
 
@@ -79,7 +83,7 @@ This taxonomy prevents strategy code from being used to patch valuation or conti
 
 Some passages in [STRATEGIC_ENGINE_V3.md](STRATEGIC_ENGINE_V3.md) disagree with each other and with current source about recursive opponent behavior, root width and budget allocation. Use the source observations above for this design. Reconcile those passages when an implementation changes the documented engine contract.
 
-CPU/WASM and native CUDA are distinct search algorithms. The three-action mixture is the inspected CPU belief-search mechanism; native CUDA has a different but related issue because rollout continuation samples weighted policy actions for every player. See [CPU_GPU_MREF_CONTRACT.md](CPU_GPU_MREF_CONTRACT.md).
+CPU/WASM MaxN and native **rollout** CUDA are distinct search algorithms. The exact CUDA path introduced by the stabilization contract is different: it is a computation backend for the same `deep-maxn-v14` candidate policy and must pass fixed-work action/value parity. The three-action opponent mixture is the CPU belief-search mechanism; `gpu-root-rollout` uses its own weighted rollout continuation, while `deep-maxn-cuda-exact-fixed-work-v1` mirrors the MaxN continuation contract. See [CPU_GPU_MREF_CONTRACT.md](CPU_GPU_MREF_CONTRACT.md).
 
 ## 3. Architectural options
 
@@ -96,7 +100,7 @@ Keep multiple strategies eligible. Do not select one permanent archetype at game
 ## 4. Scope and invariants
 
 - Initial rules scope is the existing 2–4 player base game with its supported configurable victory target. Reject unsupported rules or player counts through the existing validation path. Five to eight players require the separate migration described in [COLONIST_5_8_PLAYER_SUPPORT.md](COLONIST_5_8_PLAYER_SUPPORT.md).
-- Keep Deep MaxN as the validated default. The new strategy policy remains experimental until promotion evidence exists. Preserve the existing native-backend routing contract.
+- Keep the current `deep-maxn-v14` candidate on CPU/WASM. The new strategy policy remains experimental until promotion evidence exists. Follow the stabilization routing contract: rollout GPU cannot substitute for MaxN, and exact CUDA remains unpromoted until its independent backend gates pass.
 - Preserve public observation boundaries, exact local hand knowledge and honest uncertainty about opponents. No sampled hidden world becomes an actor's knowledge.
 - Preserve mandatory actions, exact-family ownership, existing verified safety arbitration, trade exclusions and legal-state validation.
 - Execute only the authoritative first action. Every subsequent click or decision must satisfy the existing state-signature and legal-target checks.
@@ -304,7 +308,7 @@ The initial candidate-admission layer can run on the native Rust host before CUD
 
 Introduce an explicit experimental strategy-policy identity, separate from search algorithm, stochastic model and protocol identity. A missing field means the existing baseline for backward compatibility. An explicit unknown requested strategy identity must be rejected or routed to a backend that supports it; it cannot be silently ignored. Responses echo the identity actually used.
 
-CPU-only experimental requests use CPU/WASM until native capabilities support the same proposal contract. Production routing stays unchanged while the experiment is disabled. CPU and GPU need agreement on inputs, chance transitions, proposal semantics and explanations; different search algorithms need not choose identical moves in every position.
+Production M2 remains disabled/opt-in and ordinary requests therefore stay baseline-authoritative. Explicit M2 requests use CPU/WASM in production; exact CUDA can execute the same proposal contract only in parity/experimental tooling while its backend promotion gate remains closed. Different algorithms such as MaxN versus `gpu-root-rollout` need not choose identical moves, but CPU MaxN versus exact CUDA **must** match under fixed work within the declared tolerance.
 
 Cache identity includes observation and belief evidence, rules, strategy version, search algorithm, stochastic identity and relevant effort/horizon. Explanations and results are revoked together when their evidence becomes stale.
 
@@ -322,7 +326,7 @@ The detailed local trace records strategy IDs, goal targets, evidence status, pr
 
 ## 14. Verification and promotion design
 
-These are requirements for later implementation work; no tests or benchmarks were run for this document.
+These remain the promotion requirements for strategy work. Stabilization has since added focused regressions, exact-backend parity artifacts, replay fidelity checks and a product-route takeover smoke, but those results do not promote M2 or establish playing-strength improvement.
 
 ### Paired decision scenarios
 
@@ -370,12 +374,12 @@ The ROI order is intentionally asymmetric. Fix the comparator's model of our own
 | Milestone | Reviewable deliverable | Authority boundary |
 | --- | --- | --- |
 | **0. Baseline reasoning repair** | **Committed at `c21e4ae`:** controlled-player identity carried through CPU/GPU continuation; future self no longer uses opponent-style stochastic behavior; opponents remain observation-safe modeled policies | Build/static checks complete; the reduced-effort matched arena screen is directionally favorable in 2p/3p/4p but too small for promotion; independent review and a larger preregistered held-out run remain separate gates |
-| **1. Reachability + shadow strategy evidence** | **Committed at `06b14f8`:** shared player-count/response-window context, optimistic point-source bounds, five proposal families, baseline rank/retention evidence, and coverage/valuation/horizon classification recorded under root provenance | Shadow-only: no strategy-driven root admission, evaluator bonus, or final-action authority change |
-| **2. Experimental candidate admission** | **Implemented in this revision:** explicit `adaptive-candidate-admission-v1` admits at most three distinct evidence-ranked challengers into the existing root cap; mandatory/forced-loss safety roots, EndTurn, the retained baseline leader, and retained spatial/closeout protections cannot be displaced; admitted actions enter the same common search/evaluator and diagnostics record selection, displacement, omission, and search entry | Opt-in only; missing policy is baseline-authoritative; explicit unsupported requests fail closed; native rollout GPU routes experimental requests to CPU/WASM; bounded matched pilot is neutral/non-positive, so there is no default promotion |
-| **3. Adaptive candidate reconsideration** | Bounded queue of omitted proposals with common-horizon re-entry only at completed comparison boundaries | Independent ablation; no shallow-vs-deep comparisons |
-| **4. Transition-aware economic forecasting** | Mref/fair chance-consistent build-readiness and opponent-response forecasts where static pips are inadequate | Separate probability/economic experiment; do not silently alter chance law or evaluator weights |
-| **5. Full contingent continuation** | Observation-equivalent-history grouping with conditional-posterior optimization for future controlled-player decisions | Stronger than Milestone 0; independent algorithm review and evidence required |
-| **6. Backend integration and promotion** | Native capability/version handling, packaged checks, held-out evaluation and any later schema-v2 learned-model experiment | Promotion only after each independently changed mechanism meets frozen criteria |
+| **1. Reachability + shadow strategy evidence** | **Implemented:** shared player-count/response-window context, optimistic sampled-world bounds, five proposal families and baseline rank/retention evidence. Stabilization separates observable proposal status from causal attribution, which remains unknown without a controlled reference/intervention | Shadow-only: no strategy-driven root admission, evaluator bonus, or final-action authority change |
+| **2. Experimental candidate admission** | **Implemented:** explicit `adaptive-candidate-admission-v1` admits at most three distinct evidence-ranked challengers into the existing root cap; mandatory/forced-loss safety roots, EndTurn, the retained baseline leader, and retained spatial/closeout protections cannot be displaced; admitted actions enter the same common search/evaluator and diagnostics record selection, displacement, omission, and search entry | Opt-in only; missing policy is baseline-authoritative; native rollout GPU rejects/reroutes the policy; exact CUDA can reproduce it only as the same-policy backend under parity tooling and remains unpromoted; bounded matched pilot is neutral/non-positive, so there is no default promotion |
+| **3. Adaptive candidate reconsideration** | **Not started:** bounded queue of omitted proposals with common-horizon re-entry only at completed comparison boundaries | First demonstrate a consequential omitted candidate; independent ablation, no shallow-vs-deep comparisons |
+| **4. Transition-aware economic forecasting** | **Not started:** Mref/fair chance-consistent build-readiness and opponent-response forecasts where static pips are inadequate | First demonstrate a comparison that static forecasts get wrong; separate experiment, no silent chance-law or evaluator change |
+| **5. Full contingent continuation** | **Not started:** observation-equivalent-history grouping with conditional-posterior optimization for future controlled-player decisions | Stronger than Milestone 0's bounded argmax; independent algorithm design/review and evidence required |
+| **6. Backend integration and promotion** | **Partial:** protocol-7 capabilities, `analyze-exact`, topology handling and arena routing are implemented; focused v14 fixed-work parity passes. Full current-candidate acceptance, performance and packaged execution remain incomplete | Exact CUDA remains unpromoted. Recorded v13 speedup failed ≥2×; current v14 performance is unmeasured. Packaged recommendation → click → confirmed transition and held-out strength evidence remain missing. Learned-model promotion stays separate |
 
 Milestone 2 keeps evidence ranking confined to coverage: necessary-source evidence ranks ahead of contested/scarce opportunity evidence, which ranks ahead of bounded current-turn/planner evidence; baseline order and canonical action order break remaining ties. Multiple strategies supporting one action still consume one root slot. The admitted roster is frozen for the decision, so no omitted challenger re-enters after deeper work; reconsideration remains Milestone 3.
 
@@ -389,7 +393,9 @@ The first bounded matched Milestone-2 pilot used four blocks per player-count st
 
 Across 3,463 policy decisions, only three decisions admitted any challenger (about 0.087%); four challenger actions were admitted and evaluated, all four displaced baseline actions, none won common search, and search depth/nodes were unchanged within each matched stratum. This small pilot is deliberately reported without tuning or rerunning its seeds. It supports semantic/latency feasibility but supplies no evidence that Milestone-2 admission improves playing strength.
 
-Milestone 1 remains the evidence source for proposal support and failure classification. `continuation` and `belief-model` remain explicit taxonomy values but are not guessed from insufficient evidence. Milestone 3 candidate reconsideration has not been implemented.
+Milestone 1 remains the evidence source for proposal support. Current diagnostics record `omitted`, `searched-not-selected`, `budget-limited`, or `selected`; none alone proves coverage, valuation, horizon, continuation, or belief-model causation. Causal attribution remains unknown without discriminating evidence. Milestone 3 candidate reconsideration has not been implemented.
+
+The next roadmap work is to finish the applicable stabilization evidence and evaluate M2 against the repaired baseline with frozen settings. Only a demonstrated omitted-candidate failure justifies starting M3. M4 and M5 remain separate later experiments, not work implicitly completed by backend integration. Backend speedup alone cannot establish strategy strength.
 
 Do not start by training or enabling the learned heads. Their current checkpoint is schema-incompatible and unpromoted, and native rollout cutoff reasoning is separately hand-written. Revisit learning only after the baseline decision semantics and teacher/evidence contracts are stable.
 

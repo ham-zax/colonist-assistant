@@ -8,6 +8,8 @@ import type {
   DeepSearchAuthorityTrace,
   DeepSearchEffectiveEffort,
   DeepSearchRootProvenance,
+  DeepSearchStrategyPolicy,
+  CanonicalEngineRequest,
   DecisionRationale,
   DecisionAnalysis,
   DecisionAuthority,
@@ -17,6 +19,7 @@ import type {
 import type { TrackerState } from "./types";
 import type {
   DiceHistoryProvenance,
+  PublicStochasticInput,
   StochasticBeliefPolicyId,
   StochasticModelId,
 } from "./dice-history";
@@ -48,6 +51,14 @@ export interface DecisionTraceSettings {
   engine: string;
   disablePlayerTrades: boolean;
   autopilot: boolean;
+}
+
+export interface DecisionTraceReplayRequestContext {
+  representation: "reconstructed-request-v1";
+  playerTradesEnabled: boolean;
+  stochastic: PublicStochasticInput;
+  searchConstraints: DecisionSearchConstraints;
+  strategyPolicy?: DeepSearchStrategyPolicy;
 }
 
 export interface DecisionTraceSearchConstraints {
@@ -206,6 +217,8 @@ export interface DecisionTrace {
   tradeModelVersion?: string;
   seed?: number;
   rootPlayer?: string;
+  replayRequestContext?: DecisionTraceReplayRequestContext;
+  canonicalRequest?: CanonicalEngineRequest;
   replayState?: TrackerState;
   replayBoard?: BoardSnapshot;
 }
@@ -338,6 +351,7 @@ export class DecisionTraceRecorder {
     context?: {
       settings?: DecisionTraceSettings;
       searchConstraints?: DecisionSearchConstraints;
+      replayRequestContext?: Omit<DecisionTraceReplayRequestContext, "representation">;
     },
   ): void {
     this.supersedePending(stateHash, startedAt);
@@ -358,6 +372,17 @@ export class DecisionTraceRecorder {
       existing.searchConstraints = context?.searchConstraints
         ? searchConstraintSnapshot(context.searchConstraints)
         : existing.searchConstraints;
+      existing.replayRequestContext = context?.replayRequestContext
+        ? {
+            representation: "reconstructed-request-v1",
+            playerTradesEnabled: context.replayRequestContext.playerTradesEnabled,
+            stochastic: structuredClone(context.replayRequestContext.stochastic),
+            searchConstraints: structuredClone(context.replayRequestContext.searchConstraints),
+            ...(context.replayRequestContext.strategyPolicy
+              ? { strategyPolicy: context.replayRequestContext.strategyPolicy }
+              : {}),
+          }
+        : existing.replayRequestContext;
       existing.deepAttempts ??= [];
       existing.deepAttempts.push({
         startedAt,
@@ -412,6 +437,19 @@ export class DecisionTraceRecorder {
       deepAttempts: [{ startedAt, status: "pending", timedOut: false }],
       executedBeforeDeepResult: false,
       rootPlayer: board.myPlayer,
+      ...(context?.replayRequestContext
+        ? {
+            replayRequestContext: {
+              representation: "reconstructed-request-v1" as const,
+              playerTradesEnabled: context.replayRequestContext.playerTradesEnabled,
+              stochastic: structuredClone(context.replayRequestContext.stochastic),
+              searchConstraints: structuredClone(context.replayRequestContext.searchConstraints),
+              ...(context.replayRequestContext.strategyPolicy
+                ? { strategyPolicy: context.replayRequestContext.strategyPolicy }
+                : {}),
+            },
+          }
+        : {}),
       replayState,
       replayBoard,
     });
@@ -461,6 +499,8 @@ export class DecisionTraceRecorder {
     trace.engine = analysis.engine;
     trace.runtime = analysis.runtime;
     trace.engineRevision = analysis.deepSearch?.engineRevision;
+    trace.canonicalRequest = analysis.deepSearch?.canonicalRequest
+      ? structuredClone(analysis.deepSearch.canonicalRequest) : undefined;
     trace.diceMode = analysis.deepSearch?.diceMode;
     trace.chanceModel = analysis.deepSearch?.chanceModel;
     trace.requestedStochasticModel = analysis.deepSearch?.requestedStochasticModel;

@@ -22,9 +22,8 @@ fn production_units(state: &GameState, player: u8) -> [i32; 5] {
                 continue;
             };
             let active_eighths = if *hex == state.robber_hex { 1 } else { 8 };
-            production[resource.index()] += NUMBER_PIPS[tile.number as usize]
-                * multiplier
-                * active_eighths;
+            production[resource.index()] +=
+                NUMBER_PIPS[tile.number as usize] * multiplier * active_eighths;
         }
     }
     production
@@ -44,13 +43,19 @@ fn remaining_missing_after_maritime(
         let reserved = hand[resource].min(required);
         missing += i32::from(required - reserved);
         unavailable += i32::from((required - reserved).saturating_sub(bank[resource]));
-        capacity += i32::from(hand[resource] - reserved)
-            / i32::from(ratios[resource].max(1));
+        capacity += i32::from(hand[resource] - reserved) / i32::from(ratios[resource].max(1));
     }
     (missing - capacity).max(unavailable)
 }
 
-fn build_access(weight: i32, enabled: bool, hand: &ResourceHand, ratios: &ResourceHand, bank: &ResourceHand, cost: &ResourceHand) -> i32 {
+fn build_access(
+    weight: i32,
+    enabled: bool,
+    hand: &ResourceHand,
+    ratios: &ResourceHand,
+    bank: &ResourceHand,
+    cost: &ResourceHand,
+) -> i32 {
     if !enabled {
         return 0;
     }
@@ -89,9 +94,7 @@ fn route_distance_at_most_one(state: &GameState, player: u8, vertex: usize) -> O
         let other = endpoints
             .into_iter()
             .find(|endpoint| usize::from(*endpoint) != vertex)?;
-        if state.buildings[other as usize]
-            .is_some_and(|building| building.player() != player)
-        {
+        if state.buildings[other as usize].is_some_and(|building| building.player() != player) {
             continue;
         }
         if network_touches_vertex(state, player, other as usize) {
@@ -102,7 +105,9 @@ fn route_distance_at_most_one(state: &GameState, player: u8, vertex: usize) -> O
 }
 
 fn expansion_option_score(state: &GameState, player: u8) -> i32 {
-    if state.players[usize::from(player)].settlements_left == 0 { return 0; }
+    if state.players[usize::from(player)].settlements_left == 0 {
+        return 0;
+    }
     let mut best = 0i32;
     let existing_production = production_units(state, player);
     let mut missing_settlement_mask = 0u8;
@@ -111,11 +116,12 @@ fn expansion_option_score(state: &GameState, player: u8) -> i32 {
             missing_settlement_mask |= 1 << resource;
         }
     }
-    let closure_weight = if !state.player_trades_enabled || state.domestic_trade_disabled & (1 << player) != 0 {
-        64
-    } else {
-        40
-    };
+    let closure_weight =
+        if !state.player_trades_enabled || state.domestic_trade_disabled & (1 << player) != 0 {
+            64
+        } else {
+            40
+        };
     for vertex in 0..state.board.vertices.len() {
         if !distance_rule_open(state, vertex) {
             continue;
@@ -123,7 +129,9 @@ fn expansion_option_score(state: &GameState, player: u8) -> i32 {
         let Some(distance) = route_distance_at_most_one(state, player, vertex) else {
             continue;
         };
-        if distance > i32::from(state.players[usize::from(player)].roads_left) { continue; }
+        if distance > i32::from(state.players[usize::from(player)].roads_left) {
+            continue;
+        }
         let mut pips = 0i32;
         let mut resource_mask = 0u8;
         for hex in &state.board.vertices[vertex].adjacent_hexes {
@@ -136,12 +144,9 @@ fn expansion_option_score(state: &GameState, player: u8) -> i32 {
             resource_mask |= 1 << resource.index();
         }
         let port = i32::from(state.board.vertices[vertex].port.is_some()) * 16;
-        let closure = (resource_mask & missing_settlement_mask).count_ones() as i32
-            * closure_weight;
-        let site = pips * 2
-            + resource_mask.count_ones() as i32 * 18
-            + closure
-            + port;
+        let closure =
+            (resource_mask & missing_settlement_mask).count_ones() as i32 * closure_weight;
+        let site = pips * 2 + resource_mask.count_ones() as i32 * 18 + closure + port;
         best = best.max(site / (distance + 1));
     }
     best.min(320)
@@ -187,9 +192,10 @@ pub fn rollout_cutoff_player_score(state: &GameState, player: u8) -> i32 {
     let has_settlement = state
         .buildings
         .contains(&Some(Building::Settlement(player)));
-    let has_distance_open_site = (0..state.board.vertices.len())
-        .any(|vertex| distance_rule_open(state, vertex)
-            && route_distance_at_most_one(state, player, vertex) == Some(0));
+    let has_distance_open_site = (0..state.board.vertices.len()).any(|vertex| {
+        distance_rule_open(state, vertex)
+            && route_distance_at_most_one(state, player, vertex) == Some(0)
+    });
     let development_available = state.development_deck.iter().copied().sum::<u8>() > 0;
     let development_inventory = player_state
         .development
@@ -272,7 +278,10 @@ mod tests {
         }
         state.phase = Phase::Main;
         state.current_player = 0;
-        state.players.iter_mut().for_each(|player| player.resources = [0; 5]);
+        state
+            .players
+            .iter_mut()
+            .for_each(|player| player.resources = [0; 5]);
         state.bank = [19; 5];
         state
     }
@@ -285,10 +294,7 @@ mod tests {
         let mut closed = base.clone();
         closed.players[0].resources[Resource::Wool.index()] = 1;
         closed.bank[Resource::Wool.index()] = 18;
-        assert!(
-            rollout_cutoff_player_score(&closed, 0)
-                > rollout_cutoff_player_score(&base, 0)
-        );
+        assert!(rollout_cutoff_player_score(&closed, 0) > rollout_cutoff_player_score(&base, 0));
     }
 
     #[test]
@@ -296,7 +302,10 @@ mod tests {
         let mut state = after_setup(79_003);
         state.players[0].resources = [1, 1, 1, 1, 0];
         state.bank = [18, 18, 18, 18, 19];
-        assert_eq!(state.players[0].victory_points(), state.players[1].victory_points());
+        assert_eq!(
+            state.players[0].victory_points(),
+            state.players[1].victory_points()
+        );
         assert_ne!(rollout_cutoff_margin(&state, 0), 0.0);
     }
 }

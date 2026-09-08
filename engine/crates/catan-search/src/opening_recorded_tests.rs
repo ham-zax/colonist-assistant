@@ -5,8 +5,8 @@ use colonist_catan_core::{
 };
 
 use super::{
-    OpeningVisitValue, opening_visit_is_better, opening_root_node_budgets,
-    opening_build_economy, opening_build_economy_from_inputs, opening_position_bonus,
+    OpeningVisitValue, opening_build_economy, opening_build_economy_from_inputs,
+    opening_position_bonus, opening_root_node_budgets, opening_visit_is_better,
 };
 use crate::economy::build_fundable_at_rolls as opening_build_cost_fundable_at_rolls;
 use crate::{OpeningConfig, OpeningReport, production_pips, solve_opening};
@@ -468,8 +468,7 @@ fn assert_setup_turn(state: &GameState, root: u8, setup_step: u8) {
 }
 
 fn hand2325_d1() -> GameState {
-    let mut state =
-        recorded_state_with_rules(&HAND2325_HEXES, &HAND2325_PORTS, 1, 2, 15);
+    let mut state = recorded_state_with_rules(&HAND2325_HEXES, &HAND2325_PORTS, 1, 2, 15);
     place_settlement(&mut state, "v:-2,1,0");
     place_road(&mut state, "e:-1,0,2");
     assert_setup_turn(&state, 1, 1);
@@ -556,8 +555,7 @@ fn hand2325_d1_does_not_sacrifice_half_the_production_for_a_generic_port() {
         .as_ref()
         .expect("the recorded setup state has legal opening roots");
     assert_ne!(
-        chosen,
-        &weak_port,
+        chosen, &weak_port,
         "a 5-pip generic-port root must not win through fractional maritime credit"
     );
     assert!(
@@ -590,7 +588,11 @@ fn hand2325_d1_is_stable_across_live_and_reference_node_budgets() {
         assert_ne!(report.chosen.as_ref(), Some(&weak_port));
     }
     let reference = reports.last().unwrap().1.chosen.as_ref();
-    assert!(reports.iter().all(|(_, report)| report.chosen.as_ref() == reference));
+    assert!(
+        reports
+            .iter()
+            .all(|(_, report)| report.chosen.as_ref() == reference)
+    );
 }
 
 #[test]
@@ -619,7 +621,10 @@ fn recorded_d1_authoritative_candidates_are_completion_backed() {
     ] {
         let report = solve_opening(&state, root, live_opening_config());
         assert!(
-            report.actions.iter().any(|candidate| candidate.authoritative),
+            report
+                .actions
+                .iter()
+                .any(|candidate| candidate.authoritative),
             "{name} must retain an authoritative root"
         );
         assert!(

@@ -12,7 +12,7 @@ to run one fixed value/policy corpus on CPU and CUDA with identical seeds, split
 
 ## Exact GPU acceleration
 
-Tasks 4-12 are integrated at `7c91f69`. Treat that search behavior as the CPU semantic reference for the exact GPU path.
+The original exact-acceleration work was integrated at `7c91f69`. The current semantic reference is now `deep-maxn-v13`; historical parity or timing from the older reference does not certify the stabilization candidate.
 
 Use:
 
@@ -39,8 +39,8 @@ The implementation contract is:
 2. Keep the CPU evaluator as the semantic oracle.
 3. Batch exact leaf evaluation across independent roots, belief particles, and arena games.
 4. Require CPU/GPU evaluator parity on a fixed state corpus before using GPU values in search.
-5. Require chosen-action and terminal-outcome parity on deterministic 3P/4P benchmark seeds.
-6. Keep the backend only if the end-to-end 3P and 4P arena benchmark is at least 2x faster.
+5. Require fixed-work action/value parity on supported 2P/3P/4P decision cases, including fair/Mref stochastic evidence, trade settings and supported victory targets; retain deterministic 3P/4P terminal/checkpoint parity in the matched arena.
+6. Keep the backend production-promotable only if the end-to-end 3P and 4P arena benchmark is at least 2x faster and the packaged execution/cancellation gates also pass.
 
 The current handcrafted `evaluate()` is not a dense kernel. It includes route maps, expansion races, discard optimization, trophy outlooks, development-card value, ports, production, hand composition, build tempo, and other state-dependent terms. Implementing Option 1 is therefore a full evaluator backend, not a small CUDA wrapper.
 
@@ -48,7 +48,7 @@ For hardware headroom only, the existing width-512 neural parity benchmark repro
 
 ### Exact native baseline result
 
-The opt-in `cuda-exact` Rust feature now compiles the checked-in evaluator kernel with NVRTC, uploads immutable standard-board topology once, and keeps the CUDA context, module, stream, topology, and expandable device buffers resident. Search leaves are packed directly into a fixed 330-word representation and evaluated in one batch per fixed-node weighted-belief MaxN decision. The normal CPU and WASM builds do not enable or link the CUDA dependency.
+The opt-in `cuda-exact` Rust feature compiles the checked-in evaluator kernel with NVRTC and keeps the CUDA context, module, stream, currently prepared board topology, and expandable device buffers resident. The evaluator starts with canonical standard-board topology only as initialization; each exact request prepares the **actual request board adjacency topology**, and belief particles with a different topology are rejected. This matters for recorded/live boards whose vertex and edge indices are not the generated canonical order. Search leaves are packed into the exact state representation and evaluated in batches inside the same global iterative fixed-work depth schedule used by CPU MaxN. The normal CPU and WASM builds do not enable or link the CUDA dependency.
 
 Run the correctness gates with CUDA/NVRTC available on `LD_LIBRARY_PATH`:
 

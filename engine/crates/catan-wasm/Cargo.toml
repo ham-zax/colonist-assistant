@@ -10,7 +10,11 @@ crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
 [features]
-native-gpu = ["colonist-catan-search/cuda-sim", "dep:serde_json"]
+native-gpu = [
+  "colonist-catan-search/cuda-sim",
+  "colonist-catan-search/cuda-exact",
+  "dep:serde_json",
+]
 
 [dependencies]
 colonist-catan-core = { path = "../catan-core" }

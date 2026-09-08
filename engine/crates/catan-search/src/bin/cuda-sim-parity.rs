@@ -1,13 +1,14 @@
 use colonist_catan_core::{Action, DevCard, GameState, Phase, SplitMix64};
-use colonist_catan_search::{
-    CudaSimEngine, CudaSimPackedState, cuda_sim_action_supported,
-};
+use colonist_catan_search::{CudaSimEngine, CudaSimPackedState, cuda_sim_action_supported};
 
 const LANES: usize = 64;
 const STEPS: usize = 256;
 
 fn finish_setup(state: &mut GameState) -> Result<(), Box<dyn std::error::Error>> {
-    while matches!(state.phase, Phase::SetupSettlement | Phase::SetupRoad { .. }) {
+    while matches!(
+        state.phase,
+        Phase::SetupSettlement | Phase::SetupRoad { .. }
+    ) {
         let action = state
             .legal_actions()
             .into_iter()
@@ -34,7 +35,9 @@ fn verify_end_turn_winner(engine: &mut CudaSimEngine) -> Result<(), Box<dyn std:
     engine.apply_actions(&[Action::EndTurn])?;
     state.apply(&Action::EndTurn)?;
     if state.phase != Phase::Finished || state.current_player != 1 {
-        return Err("CPU EndTurn winner oracle did not enter Finished for the newly current player".into());
+        return Err(
+            "CPU EndTurn winner oracle did not enter Finished for the newly current player".into(),
+        );
     }
     let expected = CudaSimPackedState::new(&state)?;
     let actual = engine.download_packed_states()?.remove(0);

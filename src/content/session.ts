@@ -1569,7 +1569,7 @@ export class GameSession {
       playerCount: this.state.playerOrder.length,
       eventCount: this.state.eventCount,
       possibilities: this.state.worlds.length,
-      partialHistory: this.partialHistory || Boolean(this.state.warnings.length),
+      partialHistory: this.partialHistory,
       updatedAt: now,
     };
     try {

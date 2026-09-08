@@ -22,8 +22,9 @@ fn paired_states(players: u8, blocks: usize) -> Vec<GameState> {
     for block in 0..blocks {
         let board_seed = cuda_sim_board_seed(BOARD_SEED, block as u64);
         for _seat in 0..players {
-            let mut state = GameState::from_generator(board_generator(players), board_seed, players)
-                .expect("searched arena generator must support configured player count");
+            let mut state =
+                GameState::from_generator(board_generator(players), board_seed, players)
+                    .expect("searched arena generator must support configured player count");
             state.player_trades_enabled = true;
             states.push(state);
         }

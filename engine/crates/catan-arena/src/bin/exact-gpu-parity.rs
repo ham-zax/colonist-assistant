@@ -61,6 +61,7 @@ struct Report {
     parity: bool,
     validated: bool,
     cases: usize,
+    two_player_cases: usize,
     three_player_cases: usize,
     four_player_cases: usize,
     terminal_cases: usize,
@@ -80,6 +81,10 @@ struct Report {
 
 impl Report {
     fn new(mode: &'static str, cases: &[ExactParityCase]) -> Self {
+        let two_player_cases = cases
+            .iter()
+            .filter(|case| case.state.board.num_players == 2)
+            .count();
         let three_player_cases = cases
             .iter()
             .filter(|case| case.state.board.num_players == 3)
@@ -102,6 +107,7 @@ impl Report {
             parity: false,
             validated: false,
             cases: cases.len(),
+            two_player_cases,
             three_player_cases,
             four_player_cases,
             terminal_cases,
@@ -385,11 +391,7 @@ fn stats_report(evaluator: &CudaExactEvaluator) -> StatsReport {
     }
 }
 
-fn run_cases(
-    mode: &'static str,
-    cases: Vec<ExactParityCase>,
-    batch_size: usize,
-) -> Report {
+fn run_cases(mode: &'static str, cases: Vec<ExactParityCase>, batch_size: usize) -> Report {
     let mut report = Report::new(mode, &cases);
     validate_cases(&mut report, &cases);
     if report.failure_count > 0 {

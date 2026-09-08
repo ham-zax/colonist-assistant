@@ -2,7 +2,10 @@ use colonist_catan_core::{Action, GameState, Phase};
 use colonist_catan_search::{CudaSimEngine, CudaSimPackedState};
 
 fn finish_setup(state: &mut GameState) {
-    while matches!(state.phase, Phase::SetupSettlement | Phase::SetupRoad { .. }) {
+    while matches!(
+        state.phase,
+        Phase::SetupSettlement | Phase::SetupRoad { .. }
+    ) {
         let action = state
             .legal_actions()
             .into_iter()
@@ -63,7 +66,11 @@ fn apply_and_compare(
 }
 
 fn offer(state: &GameState) -> Result<Action, Box<dyn std::error::Error>> {
-    first_matching(state, |action| matches!(action, Action::OfferTrade { .. }), "offer")
+    first_matching(
+        state,
+        |action| matches!(action, Action::OfferTrade { .. }),
+        "offer",
+    )
 }
 
 fn complete_with_rejections(
@@ -73,7 +80,10 @@ fn complete_with_rejections(
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let legal = state.legal_actions();
-        if legal.iter().any(|action| matches!(action, Action::CancelTrade)) {
+        if legal
+            .iter()
+            .any(|action| matches!(action, Action::CancelTrade))
+        {
             return Ok(());
         }
         let reject = legal
@@ -90,7 +100,11 @@ fn rejection_and_cancel(engine: &mut CudaSimEngine) -> Result<usize, Box<dyn std
     let action = offer(&state)?;
     apply_and_compare(engine, &mut state, action, "offer-reject")?;
     complete_with_rejections(engine, &mut state, "reject")?;
-    let cancel = first_matching(&state, |action| matches!(action, Action::CancelTrade), "cancel")?;
+    let cancel = first_matching(
+        &state,
+        |action| matches!(action, Action::CancelTrade),
+        "cancel",
+    )?;
     apply_and_compare(engine, &mut state, cancel, "cancel")?;
     if state.last_rejected_trade.is_none() || state.trade.is_some() || state.phase != Phase::Main {
         return Err("cancel did not preserve the CPU rejection contract".into());
@@ -174,7 +188,11 @@ fn disabled_cleanup(engine: &mut CudaSimEngine) -> Result<usize, Box<dyn std::er
     state.player_trades_enabled = false;
     engine.upload_states(std::slice::from_ref(&state))?;
     complete_with_rejections(engine, &mut state, "disabled-reject")?;
-    let cancel = first_matching(&state, |action| matches!(action, Action::CancelTrade), "disabled cancel")?;
+    let cancel = first_matching(
+        &state,
+        |action| matches!(action, Action::CancelTrade),
+        "disabled cancel",
+    )?;
     apply_and_compare(engine, &mut state, cancel, "disabled-cancel")?;
     Ok(1)
 }
@@ -322,7 +340,6 @@ fn generated_trade_policy_parity(
     ))
 }
 
-
 fn per_seat_disabled_policy_parity(
     engine: &mut CudaSimEngine,
 ) -> Result<usize, Box<dyn std::error::Error>> {
@@ -396,7 +413,8 @@ fn high_hand_offer_policy_parity(
     const ATTEMPTS: usize = 96;
     let states = (0..LANES)
         .map(|lane| {
-            let mut state = trade_ready_state(33_000 + lane as u64 * 19, if lane % 2 == 0 { 3 } else { 4 });
+            let mut state =
+                trade_ready_state(33_000 + lane as u64 * 19, if lane % 2 == 0 { 3 } else { 4 });
             for player in &mut state.players {
                 player.resources = [0; 5];
                 player.policy_profile = [0, 0, 0, 102, 0];
@@ -405,7 +423,9 @@ fn high_hand_offer_policy_parity(
             let actor = state.current_player as usize;
             state.players[actor].resources = [4; 5];
             state.bank = [15; 5];
-            state.validate().expect("high-hand trade oracle state must validate");
+            state
+                .validate()
+                .expect("high-hand trade oracle state must validate");
             state
         })
         .collect::<Vec<_>>();

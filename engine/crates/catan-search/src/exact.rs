@@ -66,7 +66,7 @@ fn matches_family(state: &GameState, action: &Action, family: ExactActionFamily)
             // arbitrate exactly.
             Phase::TradeResponses => {
                 matches!(action, Action::ConfirmTrade { .. } | Action::CancelTrade)
-            },
+            }
             _ => false,
         },
         ExactActionFamily::Knight => matches!(action, Action::PlayKnight { .. }),
@@ -363,11 +363,9 @@ fn family_score(
                 // real race exposure. Keep this a bounded tie-break; proven
                 // kingmaker continuations remain the responsibility of the
                 // hard trade-safety veto.
-                let public_race_exposure = received_cards * 0.32
-                    / f32::from(points_remaining.max(1));
-                return own_plan
-                    - opponent_gain * threat_multiplier
-                    - public_race_exposure;
+                let public_race_exposure =
+                    received_cards * 0.32 / f32::from(points_remaining.max(1));
+                return own_plan - opponent_gain * threat_multiplier - public_race_exposure;
             }
             return own_plan;
         }
@@ -997,7 +995,10 @@ mod tests {
             ExactActionFamily::YearOfPlenty,
         );
         assert!(
-            !result.actions.iter().any(|candidate| candidate.action == hidden_only),
+            !result
+                .actions
+                .iter()
+                .any(|candidate| candidate.action == hidden_only),
         );
         assert!(
             result

@@ -11,7 +11,9 @@ use colonist_catan_core::{Building, GameState};
 
 use crate::eval::{road_distances, settlement_vertex_open};
 
-const PUBLIC_PIPS: [f32; 13] = [0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 0.0, 5.0, 4.0, 3.0, 2.0, 1.0];
+const PUBLIC_PIPS: [f32; 13] = [
+    0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 0.0, 5.0, 4.0, 3.0, 2.0, 1.0,
+];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CriticalVertex {
@@ -45,7 +47,6 @@ pub struct RoadResilience {
     pub maximum_expansion_value_loss: f32,
     pub minimum_bypass_roads: Option<u8>,
 }
-
 
 /// Searches for the shortest path of unbuilt edges connecting any two distinct
 /// branch endpoints around a cut vertex, without traversing the cut vertex or
@@ -274,11 +275,7 @@ pub fn evaluate_vertex_cut(
 
 /// Evaluates the hypothetical consequence of an opponent claiming unbuilt `edge`
 /// that is adjacent to `target_player`'s road network.
-pub fn evaluate_edge_cut(
-    state: &GameState,
-    target_player: u8,
-    edge: u8,
-) -> Option<CriticalEdge> {
+pub fn evaluate_edge_cut(state: &GameState, target_player: u8, edge: u8) -> Option<CriticalEdge> {
     if state.roads.get(edge as usize).is_none_or(Option::is_some) {
         return None;
     }
@@ -407,7 +404,11 @@ mod tests {
             .unwrap() as usize;
         state.roads[e1] = Some(0);
         let [_, v2] = state.board.edges[e1].vertices;
-        let v2 = if v2 == v1 { state.board.edges[e1].vertices[0] } else { v2 };
+        let v2 = if v2 == v1 {
+            state.board.edges[e1].vertices[0]
+        } else {
+            v2
+        };
 
         let e2 = *state.board.vertices[v2 as usize]
             .adjacent_edges
@@ -416,7 +417,11 @@ mod tests {
             .unwrap() as usize;
         state.roads[e2] = Some(0);
         let [_, v3] = state.board.edges[e2].vertices;
-        let v3 = if v3 == v2 { state.board.edges[e2].vertices[0] } else { v3 };
+        let v3 = if v3 == v2 {
+            state.board.edges[e2].vertices[0]
+        } else {
+            v3
+        };
 
         let e3 = *state.board.vertices[v3 as usize]
             .adjacent_edges
@@ -425,7 +430,11 @@ mod tests {
             .unwrap() as usize;
         state.roads[e3] = Some(0);
         let [_, v4] = state.board.edges[e3].vertices;
-        let v4 = if v4 == v3 { state.board.edges[e3].vertices[0] } else { v4 };
+        let v4 = if v4 == v3 {
+            state.board.edges[e3].vertices[0]
+        } else {
+            v4
+        };
 
         let e4 = *state.board.vertices[v4 as usize]
             .adjacent_edges
@@ -443,7 +452,10 @@ mod tests {
         assert!(cut.is_some());
         let cut = cut.unwrap();
         assert!(cut.road_loss > 0, "cut must cause road loss");
-        assert!(cut.award_loss, "cut must cause award loss since length drops below 5");
+        assert!(
+            cut.award_loss,
+            "cut must cause award loss since length drops below 5"
+        );
         assert_eq!(cut.award_vp_swing, -2);
     }
 
@@ -451,7 +463,9 @@ mod tests {
     fn loop_with_bypass_reports_zero_road_loss() {
         let mut state = GameState::standard(1, 3);
         let hex = 0usize;
-        let hex_edges: Vec<u8> = state.board.edges
+        let hex_edges: Vec<u8> = state
+            .board
+            .edges
             .iter()
             .enumerate()
             .filter(|(_, edge)| edge.adjacent_hexes.contains(&(hex as u8)))

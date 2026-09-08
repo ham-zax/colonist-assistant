@@ -1,5 +1,5 @@
 use colonist_catan_core::{
-    Action, CITY_COST, DEVELOPMENT_COST, GameState, ResourceHand, ROAD_COST, SETTLEMENT_COST,
+    Action, CITY_COST, DEVELOPMENT_COST, GameState, ROAD_COST, ResourceHand, SETTLEMENT_COST,
 };
 
 /// Deterministic production/whole-batch proxy, not a stochastic first-passage ETA.
@@ -73,33 +73,63 @@ pub(crate) fn build_conversion_efficiency(
         .filter(|(pips, _)| **pips > 0.0)
         .map(|(_, ratio)| u32::from(*ratio))
         .min();
-    let Some(best_ratio) = best_ratio else { return 0.0; };
-    let cards = cost.iter().enumerate().map(|(resource, count)| {
-        u32::from(*count) * if production[resource] > 0.0 { 1 } else { best_ratio }
-    }).sum::<u32>();
+    let Some(best_ratio) = best_ratio else {
+        return 0.0;
+    };
+    let cards = cost
+        .iter()
+        .enumerate()
+        .map(|(resource, count)| {
+            u32::from(*count)
+                * if production[resource] > 0.0 {
+                    1
+                } else {
+                    best_ratio
+                }
+        })
+        .sum::<u32>();
     required as f32 / cards.max(required) as f32
 }
 
 /// Guaranteed bank stock using only the actor's hand and public opponent hand
 /// totals. Never inspect sampled opponent resource identities in action policy.
 pub(crate) fn guaranteed_hidden_bank_lower_bound(state: &GameState, player: u8) -> ResourceHand {
-    let others = state.players.iter().enumerate()
+    let others = state
+        .players
+        .iter()
+        .enumerate()
         .filter(|(index, _)| *index != usize::from(player))
-        .map(|(_, other)| other.resources.iter().map(|count| u16::from(*count)).sum::<u16>())
+        .map(|(_, other)| {
+            other
+                .resources
+                .iter()
+                .map(|count| u16::from(*count))
+                .sum::<u16>()
+        })
         .sum::<u16>();
     std::array::from_fn(|resource| {
-        19u16.saturating_sub(others + u16::from(state.players[usize::from(player)].resources[resource])) as u8
+        19u16.saturating_sub(
+            others + u16::from(state.players[usize::from(player)].resources[resource]),
+        ) as u8
     })
 }
 
 #[cfg(test)]
 fn guaranteed_hidden_bank_mask(state: &GameState, player: u8) -> u8 {
-    guaranteed_hidden_bank_lower_bound(state, player).iter().enumerate()
-        .fold(0, |mask, (resource, count)| mask | (u8::from(*count > 0) << resource))
+    guaranteed_hidden_bank_lower_bound(state, player)
+        .iter()
+        .enumerate()
+        .fold(0, |mask, (resource, count)| {
+            mask | (u8::from(*count > 0) << resource)
+        })
 }
 
 fn observable_bank(state: &GameState, player: u8) -> ResourceHand {
-    if state.bank_is_public { state.bank } else { guaranteed_hidden_bank_lower_bound(state, player) }
+    if state.bank_is_public {
+        state.bank
+    } else {
+        guaranteed_hidden_bank_lower_bound(state, player)
+    }
 }
 
 const BUILD_TARGETS: [(ResourceHand, f32); 4] = [
@@ -129,9 +159,12 @@ pub(crate) fn minimum_maritime_trades_to_fund(
             return None;
         }
         missing += u16::from(deficit);
-        capacity += u16::from(hand[resource].saturating_sub(cost[resource]) / ratios[resource].clamp(2, 4));
+        capacity +=
+            u16::from(hand[resource].saturating_sub(cost[resource]) / ratios[resource].clamp(2, 4));
     }
-    if capacity < missing { return None; }
+    if capacity < missing {
+        return None;
+    }
     u8::try_from(missing).ok()
 }
 
@@ -215,24 +248,41 @@ pub(crate) fn immediate_build_closure_value(state: &GameState, player: u8) -> f3
     let mask = crate::eval::build_target_mask(state, player);
     let bank = observable_bank(state, player);
     let ratios = state.trade_ratios(player);
-    BUILD_TARGETS.iter().zip([mask[1], mask[0], mask[2], mask[3]])
+    BUILD_TARGETS
+        .iter()
+        .zip([mask[1], mask[0], mask[2], mask[3]])
         .filter(|(_, enabled)| *enabled)
         .map(|((cost, importance), _)| {
-            minimum_maritime_trades_to_fund(&state.players[usize::from(player)].resources, &bank, &ratios, cost)
-                .map_or(0.0, |trades| importance / (1.0 + f32::from(trades)))
-        }).sum()
+            minimum_maritime_trades_to_fund(
+                &state.players[usize::from(player)].resources,
+                &bank,
+                &ratios,
+                cost,
+            )
+            .map_or(0.0, |trades| importance / (1.0 + f32::from(trades)))
+        })
+        .sum()
 }
 
 fn self_sufficient_production_from_inputs(production: &[f32; 5], ratios: &ResourceHand) -> f32 {
-    [(SETTLEMENT_COST, 0.65), (CITY_COST, 0.20), (DEVELOPMENT_COST, 0.15)]
-        .iter().map(|(cost, weight)| {
-            weight * build_conversion_efficiency(production, ratios, cost)
-                / (1.0 + build_eta_rolls(production, &[0; 5], ratios, cost) / 18.0)
-        }).sum()
+    [
+        (SETTLEMENT_COST, 0.65),
+        (CITY_COST, 0.20),
+        (DEVELOPMENT_COST, 0.15),
+    ]
+    .iter()
+    .map(|(cost, weight)| {
+        weight * build_conversion_efficiency(production, ratios, cost)
+            / (1.0 + build_eta_rolls(production, &[0; 5], ratios, cost) / 18.0)
+    })
+    .sum()
 }
 
 pub(crate) fn self_sufficient_production_value(state: &GameState, player: u8) -> f32 {
-    self_sufficient_production_from_inputs(&crate::eval::production_pips(state, player), &state.trade_ratios(player))
+    self_sufficient_production_from_inputs(
+        &crate::eval::production_pips(state, player),
+        &state.trade_ratios(player),
+    )
 }
 
 #[cfg(test)]

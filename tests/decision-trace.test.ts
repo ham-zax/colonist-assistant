@@ -303,6 +303,58 @@ describe("decision trace recorder", () => {
     expect(recorder.snapshot(false)[0]?.searchResultId).toBeUndefined();
   });
 
+  it("preserves lossless replay inputs at the adapter boundary", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("chrome", {
+      storage: {
+        local: {
+          set: vi.fn(async () => undefined),
+          get: vi.fn(async () => ({})),
+        },
+      },
+    });
+    let state = createTrackerState();
+    for (const player of ["Rival", "You", "Third"]) {
+      state = reduceTracker(state, { type: "discover", player });
+    }
+    const searchConstraints = {
+      rootExclusions: [
+        {
+          kind: "offer-trade" as const,
+          give: { ...emptyResources(), lumber: 1 },
+          receive: { ...emptyResources(), grain: 1 },
+        },
+      ],
+    };
+    const stochastic = {
+      model: "mref-colonist-linked-2024-v1" as const,
+      playerMapping: ["Rival", "You", "Third"],
+      rolls: [{ ordinal: 0, actor: 0, total: 6 }],
+      provenance: "complete-from-first-gameplay-roll" as const,
+      diceHistoryDigest: "replay-context-fixture",
+    };
+    const recorder = new DecisionTraceRecorder();
+    recorder.begin("replay-context", state, board(), 100, {
+      searchConstraints,
+      replayRequestContext: {
+        playerTradesEnabled: false,
+        stochastic,
+        searchConstraints,
+        strategyPolicy: "adaptive-candidate-admission-v1",
+      },
+    });
+
+    expect(recorder.snapshot()[0]).toMatchObject({
+      replayRequestContext: {
+        representation: "reconstructed-request-v1",
+        playerTradesEnabled: false,
+        stochastic,
+        searchConstraints,
+        strategyPolicy: "adaptive-candidate-admission-v1",
+      },
+    });
+  });
+
   it("cancels pending persistence and deletes stored traces on reset", async () => {
     vi.useFakeTimers();
     const set = vi.fn(async (_value: Record<string, unknown>) => undefined);

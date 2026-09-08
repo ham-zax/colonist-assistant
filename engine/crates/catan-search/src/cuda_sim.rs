@@ -384,8 +384,14 @@ pub enum CudaSimError {
     TopologyMismatch,
     BatchTooLarge,
     NoResidentBatch,
-    ActionCountMismatch { states: usize, actions: usize },
-    RootBatchMismatch { states: usize, rows: usize },
+    ActionCountMismatch {
+        states: usize,
+        actions: usize,
+    },
+    RootBatchMismatch {
+        states: usize,
+        rows: usize,
+    },
     InvalidRolloutCount,
     Cancelled,
     InvalidArenaChunk,
@@ -400,12 +406,16 @@ pub enum CudaSimError {
 impl fmt::Display for CudaSimError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnsupportedState(reason) => write!(formatter, "unsupported CUDA simulation state: {reason}"),
+            Self::UnsupportedState(reason) => {
+                write!(formatter, "unsupported CUDA simulation state: {reason}")
+            }
             Self::TopologyMismatch => formatter.write_str(
                 "CUDA simulation requires the standard 19-hex, 54-vertex, 72-edge topology",
             ),
             Self::BatchTooLarge => formatter.write_str("CUDA simulation batch is too large"),
-            Self::NoResidentBatch => formatter.write_str("CUDA simulation has no resident state batch"),
+            Self::NoResidentBatch => {
+                formatter.write_str("CUDA simulation has no resident state batch")
+            }
             Self::ActionCountMismatch { states, actions } => write!(
                 formatter,
                 "CUDA simulation action batch has {actions} actions for {states} resident states"
@@ -418,12 +428,10 @@ impl fmt::Display for CudaSimError {
                 "CUDA simulation root search requires nonzero root samples and rollouts",
             ),
             Self::Cancelled => formatter.write_str("CUDA simulation root search was cancelled"),
-            Self::InvalidArenaChunk => formatter.write_str(
-                "CUDA simulation arena campaign requires a nonzero resident chunk size",
-            ),
-            Self::UnsupportedAction => formatter.write_str(
-                "action is not implemented by the GPU-resident transition kernel",
-            ),
+            Self::InvalidArenaChunk => formatter
+                .write_str("CUDA simulation arena campaign requires a nonzero resident chunk size"),
+            Self::UnsupportedAction => formatter
+                .write_str("action is not implemented by the GPU-resident transition kernel"),
             Self::TransitionFailed { index, status } => {
                 write!(formatter, "CUDA transition {index} failed with {status:?}")
             }
@@ -518,7 +526,8 @@ impl CudaSimEngine {
         let context = CudaContext::new(ordinal)?;
         let module = context.load_module(Ptx::from_src(CUDA_PTX))?;
         let transition_kernel = module.load_function("apply_transition_batch_kernel")?;
-        let rollout_action_kernel = module.load_function("generate_rollout_actions_batch_kernel")?;
+        let rollout_action_kernel =
+            module.load_function("generate_rollout_actions_batch_kernel")?;
         let rollout_steps_kernel = module.load_function("run_rollout_steps_kernel")?;
         let root_rollout_turns_kernel = module.load_function("run_root_rollout_turns_kernel")?;
         let arena_kernel = module.load_function("run_games_kernel")?;
@@ -541,8 +550,17 @@ impl CudaSimEngine {
         unsafe { arguments.launch(LaunchConfig::for_num_elems(1))? };
         let contract = stream.clone_dtoh(&contract_device)?;
         stream.synchronize()?;
-        if contract != [3, STATE_WORDS as u32, ACTION_WORDS as u32, ROOT_STATS_WORDS as u32] {
-            return Err(CudaSimError::UnsupportedState("embedded CUDA artifact ABI does not match Rust; rebuild sim.ptx"));
+        if contract
+            != [
+                3,
+                STATE_WORDS as u32,
+                ACTION_WORDS as u32,
+                ROOT_STATS_WORDS as u32,
+            ]
+        {
+            return Err(CudaSimError::UnsupportedState(
+                "embedded CUDA artifact ABI does not match Rust; rebuild sim.ptx",
+            ));
         }
         let topology_device = stream.clone_htod(&topology_host)?;
         let state_device = stream.alloc_zeros(INITIAL_BATCH_CAPACITY * STATE_WORDS)?;
@@ -640,7 +658,9 @@ impl CudaSimEngine {
     /// Non-roll phases return zeroes; M0 retains integer 2d6 weights.
     pub fn dice_distributions(&self) -> Result<Vec<[u64; 11]>, CudaSimError> {
         let count = self.resident_states;
-        if count == 0 { return Err(CudaSimError::NoResidentBatch); }
+        if count == 0 {
+            return Err(CudaSimError::NoResidentBatch);
+        }
         let stride = u32::try_from(count).map_err(|_| CudaSimError::BatchTooLarge)?;
         let mut output = self.stream.alloc_zeros::<u64>(11 * count)?;
         let mut arguments = self.stream.launch_builder(&self.dice_distribution_kernel);
@@ -657,7 +677,9 @@ impl CudaSimEngine {
         };
         unsafe { arguments.launch(config)? };
         let words = self.stream.clone_dtoh(&output)?;
-        Ok((0..count).map(|lane| std::array::from_fn(|i| words[i * count + lane])).collect())
+        Ok((0..count)
+            .map(|lane| std::array::from_fn(|i| words[i * count + lane]))
+            .collect())
     }
 
     pub fn upload_states(&mut self, states: &[GameState]) -> Result<(), CudaSimError> {
@@ -673,7 +695,8 @@ impl CudaSimEngine {
             }
         }
         if topology != self.topology_host {
-            self.stream.memcpy_htod(&topology, &mut self.topology_device)?;
+            self.stream
+                .memcpy_htod(&topology, &mut self.topology_device)?;
             self.topology_host = topology;
         }
         self.ensure_capacity(states.len())?;
@@ -712,10 +735,8 @@ impl CudaSimEngine {
             .extend(candidate.into_iter().map(u32::from));
         self.matchup_profile_host
             .extend(baseline.into_iter().map(u32::from));
-        self.stream.memcpy_htod(
-            &self.matchup_profile_host,
-            &mut self.matchup_profile_device,
-        )?;
+        self.stream
+            .memcpy_htod(&self.matchup_profile_host, &mut self.matchup_profile_device)?;
 
         let count_u32 = u32::try_from(count).map_err(|_| CudaSimError::BatchTooLarge)?;
         let stride = count_u32;
@@ -896,8 +917,8 @@ impl CudaSimEngine {
             if game.terminal {
                 terminal_games = terminal_games.saturating_add(1);
             }
-            let truncated = !game.terminal
-                && (game.turn >= config.max_turns || actions >= config.max_actions);
+            let truncated =
+                !game.terminal && (game.turn >= config.max_turns || actions >= config.max_actions);
             if truncated {
                 truncated_games = truncated_games.saturating_add(1);
             }
@@ -1069,10 +1090,8 @@ impl CudaSimEngine {
         )?;
         self.candidate_ready_host.clear();
         self.candidate_ready_host.resize(count, 0);
-        self.stream.memcpy_htod(
-            &self.candidate_ready_host,
-            &mut self.candidate_ready_device,
-        )?;
+        self.stream
+            .memcpy_htod(&self.candidate_ready_host, &mut self.candidate_ready_device)?;
 
         let roots_per_game = search_config.root_samples;
         let roots_per_game_u32 =
@@ -1080,8 +1099,7 @@ impl CudaSimEngine {
         let root_count = count
             .checked_mul(roots_per_game)
             .ok_or(CudaSimError::BatchTooLarge)?;
-        let root_count_u32 =
-            u32::try_from(root_count).map_err(|_| CudaSimError::BatchTooLarge)?;
+        let root_count_u32 = u32::try_from(root_count).map_err(|_| CudaSimError::BatchTooLarge)?;
         let rollouts_per_action = search_config.rollouts_per_action;
         let rollouts_u32 =
             u32::try_from(rollouts_per_action).map_err(|_| CudaSimError::BatchTooLarge)?;
@@ -1131,15 +1149,11 @@ impl CudaSimEngine {
                 break;
             }
             candidate_decisions = candidate_decisions.saturating_add(ready_count as u64);
-            root_actions_evaluated = root_actions_evaluated.saturating_add(
-                (ready_count as u64).saturating_mul(roots_per_game as u64),
-            );
+            root_actions_evaluated = root_actions_evaluated
+                .saturating_add((ready_count as u64).saturating_mul(roots_per_game as u64));
 
-            let decision_seed = mix_stream_seed(
-                search_seed,
-                decision_round,
-                CANDIDATE_DECISION_DOMAIN,
-            );
+            let decision_seed =
+                mix_stream_seed(search_seed, decision_round, CANDIDATE_DECISION_DOMAIN);
             let root_launch = LaunchConfig {
                 grid_dim: (root_count.div_ceil(THREADS_PER_BLOCK) as u32, 1, 1),
                 block_dim: (THREADS_PER_BLOCK as u32, 1, 1),
@@ -1168,14 +1182,14 @@ impl CudaSimEngine {
             }
 
             self.root_stats_host.clear();
-            self.root_stats_host.resize(ROOT_STATS_WORDS * root_count, 0);
+            self.root_stats_host
+                .resize(ROOT_STATS_WORDS * root_count, 0);
             self.stream
                 .memcpy_htod(&self.root_stats_host, &mut self.root_stats_device)?;
 
             let mut rollout_offset = 0usize;
             while rollout_offset < rollouts_per_action {
-                let chunk_rollouts =
-                    (rollouts_per_action - rollout_offset).min(chunk_rollouts_cap);
+                let chunk_rollouts = (rollouts_per_action - rollout_offset).min(chunk_rollouts_cap);
                 let lane_count = root_count
                     .checked_mul(chunk_rollouts)
                     .ok_or(CudaSimError::BatchTooLarge)?;
@@ -1313,8 +1327,8 @@ impl CudaSimEngine {
             if game.terminal {
                 terminal_games = terminal_games.saturating_add(1);
             }
-            let truncated = !game.terminal
-                && (game.turn >= config.max_turns || actions >= config.max_actions);
+            let truncated =
+                !game.terminal && (game.turn >= config.max_turns || actions >= config.max_actions);
             if truncated {
                 truncated_games = truncated_games.saturating_add(1);
             }
@@ -1579,8 +1593,10 @@ impl CudaSimEngine {
         }
         let base_stride = u32::try_from(base_count).map_err(|_| CudaSimError::BatchTooLarge)?;
         let root_count_u32 = u32::try_from(root_count).map_err(|_| CudaSimError::BatchTooLarge)?;
-        let rollouts_u32 = u32::try_from(rollouts_per_action).map_err(|_| CudaSimError::BatchTooLarge)?;
-        let rollout_steps_u32 = u32::try_from(rollout_steps).map_err(|_| CudaSimError::BatchTooLarge)?;
+        let rollouts_u32 =
+            u32::try_from(rollouts_per_action).map_err(|_| CudaSimError::BatchTooLarge)?;
+        let rollout_steps_u32 =
+            u32::try_from(rollout_steps).map_err(|_| CudaSimError::BatchTooLarge)?;
         let chunk_rollouts_cap = (SEARCH_CHUNK_LANES / root_count).max(1);
         let max_chunk_lanes = root_count
             .checked_mul(chunk_rollouts_cap.min(rollouts_per_action))
@@ -1600,18 +1616,16 @@ impl CudaSimEngine {
         }
         self.stream
             .memcpy_htod(&self.root_action_host, &mut self.root_action_device)?;
-        self.stream.memcpy_htod(
-            &self.root_base_index_host,
-            &mut self.root_base_index_device,
-        )?;
+        self.stream
+            .memcpy_htod(&self.root_base_index_host, &mut self.root_base_index_device)?;
         self.root_seed_key_host.clear();
-        self.root_seed_key_host.extend((0..root_count).map(|root| root as u64));
-        self.stream.memcpy_htod(
-            &self.root_seed_key_host,
-            &mut self.root_seed_key_device,
-        )?;
+        self.root_seed_key_host
+            .extend((0..root_count).map(|root| root as u64));
+        self.stream
+            .memcpy_htod(&self.root_seed_key_host, &mut self.root_seed_key_device)?;
         self.root_stats_host.clear();
-        self.root_stats_host.resize(ROOT_STATS_WORDS * root_count, 0);
+        self.root_stats_host
+            .resize(ROOT_STATS_WORDS * root_count, 0);
         self.stream
             .memcpy_htod(&self.root_stats_host, &mut self.root_stats_device)?;
 
@@ -1705,7 +1719,9 @@ impl CudaSimEngine {
             self.stream.synchronize()?;
             rollout_offset += chunk_rollouts;
         }
-        let stats = self.root_stats_device.slice(0..ROOT_STATS_WORDS * root_count);
+        let stats = self
+            .root_stats_device
+            .slice(0..ROOT_STATS_WORDS * root_count);
         self.stream.memcpy_dtoh(&stats, &mut self.root_stats_host)?;
         self.stream.synchronize()?;
 
@@ -1767,7 +1783,8 @@ impl CudaSimEngine {
         unsafe { arguments.launch(config)? };
         self.summary_host.resize(SUMMARY_WORDS * count, 0);
         let summaries = self.summary_device.slice(0..SUMMARY_WORDS * count);
-        self.stream.memcpy_dtoh(&summaries, &mut self.summary_host)?;
+        self.stream
+            .memcpy_dtoh(&summaries, &mut self.summary_host)?;
         self.stream.synchronize()?;
 
         let mut result = Vec::with_capacity(count);
@@ -1778,7 +1795,12 @@ impl CudaSimEngine {
                 terminal: field(0) != 0,
                 winner: (winner_code != 0).then(|| (winner_code - 1) as u8),
                 turn: field(2),
-                victory_points: [field(3) as u8, field(4) as u8, field(5) as u8, field(6) as u8],
+                victory_points: [
+                    field(3) as u8,
+                    field(4) as u8,
+                    field(5) as u8,
+                    field(6) as u8,
+                ],
             });
         }
         Ok(result)
@@ -1810,9 +1832,7 @@ impl CudaSimEngine {
         }
         let mut capacity = self.capacity.max(1);
         while capacity < required {
-            capacity = capacity
-                .checked_mul(2)
-                .ok_or(CudaSimError::BatchTooLarge)?;
+            capacity = capacity.checked_mul(2).ok_or(CudaSimError::BatchTooLarge)?;
         }
         self.state_device = self.stream.alloc_zeros(capacity * STATE_WORDS)?;
         self.action_device = self.stream.alloc_zeros(capacity * ACTION_WORDS)?;
@@ -1832,9 +1852,7 @@ impl CudaSimEngine {
         }
         let mut capacity = self.search_capacity.max(1);
         while capacity < required {
-            capacity = capacity
-                .checked_mul(2)
-                .ok_or(CudaSimError::BatchTooLarge)?;
+            capacity = capacity.checked_mul(2).ok_or(CudaSimError::BatchTooLarge)?;
         }
         self.search_state_device = self.stream.alloc_zeros(capacity * STATE_WORDS)?;
         self.search_action_device = self.stream.alloc_zeros(capacity * ACTION_WORDS)?;
@@ -1851,9 +1869,7 @@ impl CudaSimEngine {
         }
         let mut capacity = self.root_capacity.max(1);
         while capacity < required {
-            capacity = capacity
-                .checked_mul(2)
-                .ok_or(CudaSimError::BatchTooLarge)?;
+            capacity = capacity.checked_mul(2).ok_or(CudaSimError::BatchTooLarge)?;
         }
         self.root_action_device = self.stream.alloc_zeros(capacity * ACTION_WORDS)?;
         self.root_base_index_device = self.stream.alloc_zeros(capacity)?;
@@ -1893,12 +1909,22 @@ fn dev_card_from_index(index: u32) -> Result<DevCard, CudaSimError> {
 fn unpack_action_words(words: &[u32; ACTION_WORDS]) -> Result<Action, CudaSimError> {
     let arg = |index: usize| words[ACTION_ARG0 + index];
     match words[ACTION_TAG] {
-        ACTION_PLACE_SETTLEMENT => Ok(Action::PlaceSettlement { vertex: arg(0) as u8 }),
+        ACTION_PLACE_SETTLEMENT => Ok(Action::PlaceSettlement {
+            vertex: arg(0) as u8,
+        }),
         ACTION_PLACE_ROAD => Ok(Action::PlaceRoad { edge: arg(0) as u8 }),
         ACTION_ROLL => Ok(Action::Roll),
-        ACTION_RESOLVE_ROLL => Ok(Action::ResolveRoll { value: arg(0) as u8 }),
+        ACTION_RESOLVE_ROLL => Ok(Action::ResolveRoll {
+            value: arg(0) as u8,
+        }),
         ACTION_DISCARD => Ok(Action::Discard {
-            cards: [arg(0) as u8, arg(1) as u8, arg(2) as u8, arg(3) as u8, arg(4) as u8],
+            cards: [
+                arg(0) as u8,
+                arg(1) as u8,
+                arg(2) as u8,
+                arg(3) as u8,
+                arg(4) as u8,
+            ],
         }),
         ACTION_MOVE_ROBBER => Ok(Action::MoveRobber {
             hex: arg(0) as u8,
@@ -1909,8 +1935,12 @@ fn unpack_action_words(words: &[u32; ACTION_WORDS]) -> Result<Action, CudaSimErr
             resource: resource_from_index(arg(1))?,
         }),
         ACTION_BUILD_ROAD => Ok(Action::BuildRoad { edge: arg(0) as u8 }),
-        ACTION_BUILD_SETTLEMENT => Ok(Action::BuildSettlement { vertex: arg(0) as u8 }),
-        ACTION_BUILD_CITY => Ok(Action::BuildCity { vertex: arg(0) as u8 }),
+        ACTION_BUILD_SETTLEMENT => Ok(Action::BuildSettlement {
+            vertex: arg(0) as u8,
+        }),
+        ACTION_BUILD_CITY => Ok(Action::BuildCity {
+            vertex: arg(0) as u8,
+        }),
         ACTION_BUY_DEVELOPMENT => Ok(Action::BuyDevelopment),
         ACTION_RESOLVE_DEVELOPMENT => Ok(Action::ResolveDevelopment {
             card: dev_card_from_index(arg(0))?,
@@ -1938,15 +1968,43 @@ fn unpack_action_words(words: &[u32; ACTION_WORDS]) -> Result<Action, CudaSimErr
         ACTION_END_TURN => Ok(Action::EndTurn),
         ACTION_OFFER_TRADE => Ok(Action::OfferTrade {
             recipients: arg(0) as u8,
-            give: [arg(1) as u8, arg(2) as u8, arg(3) as u8, arg(4) as u8, arg(5) as u8],
-            receive: [arg(6) as u8, arg(7) as u8, arg(8) as u8, arg(9) as u8, arg(10) as u8],
+            give: [
+                arg(1) as u8,
+                arg(2) as u8,
+                arg(3) as u8,
+                arg(4) as u8,
+                arg(5) as u8,
+            ],
+            receive: [
+                arg(6) as u8,
+                arg(7) as u8,
+                arg(8) as u8,
+                arg(9) as u8,
+                arg(10) as u8,
+            ],
         }),
-        ACTION_RESPOND_TRADE => Ok(Action::RespondTrade { accept: arg(0) != 0 }),
+        ACTION_RESPOND_TRADE => Ok(Action::RespondTrade {
+            accept: arg(0) != 0,
+        }),
         ACTION_COUNTER_TRADE => Ok(Action::CounterTrade {
-            give: [arg(0) as u8, arg(1) as u8, arg(2) as u8, arg(3) as u8, arg(4) as u8],
-            receive: [arg(5) as u8, arg(6) as u8, arg(7) as u8, arg(8) as u8, arg(9) as u8],
+            give: [
+                arg(0) as u8,
+                arg(1) as u8,
+                arg(2) as u8,
+                arg(3) as u8,
+                arg(4) as u8,
+            ],
+            receive: [
+                arg(5) as u8,
+                arg(6) as u8,
+                arg(7) as u8,
+                arg(8) as u8,
+                arg(9) as u8,
+            ],
         }),
-        ACTION_CONFIRM_TRADE => Ok(Action::ConfirmTrade { partner: arg(0) as u8 }),
+        ACTION_CONFIRM_TRADE => Ok(Action::ConfirmTrade {
+            partner: arg(0) as u8,
+        }),
         ACTION_CANCEL_TRADE => Ok(Action::CancelTrade),
         _ => Err(CudaSimError::UnsupportedAction),
     }
@@ -2097,7 +2155,9 @@ fn pack_state_words(state: &GameState, words: &mut [u32; STATE_WORDS]) -> Result
     if let Some(belief) = state.stochastic.reference_belief() {
         let particles = belief.particles();
         if particles.is_empty() || particles.len() > MAX_DICE_PARTICLES {
-            return Err(CudaSimError::UnsupportedState("Mref posterior must contain 1..64 particles"));
+            return Err(CudaSimError::UnsupportedState(
+                "Mref posterior must contain 1..64 particles",
+            ));
         }
         words[STATE_DICE_MODEL] = 1;
         words[STATE_DICE_COUNT] = particles.len() as u32;
@@ -2111,13 +2171,21 @@ fn pack_state_words(state: &GameState, words: &mut [u32; STATE_WORDS]) -> Result
             }
             words[base + 13] = controller.cards_left() as u32;
             let recent = controller.recent_totals();
-            for (i, total) in recent.iter().enumerate() { words[base + 14 + i] = *total as u32; }
+            for (i, total) in recent.iter().enumerate() {
+                words[base + 14 + i] = *total as u32;
+            }
             words[base + 19] = recent.len() as u32;
             words[base + 20] = controller.initialized_player_mask() as u32;
-            for (i, count) in controller.seven_counts().into_iter().enumerate() { words[base + 21 + i] = count; }
-            words[base + 25] = controller.seven_streak_owner().map_or(0, |actor| actor as u32 + 1);
+            for (i, count) in controller.seven_counts().into_iter().enumerate() {
+                words[base + 21 + i] = count;
+            }
+            words[base + 25] = controller
+                .seven_streak_owner()
+                .map_or(0, |actor| actor as u32 + 1);
             words[base + 26] = controller.seven_streak_count();
-            words[base + 27] = controller.prepared_actor().map_or(0, |actor| actor as u32 + 1);
+            words[base + 27] = controller
+                .prepared_actor()
+                .map_or(0, |actor| actor as u32 + 1);
         }
     }
     let (phase, phase_arg) = phase_words(state.phase);
@@ -2287,7 +2355,10 @@ mod tests {
         grain_world.bank_is_public = false;
         grain_world.player_trades_enabled = false;
         grain_world.domestic_trade_disabled = 0b11;
-        grain_world.players.iter_mut().for_each(|player| player.resources = [0; 5]);
+        grain_world
+            .players
+            .iter_mut()
+            .for_each(|player| player.resources = [0; 5]);
         grain_world.bank = [19; 5];
         grain_world.players[0].resources[Resource::Lumber.index()] = 4;
         grain_world.bank[Resource::Lumber.index()] = 15;
@@ -2299,7 +2370,10 @@ mod tests {
         ore_world.bank[Resource::Grain.index()] = 19;
         ore_world.players[1].resources[Resource::Ore.index()] = 3;
         ore_world.bank[Resource::Ore.index()] = 16;
-        assert_eq!(grain_world.observation_hash(0), ore_world.observation_hash(0));
+        assert_eq!(
+            grain_world.observation_hash(0),
+            ore_world.observation_hash(0)
+        );
         grain_world.validate().unwrap();
         ore_world.validate().unwrap();
         (grain_world, ore_world)
@@ -2317,27 +2391,44 @@ mod tests {
     }
 
     #[test]
-    fn root_micro_actions_share_the_pre_action_turn_horizon() -> Result<(), Box<dyn std::error::Error>> {
+    fn root_micro_actions_share_the_pre_action_turn_horizon()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut state = GameState::standard(71_001, 4);
         finish_setup(&mut state);
         state.phase = Phase::Main;
         state.current_player = 0;
-        state.players.iter_mut().for_each(|player| player.resources = [0; 5]);
+        state
+            .players
+            .iter_mut()
+            .for_each(|player| player.resources = [0; 5]);
         state.players[0].resources[Resource::Lumber.index()] = 4;
         state.bank = [15, 19, 19, 19, 19];
         let actions = vec![
-            Action::MaritimeTrade { give: Resource::Lumber, receive: Resource::Grain, ratio: 4 },
+            Action::MaritimeTrade {
+                give: Resource::Lumber,
+                receive: Resource::Grain,
+                ratio: 4,
+            },
             Action::EndTurn,
         ];
-        for action in &actions { assert!(state.legal_actions().contains(action)); }
+        for action in &actions {
+            assert!(state.legal_actions().contains(action));
+        }
         let mut engine = CudaSimEngine::new()?;
         engine.upload_states(std::slice::from_ref(&state))?;
         let result = engine.search_root_actions(std::slice::from_ref(&actions), 16, 16, 91_123)?;
         for stat in &result.rows[0] {
             assert_eq!(stat.errors, 0, "{:?}", stat.action);
-            assert_eq!(stat.terminal_samples, 0, "early-game fixture should remain nonterminal");
-            assert_eq!(stat.mean_turn, (state.turn + 4) as f32,
-                "root micro-actions must not shorten the opponent horizon: {:?}", stat.action);
+            assert_eq!(
+                stat.terminal_samples, 0,
+                "early-game fixture should remain nonterminal"
+            );
+            assert_eq!(
+                stat.mean_turn,
+                (state.turn + 4) as f32,
+                "root micro-actions must not shorten the opponent horizon: {:?}",
+                stat.action
+            );
         }
         Ok(())
     }
@@ -2348,7 +2439,10 @@ mod tests {
         finish_setup(&mut state);
         state.phase = Phase::Main;
         state.current_player = 0;
-        state.players.iter_mut().for_each(|player| player.resources = [0; 5]);
+        state
+            .players
+            .iter_mut()
+            .for_each(|player| player.resources = [0; 5]);
         state.bank = [19; 5];
         state.players[0].resources[Resource::Lumber.index()] = 4;
         state.bank[Resource::Lumber.index()] = 15;
@@ -2372,8 +2466,7 @@ mod tests {
             next.apply(&stat.action)?;
             let expected = rollout_cutoff_margin(&next, 0);
             assert!(
-                (stat.mean_strategic_margin - expected).abs()
-                    <= 1.0 / ROLLOUT_CUTOFF_SCALE as f32,
+                (stat.mean_strategic_margin - expected).abs() <= 1.0 / ROLLOUT_CUTOFF_SCALE as f32,
                 "CPU/GPU strategic cutoff mismatch for {:?}: gpu={} cpu={}",
                 stat.action,
                 stat.mean_strategic_margin,
@@ -2406,8 +2499,7 @@ mod tests {
             next.apply(&stat.action)?;
             let expected = rollout_cutoff_margin(&next, 0);
             assert!(
-                (stat.mean_strategic_margin - expected).abs()
-                    <= 1.0 / ROLLOUT_CUTOFF_SCALE as f32,
+                (stat.mean_strategic_margin - expected).abs() <= 1.0 / ROLLOUT_CUTOFF_SCALE as f32,
                 "CPU/GPU road cutoff mismatch for {:?}: gpu={} cpu={}",
                 stat.action,
                 stat.mean_strategic_margin,
@@ -2426,22 +2518,30 @@ mod tests {
     }
 
     #[test]
-    fn hidden_bank_maritime_policy_is_observation_safe_and_available() -> Result<(), Box<dyn std::error::Error>> {
+    fn hidden_bank_maritime_policy_is_observation_safe_and_available()
+    -> Result<(), Box<dyn std::error::Error>> {
         let (grain_world, ore_world) = hidden_bank_worlds();
         let mut engine = CudaSimEngine::new()?;
         let mut observed_maritime = false;
         for seed in 1..=64 {
             let left = generated_action_for_seed(&mut engine, &grain_world, seed)?;
             let right = generated_action_for_seed(&mut engine, &ore_world, seed)?;
-            assert_eq!(left, right, "hidden bank identity changed the policy action at seed {seed}");
+            assert_eq!(
+                left, right,
+                "hidden bank identity changed the policy action at seed {seed}"
+            );
             observed_maritime |= matches!(left, Action::MaritimeTrade { .. });
         }
-        assert!(observed_maritime, "hidden-bank rollouts must retain self-controlled maritime play");
+        assert!(
+            observed_maritime,
+            "hidden-bank rollouts must retain self-controlled maritime play"
+        );
         Ok(())
     }
 
     #[test]
-    fn hidden_bank_year_of_plenty_policy_is_observation_safe_and_available() -> Result<(), Box<dyn std::error::Error>> {
+    fn hidden_bank_year_of_plenty_policy_is_observation_safe_and_available()
+    -> Result<(), Box<dyn std::error::Error>> {
         let (mut grain_world, mut ore_world) = hidden_bank_worlds();
         for state in [&mut grain_world, &mut ore_world] {
             state.phase = Phase::PreRoll;
@@ -2450,16 +2550,25 @@ mod tests {
             state.players[0].development[3] = 1;
             state.players[0].bought_development[3] = 0;
         }
-        assert_eq!(grain_world.observation_hash(0), ore_world.observation_hash(0));
+        assert_eq!(
+            grain_world.observation_hash(0),
+            ore_world.observation_hash(0)
+        );
         let mut engine = CudaSimEngine::new()?;
         let mut observed_yop = false;
         for seed in 1..=64 {
             let left = generated_action_for_seed(&mut engine, &grain_world, seed)?;
             let right = generated_action_for_seed(&mut engine, &ore_world, seed)?;
-            assert_eq!(left, right, "hidden bank identity changed the YOP policy action at seed {seed}");
+            assert_eq!(
+                left, right,
+                "hidden bank identity changed the YOP policy action at seed {seed}"
+            );
             observed_yop |= matches!(left, Action::PlayYearOfPlenty { .. });
         }
-        assert!(observed_yop, "hidden-bank rollouts must retain Year of Plenty play");
+        assert!(
+            observed_yop,
+            "hidden-bank rollouts must retain Year of Plenty play"
+        );
         Ok(())
     }
 

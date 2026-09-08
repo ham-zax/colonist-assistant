@@ -25,7 +25,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let roots = states
         .iter()
-        .map(|state| state.legal_actions().into_iter().take(ROOT_LIMIT).collect::<Vec<_>>())
+        .map(|state| {
+            state
+                .legal_actions()
+                .into_iter()
+                .take(ROOT_LIMIT)
+                .collect::<Vec<_>>()
+        })
         .collect::<Vec<_>>();
 
     let mut engine = CudaSimEngine::new()?;

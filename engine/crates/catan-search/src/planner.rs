@@ -124,7 +124,10 @@ impl Planner {
             };
         }
         self.nodes += 1;
-        if let Some(value) = self.memo.get(&(state.state_hash(), depth, maritime_received)) {
+        if let Some(value) = self
+            .memo
+            .get(&(state.state_hash(), depth, maritime_received))
+        {
             return value.clone();
         }
         let legal = state.legal_actions();
@@ -180,7 +183,11 @@ impl Planner {
                         continue;
                     }
                     let child = if self.nodes < self.node_limit {
-                        self.visit(&next, depth + 1, next_maritime_mask(maritime_received, &action))
+                        self.visit(
+                            &next,
+                            depth + 1,
+                            next_maritime_mask(maritime_received, &action),
+                        )
                     } else {
                         PlanValue {
                             value: self.endpoint_value(&next),
@@ -225,7 +232,8 @@ impl Planner {
                 };
                 for (action, _) in ranked {
                     if matches!(&action, Action::MaritimeTrade { give, .. }
-                        if maritime_received & (1 << give.index()) != 0) {
+                        if maritime_received & (1 << give.index()) != 0)
+                    {
                         continue;
                     }
                     let mut next = state.clone();
@@ -234,7 +242,11 @@ impl Planner {
                     }
                     let decisive_now = self.materially_decisive_transition(state, &next, &action);
                     let mut child = if self.nodes < self.node_limit {
-                        self.visit(&next, depth + 1, next_maritime_mask(maritime_received, &action))
+                        self.visit(
+                            &next,
+                            depth + 1,
+                            next_maritime_mask(maritime_received, &action),
+                        )
                     } else if next.is_terminal()
                         || (next.current_player != self.root
                             && !matches!(next.phase, Phase::TradeResponses))
@@ -356,7 +368,11 @@ impl Planner {
                         continue;
                     }
                     let child = if self.nodes < self.node_limit {
-                        self.visit(&next, depth + 1, next_maritime_mask(maritime_received, &action))
+                        self.visit(
+                            &next,
+                            depth + 1,
+                            next_maritime_mask(maritime_received, &action),
+                        )
                     } else {
                         PlanValue {
                             value: self.endpoint_value(&next),
@@ -402,8 +418,10 @@ impl Planner {
         // would let a later root action inherit an incomplete continuation
         // merely because it reached the same state after its fair budget slice.
         if self.nodes < self.node_limit {
-            self.memo
-                .insert((state.state_hash(), depth, maritime_received), result.clone());
+            self.memo.insert(
+                (state.state_hash(), depth, maritime_received),
+                result.clone(),
+            );
         }
         result
     }
@@ -516,7 +534,8 @@ fn contains_dominated_maritime_sequence(state: &GameState, actions: &[Action]) -
     let mut prior_hands = vec![cursor.players[root as usize].resources];
     for action in actions {
         if matches!(action, Action::MaritimeTrade { give, .. }
-            if maritime_received & (1 << give.index()) != 0) {
+            if maritime_received & (1 << give.index()) != 0)
+        {
             return true;
         }
         maritime_received = next_maritime_mask(maritime_received, action);
@@ -526,7 +545,10 @@ fn contains_dominated_maritime_sequence(state: &GameState, actions: &[Action]) -
         if matches!(action, Action::MaritimeTrade { .. }) {
             let hand = cursor.players[root as usize].resources;
             if prior_hands.iter().any(|prior| {
-                prior.iter().zip(hand).all(|(before, after)| *before >= after)
+                prior
+                    .iter()
+                    .zip(hand)
+                    .all(|(before, after)| *before >= after)
                     && prior != &hand
             }) {
                 return true;
@@ -681,7 +703,10 @@ mod tests {
         state.current_player = 0;
         state.player_trades_enabled = false;
         state.domestic_trade_disabled = 1;
-        state.players.iter_mut().for_each(|player| player.resources = [0; 5]);
+        state
+            .players
+            .iter_mut()
+            .for_each(|player| player.resources = [0; 5]);
         state.bank = [19; 5];
         let mut frontier = vec![state];
         for _ in 0..=4 {
@@ -714,7 +739,10 @@ mod tests {
     }
 
     fn set_root_hand(state: &mut GameState, hand: [u8; 5]) {
-        state.players.iter_mut().for_each(|player| player.resources = [0; 5]);
+        state
+            .players
+            .iter_mut()
+            .for_each(|player| player.resources = [0; 5]);
         state.bank = std::array::from_fn(|resource| 19 - hand[resource]);
         state.players[0].resources = hand;
     }
@@ -987,7 +1015,10 @@ mod maritime_dominance_tests {
 
     fn main_state() -> GameState {
         let mut state = GameState::standard(7, 2);
-        while matches!(state.phase, Phase::SetupSettlement | Phase::SetupRoad { .. }) {
+        while matches!(
+            state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        ) {
             let action = state.legal_actions()[0].clone();
             state.apply(&action).expect("legal setup action");
         }

@@ -311,13 +311,23 @@ fn opening_evidence(state: &GameState, root: u8) -> OpeningEvidence {
     let build_access_term = economy.weighted_access * 0.82;
     let conversion_efficiency_term = economy.weighted_efficiency * 0.30;
     let mut settlement_vertices = [None; 2];
-    for (slot, (vertex, _)) in settlement_vertices.iter_mut().zip(state.buildings.iter().enumerate()
-        .filter(|(_, piece)| piece.is_some_and(|piece| piece.player() == root))) {
+    for (slot, (vertex, _)) in settlement_vertices.iter_mut().zip(
+        state
+            .buildings
+            .iter()
+            .enumerate()
+            .filter(|(_, piece)| piece.is_some_and(|piece| piece.player() == root)),
+    ) {
         *slot = Some(vertex as u8);
     }
     let mut road_edges = [None; 2];
-    for (slot, (edge, _)) in road_edges.iter_mut().zip(state.roads.iter().enumerate()
-        .filter(|(_, owner)| **owner == Some(root))) {
+    for (slot, (edge, _)) in road_edges.iter_mut().zip(
+        state
+            .roads
+            .iter()
+            .enumerate()
+            .filter(|(_, owner)| **owner == Some(root)),
+    ) {
         *slot = Some(edge as u8);
     }
     OpeningEvidence {
@@ -328,19 +338,30 @@ fn opening_evidence(state: &GameState, root: u8) -> OpeningEvidence {
         settlement_vertices,
         road_edges,
         victory_term: f32::from(state.players[usize::from(root)].public_victory_points) * 1.8,
-        production_diversity_term: opening_position_bonus(state, root) - build_access_term - conversion_efficiency_term,
+        production_diversity_term: opening_position_bonus(state, root)
+            - build_access_term
+            - conversion_efficiency_term,
         build_access_term,
         conversion_efficiency_term,
         port_build_gain: build_access_term + conversion_efficiency_term
             - (without_port.weighted_access * 0.82 + without_port.weighted_efficiency * 0.30),
         expansion_term: opening_expansion_value(state, root),
-        scarcity_term: production.iter().zip(board_resource_scarcity(state))
-            .map(|(pips, scarce)| pips * scarce * 0.012).sum(),
+        scarcity_term: production
+            .iter()
+            .zip(board_resource_scarcity(state))
+            .map(|(pips, scarce)| pips * scarce * 0.012)
+            .sum(),
         concentration_penalty: opening_robber_concentration(state, root) * 0.22,
         own_value: opening_position_value(state, root),
-        rival_value: (0..state.board.num_players).filter(|player| *player != root)
-            .map(|player| opening_position_value(state, player)).fold(0.0, f32::max),
-        rival_weight: if state.board.num_players == 2 { 1.0 } else { 0.34 },
+        rival_value: (0..state.board.num_players)
+            .filter(|player| *player != root)
+            .map(|player| opening_position_value(state, player))
+            .fold(0.0, f32::max),
+        rival_weight: if state.board.num_players == 2 {
+            1.0
+        } else {
+            0.34
+        },
     }
 }
 
@@ -604,13 +625,16 @@ impl OpeningSolver {
                 endpoint_complete: false,
                 evidence: None,
             };
-            let candidates = ranked.into_iter().take(self.config.root_width).collect::<Vec<_>>();
+            let candidates = ranked
+                .into_iter()
+                .take(self.config.root_width)
+                .collect::<Vec<_>>();
             let parent_limit = self.node_limit;
             let candidate_count = candidates.len();
             for (index, (action, _)) in candidates.into_iter().enumerate() {
                 if self.nodes >= parent_limit {
                     self.aborted = true;
-            self.budget_cutoffs = self.budget_cutoffs.saturating_add(1);
+                    self.budget_cutoffs = self.budget_cutoffs.saturating_add(1);
                     break;
                 }
                 let mut next = state.clone();
@@ -632,7 +656,7 @@ impl OpeningSolver {
                         return OpeningVisitValue {
                             value: self.value(state),
                             endpoint_complete: false,
-                evidence: None,
+                            evidence: None,
                         };
                     }
                 }
@@ -647,7 +671,7 @@ impl OpeningSolver {
             for (action, _) in ranked.into_iter().take(self.config.opponent_width) {
                 if self.nodes >= self.node_limit {
                     self.aborted = true;
-            self.budget_cutoffs = self.budget_cutoffs.saturating_add(1);
+                    self.budget_cutoffs = self.budget_cutoffs.saturating_add(1);
                     break;
                 }
                 let mut next = state.clone();
@@ -667,14 +691,14 @@ impl OpeningSolver {
                     OpeningVisitValue {
                         value: self.value(state),
                         endpoint_complete: false,
-                evidence: None,
+                        evidence: None,
                     }
                 }
             } else {
                 OpeningVisitValue {
                     value: self.value(state),
                     endpoint_complete: false,
-                evidence: None,
+                    evidence: None,
                 }
             }
         } else {
@@ -688,7 +712,7 @@ impl OpeningSolver {
             for (action, prior) in candidates {
                 if self.nodes >= self.node_limit {
                     self.aborted = true;
-            self.budget_cutoffs = self.budget_cutoffs.saturating_add(1);
+                    self.budget_cutoffs = self.budget_cutoffs.saturating_add(1);
                     break;
                 }
                 let mut next = state.clone();
@@ -700,7 +724,7 @@ impl OpeningSolver {
                         return OpeningVisitValue {
                             value: self.value(state),
                             endpoint_complete: false,
-                evidence: None,
+                            evidence: None,
                         };
                     }
                     explored_mass += prior;
@@ -727,7 +751,10 @@ impl OpeningSolver {
         // Reaching one endpoint is not proof the subtree was fully searched.
         // Cache only nodes whose complete expansion saw no budget cutoff;
         // stochastic rollout gates also depend on remaining budget.
-        if result.endpoint_complete && before_cutoffs == self.budget_cutoffs && self.config.rollout_count == 0 {
+        if result.endpoint_complete
+            && before_cutoffs == self.budget_cutoffs
+            && self.config.rollout_count == 0
+        {
             self.memo.insert(state.state_hash(), result);
         }
         result
@@ -758,7 +785,10 @@ pub fn solve_opening(state: &GameState, root: u8, config: OpeningConfig) -> Open
 }
 
 pub(crate) fn solve_opening_excluding(
-    state: &GameState, root: u8, config: OpeningConfig, root_exclusions: &[Action],
+    state: &GameState,
+    root: u8,
+    config: OpeningConfig,
+    root_exclusions: &[Action],
 ) -> OpeningReport {
     if !matches!(
         state.phase,
@@ -774,7 +804,11 @@ pub(crate) fn solve_opening_excluding(
         };
     }
     let deadline = CooperativeDeadline::start(config.time_budget_ms);
-    let legal = state.legal_actions().into_iter().filter(|action| !root_exclusions.contains(action)).collect::<Vec<_>>();
+    let legal = state
+        .legal_actions()
+        .into_iter()
+        .filter(|action| !root_exclusions.contains(action))
+        .collect::<Vec<_>>();
     let ranked = normalize_priors(state, &legal, state.actor());
     let mut solver = OpeningSolver {
         root,
@@ -829,30 +863,31 @@ pub(crate) fn solve_opening_excluding(
         }
         let before_nodes = solver.nodes;
         let node_budget = budgets.get(index).copied().unwrap_or(0);
-        let (value, endpoint_complete, evidence) = if index >= deep_count || solver.deadline.has_elapsed() {
-            if solver.deadline.has_elapsed() {
-                solver.aborted = true;
-                solver.deadline_reached = true;
-            }
-            (static_value, false, None)
-        } else {
-            let per_root_budget = budgets.get(index).copied().unwrap_or(1).max(1);
-            solver.node_limit = solver
-                .nodes
-                .saturating_add(per_root_budget)
-                .min(solver.config.maximum_nodes);
-            if solver.nodes < solver.config.maximum_nodes {
-                let deep = solver.visit(&next);
-                if deep.value.is_finite() && deep.endpoint_complete {
-                    (deep.value, true, deep.evidence)
+        let (value, endpoint_complete, evidence) =
+            if index >= deep_count || solver.deadline.has_elapsed() {
+                if solver.deadline.has_elapsed() {
+                    solver.aborted = true;
+                    solver.deadline_reached = true;
+                }
+                (static_value, false, None)
+            } else {
+                let per_root_budget = budgets.get(index).copied().unwrap_or(1).max(1);
+                solver.node_limit = solver
+                    .nodes
+                    .saturating_add(per_root_budget)
+                    .min(solver.config.maximum_nodes);
+                if solver.nodes < solver.config.maximum_nodes {
+                    let deep = solver.visit(&next);
+                    if deep.value.is_finite() && deep.endpoint_complete {
+                        (deep.value, true, deep.evidence)
+                    } else {
+                        (static_value, false, None)
+                    }
                 } else {
+                    solver.aborted = true;
                     (static_value, false, None)
                 }
-            } else {
-                solver.aborted = true;
-                (static_value, false, None)
-            }
-        };
+            };
         actions.push(OpeningActionValue {
             action,
             value,
@@ -979,12 +1014,12 @@ mod tests {
         let completed = OpeningVisitValue {
             value: 0.4,
             endpoint_complete: true,
-                evidence: None,
+            evidence: None,
         };
         let partial = OpeningVisitValue {
             value: 0.9,
             endpoint_complete: false,
-                evidence: None,
+            evidence: None,
         };
 
         assert!(opening_visit_is_better(completed, partial));

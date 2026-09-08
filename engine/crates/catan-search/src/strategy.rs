@@ -93,6 +93,16 @@ pub enum StrategyProposalReason {
 /// search winner. A proposal is evidence to inspect, not an oracle asserting
 /// the engine was wrong.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StrategyProposalStatus {
+    Omitted,
+    SearchedNotSelected,
+    BudgetLimited,
+    Selected,
+}
+
+/// Causal attribution stays unknown unless a controlled reference or
+/// intervention demonstrates why a proposal mattered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecisionFailureClass {
     Coverage,
     Valuation,
@@ -126,7 +136,8 @@ pub struct StrategyProposalDiagnostic {
     pub displaced_baseline_action: Option<Action>,
     pub entered_common_search: bool,
     pub common_search_rank: Option<usize>,
-    pub failure_class: Option<DecisionFailureClass>,
+    pub status: StrategyProposalStatus,
+    pub causal_attribution: Option<DecisionFailureClass>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -140,27 +151,24 @@ pub struct StrategyShadowDiagnostics {
     pub proposals: Vec<StrategyProposalDiagnostic>,
 }
 
-fn proposal_failure_class(
+fn proposal_status(
     action: &Action,
-    ranked_actions: &[Action],
     retained_actions: &[Action],
     search_winner: Option<&Action>,
     requested_depth: u8,
     completed_depth: u8,
     deadline_reached: bool,
-) -> Option<DecisionFailureClass> {
+) -> StrategyProposalStatus {
     if search_winner == Some(action) {
-        return None;
+        return StrategyProposalStatus::Selected;
     }
-    if !ranked_actions.iter().any(|candidate| candidate == action)
-        || !retained_actions.iter().any(|candidate| candidate == action)
-    {
-        return Some(DecisionFailureClass::Coverage);
+    if !retained_actions.iter().any(|candidate| candidate == action) {
+        return StrategyProposalStatus::Omitted;
     }
     if deadline_reached || completed_depth < requested_depth {
-        return Some(DecisionFailureClass::Horizon);
+        return StrategyProposalStatus::BudgetLimited;
     }
-    Some(DecisionFailureClass::Valuation)
+    StrategyProposalStatus::SearchedNotSelected
 }
 
 struct ShadowInputs<'a> {
@@ -225,15 +233,15 @@ fn push_proposal(
         displaced_baseline_action: None,
         entered_common_search: false,
         common_search_rank: None,
-        failure_class: proposal_failure_class(
+        status: proposal_status(
             action,
-            inputs.ranked_actions,
             inputs.retained_actions,
             inputs.search_winner,
             inputs.requested_depth,
             inputs.completed_depth,
             inputs.deadline_reached,
         ),
+        causal_attribution: None,
     });
 }
 
@@ -523,7 +531,7 @@ pub(crate) fn strategy_diagnostics_for_admission(
     diagnostics.admission.omitted_challenger_count = 0;
     diagnostics.admission.evaluated_challenger_count = 0;
     for proposal in &mut diagnostics.proposals {
-        proposal.failure_class = None;
+        proposal.causal_attribution = None;
         proposal.entered_common_search = false;
         proposal.common_search_rank = None;
         proposal.selected_as_challenger = false;
@@ -714,15 +722,16 @@ pub(crate) fn finalize_strategy_diagnostics(
             !proposal.admitted || proposal.entered_common_search,
             "admitted strategy challenger must enter common search"
         );
-        proposal.failure_class = if search_winner == Some(&proposal.action) {
-            None
+        proposal.status = if search_winner == Some(&proposal.action) {
+            StrategyProposalStatus::Selected
         } else if !proposal.entered_common_search {
-            Some(DecisionFailureClass::Coverage)
+            StrategyProposalStatus::Omitted
         } else if deadline_reached || completed_depth < requested_depth {
-            Some(DecisionFailureClass::Horizon)
+            StrategyProposalStatus::BudgetLimited
         } else {
-            Some(DecisionFailureClass::Valuation)
+            StrategyProposalStatus::SearchedNotSelected
         };
+        proposal.causal_attribution = None;
         if proposal.admitted
             && proposal.entered_common_search
             && !evaluated_challengers.contains(&proposal.action)
@@ -982,11 +991,12 @@ mod tests {
             proposal.reason,
             StrategyProposalReason::FutureDevelopmentVpRequired
         );
-        assert_eq!(proposal.failure_class, Some(DecisionFailureClass::Coverage));
+        assert_eq!(proposal.status, StrategyProposalStatus::Omitted);
+        assert_eq!(proposal.causal_attribution, None);
     }
 
     #[test]
-    fn retained_losing_shadow_is_valuation_only_after_completed_horizon() {
+    fn retained_losing_shadow_records_search_outcome_without_causal_guess() {
         let state = GameState::standard(41, 2);
         let diagnostics = shadow_strategy_diagnostics(
             &[particle(state)],
@@ -1005,14 +1015,12 @@ mod tests {
             .iter()
             .find(|proposal| proposal.strategy == StrategyId::DevelopmentAccess)
             .unwrap();
-        assert_eq!(
-            proposal.failure_class,
-            Some(DecisionFailureClass::Valuation)
-        );
+        assert_eq!(proposal.status, StrategyProposalStatus::SearchedNotSelected);
+        assert_eq!(proposal.causal_attribution, None);
     }
 
     #[test]
-    fn incomplete_search_marks_retained_shadow_as_horizon_limited() {
+    fn incomplete_search_marks_retained_shadow_as_budget_limited() {
         let state = GameState::standard(43, 2);
         let diagnostics = shadow_strategy_diagnostics(
             &[particle(state)],
@@ -1031,7 +1039,8 @@ mod tests {
             .iter()
             .find(|proposal| proposal.strategy == StrategyId::DevelopmentAccess)
             .unwrap();
-        assert_eq!(proposal.failure_class, Some(DecisionFailureClass::Horizon));
+        assert_eq!(proposal.status, StrategyProposalStatus::BudgetLimited);
+        assert_eq!(proposal.causal_attribution, None);
     }
 
     #[test]
@@ -1123,7 +1132,11 @@ mod tests {
                 .proposals
                 .iter()
                 .filter(|p| p.action == road)
-                .all(|p| { p.entered_common_search && p.failure_class.is_none() })
+                .all(|p| {
+                    p.entered_common_search
+                        && p.status == StrategyProposalStatus::Selected
+                        && p.causal_attribution.is_none()
+                })
         );
     }
 

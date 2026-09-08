@@ -483,21 +483,25 @@ def main() -> None:
             f"Task 15 training requires strategic feature schema 2, got {raw_schema_versions}"
         )
     raw_teacher_engines = sorted({str(record.get("engine", "")) for record in raw_data})
-    allowed_teacher_engines = {"puct-teacher", "native-gpu-teacher"}
+    allowed_teacher_engines = {
+        "puct-teacher",
+        "native-gpu-teacher",
+        "native-gpu-exact-maxn-teacher",
+    }
     if len(raw_teacher_engines) != 1 or raw_teacher_engines[0] not in allowed_teacher_engines:
         raise SystemExit(
             "Task 15 training requires a uniform single-teacher corpus "
-            "('puct-teacher' or 'native-gpu-teacher'); "
+            "('puct-teacher', 'native-gpu-teacher', or 'native-gpu-exact-maxn-teacher'); "
             f"got {raw_teacher_engines}. Refusing to mix incompatible policy semantics."
         )
     teacher_engine = raw_teacher_engines[0]
-    if teacher_engine != "puct-teacher":
+    if teacher_engine == "native-gpu-teacher":
         raise SystemExit(
-            "Task 15 checkpoint training requires puct-teacher value semantics. "
-            "native-gpu-teacher records are policy-only screening evidence because "
-            "their rootValue/searchValue fields are rollout VP diagnostics, not "
-            "normalized strategic-value targets. Use benchmark-gpu-zoom.py for the "
-            "native-GPU policy feature screen."
+            "Task 15 checkpoint training requires normalized strategic-value teacher semantics. "
+            "Historical native-gpu-teacher records are policy-only rollout screening evidence because "
+            "their rootValue/searchValue fields are rollout VP diagnostics. "
+            "Use puct-teacher or native-gpu-exact-maxn-teacher for value training, "
+            "or benchmark-gpu-zoom.py for the historical rollout policy feature screen."
         )
     data = [record for record in raw_data if has_usable_teacher_value(record)]
     invalid_teacher_samples = len(raw_data) - len(data)

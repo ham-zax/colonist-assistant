@@ -3,8 +3,7 @@ use colonist_catan_core::{Action, GameState, NodeKind, SplitMix64};
 use crate::deadline::CooperativeDeadline;
 use crate::eval::{evaluate, road_frontier_value, road_intent};
 use crate::exact::{
-    ExactActionFamily, ExactDecisionResult, exact_family_for_action,
-    solve_exact_belief_excluding,
+    ExactActionFamily, ExactDecisionResult, exact_family_for_action, solve_exact_belief_excluding,
 };
 use crate::opening::opening_adjusted_priors;
 use crate::planner::plan_adjusted_priors;
@@ -1205,9 +1204,7 @@ impl Mcts {
 
 #[cfg(test)]
 mod tests {
-    use colonist_catan_core::{
-        Action, DevCard, GameState, NodeKind, Phase, Resource, SplitMix64,
-    };
+    use colonist_catan_core::{Action, DevCard, GameState, NodeKind, Phase, Resource, SplitMix64};
 
     use super::{
         ActionStats, BeliefError, BeliefParticle, Mcts, SearchConfig, decision_actions_for_mode,
@@ -1288,10 +1285,7 @@ mod tests {
 
     fn hidden_bank_observation_pair() -> (GameState, GameState) {
         let mut left = GameState::standard(337, 3);
-        while matches!(
-            left.phase,
-            Phase::SetupSettlement | Phase::SetupRoad { .. }
-        ) {
+        while matches!(left.phase, Phase::SetupSettlement | Phase::SetupRoad { .. }) {
             let action = left.legal_actions()[0].clone();
             left.apply(&action).unwrap();
         }

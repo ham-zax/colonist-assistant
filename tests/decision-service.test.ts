@@ -115,8 +115,20 @@ describe("decision service client", () => {
     expect(sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         stochastic: { model: "m0-fair-iid-2d6-v1" },
+        decisionBudget: expect.objectContaining({
+          contract: "client-end-to-end-v1",
+          totalMs: 12_000,
+          transportReserveMs: 500,
+          finalizationReserveMs: 500,
+          remainingEngineMs: expect.any(Number),
+        }),
       }),
     );
+    const decisionMessage = sendMessage.mock.calls[0]![0] as unknown as {
+      decisionBudget: { remainingEngineMs: number };
+    };
+    expect(decisionMessage.decisionBudget.remainingEngineMs).toBeGreaterThan(0);
+    expect(decisionMessage.decisionBudget.remainingEngineMs).toBeLessThanOrEqual(11_000);
     client.destroy();
   });
 

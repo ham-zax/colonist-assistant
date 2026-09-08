@@ -958,6 +958,176 @@ describe("local seat identity", () => {
     overlay.destroy();
   });
 
+  it("does not reinterpret a pending Road Building prompt as a paid-road search before legal edges attach", () => {
+    const overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS },
+      { reset: vi.fn() },
+    );
+    const request = vi.fn(() => "started" as const);
+    const internals = overlay as unknown as {
+      board?: BoardSnapshot;
+      freeRoadPlan?: { gameKey?: string; edgeIds: string[] };
+      decisionWorker: { request: typeof request };
+      scheduleDecisionAnalysis: (
+        state: ReturnType<typeof createTrackerState>,
+        player: string,
+      ) => void;
+    };
+    const resolvedIdentity: NonNullable<BoardSnapshot["localSeatDiagnostics"]> = {
+      identity: {
+        status: "resolved",
+        reason: "cross-checked",
+        source: "controller+account-user-id+store-roster",
+        currentUserIdAvailable: true,
+        currentUserMatchColors: [1],
+        myColor: 1,
+        myPlayer: "RedPlayer",
+        currentUserColor: 1,
+        currentUserPlayer: "RedPlayer",
+      },
+      rawMyColor: 1,
+      rawPlayOrderColors: [1, 2],
+      seatSource: "gameController.myColor+currentUserId+gameUserStates",
+    };
+    internals.board = {
+      hexes: [],
+      vertices: [
+        { id: "v:1", adjacentHexes: [], adjacentVertices: ["v:2"] },
+        { id: "v:2", adjacentHexes: [], adjacentVertices: ["v:1"] },
+      ],
+      edges: [{ id: "e:first", vertices: ["v:1", "v:2"] }],
+      diceMode: "unknown",
+      gameKey: "game-road-building",
+      turn: 8,
+      currentPlayer: "RedPlayer",
+      isMyTurn: true,
+      myPlayer: "RedPlayer",
+      action: "road",
+      playerOrder: ["RedPlayer", "BluePlayer"],
+      localSeatDiagnostics: resolvedIdentity,
+    };
+    internals.freeRoadPlan = {
+      gameKey: "game-road-building",
+      edgeIds: ["e:first", "e:second"],
+    };
+    internals.decisionWorker.request = request;
+
+    internals.scheduleDecisionAnalysis(createTrackerState(), "RedPlayer");
+
+    expect(request).not.toHaveBeenCalled();
+    expect(internals.freeRoadPlan).toEqual({
+      gameKey: "game-road-building",
+      edgeIds: ["e:first", "e:second"],
+    });
+
+    overlay.destroy();
+  });
+
+  it("keeps both searched Road Building edges as exact board continuations", () => {
+    const overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS },
+      { reset: vi.fn() },
+    );
+    const internals = overlay as unknown as {
+      board?: BoardSnapshot;
+      freeRoadPlan?: { gameKey?: string; edgeIds: string[] };
+      spatialRecommendation: (state: undefined) =>
+        | {
+            action: "road" | "settlement" | "city" | "robber";
+            recommendation: { id: string };
+            proactive: boolean;
+          }
+        | undefined;
+      nextClick: (
+        state: undefined,
+        spatial: ReturnType<
+          (typeof internals)["spatialRecommendation"]
+        >,
+        report: undefined,
+      ) => { kind: string; targetId?: string } | undefined;
+    };
+    const baseBoard: BoardSnapshot = {
+      hexes: [],
+      vertices: [
+        {
+          id: "v:0",
+          adjacentHexes: [],
+          adjacentVertices: ["v:1"],
+          building: { player: "RedPlayer", kind: "settlement" },
+        },
+        { id: "v:1", adjacentHexes: [], adjacentVertices: ["v:0", "v:2"] },
+        { id: "v:2", adjacentHexes: [], adjacentVertices: ["v:1"] },
+      ],
+      edges: [
+        {
+          id: "e:first",
+          vertices: ["v:0", "v:1"],
+          screen: { x: 20, y: 20 },
+        },
+        {
+          id: "e:second",
+          vertices: ["v:1", "v:2"],
+          screen: { x: 40, y: 20 },
+        },
+      ],
+      diceMode: "unknown",
+      gameKey: "game-road-building-two-edges",
+      turn: 8,
+      currentPlayer: "RedPlayer",
+      isMyTurn: true,
+      myPlayer: "RedPlayer",
+      action: "road",
+      legalEdgeIds: ["e:first"],
+      playerOrder: ["RedPlayer", "BluePlayer"],
+      localSeatDiagnostics: {
+        identity: {
+          status: "resolved",
+          reason: "cross-checked",
+          source: "controller+account-user-id+store-roster",
+          currentUserIdAvailable: true,
+          currentUserMatchColors: [1],
+          myColor: 1,
+          myPlayer: "RedPlayer",
+          currentUserColor: 1,
+          currentUserPlayer: "RedPlayer",
+        },
+        rawMyColor: 1,
+        rawPlayOrderColors: [1, 2],
+        seatSource: "gameController.myColor+currentUserId+gameUserStates",
+      },
+    };
+    internals.board = baseBoard;
+    internals.freeRoadPlan = {
+      gameKey: baseBoard.gameKey,
+      edgeIds: ["e:first", "e:second"],
+    };
+
+    const firstSpatial = internals.spatialRecommendation(undefined);
+    expect(firstSpatial?.recommendation.id).toBe("e:first");
+    expect(internals.nextClick(undefined, firstSpatial, undefined)).toMatchObject({
+      kind: "board",
+      targetId: "e:first",
+    });
+
+    internals.board = {
+      ...baseBoard,
+      edges: [
+        { ...baseBoard.edges[0]!, player: "RedPlayer" },
+        baseBoard.edges[1]!,
+      ],
+      legalEdgeIds: ["e:second"],
+    };
+    const secondSpatial = internals.spatialRecommendation(undefined);
+    expect(internals.freeRoadPlan?.edgeIds).toEqual(["e:second"]);
+    expect(secondSpatial?.recommendation.id).toBe("e:second");
+    expect(internals.nextClick(undefined, secondSpatial, undefined)).toMatchObject({
+      kind: "board",
+      targetId: "e:second",
+    });
+
+    overlay.destroy();
+  });
+
   it("clears exact placement continuations when the public turn advances while identity is unresolved", () => {
     const overlay = new AssistantOverlay(
       { ...DEFAULT_SETTINGS },

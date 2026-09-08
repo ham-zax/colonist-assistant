@@ -4,6 +4,7 @@ import {
 import { warmDeepSearchEngine } from "../worker/deep-search";
 import {
   NativeGpuClient,
+  nativeGpuSupportsProductionExactMaxn,
   nativeGpuSupportsStochasticModel,
 } from "./native-gpu";
 import {
@@ -23,51 +24,26 @@ import {
 
 const nativeGpu = new NativeGpuClient();
 
-const NATIVE_GPU_ROOT_ACTIONS = 12;
-const NATIVE_GPU_GLOBAL_ROLLOUTS = 12 * 32;
-const NATIVE_GPU_ROLLOUT_STEPS = 96;
-const NATIVE_GPU_DECISION_TIME_MS = 4_000;
+// Product promotion is deliberately separate from host capability. Protocol 7
+// can expose exact CUDA for parity diagnostics without authorizing the browser
+// to switch computation backends. Flip this only after the stabilization
+// release gate certifies the current reference and performance target.
+const NATIVE_GPU_EXACT_PRODUCTION_PROMOTED = false;
 
-const withNativeGpuStrengthProfile = (request: unknown): unknown => {
-  if (!request || typeof request !== "object") return request;
-  const typed = request as {
-    timeBudgetMs?: number;
-    effort?: {
-      decisionTimeMs: number;
-      tactical: { maxDepth: number; nodeBudget: number };
-      cpu: {
-        maxDepth: number;
-        rootCap: number;
-        nodesPerDepthWave: number;
-        evidenceEscalationMs?: number;
-      };
-      gpu: { rootCap: number; rolloutBudget: number; rolloutSteps: number };
-    };
-  };
-  if (!typed.effort) return request;
+export const withRemainingDecisionBudget = (
+  message: DecisionMessage,
+  localStartedAt: number,
+): DecisionMessage => {
+  if (!message.decisionBudget) return message;
+  const localElapsedMs = Math.max(0, performance.now() - localStartedAt);
   return {
-    ...typed,
-    timeBudgetMs: Math.max(
-      NATIVE_GPU_DECISION_TIME_MS,
-      typed.timeBudgetMs ?? 0,
-    ),
-    effort: {
-      ...typed.effort,
-      decisionTimeMs: Math.max(
-        NATIVE_GPU_DECISION_TIME_MS,
-        typed.effort.decisionTimeMs,
+    ...message,
+    decisionBudget: {
+      ...message.decisionBudget,
+      remainingEngineMs: Math.max(
+        0,
+        Math.floor(message.decisionBudget.remainingEngineMs - localElapsedMs),
       ),
-      gpu: {
-        rootCap: Math.max(NATIVE_GPU_ROOT_ACTIONS, typed.effort.gpu.rootCap),
-        rolloutBudget: Math.max(
-          NATIVE_GPU_GLOBAL_ROLLOUTS,
-          typed.effort.gpu.rolloutBudget,
-        ),
-        rolloutSteps: Math.max(
-          NATIVE_GPU_ROLLOUT_STEPS,
-          typed.effort.gpu.rolloutSteps,
-        ),
-      },
     },
   };
 };
@@ -83,7 +59,7 @@ const hasPendingIncomingTrade = (message: DecisionMessage): boolean =>
   );
 
 export const shouldUseNativeGpu = (message: DecisionMessage): boolean =>
-  message.strategyPolicy === undefined &&
+  NATIVE_GPU_EXACT_PRODUCTION_PROMOTED &&
   nativeGpuSupportsStochasticModel(message.stochastic?.model) &&
   message.engine === "deep-search" &&
   !message.board.initialPlacement &&
@@ -113,10 +89,13 @@ const isNativeGpuTransportFailure = (error: unknown): boolean =>
 const analyzeAfterNativeGpuTransportFailure = async (
   message: DecisionMessage,
   error: unknown,
+  localStartedAt: number,
 ) => {
   const detail = errorDetail(error, "Native GPU transport failed");
   nativeGpu.release();
-  const analysis = await analyzeDecisionRequest(message);
+  const analysis = await analyzeDecisionRequest(
+    withRemainingDecisionBudget(message, localStartedAt),
+  );
   const requestedStochasticModel =
     message.stochastic?.model ?? M0_FAIR_IID_2D6_V1;
   return {
@@ -164,9 +143,12 @@ chrome.runtime.onMessage.addListener(
       const status = message as DecisionStatusMessage;
       const startedAt = performance.now();
       void (async () => {
-        if (status.engine === "deep-search") {
+        if (
+          status.engine === "deep-search" &&
+          NATIVE_GPU_EXACT_PRODUCTION_PROMOTED
+        ) {
           const gpu = await nativeGpu.status();
-          if (gpu) {
+          if (gpu && nativeGpuSupportsProductionExactMaxn(gpu)) {
             const response: DecisionStatusMessageResponse = {
               id: status.id,
               runtime: "background-gpu",
@@ -199,6 +181,7 @@ chrome.runtime.onMessage.addListener(
     }
     if (!isDecisionMessage(message)) return undefined;
     void (async () => {
+      const backgroundStartedAt = performance.now();
       const nativeGpuEligible = shouldUseNativeGpu(message);
       if (nativeGpuEligible) {
         let gpu;
@@ -206,29 +189,45 @@ chrome.runtime.onMessage.addListener(
           gpu = await nativeGpu.status();
         } catch (error) {
           if (!isNativeGpuTransportFailure(error)) throw error;
-          return analyzeAfterNativeGpuTransportFailure(message, error);
+          return analyzeAfterNativeGpuTransportFailure(
+            message,
+            error,
+            backgroundStartedAt,
+          );
         }
-        if (gpu && nativeGpuSupportsStochasticModel(message.stochastic?.model, gpu.stochasticModels)) {
+        if (
+          gpu &&
+          nativeGpuSupportsProductionExactMaxn(gpu) &&
+          nativeGpuSupportsStochasticModel(
+            message.stochastic?.model,
+            gpu.stochasticModels,
+          )
+        ) {
           try {
             const analysis = await analyzeDecisionRequest(
-              message,
-              (request) =>
-                nativeGpu.analyze(withNativeGpuStrengthProfile(request), message.id),
+              withRemainingDecisionBudget(message, backgroundStartedAt),
+              (request) => nativeGpu.analyzeExact(request, message.id),
             );
             return {
               ...analysis,
               runtime: "background-gpu" as const,
-              runtimeReason: `CUDA resident search on ${gpu.device.name}`,
+              runtimeReason: `Exact CUDA MaxN on ${gpu.device.name}`,
               ...(gpu.build ? { nativeGpuBuild: gpu.build } : {}),
             };
           } catch (error) {
             if (!isNativeGpuTransportFailure(error)) throw error;
-            return analyzeAfterNativeGpuTransportFailure(message, error);
+            return analyzeAfterNativeGpuTransportFailure(
+              message,
+              error,
+              backgroundStartedAt,
+            );
           }
         }
       }
       if (message.engine === "weighted") nativeGpu.release();
-      const analysis = await analyzeDecisionRequest(message);
+      const analysis = await analyzeDecisionRequest(
+        withRemainingDecisionBudget(message, backgroundStartedAt),
+      );
       const runtime = analysis.deepSearch
         ? ("background-wasm" as const)
         : ("background-rollout" as const);
@@ -237,17 +236,19 @@ chrome.runtime.onMessage.addListener(
       const runtimeReason =
         analysis.runtimeReason ??
         (runtime === "background-wasm"
-          ? requestedStochasticModel === MREF_COLONIST_LINKED_2024_V1
-            ? "Mref preserved on CPU/WASM; no eligible Mref-capable native route for this decision"
-            : message.strategyPolicy
-              ? `Strategy policy ${message.strategyPolicy} requires WASM/CPU fixed-root admission`
-              : message.engine === "deep-search" && message.board.initialPlacement
-                ? "Dedicated opening solver runs on WASM/CPU"
-                : nativeGpuEligible
+          ? message.strategyPolicy
+            ? `Strategy policy ${message.strategyPolicy} remains on CPU/WASM until exact CUDA MaxN is production-promoted`
+            : message.engine === "deep-search" && message.board.initialPlacement
+              ? "Dedicated opening solver runs on WASM/CPU"
+              : nativeGpuEligible
                 ? "Native GPU unavailable; using WASM Deep MaxN"
-                : message.engine === "weighted"
-                  ? "Weighted mode runs on WASM"
-                  : undefined
+                : message.engine === "deep-search"
+                  ? requestedStochasticModel === MREF_COLONIST_LINKED_2024_V1
+                    ? "Mref preserved on CPU/WASM Deep MaxN; exact CUDA MaxN remains a fixed-work parity backend and gpu-root-rollout remains experimental"
+                    : "Weighted-belief Deep MaxN is the production authority; exact CUDA MaxN remains parity-gated and gpu-root-rollout remains experimental"
+                  : message.engine === "weighted"
+                    ? "Weighted mode runs on WASM"
+                    : undefined
           : undefined);
       return {
         ...analysis,

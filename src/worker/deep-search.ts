@@ -27,6 +27,7 @@ import type {
   DeepSearchResult,
   DeepSearchStrategyPolicy,
   DecisionAnalysis,
+  DecisionBudget,
   DecisionEngine,
   DecisionSearchConstraints,
 } from "../core/engine";
@@ -82,16 +83,21 @@ export type DeepSearchExecutor = (
 ) => Promise<WasmSearchResponse>;
 
 let wasmReady: Promise<void> | undefined;
+let wasmSha256: string | undefined;
 
 const ensureWasm = async (): Promise<void> => {
-  wasmReady ??= initWasm({
-    module_or_path: chrome.runtime.getURL("colonist_search_bg.wasm"),
-  })
-    .then(() => undefined)
-    .catch((error: unknown) => {
-      wasmReady = undefined;
-      throw error;
-    });
+  wasmReady ??= (async () => {
+    const response = await fetch(chrome.runtime.getURL("colonist_search_bg.wasm"));
+    if (!response.ok) throw new Error(`WASM fetch failed: ${response.status}`);
+    const bytes = await response.arrayBuffer();
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    wasmSha256 = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    await initWasm({ module_or_path: bytes });
+  })().catch((error: unknown) => {
+    wasmReady = undefined;
+    wasmSha256 = undefined;
+    throw error;
+  });
   return wasmReady;
 };
 
@@ -751,6 +757,15 @@ const mapRootProvenance = (
         : {}),
       reason: candidate.reason,
     })),
+    rootSearchWork: provenance.rootSearchWork.map((work) => ({
+      action: mapAction(work.action, players, board),
+      nodes: work.nodes,
+      completedWaveDepth: work.completedWaveDepth,
+      cutoffDepthCounts: [...work.cutoffDepthCounts],
+      posteriorMassReachingControlledNextDecision:
+        work.posteriorMassReachingControlledNextDecision,
+      posteriorMassReachingTerminal: work.posteriorMassReachingTerminal,
+    })),
     rootEvidence: provenance.rootEvidence.map((evidence) => ({
       action: mapAction(evidence.action, players, board),
       ...(evidence.promotionReason
@@ -875,8 +890,9 @@ const mapRootProvenance = (
               ...(typeof proposal.commonSearchRank === "number"
                 ? { commonSearchRank: proposal.commonSearchRank }
                 : {}),
-              ...(proposal.failureClass
-                ? { failureClass: proposal.failureClass }
+              status: proposal.status,
+              ...(proposal.causalAttribution
+                ? { causalAttribution: proposal.causalAttribution }
                 : {}),
             })),
           },
@@ -1694,7 +1710,9 @@ export const analyzeDeepSearch = async (
   executor?: DeepSearchExecutor,
   stochastic?: PublicStochasticInput,
   strategyPolicy?: DeepSearchStrategyPolicy,
+  decisionBudget?: DecisionBudget,
 ): Promise<DecisionAnalysis> => {
+  const preparationStartedAt = performance.now();
   if (!executor) await ensureWasm();
   const { request, players, root } = buildDeepSearchRequest(
     state,
@@ -1744,13 +1762,26 @@ export const analyzeDeepSearch = async (
   // remain available to offline tooling. Live WASM/native execution consumes
   // this explicit effort object so CPU nodes and GPU rollouts cannot be
   // mistaken for the same unit.
-  const evidenceEscalationMs =
+  const requestedEvidenceEscalationMs =
     engine === "deep-search" &&
     board.isMyTurn &&
     !board.initialPlacement &&
     request.state.phase !== "trade-responses"
       ? LIVE_WASM_EVIDENCE_ESCALATION_MS
       : 0;
+  let evidenceEscalationMs = requestedEvidenceEscalationMs;
+  if (decisionBudget) {
+    const remainingEngineMs = Math.floor(decisionBudget.remainingEngineMs -
+      Math.max(0, performance.now() - preparationStartedAt));
+    if (remainingEngineMs < 50) {
+      throw new Error("Decision allowance exhausted before engine search could start");
+    }
+    request.timeBudgetMs = Math.min(request.timeBudgetMs, remainingEngineMs);
+    evidenceEscalationMs = Math.min(
+      requestedEvidenceEscalationMs,
+      Math.max(0, remainingEngineMs - request.timeBudgetMs),
+    );
+  }
   request.effort = {
     decisionTimeMs: request.timeBudgetMs,
     tactical: {
@@ -1769,10 +1800,13 @@ export const analyzeDeepSearch = async (
       rolloutSteps: request.rolloutActions,
     },
   };
+  // Capture the same JSON representation used by native messaging. Keeping the
+  // final joint particles avoids reconstructing from a truncated tracker trace.
+  const wireRequest = JSON.parse(JSON.stringify(request)) as typeof request;
   const startedAt = performance.now();
   const response = executor
-    ? await executor(request)
-    : (analyzeWasm(request) as WasmSearchResponse);
+    ? await executor(wireRequest)
+    : (analyzeWasm(wireRequest) as WasmSearchResponse);
   const elapsedMs = performance.now() - startedAt;
   const mappingFailureReason =
     response.chosen && !matchingPrompt(response.chosen, board)
@@ -1804,6 +1838,13 @@ export const analyzeDeepSearch = async (
   const requestedStochasticModel = stochastic?.model ?? M0_FAIR_IID_2D6_V1;
   const stochasticModel = effectiveStochasticModel(response.stochasticModel);
   const search: DeepSearchResult = {
+    canonicalRequest: {
+      representation: "canonical-engine-request-v1",
+      engineRevision: response.engineRevision,
+      algorithm: response.algorithm,
+      ...(!executor && wasmSha256 ? { wasmSha256 } : {}),
+      players: [...players], root, request: wireRequest,
+    },
     engineRevision: response.engineRevision,
     diceMode: board.diceMode,
     chanceModel: "fair-iid-2d6",
@@ -1831,6 +1872,9 @@ export const analyzeDeepSearch = async (
     algorithm: response.algorithm,
     authority: response.authority,
     effectiveSearchEffort,
+    ...(decisionBudget
+      ? { clientDecisionBudget: { ...decisionBudget } }
+      : {}),
     ...(selected ? { chosen: mapAction(selected, players, board) } : {}),
     rootValue: response.rootValue.slice(0, players.length),
     tacticalWinProbability: response.tacticalWinProbability,

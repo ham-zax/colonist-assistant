@@ -244,6 +244,15 @@ export interface DeepSearchRoadIntent {
   orderingScore: number;
 }
 
+export interface DeepSearchRootSearchWork {
+  action: DeepSearchAction;
+  nodes: number;
+  completedWaveDepth: number;
+  cutoffDepthCounts: number[];
+  posteriorMassReachingControlledNextDecision: number;
+  posteriorMassReachingTerminal: number;
+}
+
 export interface DeepSearchRootCausalEvidence {
   action: DeepSearchAction;
   promotionReason?: DeepSearchRootPromotionReason;
@@ -284,6 +293,12 @@ export type DeepSearchDecisionFailureClass =
   | "horizon"
   | "continuation"
   | "belief-model";
+
+export type DeepSearchStrategyProposalStatus =
+  | "omitted"
+  | "searched-not-selected"
+  | "budget-limited"
+  | "selected";
 
 export type DeepSearchStrategyPolicy = "adaptive-candidate-admission-v1";
 
@@ -338,7 +353,9 @@ export interface DeepSearchStrategyProposalDiagnostic {
   displacedBaselineAction?: DeepSearchAction;
   enteredCommonSearch: boolean;
   commonSearchRank?: number;
-  failureClass?: DeepSearchDecisionFailureClass;
+  status: DeepSearchStrategyProposalStatus;
+  /** Unknown unless a controlled reference or intervention demonstrates cause. */
+  causalAttribution?: DeepSearchDecisionFailureClass;
 }
 
 export interface DeepSearchStrategyAdmissionDiagnostic {
@@ -385,6 +402,7 @@ export interface DeepSearchRootProvenance {
   prunedRootCount: number;
   prunedRoots: DeepSearchPrunedRoot[];
   rootEvidence?: DeepSearchRootCausalEvidence[];
+  rootSearchWork?: DeepSearchRootSearchWork[];
   strategyShadow?: DeepSearchStrategyShadowDiagnostics;
   horizonEscalation?: DeepSearchHorizonEscalation;
   tradeHardVetoThreshold?: number;
@@ -414,7 +432,27 @@ export interface DecisionSearchConstraints {
   rootExclusions?: RootTradeActionExclusion[];
 }
 
+export interface DecisionBudget {
+  contract: "client-end-to-end-v1";
+  totalMs: number;
+  remainingEngineMs: number;
+  transportReserveMs: number;
+  finalizationReserveMs: number;
+}
+
+/** Exact JSON wire request, captured after all production profile adjustments. */
+export interface CanonicalEngineRequest {
+  representation: "canonical-engine-request-v1";
+  engineRevision: string;
+  algorithm: string;
+  wasmSha256?: string;
+  players: string[];
+  root: number;
+  request: Record<string, unknown>;
+}
+
 export interface DeepSearchResult {
+  canonicalRequest?: CanonicalEngineRequest;
   engineRevision: string;
   diceMode: DiceMode;
   /** Legacy spelling retained for additive evidence compatibility. */
@@ -433,6 +471,7 @@ export interface DeepSearchResult {
   algorithm: string;
   authority: DecisionAuthority;
   effectiveSearchEffort?: DeepSearchEffectiveEffort;
+  clientDecisionBudget?: DecisionBudget;
   chosen?: DeepSearchAction;
   rootValue: number[];
   tacticalWinProbability: number;

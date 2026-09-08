@@ -33,9 +33,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .into());
         }
         if game.actions > 4_096 {
-            return Err(format!("arena action bound exceeded lane={lane}: {}", game.actions).into());
+            return Err(
+                format!("arena action bound exceeded lane={lane}: {}", game.actions).into(),
+            );
         }
-        if game.truncated != (!game.game.terminal && (game.game.turn >= 160 || game.actions >= 4_096)) {
+        if game.truncated
+            != (!game.game.terminal && (game.game.turn >= 160 || game.actions >= 4_096))
+        {
             return Err(format!("arena truncation mismatch lane={lane}: {game:?}").into());
         }
     }
@@ -45,14 +49,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("arena campaign changed when resident chunk size changed".into());
     }
     let neutral = [51u8; 5];
-    let profiled = engine.run_rotating_profile_campaign(
-        &states,
-        neutral,
-        neutral,
-        config,
-        seed,
-        11,
-    )?;
+    let profiled =
+        engine.run_rotating_profile_campaign(&states, neutral, neutral, config, seed, 11)?;
     if profiled != result {
         return Err("neutral rotating profile assignment changed the campaign".into());
     }

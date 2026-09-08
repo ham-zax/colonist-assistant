@@ -2,14 +2,14 @@ use std::env;
 use std::path::PathBuf;
 
 use colonist_catan_arena::tactical_corpus::{
-    build_state, default_corpus_path, load_tactical_corpus, TacticalScenario,
+    TacticalScenario, build_state, default_corpus_path, load_tactical_corpus,
 };
 use colonist_catan_core::{
     Building, GameState, NodeKind, Phase, PlayerState, SplitMix64, SyntheticBoardGenerator,
     TradeOffer,
 };
 use colonist_catan_search::{
-    search_maxn_bounded, search_maxn_hostility_stress_bounded, DepthActionValue, DepthSearchResult,
+    DepthActionValue, DepthSearchResult, search_maxn_bounded, search_maxn_hostility_stress_bounded,
 };
 use serde::{Deserialize, Serialize};
 
@@ -65,10 +65,10 @@ fn parse_args() -> Args {
             }
             "--takeover-snapshot" => {
                 index += 1;
-                parsed.takeover_snapshot = Some(PathBuf::from(
-                    args.get(index)
-                        .unwrap_or_else(|| panic!("--takeover-snapshot requires a JSONL path")),
-                ));
+                parsed.takeover_snapshot =
+                    Some(PathBuf::from(args.get(index).unwrap_or_else(|| {
+                        panic!("--takeover-snapshot requires a JSONL path")
+                    })));
             }
             "--snapshot-id" => {
                 index += 1;
@@ -482,12 +482,8 @@ struct CaseDefinition {
 
 fn run_case(case: CaseDefinition, args: &Args) -> ScenarioReport {
     let root = case.state.actor() as usize;
-    let ordinary = search_maxn_bounded(
-        &case.state,
-        args.depth,
-        args.branch_cap,
-        args.maximum_nodes,
-    );
+    let ordinary =
+        search_maxn_bounded(&case.state, args.depth, args.branch_cap, args.maximum_nodes);
     let h0 = search_maxn_hostility_stress_bounded(
         &case.state,
         0.0,
@@ -667,12 +663,18 @@ fn run_takeover_snapshot(snapshot: TakeoverSnapshot, args: &Args) -> ScenarioRep
             "schema-v1 takeover snapshots must use legacy-randomized-v1"
         ),
         2 => {
-            let recorded = snapshot.board_generator_state_hash.as_deref().unwrap_or_else(|| {
-                panic!("schema-v2 snapshot {snapshot_id} is missing boardGeneratorStateHash")
-            });
+            let recorded = snapshot
+                .board_generator_state_hash
+                .as_deref()
+                .unwrap_or_else(|| {
+                    panic!("schema-v2 snapshot {snapshot_id} is missing boardGeneratorStateHash")
+                });
             assert_eq!(
                 recorded,
-                format!("{:016x}", board_generator.provenance_state_hash(expected_hash)),
+                format!(
+                    "{:016x}",
+                    board_generator.provenance_state_hash(expected_hash)
+                ),
                 "takeover snapshot generator provenance mismatch"
             );
         }
@@ -778,8 +780,7 @@ fn main() {
         input_path,
         corpus_schema_version,
         hostility_formula: "U_i(a|h)=(1-h)*V_i(a)+h*(1-V_root(a))",
-        stress_parameter_semantics:
-            "controlled counterfactual stress parameter; not an inferred hostility probability",
+        stress_parameter_semantics: "controlled counterfactual stress parameter; not an inferred hostility probability",
         hostility_grid: HOSTILITY_GRID,
         search: SearchConfigReport {
             depth: args.depth,

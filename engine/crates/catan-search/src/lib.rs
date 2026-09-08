@@ -37,24 +37,23 @@ pub use cuda_exact::*;
 pub use cuda_sim::*;
 
 pub use deadline::CooperativeDeadline;
-pub use eval::{
-    ExpansionOption, RoadIntent, TrophyOutlook, evaluate, expansion_option_value,
-    expected_discard_loss, largest_army_outlook, longest_road_outlook,
-    marginal_development_value, production_pips, road_intent, strategic_utility,
-};
 #[cfg(feature = "benchmark-profile")]
 pub use eval::{EvaluateProfile, evaluate_profiled};
+pub use eval::{
+    ExpansionOption, RoadIntent, TrophyOutlook, evaluate, expansion_option_value,
+    expected_discard_loss, largest_army_outlook, longest_road_outlook, marginal_development_value,
+    production_pips, road_intent, strategic_utility,
+};
 pub use exact::{
     DEVELOPMENT_EXACT_FAMILIES, ExactActionFamily, ExactActionValue, ExactDecisionResult,
     exact_action_comparator_score, exact_family_for_action, solve_exact_belief,
-    solve_exact_belief_excluding,
-    solve_exact_belief_excluding_controlled,
+    solve_exact_belief_excluding, solve_exact_belief_excluding_controlled,
 };
 pub use features::{
     ACTION_FEATURES, BASE_ACTION_FEATURES, EDGE_FEATURES, GLOBAL_FEATURES, HEX_FEATURES,
     HeterogeneousGraphFeatures, PLAYER_FEATURES, ROOT_IMPACT_FEATURES, STATE_FEATURES,
-    STRATEGIC_FEATURE_SCHEMA_VERSION, VERTEX_FEATURES, encode_action,
-    encode_actions, encode_heterogeneous_graph, pool_heterogeneous_graph,
+    STRATEGIC_FEATURE_SCHEMA_VERSION, VERTEX_FEATURES, encode_action, encode_actions,
+    encode_heterogeneous_graph, pool_heterogeneous_graph,
 };
 pub use mcts::{
     ActionStats, BeliefError, BeliefParticle, Mcts, SearchConfig, SearchMode, SearchReport,
@@ -71,12 +70,12 @@ pub use policy::{
     choose_rollout_action, trade_acceptance_probability,
 };
 pub use reachability::{ReachabilityDiagnostic, optimistic_reachability};
+pub use resilience::{
+    CriticalEdge, CriticalVertex, RoadResilience, analyze_road_resilience, evaluate_edge_cut,
+    evaluate_vertex_cut,
+};
 pub use rollout_cutoff::{
     ROLLOUT_CUTOFF_SCALE, rollout_cutoff_margin, rollout_cutoff_player_score,
-};
-pub use resilience::{
-    CriticalEdge, CriticalVertex, RoadResilience, analyze_road_resilience,
-    evaluate_edge_cut, evaluate_vertex_cut,
 };
 pub use root_impact::{
     IntroducedCriticalVertex, IntroducedRoadFragility, RoadImpactDelta, RootImpactReport,
@@ -92,17 +91,17 @@ pub use strategy::{
     ADAPTIVE_CANDIDATE_ADMISSION_V1, DecisionFailureClass, MAX_STRATEGY_CHALLENGERS,
     STRATEGY_SHADOW_POLICY_VERSION, StrategyAdmissionDiagnostic, StrategyContext,
     StrategyEvidenceTier, StrategyId, StrategyOmissionReason, StrategyPolicy,
-    StrategyProposalDiagnostic, StrategyProposalReason, StrategyShadowDiagnostics,
-    shadow_strategy_diagnostics,
+    StrategyProposalDiagnostic, StrategyProposalReason, StrategyProposalStatus,
+    StrategyShadowDiagnostics, shadow_strategy_diagnostics,
 };
 pub use tactical::{
     TacticalResult, solve_belief_current_turn, solve_belief_current_turn_timed, solve_current_turn,
 };
 pub use threats::{
-    OpponentThreat, OpponentThreatKind, RoadCutContinuationAssessment,
-    RoadCutContinuationEvidence, action_blocks_threat, belief_road_cut_continuation_assessment,
-    detect_opponent_threats, force_threat_blocking_actions, forced_loss_weight,
-    posterior_expected_tactical_threat_weight, posterior_immediate_threat_weight,
+    OpponentThreat, OpponentThreatKind, RoadCutContinuationAssessment, RoadCutContinuationEvidence,
+    action_blocks_threat, belief_road_cut_continuation_assessment, detect_opponent_threats,
+    force_threat_blocking_actions, forced_loss_weight, posterior_expected_tactical_threat_weight,
+    posterior_immediate_threat_weight,
 };
 pub use trade_model::{
     TRADE_ACCEPTANCE_FEATURES, learned_trade_acceptance_probability, learned_trade_model_version,
@@ -113,17 +112,16 @@ pub use trade_safety::{
     belief_domestic_trade_assessment, belief_domestic_trade_threat, domestic_trade_threat,
 };
 
-pub const ENGINE_REVISION: &str = "deep-maxn-v12";
+pub const ENGINE_REVISION: &str = "deep-maxn-v14";
 pub use depth::{
     BeliefDepthConfig, BeliefDepthResult, BeliefSearchProvenance, BeliefSearchStageTimings,
     DecisiveContinuationDiagnostic, DepthActionValue, DepthBeliefError, DepthSearchResult,
     PrunedRootDiagnostic, RankedRootDiagnostic, RetainedRootDiagnostic, RootCausalEvidence,
-    RootPruneReason, belief_root_closeout_plans, diagnose_decisive_continuation,
-    search_belief_maxn, search_belief_maxn_bounded, search_belief_paranoid,
-    search_belief_paranoid_bounded, search_maxn,
-    search_maxn_bounded, search_maxn_bounded_timed, search_maxn_hostility_stress_bounded,
-    search_paranoid, search_paranoid_bounded,
-    search_paranoid_bounded_timed, search_weighted_belief_maxn_bounded,
+    RootPruneReason, RootSearchWorkDiagnostic, belief_root_closeout_plans,
+    diagnose_decisive_continuation, search_belief_maxn, search_belief_maxn_bounded,
+    search_belief_paranoid, search_belief_paranoid_bounded, search_maxn, search_maxn_bounded,
+    search_maxn_bounded_timed, search_maxn_hostility_stress_bounded, search_paranoid,
+    search_paranoid_bounded, search_paranoid_bounded_timed, search_weighted_belief_maxn_bounded,
     search_weighted_belief_maxn_bounded_timed, search_weighted_belief_maxn_bounded_timed_excluding,
     search_weighted_belief_maxn_iterative_timed_excluding,
     search_weighted_belief_maxn_iterative_timed_excluding_with_strategy_policy,
@@ -137,8 +135,10 @@ pub use depth::{
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
 pub use depth::{
     CudaExactSearchStats, cuda_exact_search_stats,
+    search_weighted_belief_maxn_cuda_iterative_controlled,
     search_weighted_belief_maxn_cuda_with_config,
     search_weighted_belief_maxn_cuda_with_config_excluding,
+    search_weighted_belief_maxn_cuda_with_config_excluding_controlled,
     search_weighted_belief_maxn_cuda_with_config_mutex,
     search_weighted_belief_maxn_cuda_with_config_mutex_excluding,
 };

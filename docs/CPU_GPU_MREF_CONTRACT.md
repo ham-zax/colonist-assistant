@@ -2,34 +2,21 @@
 
 ## Reference baseline
 
-The engineering reference is commit
-`950c1ae9af224f802ad266f268fe7c2f9ff2fe38` on
-`fix/r6-authority-completion`. It includes the R6 authority repairs through
-`07ff6db385928e26cf126c43e7ddfbb423969b18` and the subsequent lifecycle fixes.
+The current stabilization candidate policy is `deep-maxn-v14`. The saved acceptance artifacts describe the earlier `deep-maxn-v13` working tree based on `d77935fda984e3006b8a8ad9d65eb58a6d162eaf`; they do not certify v14. The older R6 pin `950c1ae9af224f802ad266f268fe7c2f9ff2fe38` remains historical provenance only.
 
-The user authorized GPU implementation against this pinned candidate before
-independent acceptance. This is a **reference pin**, not a claim that R6 passed.
-Independent GPU review subsequently passed the exact range
-`950c1ae9af224f802ad266f268fe7c2f9ff2fe38..7023af989d7590df36bb078cb9971fb0ac32859d`.
-The integration is now on canonical `main`. Commit `cfcdf1b6a9d3c6558955819be8b7c8b3f6e95849`
-adds retained legacy-roll conflict reconciliation and revokes in-flight decisions
-when stochastic authority changes. Those ingestion repairs do not change the
-pinned engine mathematics; their R6 acceptance remains separate from GPU review.
+`deep-maxn-v13` keeps the existing `catan-core` stochastic mathematics and public-history posterior contract, while incorporating the repaired controlled-player continuation, current root/admission semantics, and the shared fixed-work/deadline contract. Any future semantic change to those decision rules requires a new reference identity and rerunning the affected parity gate.
 
-This integration does not change `catan-core` dice mathematics, CPU search policy,
-`deep-maxn-v12`, or the public-history belief construction algorithm. Future
-semantic changes must identify a new reference and rerun the affected parity gate.
-
-Identities remain separate:
+Identities are deliberately separate:
 
 | Component | Identity |
 | --- | --- |
-| CPU search policy | `deep-maxn-v12` |
-| Native strategic algorithm | `gpu-root-rollout` |
+| Current CPU candidate policy | `deep-maxn-v14` |
+| Exact CUDA backend for the same policy | `deep-maxn-cuda-exact-fixed-work-v1` |
+| Experimental native rollout algorithm | `gpu-root-rollout` |
 | Legacy stochastic model | `m0-fair-iid-2d6-v1` |
 | Balanced-Dice reference hypothesis | `mref-colonist-linked-2024-v1` |
 | Public-history posterior policy | `public-history-belief-v1` |
-| Native messaging protocol / JSON schema | `6` / `3` |
+| Native messaging protocol / state schema | `7` / `3` |
 | Internal CUDA state/reduction ABI | `3` |
 
 Mref is a named public/reference hypothesis, not a reconstruction of Colonist's
@@ -48,18 +35,11 @@ roll. It does not draw every future roll from a static root distribution, sample
 a hidden controller into actor-facing authority, or multiply TypeScript resource
 worlds by a separate dice-world population.
 
-Production browser decisions currently do **not** route to native
-`gpu-root-rollout`. CPU/WASM Deep MaxN remains authoritative for opening,
-opponent-turn pondering, incoming-trade decisions, and own-turn midgame decisions.
-This is intentional: the rollout backend is a different search policy, and
-same-observation diagnostics have demonstrated that hardware availability can
-change the selected action. The companion remains available for local parity,
-benchmark, and protocol diagnostics; production routing may be re-enabled only
-after a native backend satisfies the production strategic-parity contract. Mref
-semantics remain unchanged on CPU/WASM. The experimental
-`adaptive-candidate-admission-v1` policy is likewise not implemented by native
-rollout GPU; the native parser rejects such a request rather than silently
-pretending support.
+Production browser decisions currently remain on CPU/WASM `deep-maxn-v14`. Companion availability cannot substitute `gpu-root-rollout`; that algorithm remains explicit experimental tooling. The companion also exposes `deep-maxn-cuda-exact-fixed-work-v1` through `analyze-exact`, but exact CUDA is not production-promoted until its correctness, latency/performance, cancellation and packaged-execution gates are all satisfied. Opening remains unsupported by exact CUDA and therefore stays on the same-policy CPU opening path.
+
+For offline CPU/exact-MaxN parity, explicit `effort.decisionTimeMs: 0` (or legacy `timeBudgetMs: 0` when no effort object is supplied) disables the wall-clock deadline and evidence escalation. Node and depth limits remain active, and native cancellation remains supported. Positive decision times retain the 50–10,000 ms normalization; omitted effort retains the existing defaults. Live requests supply positive budgets. Experimental rollout and other modes retain their positive time floor. Parity tooling must assert the returned zero decision time and matching effective effort before comparing fixed work.
+
+Exact CUDA accepts the same M0/Mref posterior input, root exclusions, trade rules and explicit `adaptive-candidate-admission-v1` identity as CPU MaxN. The rollout parser still rejects the adaptive strategy policy rather than silently pretending support. An old rollout-only companion cannot satisfy the protocol-7 exact capability check.
 
 ## Mechanical parity versus strategic parity
 
@@ -68,9 +48,9 @@ transitions, stochastic/Mref law, terminal semantics, packed-state integrity, an
 the required observation boundary. That remains necessary, but it is not enough to
 show that CUDA is functioning as an acceleration backend for the same Strategist.
 
-**Strategic parity** is the stronger diagnostic contract. For one identical adapter
-observation and joint posterior, compare the strongest common semantic layer rather
-than requiring bitwise equality between different search algorithms:
+**Algorithm/backend parity** is the production acceleration contract for CPU MaxN versus exact CUDA. With identical canonical particles and fixed work it requires the same legal/root domain, retained roots and priors, continuation semantics, node schedule, final authority and chosen action, with backed-up values equal within the declared numerical tolerance. A substantive disagreement blocks exact-backend promotion.
+
+**Strategic parity** remains the diagnostic contract for comparing different algorithms such as CPU MaxN versus `gpu-root-rollout`. For one identical adapter observation and joint posterior, compare the strongest common semantic layer rather than requiring bitwise equality between different search algorithms:
 
 - identical observation and stochastic-model identity;
 - comparable posterior/effective particle populations;
@@ -83,16 +63,15 @@ than requiring bitwise equality between different search algorithms:
   replacement;
 - the explicit strategy-policy identity.
 
-CPU Deep MaxN and native GPU rollouts still use different policy/evaluator value
-scales and search mechanics. A numeric value correlation is therefore not part of
-the contract unless a future common value representation is introduced. Persistent
-root-coverage or action-direction disagreement under the same observation is a
-strategic-parity finding even when mechanical parity is green; exact action equality
-on every decision is not required.
+CPU Deep MaxN and native GPU rollouts still use different policy/evaluator value scales and search mechanics. A numeric value correlation is therefore not part of the rollout comparison. Persistent root-coverage or action-direction disagreement under the same observation is a strategic-parity finding even when mechanical parity is green; exact action equality on every rollout decision is not required. This looser rule does **not** apply to exact CUDA, whose fixed-work parity gate requires the same MaxN computation within tolerance.
+
+Historical v13 exact evidence is frozen under `docs/benchmarks/engine-stabilization-2026-09-07/`: evaluator parity passed 69 states across 2P/3P/4P with maximum absolute error `2.9802322e-7`; fixed-work search parity passed 15/15 action comparisons with identical node/depth work and maximum absolute error `5.9604645e-7`; the production-shaped native-host lane matched M0+trades, Mref and explicit M2 requests within `3.8743019e-7`, while also rejecting invalid evidence and recovering from cancellation. These results do not certify the current v14 orchestration. The recorded v13 arena smoke failed the 2× retention threshold (1.370× for 3P; 1.272× for 4P). None of these results establishes playing strength or authorizes promotion.
 
 ### Current decision-pipeline map
 
-| Surface | Packaged CPU/WASM Deep MaxN | Native GPU diagnostic analyzer (browser routing disabled) | `gpu-sim-agent-benchmark` |
+The table below intentionally compares the distinct rollout algorithm to CPU MaxN and the resident rollout benchmark. Exact CUDA is **not** a fourth strategy column: `analyze-exact` is required to reproduce the packaged CPU/WASM MaxN column under the algorithm/backend parity contract, with GPU evaluation as a computation backend. Its currently declared exceptions are opening placement and promotion/performance status, both of which route or remain on CPU.
+
+| Surface | Packaged CPU/WASM Deep MaxN | Native GPU rollout diagnostic (browser routing disabled) | `gpu-sim-agent-benchmark` |
 | --- | --- | --- | --- |
 | Input information | Adapter actor-visible state plus joint hidden-world posterior | The same serialized request/posterior for eligible native decisions | One resident authoritative `GameState`; no live posterior reconstruction |
 | Posterior handling | Rust belief particles; weighted belief MaxN | Posterior normalization/allocation across resident CUDA states | None: one realized state per simulated game |
@@ -133,12 +112,7 @@ sufficient by itself to force action disagreement; native rollout horizon/valuat
 also materially affects D68. The exact internal cause of the 96-step reversal
 remains an unresolved strategic-parity question, not evidence that GPU is stronger.
 
-The native `hello` response adds `stochasticModels`. Missing capabilities mean
-M0-only, preserving old protocol-6 companion compatibility without giving those
-companions Mref authority. Native diagnostic/experimental clients check
-capabilities before sending an analysis request and reject an Mref response with
-absent or different model identity. The native parser still rejects unknown models
-and unusable evidence.
+The protocol-7 native `hello` response reports `stochasticModels` and an explicit algorithm capability set. `exactMaxn` identifies `deep-maxn-cuda-exact-fixed-work-v1`, availability, fixed-work-only promotion status, cancellation/deadline support and opening support. Production-facing exact clients require that capability; an old protocol-6/rollout-only companion is not silently treated as an exact accelerator. Native clients reject absent/different Mref identity, unknown models and unusable evidence.
 
 ## CUDA posterior contract
 

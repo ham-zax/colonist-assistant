@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use colonist_catan_arena::tactical_corpus::{
-    apply_hidden_variant, build_state, default_corpus_path, load_tactical_corpus,
-    rebalance_tactical_bank, verify_mechanical_consequence, TacticalCorpus, TacticalScenario,
+    TacticalCorpus, TacticalScenario, apply_hidden_variant, build_state, default_corpus_path,
+    load_tactical_corpus, rebalance_tactical_bank, verify_mechanical_consequence,
 };
 use colonist_catan_core::{Action, GameState, Phase, SETTLEMENT_COST};
 use colonist_catan_search::{
@@ -369,7 +369,10 @@ fn best_posterior_root(roots: &[PosteriorRootReport]) -> Option<&PosteriorRootRe
     roots.iter().max_by(|left, right| {
         left.net_terminal_outcome
             .total_cmp(&right.net_terminal_outcome)
-            .then_with(|| left.mean_victory_margin.total_cmp(&right.mean_victory_margin))
+            .then_with(|| {
+                left.mean_victory_margin
+                    .total_cmp(&right.mean_victory_margin)
+            })
             .then_with(|| right.mean_turn.total_cmp(&left.mean_turn))
     })
 }
@@ -448,7 +451,8 @@ fn run_posterior_sensitivity_probe(
                         || search.rows[0].len() != candidate_roots.len()
                         || search.rows[1].len() != candidate_roots.len()
                     {
-                        errors.push("posterior root search returned an unexpected row shape".into());
+                        errors
+                            .push("posterior root search returned an unexpected row shape".into());
                     } else if search.rows.iter().flatten().any(|stats| stats.errors > 0) {
                         errors.push("posterior root search reported rollout errors".into());
                     } else {
@@ -742,18 +746,15 @@ fn main() {
         // 1. Task 8 Proposal-Frequency Diagnostic:
         // Sample the CUDA rollout proposal policy directly without advancing state.
         let mut proposal_errors = 0usize;
-        let sampled_actions = match sample_proposals(
-            &mut engine,
-            &state,
-            scenario_seed ^ PROPOSAL_SEED_XOR,
-        ) {
-            Ok(actions) => actions,
-            Err(error) => {
-                eprintln!("Proposal test failed for {}: {error}", scenario.id);
-                proposal_errors = 1;
-                Vec::new()
-            }
-        };
+        let sampled_actions =
+            match sample_proposals(&mut engine, &state, scenario_seed ^ PROPOSAL_SEED_XOR) {
+                Ok(actions) => actions,
+                Err(error) => {
+                    eprintln!("Proposal test failed for {}: {error}", scenario.id);
+                    proposal_errors = 1;
+                    Vec::new()
+                }
+            };
 
         let proposal_probe_report = if let Some(probe) = &scenario.proposal_probe {
             let mut probe_state = state.clone();
@@ -830,7 +831,10 @@ fn main() {
             } else {
                 for variant in &probe.variants {
                     let world = apply_hidden_variant(&state, variant).unwrap_or_else(|error| {
-                        panic!("invalid threat variant {} / {}: {error}", scenario.id, variant.id)
+                        panic!(
+                            "invalid threat variant {} / {}: {error}",
+                            scenario.id, variant.id
+                        )
                     });
                     worlds.push((world, variant.weight));
                 }
@@ -865,7 +869,10 @@ fn main() {
             let base_actions = match sample_proposals(&mut engine, &state, seed) {
                 Ok(actions) => actions,
                 Err(error) => {
-                    eprintln!("Observation-safety base proposal failed for {}: {error}", scenario.id);
+                    eprintln!(
+                        "Observation-safety base proposal failed for {}: {error}",
+                        scenario.id
+                    );
                     errors += 1;
                     Vec::new()
                 }
@@ -873,7 +880,10 @@ fn main() {
             let variant_actions = match sample_proposals(&mut engine, &variant, seed) {
                 Ok(actions) => actions,
                 Err(error) => {
-                    eprintln!("Observation-safety variant proposal failed for {}: {error}", scenario.id);
+                    eprintln!(
+                        "Observation-safety variant proposal failed for {}: {error}",
+                        scenario.id
+                    );
                     errors += 1;
                     Vec::new()
                 }
@@ -923,7 +933,10 @@ fn main() {
         ) {
             Ok(res) => res,
             Err(e) => {
-                eprintln!("search_root_actions failed for scenario {}: {e:?}", scenario.id);
+                eprintln!(
+                    "search_root_actions failed for scenario {}: {e:?}",
+                    scenario.id
+                );
                 failed_count += 1;
                 continue;
             }
@@ -943,14 +956,15 @@ fn main() {
             .negative_control_root
             .as_ref()
             .map(|s| s.to_action());
-        let negative_control_str = negative_control_action
-            .as_ref()
-            .map(|a| format!("{a:?}"));
+        let negative_control_str = negative_control_action.as_ref().map(|a| format!("{a:?}"));
 
         let action_reports: Vec<ActionReport> = row
             .iter()
             .map(|stat| {
-                let proposal_count = sampled_actions.iter().filter(|&act| act == &stat.action).count();
+                let proposal_count = sampled_actions
+                    .iter()
+                    .filter(|&act| act == &stat.action)
+                    .count();
                 let proposal_rate = if PROPOSAL_SAMPLES > 0 {
                     proposal_count as f32 / PROPOSAL_SAMPLES as f32
                 } else {
@@ -1006,14 +1020,18 @@ fn main() {
             false
         } else if scenario.enforce_explicit_root_ordering && scenario.is_negative_control {
             negative_control_action.as_ref().is_some_and(|negative| {
-                row.iter().find(|stat| &stat.action == negative).is_some_and(|negative_stat| {
-                    let best = best_stat.expect("expected root was selected");
-                    best.net_terminal_outcome() > negative_stat.net_terminal_outcome() + 0.001
-                        || ((best.net_terminal_outcome() - negative_stat.net_terminal_outcome()).abs()
-                            <= 0.001
-                            && best.mean_victory_margin()
-                                > negative_stat.mean_victory_margin() + 0.001)
-                })
+                row.iter()
+                    .find(|stat| &stat.action == negative)
+                    .is_some_and(|negative_stat| {
+                        let best = best_stat.expect("expected root was selected");
+                        best.net_terminal_outcome() > negative_stat.net_terminal_outcome() + 0.001
+                            || ((best.net_terminal_outcome()
+                                - negative_stat.net_terminal_outcome())
+                            .abs()
+                                <= 0.001
+                                && best.mean_victory_margin()
+                                    > negative_stat.mean_victory_margin() + 0.001)
+                    })
             })
         } else {
             true

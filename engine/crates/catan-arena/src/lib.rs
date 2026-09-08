@@ -1,5 +1,6 @@
 use colonist_catan_core::{
-    Action, Building, DevCard, GameState, NodeKind, Phase, ResourceHand, SplitMix64,
+    Action, Building, DevCard, DiceHistoryProvenance, GameState, NodeKind, Phase,
+    PublicRollObservation, ResourceHand, SplitMix64, StochasticBelief, StochasticState,
 };
 use colonist_catan_search::BeliefParticle;
 
@@ -8,7 +9,7 @@ pub mod tactical_corpus;
 const PARTICLE_COUNT: usize = 4;
 const PARTICLE_MIX: u64 = 0x9e37_79b9_7f4a_7c15;
 
-pub const EXACT_PARITY_CORPUS_REVISION: &str = "phase-1-handcrafted-v1";
+pub const EXACT_PARITY_CORPUS_REVISION: &str = "phase-1-handcrafted-v2";
 
 /// One deterministic input to the exact CPU/GPU evaluator comparison.
 #[derive(Clone, Debug)]
@@ -152,7 +153,11 @@ pub fn belief_particles(
 /// by a stable case name for machine-readable failure reports.
 pub fn exact_parity_corpus() -> Vec<ExactParityCase> {
     let mut cases = Vec::new();
-    for (players, board_seed) in [(3u8, 910_300_003u64), (4, 910_400_004)] {
+    for (players, board_seed) in [
+        (2u8, 910_200_002u64),
+        (3u8, 910_300_003u64),
+        (4u8, 910_400_004u64),
+    ] {
         let early = setup_state(board_seed, players);
         push_case(&mut cases, format!("{players}p-early-setup"), early.clone());
 
@@ -171,6 +176,8 @@ pub fn exact_parity_corpus() -> Vec<ExactParityCase> {
         append_large_hand_case(&mut cases, board_seed ^ 0x500, players);
         append_no_player_trades_case(&mut cases, board_seed ^ 0x600, players);
         append_terminal_cases(&mut cases, board_seed ^ 0x700, players);
+        append_victory_target_case(&mut cases, board_seed ^ 0x800, players);
+        append_mref_case(&mut cases, board_seed ^ 0x900, players);
     }
     cases
 }
@@ -484,6 +491,35 @@ fn append_no_player_trades_case(cases: &mut Vec<ExactParityCase>, board_seed: u6
     push_case(cases, format!("{players}p-no-player-trades"), state);
 }
 
+fn append_victory_target_case(cases: &mut Vec<ExactParityCase>, board_seed: u64, players: u8) {
+    let mut state = main_state(board_seed, players);
+    state.victory_target = 15;
+    set_resources(&mut state, 0, [2, 2, 2, 2, 2]);
+    push_case(cases, format!("{players}p-victory-target-15"), state);
+}
+
+fn append_mref_case(cases: &mut Vec<ExactParityCase>, board_seed: u64, players: u8) {
+    let history = (0..players.max(2))
+        .map(|actor| PublicRollObservation {
+            ordinal: actor as u32,
+            actor,
+            total: 6 + (actor % 3),
+        })
+        .collect::<Vec<_>>();
+    let belief = StochasticBelief::from_public_history(
+        players,
+        &history,
+        &DiceHistoryProvenance::CompleteFromFirstGameplayRoll,
+        0,
+    )
+    .expect("Mref parity fixture must construct from complete public history");
+    let mut state = main_state(board_seed, players);
+    state.current_player = 0;
+    state.phase = Phase::PreRoll;
+    state.stochastic = StochasticState::reference(belief);
+    push_case(cases, format!("{players}p-mref-preroll"), state);
+}
+
 fn append_terminal_cases(cases: &mut Vec<ExactParityCase>, board_seed: u64, players: u8) {
     for winner in 0..players {
         let mut state = setup_state(board_seed, players);
@@ -505,6 +541,7 @@ mod tests {
         let second = exact_parity_corpus();
         assert!(!first.is_empty());
         assert_eq!(first.len(), second.len());
+        assert!(first.iter().any(|case| case.state.board.num_players == 2));
         assert!(first.iter().any(|case| case.state.board.num_players == 3));
         assert!(first.iter().any(|case| case.state.board.num_players == 4));
         assert!(first.iter().any(|case| case.state.is_terminal()));
@@ -523,6 +560,8 @@ mod tests {
             "development-cards",
             "large-hands-discard-pressure",
             "no-player-trades",
+            "victory-target-15",
+            "mref-preroll",
         ] {
             assert!(
                 first.iter().any(|case| case.name.contains(marker)),

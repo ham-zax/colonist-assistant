@@ -98,6 +98,7 @@ export const isContradictionEntry = (
 
 
 export interface CompactGameRecord {
+  engineRequests?: Record<string, import("./engine").CanonicalEngineRequest>;
   schema: "catan-evidence/2";
   status: "recording" | "completed" | "interrupted";
   scope: string;
@@ -138,6 +139,7 @@ export interface CompactGameRecord {
     botOnlyGame?: boolean;
     playerCount?: number;
     unresolvedPlayers?: string[];
+    trackerWarnings?: string[];
     unmatchedSamples?: Array<{
       signature: string;
       count: number;
@@ -182,6 +184,7 @@ export interface CompactGameCapture {
   gameKey?: string;
   startedAt: number;
   partialHistory: boolean;
+  trackerWarnings?: string[];
   unmatchedCount: number;
   unmatchedIntegrityCount?: number;
   diceHistory?: DiceHistoryState;
@@ -635,6 +638,7 @@ const updateRecordIntegrity = (record: CompactGameRecord): void => {
     }
   }
   if (record.partialHistory) issues.push("partial-history");
+  if (record.meta.trackerWarnings?.length) issues.push("tracker-state-warning");
   if (record.unmatchedIntegrityCount > 0) {
     issues.push(`unmatched-state-events:${record.unmatchedIntegrityCount}`);
   }
@@ -1280,6 +1284,9 @@ export class CompactGameBuilder {
 
     const record = this.record!;
     record.aliases = aliasing.aliases;
+    record.meta.trackerWarnings = input.trackerWarnings?.length
+      ? [...new Set(input.trackerWarnings)]
+      : undefined;
     record.meta.unmatchedSamples = input.unmatchedSamples?.length
       ? input.unmatchedSamples.slice(-MAX_UNMATCHED_SAMPLES).map((sample) => ({
           ...sample,
@@ -1751,6 +1758,13 @@ export class CompactGameBuilder {
       timestamp === undefined
         ? null
         : Math.max(0, Math.round(timestamp - record.startedAt));
+    if (trace.canonicalRequest) {
+      record.engineRequests ??= {};
+      record.engineRequests[id] = {
+        ...structuredClone(trace.canonicalRequest),
+        players: trace.canonicalRequest.players.map((player, index) => alias(player) ?? `unknown-${index}`),
+      };
+    }
     const effort = trace.effectiveSearchEffort;
     const searchOriginState = trace.searchResultOriginStateHash
       ? compactStateId(trace.searchResultOriginStateHash)

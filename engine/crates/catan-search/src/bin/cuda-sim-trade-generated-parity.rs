@@ -9,7 +9,10 @@ const DISABLED_LANES: usize = 16;
 const STEPS: usize = 12;
 
 fn finish_setup(state: &mut GameState) {
-    while matches!(state.phase, Phase::SetupSettlement | Phase::SetupRoad { .. }) {
+    while matches!(
+        state.phase,
+        Phase::SetupSettlement | Phase::SetupRoad { .. }
+    ) {
         let action = state
             .legal_actions()
             .into_iter()
@@ -99,7 +102,10 @@ fn make_complete(seed: u64, players: u8) -> GameState {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut states = Vec::new();
     for lane in 0..MAIN_LANES {
-        states.push(make_main(40_000 + lane as u64, if lane % 2 == 0 { 3 } else { 4 }));
+        states.push(make_main(
+            40_000 + lane as u64,
+            if lane % 2 == 0 { 3 } else { 4 },
+        ));
     }
     for lane in 0..RICH_MAIN_LANES {
         states.push(make_rich_main(
@@ -170,10 +176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         high_hand_offers += 1;
                     }
                     let give_total = give.iter().map(|value| *value as usize).sum::<usize>();
-                    let receive_total = receive
-                        .iter()
-                        .map(|value| *value as usize)
-                        .sum::<usize>();
+                    let receive_total = receive.iter().map(|value| *value as usize).sum::<usize>();
                     if give_total > 1 || receive_total > 1 {
                         bundled_offers += 1;
                     }

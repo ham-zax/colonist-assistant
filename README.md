@@ -72,9 +72,14 @@ your own shown resource cards, and bank counts when the room shows them.
 
 It does not read game chat, cookies, account tokens, network messages,
 opponents’ hidden cards, or hidden development cards. It does not use a
-server, ads, tracking, or usage reports. Game computation stays on your computer;
-the optional native GPU companion receives local analysis requests from the
-extension.
+server, ads, tracking, or usage reports. Game computation stays on your computer.
+The optional native GPU companion exposes two explicitly different capabilities:
+`gpu-root-rollout` for experimental diagnostics and
+`deep-maxn-cuda-exact-fixed-work-v1` as a same-policy acceleration candidate.
+Production `deep-search` decisions currently stay on CPU/WASM; exact CUDA is not
+promoted unless fixed-work parity, cancellation, packaged execution, and the
+end-to-end performance gate all pass. Companion availability never substitutes
+rollout search for the production MaxN policy.
 Chrome may sync settings through the user’s Google account when Chrome Sync is
 on.
 
@@ -127,6 +132,12 @@ of a single hostile coalition.
 
 The bundled learned policy and value heads are both unpromoted and disabled
 because their grouped validation evidence did not pass the production gates.
+Exact CUDA parity is a backend-correctness result, not evidence that the engine
+plays better; strategy and backend promotion remain separate decisions.
+The current candidate is `deep-maxn-v14`. Saved v13 acceptance artifacts do not
+certify it; the recorded v13 GPU smoke reached 1.370× (3P) and 1.272× (4P), below
+the required 2×. See [the acceptance report](docs/ENGINE_STABILIZATION_ACCEPTANCE_2026-09-07.md)
+for verification scope and remaining promotion gates.
 Structured action priors and the strategic evaluator remain authoritative.
 Experimental belief PUCT, UCT, and paranoid AlphaBeta are native-arena
 comparisons only. The public build-time estimate remains display-only and

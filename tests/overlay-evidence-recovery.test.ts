@@ -16,6 +16,85 @@ afterEach(() => {
 });
 
 describe("live stochastic evidence recovery", () => {
+  it("keeps tracker repair warnings separate from structural card-history integrity", async () => {
+    vi.stubGlobal("chrome", {
+      runtime: {
+        getURL: (path: string) => `chrome-extension://fixture/${path}`,
+        getManifest: () => ({ version: "0.9.1" }),
+        sendMessage: async (message: { id: number }) => ({
+          id: message.id,
+          runtime: "background-wasm",
+          engineRevision: "deep-maxn-v12",
+          initializationMs: 1,
+        }),
+      },
+      storage: {
+        local: { get: async () => ({}), set: async () => {}, remove: async () => {} },
+        sync: { set: async () => {} },
+      },
+    });
+    overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS, recordGame: true },
+      { reset: vi.fn() },
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    let tracker = reduceTracker(createTrackerState(), { type: "discover", player: "Alice" });
+    tracker = {
+      ...tracker,
+      warnings: ["Some earlier game history was unavailable; lower bounds were repaired."],
+    };
+    const capture = vi.fn();
+    const internals = overlay as unknown as {
+      session: {
+        id: string;
+        gameKey: string;
+        startedAt: number;
+        partialHistory: boolean;
+        unmatchedCount: number;
+        unmatchedIntegrityCount: number;
+        unmatchedSamples: unknown[];
+        diceHistory: ReturnType<typeof createDiceHistoryState>;
+        state: typeof tracker;
+        events: unknown[];
+      };
+      gameRecorder: { capture: typeof capture; finalize: typeof capture };
+      buildInfo: { identity: string };
+      decisionTraces: { snapshotForRecord: () => unknown[] };
+      captureGameRecord: () => void;
+      renderCards: (state: typeof tracker, analysis?: undefined) => string;
+    };
+    internals.session = {
+      id: "session-warning-only",
+      gameKey: "warning-only-game",
+      startedAt: 1,
+      partialHistory: false,
+      unmatchedCount: 0,
+      unmatchedIntegrityCount: 0,
+      unmatchedSamples: [],
+      diceHistory: createDiceHistoryState(),
+      state: tracker,
+      events: [],
+    };
+    internals.gameRecorder.capture = capture;
+    internals.gameRecorder.finalize = capture;
+    internals.buildInfo = { identity: "test-build" };
+    internals.decisionTraces.snapshotForRecord = () => [];
+
+    const cards = internals.renderCards(tracker);
+    expect(cards).not.toContain("Card-event history is incomplete");
+    expect(cards).toContain("Some earlier game history was unavailable");
+
+    internals.captureGameRecord();
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect(capture.mock.calls[0]![0]).toMatchObject({
+      partialHistory: false,
+      trackerWarnings: [
+        "Some earlier game history was unavailable; lower bounds were repaired.",
+      ],
+    });
+  });
+
   it("does not expose a heuristic click while the authoritative engine is paused", async () => {
     vi.stubGlobal("chrome", {
       runtime: {

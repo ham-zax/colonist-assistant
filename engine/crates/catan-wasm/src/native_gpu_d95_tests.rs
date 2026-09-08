@@ -193,13 +193,20 @@ fn censored_losses_do_not_displace_settlement_conversion() {
     // The report supplies completion/outcome rates; leaf values here isolate
     // the bug: observing fewer losses must not overrule stronger VP conversion.
     let settlement = aggregate_root_for_ordering(
-        Action::BuildSettlement { vertex: 30 }, -0.50, 0.50, 0.25, -1.0, 0.04);
+        Action::BuildSettlement { vertex: 30 },
+        -0.50,
+        0.50,
+        0.25,
+        -1.0,
+        0.04,
+    );
     for action in [
         Action::EndTurn,
         Action::BuildRoad { edge: 36 },
         Action::MaritimeTrade {
             give: colonist_catan_core::Resource::Lumber,
-            receive: colonist_catan_core::Resource::Grain, ratio: 3,
+            receive: colonist_catan_core::Resource::Grain,
+            ratio: 3,
         },
     ] {
         let delayed_loss = aggregate_root_for_ordering(action, -0.125, 0.125, 0.109375, -2.0, 0.04);
@@ -215,7 +222,8 @@ fn censored_losses_do_not_displace_settlement_conversion() {
 #[test]
 fn strong_completed_terminal_evidence_still_beats_a_better_leaf() {
     let mut win = aggregate_root_for_ordering(Action::EndTurn, 1.0, 1.0, 0.0, -3.0, 0.0);
-    let mut loss = aggregate_root_for_ordering(Action::BuildRoad { edge: 36 }, -1.0, 1.0, 0.0, 3.0, 0.0);
+    let mut loss =
+        aggregate_root_for_ordering(Action::BuildRoad { edge: 36 }, -1.0, 1.0, 0.0, 3.0, 0.0);
     win.samples = 1_000;
     loss.samples = 1_000;
     assert_eq!(escalated_root_order(&[1, 0], &[win, loss]), vec![0, 1]);
@@ -223,9 +231,17 @@ fn strong_completed_terminal_evidence_still_beats_a_better_leaf() {
 
 #[test]
 fn fewer_terminal_losses_cannot_break_an_equal_leaf_tie() {
-    let mut productive = aggregate_root_for_ordering(Action::BuildSettlement { vertex: 30 }, -0.5, 0.5, 0.25, -1.0, 0.04);
+    let mut productive = aggregate_root_for_ordering(
+        Action::BuildSettlement { vertex: 30 },
+        -0.5,
+        0.5,
+        0.25,
+        -1.0,
+        0.04,
+    );
     productive.prior = 0.9;
-    let mut delay = aggregate_root_for_ordering(Action::EndTurn, -0.125, 0.125, 0.109375, -1.0, 0.04);
+    let mut delay =
+        aggregate_root_for_ordering(Action::EndTurn, -0.125, 0.125, 0.109375, -1.0, 0.04);
     delay.prior = 0.02;
     assert_eq!(escalated_root_order(&[0, 1], &[delay, productive])[0], 1);
 }
@@ -241,7 +257,9 @@ fn escalated_three_root_order_is_input_order_independent() {
         aggregate_root_for_ordering(Action::BuildRoad { edge: 11 }, 0.79, 1.0, 0.3759, 4.8, 0.04),
         aggregate_root_for_ordering(Action::BuildRoad { edge: 12 }, 0.40, 1.0, 0.84, 6.0, 0.04),
     ];
-    for root in &mut roots { root.samples = 10_000; }
+    for root in &mut roots {
+        root.samples = 10_000;
+    }
     let expected = vec![0, 1, 2];
     for input in [
         vec![0, 1, 2],

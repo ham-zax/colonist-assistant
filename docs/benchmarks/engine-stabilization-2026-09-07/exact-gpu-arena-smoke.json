@@ -1,0 +1,404 @@
+{
+  "schemaVersion": 1,
+  "kind": "colonist-exact-gpu-arena-benchmark",
+  "generatedAt": "2026-09-07T03:38:34.784Z",
+  "profile": "smoke",
+  "build": {
+    "repositoryCommit": "d77935fda984e3006b8a8ad9d65eb58a6d162eaf",
+    "builtOnce": true
+  },
+  "evaluator": {
+    "kind": "exact-handcrafted",
+    "cpuOracle": "evaluate(state)",
+    "neural": false
+  },
+  "cudaEnvironment": {
+    "discovery": "uv run --with torch --no-project",
+    "torchVersion": "2.14.0+cu130",
+    "cudaVersion": "13.0",
+    "deviceName": "NVIDIA GeForce RTX 3070 Ti",
+    "deviceCount": 1,
+    "memoryFreeBytes": 7435452416,
+    "memoryTotalBytes": 8589410304,
+    "libraryDirs": [
+      "/home/hamza/.cache/uv/archive-v0/8w8jqyxf7fiPMgkI/lib/python3.13/site-packages/nvidia/cu13/lib"
+    ],
+    "nvrtcLibraries": [
+      "/home/hamza/.cache/uv/archive-v0/8w8jqyxf7fiPMgkI/lib/python3.13/site-packages/nvidia/cu13/lib/libnvrtc.so.13"
+    ],
+    "cudaRuntimeLibraries": [
+      "/home/hamza/.cache/uv/archive-v0/8w8jqyxf7fiPMgkI/lib/python3.13/site-packages/nvidia/cu13/lib/libcudart.so.13"
+    ]
+  },
+  "configuration": {
+    "players": [
+      3,
+      4
+    ],
+    "blocks": 1,
+    "seed": 9100001,
+    "threads": 4,
+    "lineup": "all-maxn",
+    "iterations": 80,
+    "rolloutActions": 140,
+    "maxTurns": 600,
+    "maxnDepth": 4,
+    "maxnBranch": 8,
+    "maxnNodes": 4000,
+    "maxnTimeMs": 0,
+    "openingNodes": 12000,
+    "openingTimeMs": 0,
+    "tradeResponseNodes": 2000,
+    "tradeResponseTimeMs": 0,
+    "beliefParticles": 24,
+    "strategicParticles": 24,
+    "playerTradesEnabled": false,
+    "maritimeTradesEnabled": true,
+    "validate": true
+  },
+  "checkpointDirectory": "/home/hamza/repo/colonist-assistant/docs/benchmarks/engine-stabilization-2026-09-07/exact-gpu-arena-smoke.checkpoints",
+  "parity": true,
+  "lanes": [
+    {
+      "players": 3,
+      "seed": 9100001,
+      "lineup": [
+        "maxn",
+        "maxn",
+        "maxn"
+      ],
+      "cpu": {
+        "backend": "cpu-exact",
+        "device": "CPU",
+        "elapsedMs": 152873.571876,
+        "reportedElapsedMs": 152868,
+        "gamesPerSecond": 0.019625,
+        "terminalGames": 3,
+        "winners": {
+          "random": 0,
+          "weighted": 0,
+          "maxn": 3,
+          "alphabeta": 0,
+          "uct": 0,
+          "puct": 0
+        },
+        "turns": {
+          "mean": 102,
+          "total": null
+        },
+        "actions": {
+          "mean": 474,
+          "total": null
+        },
+        "cutoffs": 0,
+        "cutoffRate": 0,
+        "decisions": {
+          "total": 981,
+          "search": 981,
+          "meanLatencyMs": 465.831339
+        },
+        "search": {
+          "totalNodes": null,
+          "meanNodes": 3904.33,
+          "meanDepth": 1.826,
+          "meanRootActions": 3.648,
+          "searchDeadlineRate": 0
+        },
+        "particles": {
+          "configuredBelief": 24,
+          "configuredStrategic": 24,
+          "meanPosterior": 24,
+          "meanStrategic": 15.651
+        },
+        "batch": {
+          "averageSize": null,
+          "stats": null
+        },
+        "gpu": null,
+        "build": {
+          "engineRevision": "deep-maxn-v13",
+          "buildGitSha": "d77935fda984e3006b8a8ad9d65eb58a6d162eaf",
+          "buildDirty": true
+        },
+        "checkpoint": "/home/hamza/repo/colonist-assistant/docs/benchmarks/engine-stabilization-2026-09-07/exact-gpu-arena-smoke.checkpoints/3p-cpu.jsonl"
+      },
+      "cuda": {
+        "backend": "cuda-exact",
+        "device": "NVIDIA GeForce RTX 3070 Ti",
+        "elapsedMs": 111593.789167,
+        "reportedElapsedMs": 111128,
+        "gamesPerSecond": 0.026996,
+        "terminalGames": 3,
+        "winners": {
+          "random": 0,
+          "weighted": 0,
+          "maxn": 3,
+          "alphabeta": 0,
+          "uct": 0,
+          "puct": 0
+        },
+        "turns": {
+          "mean": 102,
+          "total": null
+        },
+        "actions": {
+          "mean": 474,
+          "total": null
+        },
+        "cutoffs": 0,
+        "cutoffRate": 0,
+        "decisions": {
+          "total": 981,
+          "search": 981,
+          "meanLatencyMs": 338.370077
+        },
+        "search": {
+          "totalNodes": null,
+          "meanNodes": 3904.33,
+          "meanDepth": 1.826,
+          "meanRootActions": 3.648,
+          "searchDeadlineRate": 0
+        },
+        "particles": {
+          "configuredBelief": 24,
+          "configuredStrategic": 24,
+          "meanPosterior": 24,
+          "meanStrategic": 15.651
+        },
+        "batch": {
+          "averageSize": 1653.3231382978724,
+          "stats": {
+            "averageBatchSize": 1653.3231382978724,
+            "batches": 2256,
+            "lastBatchSize": 1440,
+            "states": 3729897
+          }
+        },
+        "gpu": {
+          "identity": "NVIDIA GeForce RTX 3070 Ti",
+          "utilizationPercent": null,
+          "memoryUsedBytes": null,
+          "memoryTotalBytes": null,
+          "evaluatorStatesPerSecond": 122418.29357340078,
+          "searchCalls": 2256,
+          "linearSearchCalls": 2256,
+          "deferredSearchCalls": 0,
+          "streamedLeaves": 3729897,
+          "streamFlushes": 2256,
+          "evaluatorTimingMs": {
+            "deviceToHost": 287.619573,
+            "hostToDevice": 1186.873211,
+            "kernel": 28335.013351,
+            "pack": 0,
+            "total": 30468.460972
+          },
+          "searchTimingMs": {
+            "backup": 3263.579951,
+            "evaluation": 34393.858323,
+            "hostPacking": 1037.254604,
+            "linearApply": 2091.0754,
+            "linearBudget": 293.753783,
+            "linearLegalActions": 3879.499029,
+            "linearPolicy": 180041.431563,
+            "linearTraversal": 188858.448213,
+            "queueWait": 3909.589199,
+            "rootPreparation": 82182.567145,
+            "total": 309763.602177,
+            "treeBuild": 0
+          },
+          "rulesAndSearchMs": 80659.539028
+        },
+        "build": {
+          "engineRevision": "deep-maxn-v13",
+          "buildGitSha": "d77935fda984e3006b8a8ad9d65eb58a6d162eaf",
+          "buildDirty": true
+        },
+        "checkpoint": "/home/hamza/repo/colonist-assistant/docs/benchmarks/engine-stabilization-2026-09-07/exact-gpu-arena-smoke.checkpoints/3p-cuda.jsonl"
+      },
+      "parity": {
+        "match": true,
+        "gamesCompared": 3,
+        "checkpointLines": {
+          "cpu": 3,
+          "cuda": 3
+        }
+      },
+      "speedup": {
+        "elapsedCpuOverGpu": 1.3699111125909065,
+        "gamesPerSecondGpuOverCpu": 1.375592356687898,
+        "meanDecisionLatencyCpuOverGpu": 1.3766918846077516
+      }
+    },
+    {
+      "players": 4,
+      "seed": 9100001,
+      "lineup": [
+        "maxn",
+        "maxn",
+        "maxn",
+        "maxn"
+      ],
+      "cpu": {
+        "backend": "cpu-exact",
+        "device": "CPU",
+        "elapsedMs": 247970.937367,
+        "reportedElapsedMs": 247965,
+        "gamesPerSecond": 0.016131,
+        "terminalGames": 4,
+        "winners": {
+          "random": 0,
+          "weighted": 0,
+          "maxn": 4,
+          "alphabeta": 0,
+          "uct": 0,
+          "puct": 0
+        },
+        "turns": {
+          "mean": 117,
+          "total": null
+        },
+        "actions": {
+          "mean": 604,
+          "total": null
+        },
+        "cutoffs": 0,
+        "cutoffRate": 0,
+        "decisions": {
+          "total": 1716,
+          "search": 1716,
+          "meanLatencyMs": 574.784056
+        },
+        "search": {
+          "totalNodes": null,
+          "meanNodes": 3900.531,
+          "meanDepth": 1.683,
+          "meanRootActions": 4.014,
+          "searchDeadlineRate": 0
+        },
+        "particles": {
+          "configuredBelief": 24,
+          "configuredStrategic": 24,
+          "meanPosterior": 24,
+          "meanStrategic": 21.515
+        },
+        "batch": {
+          "averageSize": null,
+          "stats": null
+        },
+        "gpu": null,
+        "build": {
+          "engineRevision": "deep-maxn-v13",
+          "buildGitSha": "d77935fda984e3006b8a8ad9d65eb58a6d162eaf",
+          "buildDirty": true
+        },
+        "checkpoint": "/home/hamza/repo/colonist-assistant/docs/benchmarks/engine-stabilization-2026-09-07/exact-gpu-arena-smoke.checkpoints/4p-cpu.jsonl"
+      },
+      "cuda": {
+        "backend": "cuda-exact",
+        "device": "NVIDIA GeForce RTX 3070 Ti",
+        "elapsedMs": 194935.231339,
+        "reportedElapsedMs": 194051,
+        "gamesPerSecond": 0.020613,
+        "terminalGames": 4,
+        "winners": {
+          "random": 0,
+          "weighted": 0,
+          "maxn": 4,
+          "alphabeta": 0,
+          "uct": 0,
+          "puct": 0
+        },
+        "turns": {
+          "mean": 117,
+          "total": null
+        },
+        "actions": {
+          "mean": 604,
+          "total": null
+        },
+        "cutoffs": 0,
+        "cutoffRate": 0,
+        "decisions": {
+          "total": 1716,
+          "search": 1716,
+          "meanLatencyMs": 452.037488
+        },
+        "search": {
+          "totalNodes": null,
+          "meanNodes": 3900.531,
+          "meanDepth": 1.683,
+          "meanRootActions": 4.014,
+          "searchDeadlineRate": 0
+        },
+        "particles": {
+          "configuredBelief": 24,
+          "configuredStrategic": 24,
+          "meanPosterior": 24,
+          "meanStrategic": 21.515
+        },
+        "batch": {
+          "averageSize": 1588.436499466382,
+          "stats": {
+            "averageBatchSize": 1588.436499466382,
+            "batches": 3748,
+            "lastBatchSize": 1017,
+            "states": 5953460
+          }
+        },
+        "gpu": {
+          "identity": "NVIDIA GeForce RTX 3070 Ti",
+          "utilizationPercent": null,
+          "memoryUsedBytes": null,
+          "memoryTotalBytes": null,
+          "evaluatorStatesPerSecond": 129454.3146538759,
+          "searchCalls": 3748,
+          "linearSearchCalls": 3748,
+          "deferredSearchCalls": 0,
+          "streamedLeaves": 5953460,
+          "streamFlushes": 3748,
+          "evaluatorTimingMs": {
+            "deviceToHost": 445.09908,
+            "hostToDevice": 1643.620263,
+            "kernel": 42929.052803,
+            "pack": 0,
+            "total": 45988.888172
+          },
+          "searchTimingMs": {
+            "backup": 8124.451403,
+            "evaluation": 53134.838974,
+            "hostPacking": 1810.684333,
+            "linearApply": 5939.758247,
+            "linearBudget": 516.61847,
+            "linearLegalActions": 8282.677493,
+            "linearPolicy": 359243.207404,
+            "linearTraversal": 379746.109741,
+            "queueWait": 7116.178389,
+            "rootPreparation": 281744.801748,
+            "total": 724611.415923,
+            "treeBuild": 0
+          },
+          "rulesAndSearchMs": 148062.111828
+        },
+        "build": {
+          "engineRevision": "deep-maxn-v13",
+          "buildGitSha": "d77935fda984e3006b8a8ad9d65eb58a6d162eaf",
+          "buildDirty": true
+        },
+        "checkpoint": "/home/hamza/repo/colonist-assistant/docs/benchmarks/engine-stabilization-2026-09-07/exact-gpu-arena-smoke.checkpoints/4p-cuda.jsonl"
+      },
+      "parity": {
+        "match": true,
+        "gamesCompared": 4,
+        "checkpointLines": {
+          "cpu": 4,
+          "cuda": 4
+        }
+      },
+      "speedup": {
+        "elapsedCpuOverGpu": 1.2720683463102103,
+        "gamesPerSecondGpuOverCpu": 1.2778501022875208,
+        "meanDecisionLatencyCpuOverGpu": 1.271540682484281
+      }
+    }
+  ]
+}

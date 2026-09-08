@@ -1,9 +1,12 @@
 use colonist_catan_core::{Action, GameState, Phase};
-use colonist_catan_search::{plan_current_turn, TurnPlanConfig};
+use colonist_catan_search::{TurnPlanConfig, plan_current_turn};
 
 fn main_state(players: u8) -> GameState {
     let mut state = GameState::standard(7, players);
-    while matches!(state.phase, Phase::SetupSettlement | Phase::SetupRoad { .. }) {
+    while matches!(
+        state.phase,
+        Phase::SetupSettlement | Phase::SetupRoad { .. }
+    ) {
         let action = state.legal_actions()[0].clone();
         state.apply(&action).expect("legal setup action");
     }

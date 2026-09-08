@@ -253,8 +253,14 @@ fn completes_build(state: &GameState, give: Resource, receive: Resource, ratio: 
         .iter()
         .enumerate()
         .filter(|(_, cost)| {
-            hand.iter().zip(cost.iter()).all(|(available, needed)| available >= needed)
-                && player.resources.iter().zip(cost.iter()).any(|(available, needed)| available < needed)
+            hand.iter()
+                .zip(cost.iter())
+                .all(|(available, needed)| available >= needed)
+                && player
+                    .resources
+                    .iter()
+                    .zip(cost.iter())
+                    .any(|(available, needed)| available < needed)
         })
         .map(|(index, _)| [0.35, 1.1, 1.0, 0.65][index])
         .fold(0.0, f32::max)
@@ -265,7 +271,13 @@ fn road_pair_coherence(state: &GameState, first: u8, second: Option<u8>, actor: 
     let Some(second) = second else {
         return first_value;
     };
-    road_pair_coherence_from_values(state, first, second, first_value, road_frontier_value(state, second, actor))
+    road_pair_coherence_from_values(
+        state,
+        first,
+        second,
+        first_value,
+        road_frontier_value(state, second, actor),
+    )
 }
 
 fn road_pair_coherence_from_values(
@@ -464,13 +476,19 @@ fn action_prior_nonwinning(state: &GameState, action: &Action, actor: u8) -> f32
             receive,
             ratio,
         } => {
-            let direct = crate::economy::maritime_advances_direct_build_closure(state, action, actor);
+            let direct =
+                crate::economy::maritime_advances_direct_build_closure(state, action, actor);
             let progress = if direct {
                 crate::economy::maritime_build_closure_progress(state, action, actor)
-            } else { 0.0 };
-            let safety = if state.players[usize::from(actor)].resource_total() > state.card_discard_limit {
-                f32::from(ratio.saturating_sub(1)) * 0.08
-            } else { 0.0 };
+            } else {
+                0.0
+            };
+            let safety =
+                if state.players[usize::from(actor)].resource_total() > state.card_discard_limit {
+                    f32::from(ratio.saturating_sub(1)) * 0.08
+                } else {
+                    0.0
+                };
             0.02 + completes_build(state, *give, *receive, *ratio) + progress + safety
         }
         Action::OfferTrade {
@@ -548,24 +566,22 @@ fn action_prior_nonwinning_cached(
 ) -> f32 {
     let base = match action {
         Action::PlaceRoad { edge } | Action::BuildRoad { edge } => {
-            0.02
-                + cached_road_frontier_value(state, *edge, actor, road_cache, road_context)
+            0.02 + cached_road_frontier_value(state, *edge, actor, road_cache, road_context)
                 + cheap_road_disruption(state, *edge, actor)
         }
         Action::PlayRoadBuilding { first, second } => {
-            1.0
-                + road_pair_coherence_cached(
-                    state,
-                    *first,
-                    *second,
-                    actor,
-                    road_cache,
-                    road_context,
-                )
+            1.0 + road_pair_coherence_cached(
+                state,
+                *first,
+                *second,
+                actor,
+                road_cache,
+                road_context,
+            )
         }
         Action::MoveRobber { hex, victim } | Action::PlayKnight { hex, victim } => {
-            let context = robber_context
-                .get_or_insert_with(|| prepare_robber_denial_context(state, actor));
+            let context =
+                robber_context.get_or_insert_with(|| prepare_robber_denial_context(state, actor));
             let steal = victim
                 .map(|player| {
                     state.players[player as usize].resource_total() as f32 * 0.12
@@ -1048,9 +1064,8 @@ mod tests {
     use super::{
         action_prior, action_prior_nonwinning, action_prior_nonwinning_cached,
         actor_proposal_actions, allocate_root_node_budgets, cheap_road_disruption,
-        normalize_observed_priors, normalize_priors, order_scored_with_state_quotas,
-        policy_family, rank_with_class_quotas, trade_acceptance_probability,
-        truncate_root_preserving_end_turn,
+        normalize_observed_priors, normalize_priors, order_scored_with_state_quotas, policy_family,
+        rank_with_class_quotas, trade_acceptance_probability, truncate_root_preserving_end_turn,
     };
 
     fn hidden_bank_observation_pair() -> (GameState, GameState) {
