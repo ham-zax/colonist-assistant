@@ -1499,7 +1499,14 @@ export class AssistantOverlay {
   private async exportGameRecord(): Promise<void> {
     if (this.settings.recordGame) this.captureGameRecord(Boolean(this.board?.gameOver));
     await this.gameRecorder.flush();
-    const record = await readRecordedGame();
+    let record: Awaited<ReturnType<typeof readRecordedGame>>;
+    try {
+      record = await readRecordedGame();
+    } catch (error) {
+      if (!isExtensionContextInvalidatedError(error)) throw error;
+      alert(EXTENSION_CONTEXT_RELOAD_MESSAGE);
+      return;
+    }
     if (!record) {
       alert("No recorded Colonist game is available yet.");
       return;

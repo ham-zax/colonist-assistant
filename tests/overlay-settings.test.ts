@@ -9,6 +9,7 @@ import {
 import * as actionGuide from "../src/content/action-guide";
 import type { NextClick } from "../src/content/action-guide";
 import { DEFAULT_SETTINGS } from "../src/content/settings";
+import { EXTENSION_CONTEXT_RELOAD_MESSAGE } from "../src/content/extension-context";
 import {
   createTrackerState,
   getPlayerEstimate,
@@ -267,6 +268,33 @@ describe("overlay settings interaction", () => {
       shadow.querySelector<HTMLElement>(".settings-version strong")?.textContent,
     ).toContain("v0.7.12");
     overlay.destroy();
+  });
+
+  it("alerts the reload message instead of rejecting when export-record runs in a stale context", async () => {
+    chrome.storage.local.get = () =>
+      Promise.reject(new Error("Extension context invalidated."));
+    const alertMock = vi.fn();
+    vi.stubGlobal("alert", alertMock);
+    const overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS },
+      { reset: vi.fn() },
+    );
+    try {
+      const shadow = document.querySelector<HTMLDivElement>(
+        "#colonist-assistant-root",
+      )!.shadowRoot!;
+      shadow
+        .querySelector<HTMLElement>("[data-action='view'][data-view='settings']")!
+        .click();
+      shadow
+        .querySelector<HTMLElement>("[data-action='export-record']")!
+        .click();
+      await vi.waitFor(() => {
+        expect(alertMock).toHaveBeenCalledWith(EXTENSION_CONTEXT_RELOAD_MESSAGE);
+      });
+    } finally {
+      overlay.destroy();
+    }
   });
 
   it("allows autonomous clicks whenever autopilot is enabled", () => {
