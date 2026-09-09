@@ -110,6 +110,16 @@ export type DeepSearchEffectiveEffort =
       rootCap: number;
       rolloutBudget: number;
       rolloutSteps: number;
+    }
+  | {
+      backend: "gpu-exact";
+      timeBudgetMs: number;
+      tacticalMaxDepth: number;
+      tacticalNodeBudget: number;
+      maxDepth: number;
+      rootCap: number;
+      nodesPerDepthWave: number;
+      evidenceEscalationMs: number;
     };
 
 export interface DeepSearchActionStatistics {
@@ -802,6 +812,10 @@ export const explainDeepSearchDecision = (
   } else if (effort?.backend === "gpu") {
     evidence.push(
       `GPU effort: ${effort.timeBudgetMs} ms, root cap ${effort.rootCap}, rollout budget ${effort.rolloutBudget.toLocaleString()}, ${effort.rolloutSteps} rollout steps`,
+    );
+  } else if (effort?.backend === "gpu-exact") {
+    evidence.push(
+      `Exact GPU MaxN effort: ${effort.timeBudgetMs} ms base${effort.evidenceEscalationMs > 0 ? ` + up to ${effort.evidenceEscalationMs} ms evidence reserve` : ""}, depth cap ${effort.maxDepth}, root cap ${effort.rootCap}, ${effort.nodesPerDepthWave.toLocaleString()} nodes per depth wave`,
     );
   }
 

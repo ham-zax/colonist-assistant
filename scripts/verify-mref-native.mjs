@@ -96,7 +96,9 @@ try {
   assert(hello.stochasticModels.includes(dice.MREF_COLONIST_LINKED_2024_V1));
   assert(hello.capabilities?.algorithms?.includes("gpu-root-rollout"));
   assert.equal(hello.capabilities?.exactMaxn?.algorithm, "deep-maxn-cuda-exact-fixed-work-v1");
-  assert.equal(hello.capabilities?.exactMaxn?.fixedWorkParityOnly, true);
+  // Staged source deliberately cleared the parity-only gate as the exact-MaxN
+  // production-promotion direction (native_gpu.rs); the host must agree.
+  assert.equal(hello.capabilities?.exactMaxn?.fixedWorkParityOnly, false);
   console.log(JSON.stringify({
     stage: "hello",
     elapsedMs: Math.round(performance.now() - started),

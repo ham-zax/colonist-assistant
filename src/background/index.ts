@@ -24,12 +24,6 @@ import {
 
 const nativeGpu = new NativeGpuClient();
 
-// Product promotion is deliberately separate from host capability. Protocol 7
-// can expose exact CUDA for parity diagnostics without authorizing the browser
-// to switch computation backends. Flip this only after the stabilization
-// release gate certifies the current reference and performance target.
-const NATIVE_GPU_EXACT_PRODUCTION_PROMOTED = false;
-
 export const withRemainingDecisionBudget = (
   message: DecisionMessage,
   localStartedAt: number,
@@ -59,9 +53,11 @@ const hasPendingIncomingTrade = (message: DecisionMessage): boolean =>
   );
 
 export const shouldUseNativeGpu = (message: DecisionMessage): boolean =>
-  NATIVE_GPU_EXACT_PRODUCTION_PROMOTED &&
   nativeGpuSupportsStochasticModel(message.stochastic?.model) &&
   message.engine === "deep-search" &&
+  // Explicit strategy policies remain on their declared CPU/WASM owner until
+  // that policy has its own production acceptance lane.
+  !message.strategyPolicy &&
   !message.board.initialPlacement &&
   (Boolean(message.board.isMyTurn) || hasPendingIncomingTrade(message));
 
@@ -143,10 +139,7 @@ chrome.runtime.onMessage.addListener(
       const status = message as DecisionStatusMessage;
       const startedAt = performance.now();
       void (async () => {
-        if (
-          status.engine === "deep-search" &&
-          NATIVE_GPU_EXACT_PRODUCTION_PROMOTED
-        ) {
+        if (status.engine === "deep-search") {
           const gpu = await nativeGpu.status();
           if (gpu && nativeGpuSupportsProductionExactMaxn(gpu)) {
             const response: DecisionStatusMessageResponse = {
@@ -237,15 +230,15 @@ chrome.runtime.onMessage.addListener(
         analysis.runtimeReason ??
         (runtime === "background-wasm"
           ? message.strategyPolicy
-            ? `Strategy policy ${message.strategyPolicy} remains on CPU/WASM until exact CUDA MaxN is production-promoted`
+          ? `Strategy policy ${message.strategyPolicy} remains on its CPU/WASM owner`
             : message.engine === "deep-search" && message.board.initialPlacement
               ? "Dedicated opening solver runs on WASM/CPU"
               : nativeGpuEligible
                 ? "Native GPU unavailable; using WASM Deep MaxN"
                 : message.engine === "deep-search"
                   ? requestedStochasticModel === MREF_COLONIST_LINKED_2024_V1
-                    ? "Mref preserved on CPU/WASM Deep MaxN; exact CUDA MaxN remains a fixed-work parity backend and gpu-root-rollout remains experimental"
-                    : "Weighted-belief Deep MaxN is the production authority; exact CUDA MaxN remains parity-gated and gpu-root-rollout remains experimental"
+                    ? "Native exact CUDA MaxN is preferred when its protocol-7 capability is available; Mref remains authoritative and gpu-root-rollout remains experimental"
+                    : "Native exact CUDA MaxN is preferred when its protocol-7 capability is available; weighted-belief MaxN remains the CPU/WASM fallback and gpu-root-rollout remains experimental"
                   : message.engine === "weighted"
                     ? "Weighted mode runs on WASM"
                     : undefined

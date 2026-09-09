@@ -28,7 +28,7 @@ const companion = ({
   models = [M0, MREF],
   responseModel = M0,
   exactAvailable = true,
-  exactFixedWorkOnly = true,
+      exactFixedWorkOnly = false,
   includeCapabilities = true,
 }: CompanionOptions = {}) => {
   let receive: (message: unknown) => void = () => undefined;
@@ -104,8 +104,16 @@ describe("native Mref capability and returned authority", () => {
     await expect(client.status()).rejects.toThrow(/algorithm capabilities/u);
   });
 
-  it("keeps fixed-work exact available for parity but not production promotion", async () => {
+  it("promotes deadline- and cancellation-capable exact MaxN", async () => {
     const { client } = companion();
+    const status = await client.status();
+    expect(status).toBeDefined();
+    expect(nativeGpuSupportsExactMaxn(status!)).toBe(true);
+    expect(nativeGpuSupportsProductionExactMaxn(status!)).toBe(true);
+  });
+
+  it("keeps a parity-only companion out of production routing", async () => {
+    const { client } = companion({ exactFixedWorkOnly: true });
     const status = await client.status();
     expect(status).toBeDefined();
     expect(nativeGpuSupportsExactMaxn(status!)).toBe(true);

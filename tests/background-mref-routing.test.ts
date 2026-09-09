@@ -27,6 +27,14 @@ const fixedWorkExactCapabilities = {
   },
 } as const;
 
+const productionExactCapabilities = {
+  ...fixedWorkExactCapabilities,
+  exactMaxn: {
+    ...fixedWorkExactCapabilities.exactMaxn,
+    fixedWorkParityOnly: false,
+  },
+} as const;
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -126,6 +134,28 @@ describe("background Mref dispatch", () => {
     });
   });
 
+  it("routes baseline non-opening Deep MaxN to exact CUDA when the companion is production-capable", async () => {
+    vi.resetModules();
+    let receive: (message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => unknown;
+    vi.stubGlobal("chrome", { runtime: { onMessage: { addListener: (listener: typeof receive) => { receive = listener; } } } });
+    const { NativeGpuClient } = await import("../src/background/native-gpu");
+    const status = vi.spyOn(NativeGpuClient.prototype, "status").mockResolvedValue({
+      runtime: "gpu-native", engineRevision: "deep-maxn-v14", stochasticModels: [M0, MREF],
+      capabilities: productionExactCapabilities,
+      device: { backend: "cuda-resident-sim", ordinal: 0, name: "routing-fixture", computeCapability: [8, 6] },
+    });
+    const native = vi.spyOn(NativeGpuClient.prototype, "analyzeExact").mockResolvedValue({ stochasticModel: M0 } as never);
+    await import("../src/background/index");
+    const response = await new Promise<unknown>((resolve) => receive({
+      type: DECISION_MESSAGE_TYPE, id: 46, state: {}, rootPlayer: "P0", engine: "deep-search",
+      board: { initialPlacement: false, isMyTurn: true }, stochastic: { model: M0 },
+    }, {}, resolve));
+    expect(response).toMatchObject({ analysis: { runtime: "background-gpu", runtimeReason: "Exact CUDA MaxN on routing-fixture" } });
+    expect(status).toHaveBeenCalledOnce();
+    expect(native).toHaveBeenCalledWith({ stochastic: { model: M0 } }, 46);
+    expect(analyze).toHaveBeenCalledOnce();
+  });
+
   it("does not consult a disconnected rollout companion for production MaxN", async () => {
     vi.resetModules();
     let receive: (message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => unknown;
@@ -161,7 +191,7 @@ describe("background Mref dispatch", () => {
     const { NativeGpuClient } = await import("../src/background/native-gpu");
     const status = vi.spyOn(NativeGpuClient.prototype, "status").mockResolvedValue({
       runtime: "gpu-native", engineRevision: "deep-maxn-v14", stochasticModels: [M0, MREF],
-      capabilities: fixedWorkExactCapabilities,
+      capabilities: productionExactCapabilities,
       device: { backend: "cuda-resident-sim", ordinal: 0, name: "routing-fixture", computeCapability: [8, 6] },
     });
     const { warmDeepSearchEngine } = await import("../src/worker/deep-search");
@@ -178,9 +208,10 @@ describe("background Mref dispatch", () => {
       ));
     expect(response).toMatchObject({
       id: 43,
-      runtime: "background-wasm",
+      runtime: "background-gpu",
       engineRevision: "deep-maxn-v14",
+      deviceName: "routing-fixture",
     });
-    expect(status).not.toHaveBeenCalled();
+    expect(status).toHaveBeenCalledOnce();
   });
 });

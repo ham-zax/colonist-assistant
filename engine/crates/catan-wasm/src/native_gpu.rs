@@ -633,7 +633,7 @@ impl NativeGpuSearchEngine {
                 supports_deadline: exact_available,
                 supports_cancellation: exact_available,
                 supports_opening: false,
-                fixed_work_parity_only: true,
+                fixed_work_parity_only: false,
                 unavailable_reason: self.exact_unavailable_reason.clone(),
             },
         }

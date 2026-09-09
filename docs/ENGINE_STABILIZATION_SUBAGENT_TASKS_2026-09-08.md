@@ -1,5 +1,7 @@
 # Engine stabilization: bounded subagent tasks
 
+**User requirement clarified — 2026-09-08:** acceptance is governed by soundness and robustness, not a minimum speedup. The former 2× threshold is superseded. Preserve same-policy parity, evidence validity, cancellation/recovery, stale-result rejection, safe trade execution, and packaged recommendation-to-confirmed-transition verification. Report performance as diagnostic evidence; sub-2× speedup is not a failure or a reason by itself to block a backend. This clarification does not itself enable production routing or establish playing strength.
+
 ## Start here
 
 **Outcome:** close the remaining v14 correctness and release-evidence gaps, then return the changes to Hamza's reviewing agent. This is a continuation of the existing implementation, not a new engine project.
@@ -8,7 +10,7 @@ Baseline inspected on 2026-09-08: `401956f425b3af68e4e7e57060d6f01b6c74d2fb`, wi
 
 Read this document's common rules and **only your assigned task**. Consult the [governing stabilization plan](ENGINE_STABILIZATION_AND_CPU_GPU_PLAN_2026-09-07.md) for that task's contract and the [acceptance report](ENGINE_STABILIZATION_ACCEPTANCE_2026-09-07.md) for evidence. The old plan's Steps 1–7 are recorded as implemented; they are not a fresh implementation backlog. Its historical defect descriptions are not proof those defects remain.
 
-The acceptance report distinguishes historical v13 artifacts from focused v14 repair results. It does not establish full v14 acceptance, packaged live execution, or increased playing strength. The old exact-CUDA smoke missed the existing 2× gate in both 3P and 4P. Preserve that evidence.
+The acceptance report distinguishes historical v13 artifacts from focused v14 repair results. It does not establish full v14 acceptance, packaged live execution, or increased playing strength. Preserve the old exact-CUDA timing evidence, but do not apply the superseded 2× gate.
 
 This document creates assignments; it does not claim a new code review or test run. No workers were launched while writing it.
 
@@ -223,11 +225,11 @@ campaign, or GPU promotion is part of this follow-up.
    npm run benchmark:gpu:exact -- --smoke --output benchmark-results/engine-stabilization-v14/exact-gpu-arena-smoke.json
    ```
 
-   Record matched seeds, all seat rotations, settings, cutoffs, errors, and complete request timings for both 3P and 4P. Check the runner's current help before changing options. A smoke is not a held-out strength campaign and does not by itself authorize production promotion even if its point estimate exceeds 2×.
+   Record matched seeds, all seat rotations, settings, cutoffs, errors, and complete request timings for both 3P and 4P. Check the runner's current help before changing options. A smoke is not a held-out strength campaign and does not by itself authorize production promotion regardless of its speedup.
 
 **Evidence destination:** raw execution output under ignored `benchmark-results/engine-stabilization-v14/`; propose curated machine-readable results with provenance under `docs/benchmarks/engine-stabilization-2026-09-08/`. T7 curates publication. Never overwrite the historical 2026-09-07 artifacts or relabel them v14.
 
-**Done:** current-candidate gate results and bounded timing results, or a precise blocked/failing gate. If acceleration misses 2× in either lane, leave exact CUDA experimental and return the result. Profiling/optimization is a separate assignment.
+**Done:** current-candidate gate results and bounded timing results, or a precise blocked/failing gate. A timing ratio alone neither fails acceptance nor authorizes promotion; return the soundness/robustness disposition with measured timings. Profiling/optimization is a separate assignment.
 
 ## T6 — Browser worker: packaged recommendation-to-execution evidence
 
@@ -247,8 +249,8 @@ campaign, or GPU promotion is part of this follow-up.
 **Allowed documentation edits:** this task ledger, `ENGINE_STABILIZATION_ACCEPTANCE_2026-09-07.md`, the governing plan, relevant curated benchmark evidence. Update `README.md`, `CPU_GPU_MREF_CONTRACT.md`, or `WINDOWS_GPU_RUNTIME.md` only when a verified current statement needs correction.
 
 1. Separate historical v13 results, focused prior v14 results, and newly reproduced candidate results. Attach revision/dirty-state and artifact provenance to every new claim. A final clean SHA cannot retroactively label an earlier dirty build.
-2. Give every assigned gate PASS / FAIL / BLOCKED / NOT RUN and its evidence or resume condition. Keep CPU release readiness, exact-backend correctness, acceleration retention, packaged execution, and playing strength distinct.
-3. Preserve the existing 2× 3P-and-4P requirement and the other promotion conditions. Completing these tasks never silently enables GPU routing. Keep the strength conclusion “no evidence of improvement” unless a separately designed, held-out product-route campaign supports a different conclusion.
+2. Give every assigned gate PASS / FAIL / BLOCKED / NOT RUN and its evidence or resume condition. Keep CPU release readiness, exact-backend correctness, informational performance measurements, packaged execution, and playing strength distinct.
+3. Apply the clarified soundness/robustness requirements; do not reinstate the superseded 2× threshold. Completing these tasks never silently enables GPU routing. Keep the strength conclusion “no evidence of improvement” unless a separately designed, held-out product-route campaign supports a different conclusion.
 4. Return a reviewed diff summary, remaining merge blockers, nonblocking issues, verification commands/results, and decisions requiring Hamza. Stop here; do not launch strategy or budget experiments.
 
 ## Copyable assignment

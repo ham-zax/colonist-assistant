@@ -1813,6 +1813,7 @@ export const analyzeDeepSearch = async (
       ? "rust-chosen-action-does-not-match-live-prompt"
       : undefined;
   const selected = mappingFailureReason ? undefined : response.chosen;
+  const exactGpu = response.algorithm === "deep-maxn-cuda-exact-fixed-work-v1";
   const effectiveSearchEffort: DeepSearchResult["effectiveSearchEffort"] =
     response.algorithm === "gpu-root-rollout"
       ? {
@@ -1823,6 +1824,18 @@ export const analyzeDeepSearch = async (
           rootCap: response.effectiveEffort.gpu.rootCap,
           rolloutBudget: response.effectiveEffort.gpu.rolloutBudget,
           rolloutSteps: response.effectiveEffort.gpu.rolloutSteps,
+        }
+      : exactGpu
+      ? {
+          backend: "gpu-exact",
+          timeBudgetMs: response.effectiveEffort.decisionTimeMs,
+          tacticalMaxDepth: response.effectiveEffort.tactical.maxDepth,
+          tacticalNodeBudget: response.effectiveEffort.tactical.nodeBudget,
+          maxDepth: response.effectiveEffort.cpu.maxDepth,
+          rootCap: response.effectiveEffort.cpu.rootCap,
+          nodesPerDepthWave: response.effectiveEffort.cpu.nodesPerDepthWave,
+          evidenceEscalationMs:
+            response.effectiveEffort.cpu.evidenceEscalationMs ?? 0,
         }
       : {
           backend: "cpu",

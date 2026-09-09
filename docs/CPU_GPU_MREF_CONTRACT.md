@@ -1,5 +1,7 @@
 # CPU reference and CUDA Mref integration
 
+**User requirement clarified — 2026-09-08:** acceptance is governed by soundness and robustness, not a minimum speedup. The former 2× threshold is superseded. Preserve same-policy parity, evidence validity, cancellation/recovery, stale-result rejection, safe trade execution, and packaged recommendation-to-confirmed-transition verification. Report performance as diagnostic evidence; sub-2× speedup is not a failure or a reason by itself to block a backend. This clarification does not itself enable production routing or establish playing strength.
+
 ## Reference baseline
 
 The current stabilization candidate policy is `deep-maxn-v14`. The saved acceptance artifacts describe the earlier `deep-maxn-v13` working tree based on `d77935fda984e3006b8a8ad9d65eb58a6d162eaf`; they do not certify v14. The older R6 pin `950c1ae9af224f802ad266f268fe7c2f9ff2fe38` remains historical provenance only.
@@ -76,11 +78,11 @@ show that CUDA is functioning as an acceleration backend for the same Strategist
 
 CPU Deep MaxN and native GPU rollouts still use different policy/evaluator value scales and search mechanics. A numeric value correlation is therefore not part of the rollout comparison. Persistent root-coverage or action-direction disagreement under the same observation is a strategic-parity finding even when mechanical parity is green; exact action equality on every rollout decision is not required. This looser rule does **not** apply to exact CUDA, whose fixed-work parity gate requires the same MaxN computation within tolerance.
 
-Historical v13 exact evidence is frozen under `docs/benchmarks/engine-stabilization-2026-09-07/`: evaluator parity passed 69 states across 2P/3P/4P with maximum absolute error `2.9802322e-7`; fixed-work search parity passed 15/15 action comparisons with identical node/depth work and maximum absolute error `5.9604645e-7`; the production-shaped native-host lane matched M0+trades, Mref and explicit M2 requests within `3.8743019e-7`, while also rejecting invalid evidence and recovering from cancellation. These results do not certify the current v14 orchestration. The recorded v13 arena smoke failed the 2× retention threshold (1.370× for 3P; 1.272× for 4P). None of these results establishes playing strength or authorizes promotion.
+Historical v13 exact evidence is frozen under `docs/benchmarks/engine-stabilization-2026-09-07/`: evaluator parity passed 69 states across 2P/3P/4P with maximum absolute error `2.9802322e-7`; fixed-work search parity passed 15/15 action comparisons with identical node/depth work and maximum absolute error `5.9604645e-7`; the production-shaped native-host lane matched M0+trades, Mref and explicit M2 requests within `3.8743019e-7`, while also rejecting invalid evidence and recovering from cancellation. These results do not certify the current v14 orchestration. The recorded v13 arena smoke measured 1.370× for 3P and 1.272× for 4P, below a historical threshold that is now superseded. None of these results establishes playing strength or authorizes promotion.
 
 ### Current decision-pipeline map
 
-The table below intentionally compares the distinct rollout algorithm to CPU MaxN and the resident rollout benchmark. Exact CUDA is **not** a fourth strategy column: `analyze-exact` is required to reproduce the packaged CPU/WASM MaxN column under the algorithm/backend parity contract, with GPU evaluation as a computation backend. Its currently declared exceptions are opening placement and promotion/performance status, both of which route or remain on CPU.
+The table below intentionally compares the distinct rollout algorithm to CPU MaxN and the resident rollout benchmark. Exact CUDA is **not** a fourth strategy column: `analyze-exact` is required to reproduce the packaged CPU/WASM MaxN column under the algorithm/backend parity contract, with GPU evaluation as a computation backend. Its currently declared exceptions are opening placement and promotion/robustness status, both of which route or remain on CPU.
 
 | Surface | Packaged CPU/WASM Deep MaxN | Native GPU rollout diagnostic (browser routing disabled) | `gpu-sim-agent-benchmark` |
 | --- | --- | --- | --- |
