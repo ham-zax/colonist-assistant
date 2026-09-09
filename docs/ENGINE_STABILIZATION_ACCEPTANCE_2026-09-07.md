@@ -241,3 +241,13 @@ Demonstrated integration blocker found and fixed: the installed companion binary
 - Browser-originated GPU decision NOT yet confirmed: plan4246 ran fully on CPU/WASM because the companion was stale at the time. Local protocol success is distinct from browser integration.
 
 Remaining user action between games: reload the extension (also clears the client's no-retry cached unavailable state), refresh the Colonist tab, play, and send one decision export or companion-status result showing the actual runtime and algorithm. No strategy, calibration, benchmark, or registration work follows from this task.
+
+
+## pack1230 live verification (new build, GPU confirmed) — 2026-09-09
+
+User-run completed 4p bot game on build `0.9.1 · main@2afc708f5e94+dirty · 2026-09-09T02:04:17.109Z`, our seat P0, autopilot, our domestic trades disabled. Cicely won 10-5-4-3; Longest Road passed from us to Cicely near the end.
+- Browser-originated exact GPU execution CONFIRMED: 43 of 48 decisions report `background-gpu` with algorithm `deep-maxn-cuda-exact-fixed-work-v1`, Mref preserved, "Exact CUDA MaxN on NVIDIA GeForce RTX 3070 Ti". The 5 WASM rows are setup phases (openings stay CPU/WASM by design). This closes the GPU-integration pending item.
+- Execution fidelity: zero failed executions; setup, roads, a settlement, maritime trades, robber plays all board-confirmed. Incoming offers declined by the disabled-trades policy without search rows, by design.
+- Affordability audit over all 48 decisions: every spend matched exact affordability (roads when road-affordable, the lone settlement the single turn it was affordable); every pass matched poverty (ore/grain never exceeded 1 all game, so city/dev were never affordable). No save-vs-spend discrepancy: spending lumber/brick never delayed a grain/ore plan, and the settlement consumed nothing a dev needed. The D65 all-zeros tie at Cicely-7 was followed by Cicely converting a brick stockpile into a city; consistent with honest loss assessment, not established as a defect. Nothing reopened.
+- Card-warning instance resolved for this game: the indexed log opens at index 2 with no unmatched samples at 0-1, so those rows were never observed (virtualizer opened mid-setup). The latch at placement end plus unmet recovery (observing 0 and 1) is the designed conservative behavior, and it is correct here: index 1's content is permanently unknowable. Opponent ranges stayed conservative all game; dice reconciled 53 rolls independently.
+- Trade calibration still data-less: our trades disabled, incoming declined by policy, predicted acceptance unrecorded. No fields added.
