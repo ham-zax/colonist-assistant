@@ -21,6 +21,12 @@ mod rollout_cutoff;
 mod root_impact;
 mod shared;
 mod strategy;
+#[cfg(test)]
+#[path = "midgame_save_spend_tests.rs"]
+mod midgame_save_spend_tests;
+#[cfg(test)]
+#[path = "road4311_d14_tests.rs"]
+mod road4311_d14_tests;
 mod tactical;
 mod threats;
 mod trade_model;

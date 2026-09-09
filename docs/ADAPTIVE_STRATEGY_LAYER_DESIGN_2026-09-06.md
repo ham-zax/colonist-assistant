@@ -1,5 +1,26 @@
 # Adaptive strategy layer for Colonist Assistant
 
+## Latest clarification: resource saving and GPU routing — 2026-09-08
+
+New [three-player matched pilot](ADAPTIVE_STRATEGY_3P_PILOT_2026-09-08.md): 12 terminal games, zero cutoffs; baseline and adaptive each won 1/3 in both trade settings. M2 ran on 743 decisions but admitted zero challengers. This supplies no strategy-strength improvement evidence and makes a specific resource-saving causal scenario the next task. Reproduction runner: `scripts/run-adaptive-strategy-pilot.mjs`.
+
+This dated note takes precedence over older backend-promotion wording below. Soundness and robustness govern acceptance; the previous 2× speedup threshold is superseded. Current uncommitted `src/background/index.ts` prefers compatible exact CUDA MaxN for eligible ordinary Deep Search requests. Opening placement and explicit strategy-policy requests retain CPU/WASM ownership. The locally inspected `dist/background.js` still contains the disabled production-promotion flag, so these source edits do not establish that an installed extension uses GPU. Confirm the rebuilt artifact and a decision's actual runtime/algorithm before claiming live GPU execution. Exact CUDA parity is a same-policy correctness objective; experimental `gpu-root-rollout` is a different algorithm.
+
+### Reported symptom and evidence boundary
+
+Hamza reports that the engine spends resources on immediate actions instead of saving for a future settlement, city or development card. This is a concrete strategic-quality concern, but no specific midgame decision supplied with this report yet proves the causal owner. Existing bounded lookahead and resource/economy features do not guarantee good long-term planning. The opening opponent-model repair does not resolve this midgame concern.
+
+### Bounded next investigation and repair criteria
+
+1. **Reproduce the decision.** Retain the public board, own hand, beliefs, trade setting, canonical request, build identity, chosen spend, alternative EndTurn and their search diagnostics in an existing replay fixture. Select examples where saving is useful and counterexamples where immediate spending is useful. Do not infer optimal play solely from the final game result.
+2. **Separate candidate coverage from valuation.** Inspect whether saving/EndTurn survives root admission (`depth.rs`, `strategy.rs`), whether search reaches our next meaningful decision, and whether that continuation can complete the intended build. Use existing per-root completed-wave and controlled-next-decision diagnostics. A missing alternative, truncated horizon and poor leaf valuation require different repairs.
+3. **Compare complete funding paths.** Use existing `economy.rs`, `planner.rs` and `eval.rs` owners to compare spend-now with retain-now toward a named legal target. Account for the entire build cost, starting resources, production, bank/port conversion, discard/robber exposure, lost tempo and opponent occupation. Only extend the demonstrated deficient owner; do not add a parallel strategy engine or a blanket resource-hoarding bonus.
+4. **Keep plans conditional.** Reconsider saving when a target becomes blocked, a winning action appears, the hand changes or an opponent threatens to win. Saving is an alternative evaluated by common search, not a rule that overrides legal or mandatory action authority. Existing policy-led future-self continuation may need deeper investigation; merely retaining a named goal cannot prove better decisions.
+5. **Both trade settings.** With our domestic trades disabled, require self-production or legal bank/port funding. With trades enabled, distinguish available accepted trades from uncertain future cooperation. Do not assume an opponent will supply a missing resource. Opponents retain their own permitted trading behavior.
+6. **Verify causally, then measure strength.** A regression must demonstrate the diagnosed failure and preserve counterexamples where spending now is correct. Compare baseline and repair under matched work, board/chance seeds and rotated seats, with both trade settings. Report terminal games, wins, cutoffs and confidence intervals on boards excluded from tuning. Recheck CPU/exact-CUDA parity for any shared search/evaluator change before claiming equivalent behavior.
+
+Implementation status: this section is an investigation/acceptance plan; no resource-reservation policy or evaluator change is implemented by this documentation update. Milestones 3–5 below remain unfinished. Existing historical 3-player results (508/600 against weighted agents and 201/600 against alpha-beta agents) do not measure the current build. The clean v14 three-game all-MaxN CPU/CUDA smoke checks parity, not candidate playing strength.
+
 Status updated 2026-09-08: **implemented through Milestone 2, not through the full roadmap.** Milestone 0 is the pre-strategy baseline repair (`c21e4ae`); Milestone 1 adds shadow evidence (`06b14f8`); Milestone 2 adds opt-in candidate admission (`1420496`), with review corrections in `15f5051`. Thus two strategy-layer milestones are implemented in addition to the Milestone-0 prerequisite. Implementation does not mean demonstrated strength or production promotion.
 
 Milestone 2's `adaptive-candidate-admission-v1` policy admits at most three evidence-backed challengers by replacing only unprotected baseline roots inside the existing cap. Every retained root enters the same common search/evaluator. Missing policy remains baseline-authoritative. The small matched pilot supplied no evidence of improved strength: no admitted challenger became the common-search winner.
@@ -401,7 +422,273 @@ Do not start by training or enabling the learned heads. Their current checkpoint
 
 Remaining empirical questions are which proposals improve decisions, whether point reachability improves value beyond coverage, how often dynamic root re-entry matters, whether transition-aware resource forecasts change ordering under the live budget, and how much full contingent optimization fits that budget. They are experimental questions with the evaluation path above, not assumptions to encode as facts.
 
-## 16. Source references
+## 16. Stage-1 isolated planning validation — 2026-09-08
+
+Question: does bounded MaxN systematically spend immediately when retaining
+resources for a future settlement, city, or development card would be better?
+Method: synthetic post-roll Main-phase fixtures (own domestic trading masked,
+product own-player-only semantics), decided through the production iterative
+wave entry (1500 nodes/wave, depth 3, baseline) and a fixed-work deep
+reference (40k nodes, depth 5). A save fixture holds one ore short of a city
+on an ore-rich board (seed 3: 13 ore pips 2p / 9 pips 3p) with a dev purchase
+competing for the same grain/ore. Regressions live in
+`engine/crates/catan-search/src/midgame_save_spend_tests.rs`.
+
+| Fixture | Production entry | Deep reference | Standing |
+| --- | --- | --- | --- |
+| 2p save (dev vs EndTurn) | EndTurn | EndTurn | Agree: saves. Regression. |
+| 2p city affordable now | BuildCity 0.9995 | BuildCity | Agree: spends. Counterexample regression. |
+| 3p save (dev vs EndTurn, seed 3) | BuyDevelopment 0.8020 | EndTurn 0.8196 | Disagree: ignored diagnostic, neither side is ground truth. |
+| 2p road materials (seed 3) | EndTurn +0.0035 | Road | Disagree inside noise: ignored diagnostic. |
+| EndTurn ranked + retained | all 7 shapes (2p/3p) | — | Coverage invariant regression. |
+
+Classification per the Section 2.3 taxonomy:
+
+- **Coverage: ruled out.** EndTurn is ranked (~#5–6 of 8–9) and never pruned
+  on any fixture, and is protected once retained. A future save-blindness
+  must come from valuation or horizon quality, not admission.
+- **Reachability: holds through the production entry.** `EndTurn`
+  continuations reach our next decision with mass 1.0 on the tested fixtures
+  (2p and 3p, 1 and 8 particles). A single-wave 1500-node Global budget does
+  starve EndTurn (mass 0, value collapse 0.86 → 0.57), but no live path uses
+  the Global entry; production waves re-budget per depth. That starvation is
+  a harness artifact, not a live defect, and was not repaired.
+- **Valuation across work budgets: open question.** The two flips differ with
+  no mechanism beyond node count (both roots reach; margins 0.004–0.06, in
+  both directions across fixtures). Thin-margin ranking instability between
+  work budgets is expected search approximation, not demonstrated
+  save-blindness. No hoarding bonus, budget reshuffle, or evaluator change
+  is justified by this evidence; each is explicitly banned as a substitute
+  for a demonstrated cause.
+
+No production source changed in this stage. No benchmark campaign was run:
+with no repair there is nothing to measure, and the pilot seed 2026090901
+stays out of future held-out evaluation regardless.
+
+Unresolved causal question: the complaint arose in real midgame positions
+with hidden hands, VP pressure, robber/discard exposure, and timed budgets
+that these sterile fixtures (empty opponent hands, zero VPs, post-setup
+boards) do not reproduce. To discriminate valuation from noise requires a
+recorded live decision where saving was clearly better: an investigation-tab
+export (game key, decision record showing own hand, chosen spend, retained
+EndTurn alternative, and search diagnostics) of one such moment, plus its
+spend-now counterexample. Until that evidence exists, Milestones 3–5 remain
+unstarted and M2 stays opt-in.
+
+## 17. Stage-2 contested two-player planning — 2026-09-09
+
+Accepted Stage 1 (no repair justified; EndTurn retained everywhere, so
+admission was not reopened). Controlled synthetic 2p pairs, one factor at a
+time, through the production wave entry plus the deep reference. Fixtures and
+regressions in `engine/crates/catan-search/src/midgame_save_spend_tests.rs`.
+
+### Contested settlement (demonstrated mechanism, regression locked)
+
+Seed-15 pair sharing one board: our hand is one 4:1 bank trade from settling
+a target vertex (funding path verified by applying the trade, not assumed).
+Variant B roads the opponent to the target and funds their settlement cost;
+variant A leaves them empty. The modeled opponent takes the target in B
+(BuildSettlement v8, verified by deciding for the opponent directly — the
+disproof gate; had it not taken the site, no flip would be required).
+
+| Variant | Production entry | Deep reference |
+| --- | --- | --- |
+| A uncontested | bank+settle 0.9993, EndTurn 0.9880 | bank+settle 0.9873, EndTurn 0.9854 |
+| B contested | bank+settle 0.9382, EndTurn 0.4924 | bank+settle 0.9172, EndTurn 0.8037 |
+
+Waiting is near-free in A and destroys the site in B, and both budgets price
+it: EndTurn craters exactly where the site is contested (regression asserts
+B-EndTurn + 0.05 below A-EndTurn; observed gap 0.50). A's exact choice is
+unasserted (0.002–0.011 margins are noise). Opponent-response modeling,
+not admission or reachability, carries this: mass-next-decision is 1.0
+throughout. No repair needed; the mechanism works.
+
+Robustness of the mechanism: identical A/B choices and EndTurn values
+through the timed entry (mask on), and the A→B EndTurn crater persists with
+our domestic trades enabled (fixed 0.88→0.48, timed same direction). With
+offers present, B's winning spend flips between bank (timed) and a lumber→ore
+offer (fixed) — offer-axis instability across entries, recorded as
+approximation-sensitive and out of scope for save-vs-spend.
+
+### Exposure, immediate win (no defect; outcomes recorded, probes removed)
+
+- Wealth-matched discard exposure (9 vs 7 cards, same city distance, same
+  legal set): both budgets spend (road) in the high-exposure state; the low
+  state repeats the known thin-margin live-vs-deep flip family. No
+  exposure-blindness demonstrated.
+- Immediate win: 9 VPs plus affordable city selects BuildCity (existing
+  `maxn_converts_an_immediate_win` covers the authority; guard probe agreed).
+
+### Live-decision replay: road4311 D14 (no production change)
+
+Source: a 4-player bot game export supplied from Downloads
+(`colonist-evidence-road4311-*-648Z.txt`, build 0.9.1
+main@401956f425b3+dirty). Turn 10, our seat (P2) holds [brick1, wool1,
+grain2, ore1] with two settlements (city legal at neither: ore 1 of 3),
+healthy bank, robber on our ore-6 hex. The live engine bought a development
+card at completed depth 0 (27 nodes, deadline during root scoring, 22
+particles, ~100 roots); runner-up was an ore-seeking offer 0.095 behind.
+
+Reconstruction (`engine/crates/catan-search/src/road4311_d14_tests.rs`):
+EXACT geometry/pieces/hands (all 22 belief worlds)/bank/robber/VPs/full dev
+deck; dice observations exact but the Mref posterior digest does not match
+(brute-forced constructions miss), so the live belief's observation list is
+not recoverable — a labeled replay boundary. Staged CPU-search code is
+unchanged from the recording build. NOTE: an earlier revision of this note
+compared the wrong value component (P0 instead of the acting P2); all values
+below are the decision-relevant value[2], and the arbitration rule is
+max-value with forced-loss escape (`depth.rs` final arbitration).
+
+Reconciled single ranking (full search, recorded effort, fixed work):
+offer 0.48 wins, BuyDevelopment 0.39 second, EndTurn 0.31. The save
+hypothesis is FALSIFIED for D14: completed search ranks saving below the
+recorded spend, and the starved floor agrees (dev 0.44 > offer 0.35 > EndTurn
+0.31). The dev-vs-offer flip across budgets is a separate trade-optimism
+question, out of scope for save-vs-spend, with acceptance uncertainty on the
+offer side.
+
+Fidelity (committed regression): the starved replay reproduces the live
+choice AND its values exactly (dev 0.4444, runner-up gap 0.095), so the
+reconstruction captures the live depth-0 mechanism; dice differences do not
+move these floor values. The Mref digest gap therefore does not block the
+floor finding, but it means the full-search counterfactual is established
+only in reconstruction (Mref-approx and M0 agree), not proven for the exact
+live posterior.
+
+Fallback handling: the no-wave condition is exposed (`floorComplete`,
+attempted-vs-completed depth, per-stage timings, and the evidence string
+naming depth 0) and handled by design (a guaranteed complete one-ply floor
+decides rather than an arbitrary fallback). A time-aware planner trim was
+implemented, verified coverage-clean, then REVERTED: it merely shifts time
+between stages, and release-timed runs show the depth-1 wave itself exceeds
+small slices — unproven benefit against a real shared-path blast radius.
+The justified next question is floor quality (how the initial one-ply
+comparison is supported under the same allowance), not stage budgeting, and
+it needs its own mandate: nothing here supports a hoarding bonus, weight
+retune, or strategy-layer change for D14.
+
+Close-out verdict: saving hypothesis FALSIFIED for D14 — completed search
+ranks EndTurn below the recorded dev purchase, and the starved floor agrees
+(dev > offer > EndTurn). No demonstrated production defect; no production
+change. M2 remains experimental. A review of this investigation caught a
+wrong-player value comparison (P0's component read for P2's decision); the
+starved-floor regression now derives the utility index from the acting
+player so the mistake cannot return.
+
+### Stage-3 validation (fresh-seed current-behavior block)
+
+`scripts/run-adaptive-strategy-validation-stage2.mjs`, seed 2026090801 (the
+pilot seed stays held out), one matched 3-seat block per trade setting,
+baseline MaxN vs two weighted opponents. No production change precedes this
+run, so it is additional validation of current behavior, not an improvement
+benchmark. Global no-trades rows are arena-restricted lanes, not product own-player-only evidence.
+
+| Domestic trades | Policy | Wins / 3 | Cutoffs | Policy decisions / admitted |
+| --- | --- | --- | --- | --- |
+| Enabled | Baseline | 2 | 0 | — |
+| Enabled | Adaptive M2 | 2 | 0 | 511 / 0 |
+| Globally disabled | Baseline | 2 | 0 | — |
+| Globally disabled | Adaptive M2 | 2 | 0 | 300 / 0 |
+
+Twelve terminal games, zero cutoffs or invariant failures. Adaptive again
+admitted zero challengers (identical trajectories within each trade
+setting), confirming the pilot's coverage finding on fresh boards: candidate
+admission changes nothing here. This does not establish a live win rate.
+
+### Live-decision replay boundary — 2026-09-09
+
+A bounded search of local evidence found no replayable live spend-vs-save
+decision. Audited fixtures carry inputs without recorded choices (and use
+abstract boards without production); takeover corpora carry full midgame
+states but no recorded decision, diagnostics, or complaint; pasted live logs
+cover opening/dice phases only. Per the investigation protocol this stops at
+the evidence boundary: the next step needs one user-supplied
+Investigation-tab export of a midgame spend that should have been saved
+(chosen action, intended alternative and future build identified). No
+synthetic campaign was substituted.
+
+### Verdict
+
+No demonstrated correctness failure in Stage 2. One demonstrated mechanism
+(race pricing, regression-locked), two approximation-sensitive flip families
+(ignored diagnostics), zero production changes. Timed and fixed-work entries
+agree on all mechanism facts. The original live complaint remains
+unreproduced: with hidden hands, VP pressure, and timed budgets still absent
+from these fixtures, a recorded live decision is still the missing evidence.
+
+## 18. M2 admission usefulness — 2026-09-09
+
+Question: M2 admitted zero challengers across 1,554 policy decisions (743
+first pilot + 811 Stage-3 validation with identical trajectories). Is that a
+malfunction or the correct output?
+
+Mechanism (source): every generator proposes only actions already in the
+ranked baseline domain (`strategy.rs` producers read `ranked_actions`;
+nothing proposes EndTurn, offers, or bank trades), and admission can only
+rescue ranked-but-truncated actions into a fixed cap with an EndTurn
+reserve. M2 is structurally a second chance for truncated roots.
+
+Evidence (rust-level admission audits through the production entry):
+- Save fixtures, race pair: 0–1 proposals, all already retained → zero
+  candidates. The race settle needs bank funding first, so it never enters
+  the ranked domain at all.
+- Live D14 (heaviest real truncation: 12 retained, 86 pruned): every
+  truncated action is an offer; dev and EndTurn are retained; the sole
+  proposal (dev) is already retained. Winners identical with/without M2.
+- Award-takeover hunt (low-prior +2VP road under offer flood, both sides at
+  5-chains): the award road is retained, not truncated; the deep reference
+  prefers ore-seeking offers anyway. No omission.
+- One out-of-scope observation, not pursued: D14's deep-preferred ore×3
+  offers were truncated from baseline search. That is offer-family coverage
+  (root caps/quotas) compounded with acceptance optimism — the
+  dev-versus-offer floor question, explicitly out of scope here. M2's
+  families cannot propose offers by design, so no admission change would
+  touch it.
+
+Decision (step 3, first branch): baseline already covers every useful
+action M2 is empowered to rescue. Keep M2 experimental; more admission
+machinery has no demonstrated value. No benchmark follows a non-change
+(step 4 correctly skipped). If truncation policy for offers is ever
+revisited, that is a quotas/caps investigation, not M2 promotion evidence.
+
+### Trade-acceptance realism: D14 dev-vs-ore-offer (no repair)
+
+D14's completed search prefers asking brick+wool for 2 ore (0.48) over
+buying dev (0.39) over saving (0.31). Bounded audit of where the offer's
+value comes from, same fixture and 22 worlds:
+- Acceptance is gated by availability within the model: exactly 0.000 in all 15
+  no-payer worlds, 0.16–0.39 where a recipient holds 2 ore (committed
+  invariant `d14_offer_acceptance_gated_by_availability`).
+- Rejection is modeled (accept/reject mixture at response nodes), not
+  assumed away; the floor prices pre-offer, pending, and post-reject
+  states identically (0.3527), so the cutoff floor adds no premium of its own.
+- Failed-offer memory exists: `domestic_trade_count` damps repeat-offer
+  priors 1.0→0.42→0.16, embargo mechanics exist, counts reset next turn;
+  post-reject the turn continues with dev/EndTurn still available, so
+  opportunity cost is priced, not ignored.
+- Value decomposition within the model: base ~0.37 (dev fallback) + haggling/counter
+  option value in all worlds (~0.43 with no payer able to accept) +
+  accept lottery toward an immediate city in payer worlds (~0.55).
+  Removing the payer worlds does not collapse the offer because recipients
+  holding 1 ore can counter inside the bounded neighborhood and our
+  controlled continuation accepts only good ones.
+- One structural gap noted, not repaired: repetition cost lives in priors
+  (allocation) but not in backed-up values, so fully-searched haggling
+  never discounts repetitiveness itself. Whether real acceptance decays
+  with repetition is unanswerable without live acceptance data, and
+  discounting values to intuition would be anecdotal retuning. Offer
+  coverage/quotas stay untouched until acceptance calibration is evidenced.
+
+Verdict: no acceptance-modeling defect demonstrated; the offer's premium
+is accounted for within the model. That accounting is explicitly not live
+validation: the mechanics (availability gating, counter negotiation,
+rejection fallback) explain the score, but the assigned probabilities
+(16–39% acceptance, counter rates, repeat-offer behavior) are uncalibrated
+against live play. Calibrating them needs player-visible offer/outcome
+records with predicted-vs-observed comparison across repeated interactions,
+which no local record supplies.
+
+## 19. Source references
 
 - [Live request adapter](../src/worker/deep-search.ts)
 - [Decision entry point](../src/worker/analyze.ts)
