@@ -268,3 +268,76 @@ The export names `main@401956f425b3+dirty`. It identifies HEAD but does not fing
 5. Record current benchmark results with the global-no-trades limitation. Full release, product-route strength, and installed-artifact click/confirmed-transition acceptance remain incomplete; browser checks stay user-run.
 
 Update this ledger with the exact regression result before and after each repair, the files changed, and any remaining limitations. Preserve all pre-existing staged work. Do not claim stabilization acceptance while B1/B2 remain unresolved.
+
+
+## Acceptance requirement clarification — 2026-09-08
+
+Hamza clarified that soundness and robustness, not 2× acceleration, are the requirement. The governing plan, contract, task ledger and acceptance report now treat speedup as informational. The completed clean v14 smoke remains valid evidence; its 1.455×/1.375× timings are not failures under this requirement. Raw artifacts are unchanged. Outstanding packaged-execution and robustness evidence still determines backend readiness. Opening candidates should be assessed for decision quality, complete-result authority, cancellation and practical responsiveness; matching work remains a useful experimental control, not a substitute for soundness or an automatic quality verdict. No production routing or search budget was changed.
+
+
+## First-pick portfolio comparison — 2026-09-08
+
+User scope: defer GPU wiring; find a practical opening repair with player trades enabled and disabled. The following is a new research candidate, not a production change or a playing-strength claim.
+
+### Candidate and causal hypothesis
+
+For each of the same four candidate **first opponent actions**, complete the opponent's consecutive setup actions using the existing greedy policy. Then use the unchanged production solver to complete our final placement and score the opponent at that completed endpoint. Select the first action belonging to the best completed portfolio. Do not recursively optimize every later opponent action.
+
+This tests whether comparing complete portfolios at the first opposing decision recovers much of the reference model's benefit without repeatedly solving our final reply across every combination. Our initial settlement/road is held fixed across comparison arms. The five recorded geometries are configured as 2-player, 15-point fixtures, matching the mechanism under investigation; these results do not cover 3–4-player draft schedules.
+
+The explicit ignored experiment in `opening_recorded_tests.rs::recorded_opponent_portfolio_experiment` now compares greedy, full portfolio reference, and first-pick portfolio. All retain the same top-four policy candidate source. Player trades off means only our seat's domestic-trade mask is disabled; it does not disable opponents or maritime trades. No guaranteed opponent trade acceptance or synthetic resource rate is introduced.
+
+### Results
+
+| Board | Our player trades | Greedy rival endpoint | First-pick portfolio | Full portfolio reference | Work: greedy / first-pick / full |
+| --- | --- | --- | --- | --- | --- |
+| grain8695 | off / on | 8.708606 | 10.857399 | 10.857399 | 164 / 648 / 22,204 |
+| hand2325 | off / on | 7.355114 | 10.320792 | 10.320792 | 168 / 652 / 22,240 |
+| trade5301 | off | 7.827077 | 8.027932 | 9.857949 | 164 / 648 / 22,132 |
+| trade5301 | on | 7.827077 | 8.027932 | 9.692493 | 164 / 648 / 22,132 |
+| town1088 | off / on | 8.402099 | 8.771360 | 10.062921 | 168 / 656 / 22,420 |
+| task394 | off | 7.431393 | 8.636373 | 10.232584 | 168 / 652 / 21,916 |
+| task394 | on | 7.439910 | 8.643065 | 10.243802 | 168 / 652 / 21,916 |
+
+The cheaper candidate matches the full reference on grain8695 and hand2325, under both trade settings. It improves the modeled rival endpoint over greedy in every tested board/setting, but recovers only part of the full-reference gain on the other three boards. This is optimization of the current evaluator; only grain8695 has the previously compared actual rival endpoint (10.968895) in this table. It is not independent evidence that all five predicted drafts are more human-like or win more games.
+
+The 648–656 figure is counted opponent transitions plus reported final-reply solver nodes **for one fixed own prefix**, not the total cost of integrating this model across every production root. Policy ranking, evaluation and uncounted ordering work are not comprehensively profiled by this counter. The experiment is not a browser latency benchmark. The source remains research-only and the production engine is unchanged.
+
+### Proposed repair to implement next
+
+1. **Owner: `opening.rs`, opponent continuation.** Apply completed-portfolio comparison when a 2-player opponent starts its back-to-back setup block. Select its first action from the complete policy-led portfolios; keep its subsequent actions consistent with the simulated greedy continuation. Do not change evaluator weights or add a trade-cooperation bonus.
+2. **Shared work and cancellation.** Charge all scout/continuation work to the existing opening request; do not start a fresh unrestricted allowance for each candidate. Reuse complete results for identical states when available. Evaluate candidates fairly, preserve a complete recommendation if refinement is interrupted, and never compare partial-setup scores as though they were completed endpoint scores.
+3. **Test the integrated first recommendation.** Run grain8695 and the other recorded boards under both trade masks, measuring actual total work and native/packaged latency. The fixed-prefix result above is sufficient to justify this implementation experiment, not to claim its final recommendation or total cost in advance. Include loot4438 when its exact fixture is retained; do not infer its result from these five boards.
+4. **Acceptance.** Require legal complete endpoints, reproducibility, unchanged evidence/trade semantics, cancellation and stale-action safety, plus a useful improvement in opponent-continuation evidence without unacceptable responsiveness. Performance is a practical robustness consideration, not a 2× gate or a reason to favor a weak model merely for using fewer nodes. Validate 3–4-player applicability separately before extending the new rule beyond the demonstrated 2-player block.
+5. **Quality evidence.** After integrated correctness and responsiveness hold, compare subsequent gameplay under matched board/chance seeds and both trade settings on boards excluded from tuning. Preserve the distinction between higher heuristic values, closer observed opponent predictions, and actual playing-strength gains.
+
+Verification: `cargo test --manifest-path engine/Cargo.toml -p colonist-catan-search --release --lib recorded_opponent_portfolio_experiment -- --ignored --nocapture` completed successfully: one explicit experiment, 30 comparison rows (5 geometries × 2 trade settings × 3 models). Raw local output: `/tmp/opening-first-pick-portfolio.log`. No production Rust/WASM, GPU routing, evaluator weights, or runtime budgets were changed.
+
+## Production integration and local verification — 2026-09-08
+
+This section supersedes the research-only disposition above for the cheaper first-pick model. The full recursive portfolio reference remains research-only.
+
+`opening.rs` now compares completed policy-led portfolios when the opposing seat starts its two consecutive setup pairs in a two-player game. Each first-action candidate uses the existing greedy continuation and the controlled player's final reply. The best completed rival endpoint determines the opponent continuation. Candidate transitions and reply search share the request's node allowance and deadline, with remaining nodes divided across candidates. Completed controlled results survive deadline interruption. The final two-player reply considers all legal settlement candidates, subject to that shared work allowance. Evaluator weights and domestic-trade assumptions are unchanged; no guaranteed player trade is introduced. Three- and four-player drafts do not enter the new portfolio branch.
+
+The direct grain8695 regression failed before the repair with rival endpoint value 8.7086, then passed with a completed rival endpoint above 10.8 for both trade masks. The five-board integration regression checks legal, completed selected endpoints and repeats each fixed-work search to verify identical action and node counts.
+
+| Recorded geometry | Nodes, player trades on / off | First settlement vertex index, on / off |
+| --- | --- | --- |
+| grain8695 | 11,429 / 11,429 | 6 / 23 |
+| hand2325 | 11,525 / 11,525 | 41 / 41 |
+| trade5301 | 11,465 / 11,465 | 23 / 23 |
+| town1088 | 11,519 / 11,519 | 7 / 7 |
+| task394 | 11,477 / 11,477 | 37 / 37 |
+
+Indices refer to the Rust recorded fixture's board ordering. These are fixed-work results with wall-clock cutoff disabled; live timed searches can complete different amounts of refinement. Observed native elapsed times were approximately 1.97–2.67 seconds per first search during the test run, not controlled latency benchmarks. All ten searches stayed within 12,000 nodes. Higher rival evaluator values and changed recommendations do not establish improved game win rates or globally optimal openings.
+
+Verification completed:
+
+- Focused Rust opening suite: 32 passed, one explicit research experiment ignored (`/tmp/opening-production-after.log`).
+- Additional two-player cutoff regression: passed for both trade masks at 1-node, 128-node and 1 ms allowances. It checks legal choices, node bounds, deadline reporting and completed-result authority whenever a completed endpoint exists (`/tmp/opening-cutoff-tests.log`). Together these are 33 passing focused Rust tests.
+- `npm run check`: passed. `npm run build`: passed.
+- Rebuilt-WASM adapter and decision-service suites: 42/42 passed, including deadline and stale-result service regressions (`/tmp/opening-packaged-tests.log`). These do not replay the five full recorded opening boards in a browser.
+- Packaged build: `0.9.1 · main@2afc708f5e94+dirty · 2026-09-08T20:35:04.702Z`.
+- Generated and packaged WASM SHA-256 both `645227cf3dabe68ef248b05605010831eeb11c5270b1e59c3934f36b2392b9e2`.
+
+Remaining evidence: full-board packaged opening timing, user-run installed-artifact recommendation → click → confirmed transition, and held-out playing-strength comparisons under both trade settings. No browser control was used. Later concurrent GPU/overlay edits are outside this opening verification and are not certified by the build identity above. This is a local implementation verification, not closure of the overall engine release acceptance.

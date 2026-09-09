@@ -1265,6 +1265,24 @@ fn recorded_opponent_portfolio_experiment() {
             continue_actor(&next, actor, false, work)
         }
     }
+    // Compare complete policy-led portfolios for each first action. Unlike
+    // recursive portfolio optimization, this pays for only four final replies.
+    fn first_pick_portfolio(state: &GameState, actor: u8, work: &mut u32) -> (GameState, f32) {
+        let mut best = None;
+        for (action, _) in crate::policy::normalize_priors(state, &state.legal_actions(), actor)
+            .into_iter()
+            .take(4)
+        {
+            *work += 1;
+            let mut next = state.clone();
+            next.apply(&action).unwrap();
+            let candidate = continue_actor(&next, actor, false, work);
+            if best.as_ref().is_none_or(|(_, value)| candidate.1 > *value) {
+                best = Some(candidate);
+            }
+        }
+        best.unwrap()
+    }
     for (name, initial) in [
         ("grain8695", grain8695_state()),
         (
@@ -1294,10 +1312,13 @@ fn recorded_opponent_portfolio_experiment() {
             }
             assert_eq!(state.actor(), 1);
             assert_eq!(state.setup_step, 1);
-            for portfolio in [false, true] {
+            for model in ["greedy", "portfolio", "first-pick-portfolio"] {
                 let mut work = 0;
-                let (opponent_setup, opponent_value) =
-                    continue_actor(&state, 1, portfolio, &mut work);
+                let (opponent_setup, opponent_value) = if model == "first-pick-portfolio" {
+                    first_pick_portfolio(&state, 1, &mut work)
+                } else {
+                    continue_actor(&state, 1, model == "portfolio", &mut work)
+                };
                 assert_eq!(opponent_setup.actor(), 0);
                 assert_eq!(opponent_setup.setup_step, 3);
                 assert_eq!(opponent_setup.phase, Phase::SetupSettlement);
@@ -1317,9 +1338,120 @@ fn recorded_opponent_portfolio_experiment() {
                     .evidence
                     .unwrap();
                 eprintln!(
-                    "PORTFOLIO board={name} trades={trades} portfolio={portfolio} work={work} opponent_score={opponent_value:.6} endpoint_own={:.6} endpoint_rival={:.6} positions={positions:?}",
+                    "PORTFOLIO board={name} trades={trades} model={model} work={work} opponent_score={opponent_value:.6} endpoint_own={:.6} endpoint_rival={:.6} positions={positions:?}",
                     evidence.own_value, evidence.rival_value
                 );
+            }
+        }
+    }
+}
+
+#[test]
+fn grain8695_opponent_uses_completed_portfolio_with_either_trade_policy() {
+    for disabled in [0, 1] {
+        let mut state = grain8695_state();
+        state.domestic_trade_disabled = disabled;
+        place_settlement(&mut state, "v:-1,1,1");
+        place_road(&mut state, "e:-1,1,2");
+        let mut solver = super::OpeningSolver {
+            root: 0,
+            config: live_opening_config(),
+            nodes: 0,
+            node_limit: 12_000,
+            aborted: false,
+            deadline_reached: false,
+            completed_setups: 0,
+            budget_cutoffs: 0,
+            memo: Default::default(),
+            deadline: super::CooperativeDeadline::start(0),
+        };
+        let result = solver.visit(&state);
+        assert!(result.endpoint_complete);
+        let evidence = result.evidence.unwrap();
+        assert!(
+            evidence.rival_value > 10.8,
+            "greedy predicted only 8.7086: {evidence:?}"
+        );
+        assert!(solver.nodes <= 12_000);
+    }
+}
+
+#[test]
+fn recorded_two_player_portfolios_keep_completed_choices_inside_live_work() {
+    for (name, initial) in [
+        ("grain8695", grain8695_state()),
+        (
+            "hand2325",
+            recorded_state_with_rules(&HAND2325_HEXES, &HAND2325_PORTS, 0, 2, 15),
+        ),
+        (
+            "trade5301",
+            recorded_state_with_rules(&TRADE5301_HEXES, &TRADE5301_PORTS, 0, 2, 15),
+        ),
+        (
+            "town1088",
+            recorded_state_with_rules(&TOWN1088_HEXES, &TOWN1088_PORTS, 0, 2, 15),
+        ),
+        (
+            "task394",
+            recorded_state_with_rules(&TASK394_HEXES, &TASK394_PORTS, 0, 2, 15),
+        ),
+    ] {
+        for disabled in [0, 1] {
+            let mut state = initial.clone();
+            state.domestic_trade_disabled = disabled;
+            let started = std::time::Instant::now();
+            let report = solve_opening(&state, 0, live_opening_config());
+            let chosen = report.chosen.as_ref().unwrap();
+            assert!(state.legal_actions().contains(chosen));
+            assert!(report.nodes <= 12_000, "{name}: {}", report.nodes);
+            assert!(
+                report
+                    .actions
+                    .iter()
+                    .find(|c| &c.action == chosen)
+                    .unwrap()
+                    .endpoint_complete,
+                "{name}: {report:?}"
+            );
+            eprintln!(
+                "INTEGRATED {name} disabled={disabled} chosen={chosen:?} nodes={} completed={} elapsed_ms={}",
+                report.nodes,
+                report.completed_setups,
+                started.elapsed().as_millis()
+            );
+            let repeated = solve_opening(&state, 0, live_opening_config());
+            assert_eq!(report.chosen, repeated.chosen);
+            assert_eq!(report.nodes, repeated.nodes);
+        }
+    }
+}
+
+#[test]
+fn two_player_portfolio_cutoffs_preserve_legal_complete_result_authority() {
+    for disabled in [0, 1] {
+        for (maximum_nodes, time_budget_ms) in [(1, 0), (128, 0), (12_000, 1)] {
+            let mut state = grain8695_state();
+            state.domestic_trade_disabled = disabled;
+            let mut config = live_opening_config();
+            config.maximum_nodes = maximum_nodes;
+            config.time_budget_ms = time_budget_ms;
+            let report = solve_opening(&state, 0, config);
+            let chosen = report.chosen.as_ref().unwrap();
+            assert!(state.legal_actions().contains(chosen));
+            assert!(report.nodes <= maximum_nodes);
+            let selected = report
+                .actions
+                .iter()
+                .find(|entry| &entry.action == chosen)
+                .unwrap();
+            if report.actions.iter().any(|entry| entry.endpoint_complete) {
+                assert!(selected.endpoint_complete);
+                assert!(selected.authoritative);
+                assert!(selected.evidence.is_some());
+            }
+            if time_budget_ms > 0 {
+                assert!(report.deadline_reached);
             }
         }
     }

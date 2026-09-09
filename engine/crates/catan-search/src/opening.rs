@@ -536,6 +536,92 @@ impl OpeningSolver {
         total / count as f32
     }
 
+    fn charge_portfolio_transition(&mut self) -> bool {
+        if self.nodes >= self.node_limit || self.deadline.has_elapsed() {
+            self.aborted = true;
+            self.budget_cutoffs = self.budget_cutoffs.saturating_add(1);
+            self.deadline_reached |= self.deadline.has_elapsed();
+            return false;
+        }
+        self.nodes += 1;
+        true
+    }
+
+    fn greedy_opponent_handoff(&mut self, mut state: GameState, actor: u8) -> Option<GameState> {
+        while state.actor() == actor
+            && matches!(
+                state.phase,
+                Phase::SetupSettlement | Phase::SetupRoad { .. }
+            )
+        {
+            let ranked = normalize_priors(&state, &state.legal_actions(), actor);
+            let mut best = None;
+            for (action, _) in ranked.into_iter().take(self.config.opponent_width) {
+                if !self.charge_portfolio_transition() {
+                    return None;
+                }
+                let mut next = state.clone();
+                if next.apply(&action).is_err() {
+                    continue;
+                }
+                let value = opening_position_value(&next, actor);
+                if best.as_ref().is_none_or(|(_, score)| value > *score) {
+                    best = Some((next, value));
+                }
+            }
+            state = best?.0;
+        }
+        Some(state)
+    }
+
+    fn opponent_portfolio_value(
+        &mut self,
+        state: &GameState,
+        ranked: &[(Action, f32)],
+    ) -> OpeningVisitValue {
+        // In a two-player snake draft this opponent owns both consecutive
+        // settlement/road pairs. Compare complete policy-led portfolios after
+        // our final reply, rather than choosing its first action on a partial
+        // board. The returned endpoint already contains that same continuation.
+        let actor = state.actor();
+        let parent_limit = self.node_limit;
+        let count = ranked.len().min(self.config.opponent_width);
+        let mut best = None;
+        for (index, (action, _)) in ranked.iter().take(count).enumerate() {
+            let remaining = parent_limit.saturating_sub(self.nodes);
+            self.node_limit = self.nodes + remaining / (count - index) as u32;
+            let candidate = if self.charge_portfolio_transition() {
+                let mut next = state.clone();
+                next.apply(action)
+                    .ok()
+                    .and_then(|()| self.greedy_opponent_handoff(next, actor))
+                    .map(|handoff| self.visit(&handoff))
+            } else {
+                None
+            };
+            self.node_limit = parent_limit;
+            if let Some(candidate) = candidate.filter(|value| value.endpoint_complete) {
+                if let Some(evidence) = candidate.evidence {
+                    if best
+                        .as_ref()
+                        .is_none_or(|(_, score)| evidence.rival_value > *score)
+                    {
+                        best = Some((candidate, evidence.rival_value));
+                    }
+                }
+            }
+            if self.deadline_reached {
+                break;
+            }
+        }
+        best.map(|(value, _)| value)
+            .unwrap_or_else(|| OpeningVisitValue {
+                value: self.value(state),
+                endpoint_complete: false,
+                evidence: None,
+            })
+    }
+
     fn visit(&mut self, state: &GameState) -> OpeningVisitValue {
         let endpoint_complete = !matches!(
             state.phase,
@@ -576,6 +662,13 @@ impl OpeningSolver {
         let actor = state.actor();
         let legal = state.legal_actions();
         let mut ranked = normalize_priors(state, &legal, actor);
+        // The portfolio reference completes our last pair over all legal
+        // settlements, just as a top-level final-placement request does.
+        let root_width = if state.board.num_players == 2 && state.setup_step == 3 {
+            legal.len()
+        } else {
+            self.config.root_width
+        };
         if actor == self.root && state.phase == Phase::SetupSettlement {
             // A second settlement is a portfolio decision. Rank it through a
             // cheap policy-led complete snake-draft scout rather than a one-ply
@@ -595,7 +688,7 @@ impl OpeningSolver {
                     .total_cmp(&left.2)
                     .then_with(|| right.1.total_cmp(&left.1))
             });
-            candidates.truncate(self.config.root_width);
+            candidates.truncate(root_width);
             let mut candidates = candidates
                 .into_iter()
                 .map(|(action, prior, _)| {
@@ -625,10 +718,7 @@ impl OpeningSolver {
                 endpoint_complete: false,
                 evidence: None,
             };
-            let candidates = ranked
-                .into_iter()
-                .take(self.config.root_width)
-                .collect::<Vec<_>>();
+            let candidates = ranked.into_iter().take(root_width).collect::<Vec<_>>();
             let parent_limit = self.node_limit;
             let candidate_count = candidates.len();
             for (index, (action, _)) in candidates.into_iter().enumerate() {
@@ -653,6 +743,9 @@ impl OpeningSolver {
                         best = candidate;
                     }
                     if self.deadline_reached {
+                        if best.endpoint_complete {
+                            return best;
+                        }
                         return OpeningVisitValue {
                             value: self.value(state),
                             endpoint_complete: false,
@@ -662,6 +755,12 @@ impl OpeningSolver {
                 }
             }
             best
+        } else if self.config.opponent_maximizes
+            && state.board.num_players == 2
+            && state.setup_step == 1
+            && state.phase == Phase::SetupSettlement
+        {
+            self.opponent_portfolio_value(state, &ranked)
         } else if self.config.opponent_maximizes {
             // Opponents greedily maximize their own setup-aware leaf features
             // over a pruned candidate set, then the draft continues. This is
