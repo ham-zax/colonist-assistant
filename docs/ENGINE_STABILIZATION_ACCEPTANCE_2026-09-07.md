@@ -1,5 +1,7 @@
 # Engine stabilization acceptance — 2026-09-07
 
+**User requirement clarified — 2026-09-08:** acceptance is governed by soundness and robustness, not a minimum speedup. The former 2× threshold is superseded. Preserve same-policy parity, evidence validity, cancellation/recovery, stale-result rejection, safe trade execution, and packaged recommendation-to-confirmed-transition verification. Report performance as diagnostic evidence; sub-2× speedup is not a failure or a reason by itself to block a backend. This clarification does not itself enable production routing or establish playing strength.
+
 ## Disposition
 
 **Current v14 candidate: acceptance incomplete. Recorded v13 correctness results are historical evidence. Production exact-CUDA promotion: not accepted. Strategy-strength claim: no evidence of improvement.**
@@ -16,7 +18,7 @@ Current rebuilt package: `0.9.1 · main@b3b92c31e687+dirty · 2026-09-08T17:23:0
 
 Global no-player-trades benchmark lanes do not exactly match the live policy that disables domestic trading only for our seat. They must not be relabeled as product-route or strength evidence.
 
-The historical artifact rows below describe the recorded v13 implementation session. Focused v14 replay/native repair verification is complete, as recorded in “Focused v14 repair verification” below: exact M0+trades, Mref and M2 checks passed, including cancellation/recovery and invalid-evidence rejection. This is not full release acceptance. Current-revision matched performance is now measured and fails the 2× promotion threshold; packaged execution and strength gates remain unfulfilled. Older artifacts must not be relabeled as v14 results.
+The historical artifact rows below describe the recorded v13 implementation session. Focused v14 replay/native repair verification is complete, as recorded in “Focused v14 repair verification” below: exact M0+trades, Mref and M2 checks passed, including cancellation/recovery and invalid-evidence rejection. This is not full release acceptance. Current-revision matched performance is measured and is informational; packaged execution and strength evidence remain incomplete. Older artifacts must not be relabeled as v14 results.
 
 | Gate | Evidence | Result |
 | --- | --- | --- |
@@ -30,7 +32,7 @@ The historical artifact rows below describe the recorded v13 implementation sess
 | Production-shaped native exact parity | `benchmarks/engine-stabilization-2026-09-07/native-host-exact-parity.jsonl` | PASS: M0+trades, Mref, explicit M2; max abs error `3.8743019e-7`; invalid evidence rejected; cancellation recovered |
 | Live/recorded board topology | same native exact parity lane | PASS after repair: exact evaluator prepares the actual request adjacency topology instead of assuming canonical generated indices |
 | Frozen arena product route | `benchmarks/engine-stabilization-2026-09-07/native-exact-takeover-smoke.jsonl` | PASS: protocol 7 exact capability required, exact algorithm recorded, 7,987 nodes, depth 2, zero protocol/illegal-action failures, terminal completion |
-| Exact end-to-end 2× retention | `benchmarks/engine-stabilization-2026-09-07/exact-gpu-arena-smoke-v14-ff7b9b7.json` | FAIL on clean `ff7b9b7` v14 smoke with parity: 1.455× (3P), 1.375× (4P) |
+| Exact end-to-end performance (informational) | `benchmarks/engine-stabilization-2026-09-07/exact-gpu-arena-smoke-v14-ff7b9b7.json` | MEASURED on clean `ff7b9b7` v14 smoke with parity: 1.455× (3P), 1.375× (4P) |
 | Packaged browser recommendation → click → confirmed transition | consensual live browser fixture | NOT RUN: no consensual live-game/browser-installed artifact fixture was available in this session |
 | Product strength | held-out matched complete-game campaign for the actual production route | NOT RUN / NOT CLAIMED |
 
@@ -151,13 +153,13 @@ Exact CUDA supporting explicit M2 in parity tooling does not promote either M2 o
 
 ## Performance and promotion rule
 
-The exact-backend correctness gates are necessary but not sufficient. The existing acceleration contract requires at least **2× end-to-end elapsed speedup in both the 3P and 4P matched arena lanes**. The candidate must also retain cancellation/deadline semantics and obtain packaged browser execution evidence before any production exact routing is enabled.
+Acceptance requires the same reference computation within declared tolerances, valid evidence handling, cancellation/recovery, complete-result authority, stale-action rejection and safe execution. The candidate must retain the established deadline/cancellation semantics and obtain packaged browser execution evidence before production exact routing is enabled. There is no minimum speedup requirement; measure latency and resource use to expose concrete responsiveness or reliability problems rather than enforcing an arbitrary ratio.
 
-The historical v13 RTX 3070 Ti smoke completed one matched block per player count, with three seat rotations in 3P and four in 4P. Elapsed CPU/CUDA times were 152,873.6 / 111,593.8 ms (1.3699×) for 3P and 247,970.9 / 194,935.2 ms (1.2721×) for 4P. Both lanes reported matching game results and zero cutoffs, but neither met 2×. That artifact is retained unchanged.
+The historical v13 RTX 3070 Ti smoke completed one matched block per player count, with three seat rotations in 3P and four in 4P. Elapsed CPU/CUDA times were 152,873.6 / 111,593.8 ms (1.3699×) for 3P and 247,970.9 / 194,935.2 ms (1.2721×) for 4P. Both lanes reported matching game results and zero cutoffs; their ratios were below the now-superseded 2× threshold. That artifact is retained unchanged.
 
-A clean revision-matched v14 smoke was then run from `ff7b9b717bd8bcd07d23b08bf13428b8efac2f6e` with the same 3P/4P smoke profile, seed 9100001, four threads, all-MaxN lineup, player trades disabled, maritime trades enabled and transition validation enabled. Deterministic checkpoint parity passed for all 3P and 4P games. Harness elapsed CPU/CUDA times were 160,185.2 / 110,079.6 ms (1.4552×) for 3P and 281,303.0 / 204,593.2 ms (1.3749×) for 4P. Both sides reported `deep-maxn-v14`, the exact `ff7b9b7...` build SHA and `buildDirty=false`. The result independently fails the 2× gate on the current revision, so production exact-CUDA routing remains disabled. This smoke is a parity/performance gate only; it is not a strength campaign and provides no confidence interval for gameplay quality.
+A clean revision-matched v14 smoke was then run from `ff7b9b717bd8bcd07d23b08bf13428b8efac2f6e` with the same 3P/4P smoke profile, seed 9100001, four threads, all-MaxN lineup, player trades disabled, maritime trades enabled and transition validation enabled. Deterministic checkpoint parity passed for all 3P and 4P games. Harness elapsed CPU/CUDA times were 160,185.2 / 110,079.6 ms (1.4552×) for 3P and 281,303.0 / 204,593.2 ms (1.3749×) for 4P. Both sides reported `deep-maxn-v14`, the exact `ff7b9b7...` build SHA and `buildDirty=false`. These timings are informational under the clarified requirement. Production exact-CUDA routing remains disabled pending outstanding robustness and packaged-execution acceptance. This smoke supplies bounded parity/performance evidence only; it is not a strength campaign and provides no confidence interval for gameplay quality.
 
-If the 2× gate is not met, exact CUDA remains experimental/fixed-work parity tooling and production stays CPU/WASM. The gate is not weakened after observing the result.
+A sub-2× speedup does not block acceptance. Exact CUDA remains experimental until the remaining soundness, robustness and packaged-execution checks are satisfied; the current CPU/WASM routing is unchanged.
 
 ## Frozen future experiment order
 
@@ -201,4 +203,41 @@ The missing-control pause now renders immediately from the failure callback for 
 
 The clean `ff7b9b717bd8bcd07d23b08bf13428b8efac2f6e` arena was rebuilt with CUDA exact support and run through the existing matched 3P/4P smoke protocol: seed 9100001, one block per lane, four threads, all-MaxN lineup, player trades disabled, maritime trades enabled and transition validation enabled. The retained report is `benchmarks/engine-stabilization-2026-09-07/exact-gpu-arena-smoke-v14-ff7b9b7.json` with sibling checkpoint files.
 
-Deterministic parity passed in both lanes: 3/3 3P games and 4/4 4P games matched. Final harness elapsed speedups were 1.455× for 3P and 1.375× for 4P, below the required 2× in both cases. All recorded lane builds identify `deep-maxn-v14`, the exact `ff7b9b7...` SHA and `buildDirty=false`. No full campaign or strength claim is made, and production exact-CUDA promotion remains disabled.
+Deterministic parity passed in both lanes: 3/3 3P games and 4/4 4P games matched. Final harness elapsed speedups were 1.455× for 3P and 1.375× for 4P, reported without a minimum-speedup gate. All recorded lane builds identify `deep-maxn-v14`, the exact `ff7b9b7...` SHA and `buildDirty=false`. No full campaign or strength claim is made, and production exact-CUDA promotion remains disabled.
+
+
+## Release rebuild with GPU-routing changes — 2026-09-09
+
+Source/build reconciliation found the installed `dist/` predated the staged GPU-routing change (it still carried a disabled-promotion gate). Rebuilt after `npm run check`: `0.9.1 · main@2afc708f5e94+dirty · 2026-09-09T02:02:24.140Z`. The rebuilt `dist/background.js` no longer contains the disabled gate; eligible ordinary deep-search decisions route to exact CUDA MaxN when the companion advertises protocol-7 capability (explicit strategy policies and openings stay CPU/WASM). Packaged WASM SHA-256 `645227cf3dabe68ef248b05605010831eeb11c5270b1e59c3934f36b2392b9e2` matches the staged generated binary (deterministic; test-only Rust changes excluded). User-run live verification (backend labels, recommendation → click → confirmed transition) and companion-version confirmation remain outstanding.
+
+
+## road4311 execution-fidelity analysis — 2026-09-09 (old build 401956f+dirty)
+
+Analyzed Downloads exports for a 4p bot game (our seat P2, autopilot, player trades enabled, turns 2–10): 17 decisions, 38 events. Setup placements and the D14 dev purchase executed with board-confirmed transitions (dev drawn: knight). No stale or contradictory click occurred.
+- Incoming offers x4kA/tNEh: all response attempts recorded `domCount=0` (no visible trade DOM) and failed safely; both offers died unaccepted. Outcome-consistent; failure mode (offer gone vs click missed) is indistinguishable at 500–1600 ms autopilot latency.
+- Our grain→lumber offer (D15) failed at the submit step with both confirm buttons `foreground-disabled`; D17 re-proposed it but never attempted within the window. Our offers therefore have zero outcome data in this game.
+- Trade verdict margins are thin: decline-by-0.000 tie (D12/D13), counter-vs-decline 0.001–0.002 (D9/D10). Deterministic canonical tie-breaks, no defect proven.
+- Calibration inventory for future offer work: offers recorded, outcomes recorded for incoming only, repeat history partial (used-flag plus event sequence, no counts), predicted acceptance not recorded anywhere. No fields added; pending calibration authorization.
+
+
+## plan4246 live verification (new build) — 2026-09-09
+
+User-run 4p bot game on build `0.9.1 · main@2afc708f5e94+dirty · 2026-09-09T02:04:17.109Z` (same source family as the release rebuild), our seat P2, autopilot, our domestic trades disabled, turns 2–60+. Export analyzed from Downloads.
+- Backend labels behave as designed: openings report "Dedicated opening solver runs on WASM/CPU"; ordinary decisions report "Native GPU unavailable; using WASM Deep MaxN". All 63 decisions ran CPU/WASM. Per the client's connect handling, that silent reason covers any first-connect non-compatibility failure (host never registered, extension-ID mismatch in allowed_origins, missing/broken runtime binary, launch crash, disconnect during handshake, generic hello errors) as well as a connected host failing the exact-MaxN capability/model gate. Protocol/state/engine/device mismatches instead throw visible compatibility errors, and post-success transport failures carry explicit "transport failed" messages — neither appears in plan4246, which constrains but does not close the set. Companion status on the user machine remains unconfirmed — discriminate via installed extension ID, manifest registration, executable path, and the actual handshake result, not protocol version alone. Note the client does not retry a failed first connect until the service worker reloads, so any host-side change needs an extension reload before retesting.
+- Execution fidelity: every executed decision shows execution-complete with no failure; setup, roads, three dev purchases, two maritime trades, knight/robber plays, road-building plus roads, and the resulting Longest Road (+2 VPs) all have board-confirmed transitions. No stale or contradictory click. One stale execution-pending row (D17) is trivial.
+- Incoming offers (3) were declined by the player-trades-disabled policy without deep-search rows, outcomes consistent (all died unaccepted). No engine decision rows exist for policy declines by design.
+- No strategy discrepancy identified: the game arc (roads into Longest Road, dev/knight/robber pressure) is coherent; no city/settlement opportunity was flagged as missed. Nothing reopened.
+
+
+## Native GPU integration verification — 2026-09-09 (local chain green, browser decision pending)
+
+Demonstrated integration blocker found and fixed: the installed companion binary (Sep 8 02:37) predated the staged `fixed_work_parity_only: false` change, so even a perfect connection failed the production exact-MaxN gate. Rebuilt through the supported workflow (`cargo build --release -p colonist-catan-native-host`); no reinstall or second installation, broker executes the configured path fresh per connection.
+
+- Source routing verified: eligible ordinary deep-search decisions (no strategy policy, non-opening, own turn or pending trade) prefer exact CUDA MaxN subject to protocol-7/schema/engine capability gates plus stochastic-model compatibility; remaining-budget accounting, transport-only CPU fallback, and generation-based stale rejection unchanged.
+- Packaged routing current: rebuilt `dist/` (0.9.1 · main@2afc708f5e94+dirty) contains the preference and no disabled gate; packaged WASM SHA matches the staged binary.
+- Installed registration/configuration verified read-only: Edge Default holds unpacked `cmigiicdpipphbcnebgaieeahfhlnnmb` at this repo's `dist`; Edge registry key points to the ColonistAssistant manifest whose `allowed_origins` contains exactly that ID; manifest targets the broker exe; broker conf points at Ubuntu-26.04 (this environment) and the rebuilt companion path.
+- Broker → WSL hello successful at both layers with identical results: protocol 7, schema 3, `deep-maxn-v14`, RTX 3070 Ti, exactMaxn available without parity-only restriction, deadline/cancellation capable, no opening support, m0+mref models.
+- Local exact-GPU decision successful: `verify-mref-native.mjs` PASS (one stale `fixedWorkParityOnly === true` assertion updated to the staged `false` with rationale) — rollout across 3 dice models, 9 exact-vs-CPU parity scenarios with max error ~1e-7 and identical choices/nodes/depths, timed-deadline behavior, cancellation/recovery, invalid-evidence rejection.
+- Browser-originated GPU decision NOT yet confirmed: plan4246 ran fully on CPU/WASM because the companion was stale at the time. Local protocol success is distinct from browser integration.
+
+Remaining user action between games: reload the extension (also clears the client's no-retry cached unavailable state), refresh the Colonist tab, play, and send one decision export or companion-status result showing the actual runtime and algorithm. No strategy, calibration, benchmark, or registration work follows from this task.
