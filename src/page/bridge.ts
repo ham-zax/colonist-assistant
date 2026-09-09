@@ -1,5 +1,6 @@
 import { resolveLocalBoardAction } from "../core/forced-action";
 import { isTerminalGameHeading } from "../core/game-over";
+import { isSetupTurn } from "../core/game-progress";
 import { resolveLocalIdentity } from "../core/local-identity";
 import {
   openingRoadEdgeIds,
@@ -8,7 +9,11 @@ import {
 import { observeColonistDiceMode } from "./dice-mode";
 import {
   bumpManagerGeneration,
+  isGameGenerationRollover,
+  readLiveGameProgress,
   readManagerGeneration,
+  updateLiveGameProgress,
+  writeLiveGameProgress,
 } from "./game-generation";
 
 (() => {
@@ -84,9 +89,7 @@ import {
     | undefined;
   let validatorExports: Record<string, any> | undefined;
   let previousPayload = "";
-  let previousLiveProgress:
-    | { completedTurns: number; placedPieces: number }
-    | undefined;
+  let previousLiveProgress = readLiveGameProgress(sessionStorage);
   let assetModuleIds: Map<string, string> | undefined;
   const assetUrls = new Map<string, string>();
 
@@ -524,7 +527,13 @@ import {
     ]
       .map((candidate) => Number(candidate))
       .find((candidate) => Number.isInteger(candidate) && candidate >= 0);
-    const currentState = gameController.currentState ?? {};
+    const currentState = gameController.currentState;
+    if (!currentState || currentState.turnState === undefined) return undefined;
+    const completedTurns = currentState.completedTurns;
+    if (!Number.isSafeInteger(completedTurns) || completedTurns < 0) return undefined;
+    if (currentState.turnState === 0 && !isSetupTurn(completedTurns, playOrder.length)) {
+      return undefined;
+    }
     const playerActionState =
       gameController.currentStateValidator?.getPlayerActionState?.(myColor) ??
       currentState.actionState;
@@ -871,6 +880,7 @@ import {
         return state ? [[color, state]] : [];
       }),
     ) as Record<string, any>;
+    if (Object.keys(playerStates).length < playOrder.length) return undefined;
     // Colonist renders the local card inventory from the Redux game store.
     // Do not let the placement-freshness arbitration above substitute the
     // manager snapshot for private development-card ownership: buying or
@@ -1103,7 +1113,6 @@ import {
     const placedPieces =
       vertices.filter((vertex: Record<string, any>) => vertex.building).length +
       edges.filter((edge: Record<string, any>) => edge.player).length;
-    const completedTurns = Number(currentState.completedTurns ?? 0);
     // Colonist's completedTurns includes both rounds of snake-order setup, so
     // it is not a gameplay-roll ordinal. Mref history starts only after those
     // 2*N placement turns; the currently-thrown die belongs to the next ordinal
@@ -1115,19 +1124,7 @@ import {
       : playOrder.length >= 2 && completedTurns >= setupTurnCount
         ? completedTurns - setupTurnCount + (diceState?.diceThrown ? 1 : 0)
         : undefined;
-    if (
-      !isReplay &&
-      previousLiveProgress &&
-      previousLiveProgress.completedTurns >= 3 &&
-      completedTurns <= 1 &&
-      placedPieces < previousLiveProgress.placedPieces
-    ) {
-      managerGeneration = bumpManagerGeneration(sessionStorage, managerGeneration);
-      previousLiveProgress = undefined;
-    }
-    if (!isReplay) previousLiveProgress = { completedTurns, placedPieces };
     const roomId = String(rootStoreState?.gameSettings?.roomId ?? "");
-    const gameKey = `${location.pathname}${location.search}|${roomId}|${managerGeneration}`;
     const victoryTarget = Number(
       rootStoreState?.gameSettings?.victoryPointsToWin ?? 10,
     );
@@ -1160,6 +1157,36 @@ import {
     )?.[1]?.trim();
     const gameOver = Boolean(visibleWinner || endgameHeading || winnerText);
     const winner = visibleWinner ?? winnerText;
+
+    const playerRosterKey = playOrder
+      .map((color) => playerName(gameController, color))
+      .sort()
+      .join(",");
+    const snapshotProgressInput = {
+      completedTurns,
+      placedPieces,
+      initialPlacement,
+      gameplayRollCount,
+      gameOver,
+      playerRosterKey,
+      victoryTarget,
+      isReplay,
+    };
+    if (
+      !isReplay &&
+      isGameGenerationRollover(previousLiveProgress, snapshotProgressInput)
+    ) {
+      managerGeneration = bumpManagerGeneration(sessionStorage, managerGeneration);
+      previousLiveProgress = undefined;
+    }
+    if (!isReplay) {
+      previousLiveProgress = updateLiveGameProgress(
+        previousLiveProgress,
+        snapshotProgressInput,
+      );
+      writeLiveGameProgress(sessionStorage, previousLiveProgress);
+    }
+    const gameKey = `${location.pathname}${location.search}|${roomId}|${managerGeneration}`;
     const colorAsset = identityResolved
       ? COLOR_ASSET_NAME[myColor] ?? "blue"
       : undefined;

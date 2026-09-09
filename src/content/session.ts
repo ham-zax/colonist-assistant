@@ -1,5 +1,6 @@
 import { parseBankShortageNotice, parseLogSnapshot } from "../core/parser";
 import { createTrackerState, reduceTracker, replayEvents } from "../core/tracker";
+import { isSetupTurn } from "../core/game-progress";
 import type { StoredEvent, TrackerEvent, TrackerState } from "../core/types";
 import {
   ACTIVE_SESSION_STORAGE_KEY,
@@ -755,6 +756,13 @@ export class GameSession {
     this.queueSave();
   }
 
+  get cardHistoryDetail(): string {
+    if (this.partialHistoryFromMissingPrefix && this.setupLogPrefixEnd !== undefined) {
+      return `The public card log is missing its opening entries (0–${this.setupLogPrefixEnd}). Reloading the page does not recreate log entries that Colonist no longer exposes.`;
+    }
+    return "Some card events were missing, conflicting, or outside the retained history. Counts remain estimates where the public evidence is incomplete.";
+  }
+
   private acceptGameStartBoundary(): boolean {
     // Colonist can first expose setup from index 2, then hydrate the index-0
     // "Happy settling!" banner later. Only the narrow shapes below prove that
@@ -780,6 +788,73 @@ export class GameSession {
       this.partialHistory = false;
     }
     return true;
+  }
+
+  reconcileBoardSnapshot(snapshot: {
+    gameKey?: string;
+    turn?: number;
+    initialPlacement?: boolean;
+    gameplayRollCount?: number;
+    playerOrder?: string[];
+    players?: Record<string, unknown>;
+  } | undefined): boolean {
+    if (
+      this.disposed ||
+      !snapshot ||
+      !snapshot.gameKey ||
+      snapshot.gameKey !== this.gameKey
+    ) {
+      return false;
+    }
+    const boardRoster = snapshot.playerOrder?.length
+      ? [...new Set(snapshot.playerOrder)]
+      : Object.keys(snapshot.players ?? {});
+
+    // Roster hydration or a midgame departure is not a game boundary. Only
+    // recover stale same-key state when public turn progress confirms setup.
+    if (
+      !snapshot.initialPlacement ||
+      snapshot.gameplayRollCount !== 0 ||
+      !isSetupTurn(snapshot.turn, boardRoster.length)
+    ) return false;
+
+    const validRosterName = (name: string) =>
+      Boolean(name) && !/^Player \d+$/i.test(name);
+    const validBoardRoster = boardRoster.filter(validRosterName);
+
+    if (validBoardRoster.length >= 2 && validBoardRoster.length === boardRoster.length) {
+      const boardSet = new Set(validBoardRoster);
+      const sessionPlayers = [
+        ...this.state.playerOrder,
+        ...Object.keys(this.state.players),
+      ].filter(validRosterName);
+      const sessionSet = new Set(sessionPlayers);
+      if (
+        sessionSet.size >= 1 &&
+        [...sessionSet].some((player) => !boardSet.has(player))
+      ) {
+        this.recordInvestigation("system", {
+          phase: "stale-session-roster-mismatch-reset",
+        });
+        this.reset(false);
+        observeDiceSetupBoundary(this.diceHistory);
+        return true;
+      }
+    }
+
+    if (
+      this.diceHistory.rolls.length > 0 ||
+      this.events.some((event) => event.type === "roll")
+    ) {
+      this.recordInvestigation("system", {
+        phase: "stale-session-setup-roll-mismatch-reset",
+      });
+      this.reset(false);
+      observeDiceSetupBoundary(this.diceHistory);
+      return true;
+    }
+
+    return false;
   }
 
   setInitialPlacement(active: boolean, gameKey?: string): void {
@@ -819,6 +894,8 @@ export class GameSession {
     currentPlayer?: string;
     turn?: number;
     gameplayRollCount?: number;
+    playerOrder?: string[];
+    players?: Record<string, unknown>;
   } | undefined): boolean {
     if (
       this.disposed ||
@@ -828,6 +905,7 @@ export class GameSession {
     ) {
       return false;
     }
+    this.reconcileBoardSnapshot(snapshot);
     if (snapshot.initialPlacement) {
       const changed = observeDiceSetupBoundary(this.diceHistory);
       if (changed) {

@@ -73,6 +73,7 @@ const boot = async (): Promise<void> => {
         investigationRecorder.setGame(snapshot.gameKey);
         session?.setGameKey(snapshot.gameKey);
       }
+      session?.reconcileBoardSnapshot(snapshot);
       const resolvedMyPlayer =
         snapshot?.localSeatDiagnostics?.identity.status === "resolved"
           ? snapshot.myPlayer

@@ -33,8 +33,10 @@ Install from the
 
 ## What it does
 
-Advice and the live card table share one screen. Expand **Dice & model details**
-for roll statistics; settings remain separate. Turn on **Record game** before
+Advice and the live card table share one screen with one scroll area. Open
+**Dice & details** (or **Details · N notes**) for roll statistics and history
+diagnostics, then use **Back to table** to return; settings remain separate.
+Turn on **Record game** before
 playing, then use **Export compact LLM record (.txt)** even during an unfinished
 game. The export includes the extension build, dice history and uncertainty,
 and available per-decision engine, native-build, and execution diagnostics.
@@ -42,6 +44,10 @@ and available per-decision engine, native-build, and execution diagnostics.
 A **Dice history** pause is an evidence guard, not a WASM crash. The assistant
 retries when the public roll history or seat mapping changes, but never replaces
 Balanced Dice with IID dice. Expand the diagnostic to see coverage and ambiguity.
+Partial card history can occur even in a new game when the public log attaches
+late. Details explains missing opening entries when known; this warning does
+not mean that dice history is necessarily incomplete. Same-tab reloads preserve
+observed progress, and confirmed new-game boundaries discard the old history.
 For a fresh test, reload the extension and refresh the game tab before starting
 a new game. Resetting halfway through a game cannot establish missing rolls.
 

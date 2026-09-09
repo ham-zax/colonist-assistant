@@ -63,6 +63,7 @@ describe("live stochastic evidence recovery", () => {
       decisionTraces: { snapshotForRecord: () => unknown[] };
       captureGameRecord: () => void;
       renderCards: (state: typeof tracker, analysis?: undefined) => string;
+      renderDiagnostics: (state: typeof tracker, analysis?: undefined) => string;
     };
     internals.session = {
       id: "session-warning-only",
@@ -83,7 +84,9 @@ describe("live stochastic evidence recovery", () => {
 
     const cards = internals.renderCards(tracker);
     expect(cards).not.toContain("Card-event history is incomplete");
-    expect(cards).toContain("Some earlier game history was unavailable");
+    expect(cards).toContain("Details · 1 note");
+    expect(cards).not.toContain("Some earlier game history was unavailable");
+    expect(internals.renderDiagnostics(tracker)).toContain("Some earlier game history was unavailable");
 
     internals.captureGameRecord();
     expect(capture).toHaveBeenCalledTimes(1);
@@ -129,7 +132,9 @@ describe("live stochastic evidence recovery", () => {
     expect(nextClick).not.toHaveBeenCalled();
     const shadow = document.querySelector("#colonist-assistant-root")!.shadowRoot!;
     expect(shadow.querySelector(".board-marker")).toBeNull();
-    expect(shadow.textContent).toContain("Balanced Dice requires usable public reference-dice history");
+    expect(shadow.textContent).toContain("Automatic actions are paused");
+    shadow.querySelector<HTMLButtonElement>("button[data-view='details']")!.click();
+    expect(shadow.querySelector(".diagnostics-view")?.textContent).toContain("Balanced Dice requires usable public reference-dice history");
   });
 
   it("uses public gameplay-roll count to keep sparse log indexes from pausing Balanced Dice", async () => {

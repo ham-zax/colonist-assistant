@@ -415,15 +415,17 @@ describe("overlay settings interaction", () => {
     internals.decisionRuntimeError = "Balanced Dice requires usable public reference-dice history";
     internals.render();
     const shadow = document.querySelector("#colonist-assistant-root")!.shadowRoot!;
-    expect(shadow.textContent).toContain("Balanced Dice requires usable public reference-dice history");
+    expect(shadow.textContent).toContain("Automatic actions are paused");
     expect(shadow.querySelector(".meta-engine-chip")?.textContent).toContain("STRATEGIST ERROR");
     expect(shadow.textContent).not.toContain("WASM ERROR");
     expect(shadow.querySelector(".cards-pane")).not.toBeNull();
     expect(shadow.querySelector("[data-action='retry-engine']")).not.toBeNull();
+    shadow.querySelector<HTMLButtonElement>("button[data-view='details']")!.click();
+    expect(shadow.querySelector(".diagnostics-view")?.textContent).toContain("Balanced Dice requires usable public reference-dice history");
     overlay.destroy();
   });
 
-  it("shows the observed dice distribution below the tracked card matrix", () => {
+  it("discloses dice charts separately and returns to the compact card table", () => {
     let tracker = reduceTracker(createTrackerState(), {
       type: "discover",
       player: "You",
@@ -447,24 +449,27 @@ describe("overlay settings interaction", () => {
       { ...DEFAULT_SETTINGS },
       { reset: vi.fn() },
     );
-    overlay.update({ state: tracker } as GameSession);
+    overlay.update({ state: tracker, partialHistory: true } as GameSession);
     const shadow = document
       .querySelector<HTMLDivElement>("#colonist-assistant-root")!
       .shadowRoot!;
 
-    const details = shadow.querySelector<HTMLDetailsElement>(".dice-details");
-    expect(details?.open).toBe(false);
-    details!.open = true;
+    expect(shadow.querySelector("[aria-label='Observed dice roll distribution']")).toBeNull();
+    expect(shadow.querySelector(".cards-heading h2")?.textContent).toBe("Table cards");
+    expect(shadow.querySelector("button[data-view='details']")?.textContent).toBe("Details · 1 note");
+    expect(shadow.querySelector(".notice")).toBeNull();
+    shadow.querySelector<HTMLButtonElement>("button[data-view='details']")!.click();
+    const details = shadow.querySelector<HTMLElement>(".diagnostics-view");
+    expect(details).not.toBeNull();
+    expect(details?.textContent).toContain("Partial card history");
+    expect(shadow.activeElement).toBe(details?.querySelector("button"));
+    expect(shadow.querySelector(".player-matrix")).toBeNull();
 
     const chart = shadow.querySelector<HTMLElement>(
       "[aria-label='Observed dice roll distribution']",
     );
-    const cardsHeading = shadow.querySelector<HTMLElement>(".cards-heading");
     const seven = chart?.querySelector<HTMLElement>("[data-dice-total='7']");
     const eight = chart?.querySelector<HTMLElement>("[data-dice-total='8']");
-    expect(cardsHeading?.querySelector("h2")?.textContent?.trim()).toBe("Table cards");
-    expect(cardsHeading?.querySelector("p")).toBeNull();
-    expect(details?.previousElementSibling?.classList.contains("player-matrix")).toBe(true);
     expect(chart?.parentElement).toBe(details);
     expect(seven?.getAttribute("aria-label")).toBe(
       "7 rolled 2 times; 0.5 expected after 3 rolls",
@@ -478,6 +483,11 @@ describe("overlay settings interaction", () => {
     expect(chart?.querySelector(".dice-legend")?.textContent).toContain(
       "SOLID OBSERVED · DASHED EXPECTED",
     );
+    overlay.update({ state: tracker, partialHistory: true } as GameSession);
+    expect(shadow.querySelector(".diagnostics-view")).not.toBeNull();
+    shadow.querySelector<HTMLButtonElement>("button[data-view='advice']")!.click();
+    expect(shadow.querySelector(".player-matrix")).not.toBeNull();
+    expect(shadow.querySelector(".diagnostics-view")).toBeNull();
     overlay.destroy();
   });
 

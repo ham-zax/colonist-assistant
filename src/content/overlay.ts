@@ -30,6 +30,7 @@ import {
 import {
   buildLiveDecisionStochasticInput,
   reconciledLivePublicRollAt,
+  type DiceHistoryState,
   type PublicStochasticInput,
 } from "../core/dice-history";
 import {
@@ -137,7 +138,7 @@ import { DecisionWorkerClient } from "./decision-worker";
 import { investigationRecorder } from "./investigation-recorder";
 import { InteractionRenderGate } from "./render-gate";
 
-type ViewName = "advice" | "settings";
+type ViewName = "advice" | "settings" | "details";
 
 const STRATEGIST_LABEL = "Strategist ★";
 const WEIGHTED_LABEL = "Weighted";
@@ -148,6 +149,47 @@ const resourceSupplyForPlayerCount = (playerCount: number): number =>
 const boardPlayerRoster = (board?: BoardSnapshot): string[] => {
   if (board?.playerOrder?.length) return [...new Set(board.playerOrder)];
   return Object.keys(board?.players ?? {});
+};
+
+export const isSessionCompatibleWithBoard = (
+  session?: {
+    state?: TrackerState;
+    diceHistory?: DiceHistoryState;
+    events?: Array<{ type: string }>;
+  },
+  board?: BoardSnapshot,
+): boolean => {
+  if (!session) return false;
+  if (!board) return true;
+  const boardRoster = boardPlayerRoster(board);
+  const validRosterName = (name: string) =>
+    Boolean(name) && !/^Player \d+$/i.test(name);
+  const validBoardRoster = boardRoster.filter(validRosterName);
+  if (validBoardRoster.length >= 2) {
+    const boardRosterSet = new Set(validBoardRoster);
+    const sessionState = session.state;
+    const sessionRoster = new Set([
+      ...(sessionState?.playerOrder ?? []),
+      ...Object.keys(sessionState?.players ?? {}),
+    ].filter(validRosterName));
+    if (
+      [...sessionRoster].some((player) => !boardRosterSet.has(player))
+    ) {
+      return false;
+    }
+    // A partial card tracker can still own complete public dice evidence.
+    // The stochastic builder validates actors, ordinals and board roll count;
+    // reconciledState separately supplies a full roster for recommendations.
+  }
+  if (
+    board.initialPlacement &&
+    board.gameplayRollCount === 0 &&
+    ((session.diceHistory?.rolls?.length ?? 0) > 0 ||
+      (session.events?.some((event) => event.type === "roll") ?? false))
+  ) {
+    return false;
+  }
+  return true;
 };
 
 const publicResourceSeed = (value: string): number => {
@@ -404,7 +446,12 @@ export class AssistantOverlay {
     // sees. A closed shadow root is not a security boundary and made live
     // failures impossible to diagnose.
     this.shadow = this.host.attachShadow({ mode: "open" });
-    this.shadow.innerHTML = `<style>${OVERLAY_STYLES}</style><div id="mount"></div>`;
+    this.shadow.innerHTML = `<style>@font-face {
+      font-family: "Archivo Narrow";
+      src: url("${chrome.runtime.getURL("assets/fonts/ArchivoNarrow-Variable.ttf")}") format("truetype");
+      font-weight: 400 700;
+      font-display: swap;
+    }${OVERLAY_STYLES}</style><div id="mount"></div>`;
     document.documentElement.append(this.host);
     this.installHandlers();
     void this.restorePosition();
@@ -515,6 +562,10 @@ export class AssistantOverlay {
       this.tradeOfferSnapshots.clear();
       this.clearOutgoingTradeWatchdogs();
       this.lastResolvedBoard = undefined;
+    }
+
+    if (nextBoard && this.session && !isSessionCompatibleWithBoard(this.session, nextBoard)) {
+      this.session.reconcileBoardSnapshot?.(nextBoard);
     }
 
     if (identityResolved) {
@@ -1082,6 +1133,9 @@ export class AssistantOverlay {
         return;
       }
       this.render();
+      if (action === "view" && this.activeView === "details") {
+        this.shadow.querySelector<HTMLButtonElement>(".diagnostics-heading button")?.focus({ preventScroll: true });
+      }
     });
 
     this.shadow.addEventListener("change", (rawEvent) => {
@@ -1616,6 +1670,8 @@ export class AssistantOverlay {
     const advice = executionNotice + this.renderAdvice(state, spatial, report, next);
     const panel = this.activeView === "settings"
       ? this.renderSettings()
+      : this.activeView === "details"
+      ? this.renderDiagnostics(state, displayedWinAnalysis)
       : `<div class="overview">
           <section class="advice-pane" aria-label="Current advice">${advice}</section>
           <section class="cards-pane" aria-label="Table cards">${this.renderCards(state, displayedWinAnalysis)}</section>
@@ -2637,12 +2693,23 @@ export class AssistantOverlay {
     };
   }
 
+  isSessionCompatibleWithBoard(board?: BoardSnapshot): boolean {
+    return isSessionCompatibleWithBoard(this.session, board);
+  }
+
+  private usableSessionDiceHistory(
+    board?: BoardSnapshot,
+  ): DiceHistoryState | undefined {
+    if (!isSessionCompatibleWithBoard(this.session, board)) return undefined;
+    return this.session?.diceHistory;
+  }
+
   private unresolvedDiceEvidence(): unknown {
     // Retry wake-up evidence is deliberately narrower than the raw dice-history
     // digest. Colonist can backfill harmless generic log coverage long after the
     // physical rolls are known; coverage churn is presentation work, not a new
     // stochastic position, and must not repeatedly restart the strategist.
-    const history = this.session?.diceHistory;
+    const history = this.usableSessionDiceHistory(this.board);
     if (!history) return null;
     return {
       rolls: history.rolls.map((roll) => [
@@ -2665,7 +2732,7 @@ export class AssistantOverlay {
     // change the decision key while a valid search was running, so delayed log
     // hydration cancelled useful GPU/CPU work even though the canonical roll
     // sequence had not changed.
-    const history = this.session?.diceHistory;
+    const history = this.usableSessionDiceHistory(board);
     const expected = board.gameplayRollCount;
     const order = board.playerOrder;
     if (!history || expected === undefined || !Number.isInteger(expected) || !order?.length) {
@@ -2791,7 +2858,7 @@ export class AssistantOverlay {
   }
 
   private diceEvidenceDetail(): string {
-    const history = this.session?.diceHistory;
+    const history = this.usableSessionDiceHistory(this.board);
     if (!history) return "The public game log is still attaching; analysis resumes when usable evidence arrives";
     const ranges = history.coverage.ranges.slice(0, 4).map(([start, end]) => `${start}-${end}`).join(",") || "none";
     const ambiguous = history.ambiguousLogIndices.slice(0, 8).join(",") || "none";
@@ -2803,7 +2870,7 @@ export class AssistantOverlay {
     // publishes the corresponding board turn/count. Prove the skew is exactly
     // one coherent gameplay roll and wait for the board; do not analyze a
     // hybrid position or "fix" it by trusting raw history length.
-    const history = this.session?.diceHistory;
+    const history = this.usableSessionDiceHistory(board);
     const expected = board.gameplayRollCount;
     const order = board.playerOrder;
     if (
@@ -3125,7 +3192,7 @@ export class AssistantOverlay {
       return;
     }
     try {
-      const history = this.session?.diceHistory;
+      const history = this.usableSessionDiceHistory(decisionBoard);
       investigationRecorder.record("decision", {
         phase: "stochastic-input-attempt",
         gameKey: decisionBoard.gameKey,
@@ -3158,7 +3225,7 @@ export class AssistantOverlay {
           : undefined;
       stochastic = buildLiveDecisionStochasticInput(
         decisionBoard.diceMode,
-        this.session?.diceHistory,
+        history,
         decisionBoard.playerOrder,
         decisionBoard.gameplayRollCount,
         currentRoll,
@@ -3178,7 +3245,7 @@ export class AssistantOverlay {
       this.decisionWorker.reset();
       this.decisionEvidenceWait = this.stochasticEvidenceSignature(board);
       const reason = error instanceof Error ? error.message : "Balanced Dice stochastic evidence is unavailable";
-      const history = this.session?.diceHistory;
+      const history = this.usableSessionDiceHistory(decisionBoard);
       investigationRecorder.record("decision", {
         phase: "stochastic-input-rejected",
         gameKey: decisionBoard.gameKey,
@@ -4471,11 +4538,11 @@ export class AssistantOverlay {
         </div>
         <p class="why">${awaitingEvidence
           ? "Balanced Dice needs a verified public roll history. Analysis will resume automatically when the missing evidence is resolved."
-          : `${escapeHtml(detail)}. No autonomous action will run until this is resolved.`}</p>
-        ${awaitingEvidence ? `<details class="more"><summary>Dice-history diagnostic</summary><p>${escapeHtml(detail)}.</p><p>No fair-IID fallback is used. The exported record preserves this uncertainty.</p></details>` : ""}
+          : reloadRequired ? `${escapeHtml(detail)}.` : "The selected engine has not returned a usable decision. Automatic actions are paused; open Details for the reason."}</p>
+        <button class="details-link" data-action="view" data-view="details">View diagnostic details</button>
         ${reloadRequired
           ? `<div class="board-confirm pending"><i></i><span>Reload the tab to reconnect this content script</span></div>`
-          : `<div class="board-confirm pending"><i></i><span>No automatic action until this error is resolved</span></div><button class="reset-link" type="button" data-action="retry-engine">Retry Strategist</button>`}
+          : `<button class="reset-link" type="button" data-action="retry-engine">Retry Strategist</button>`}
       </section>`;
     }
     const discard = this.discardRecommendation(state);
@@ -5269,16 +5336,7 @@ export class AssistantOverlay {
     if (!state?.playerOrder.length) {
       return `<section class="empty compact-empty"><h1>No cards tracked yet</h1><p>Public card evidence appears after the first game-log action.</p></section>`;
     }
-    const structuralHistoryWarning = this.session?.partialHistory
-      ? `<div class="notice">${warningIcon()}<span>Card-event history is incomplete. Opponent resource ranges stay conservative; Balanced-Dice history is tracked separately.</span></div>`
-      : "";
-    const trackerWarnings = state.warnings
-      .map(
-        (message) =>
-          `<div class="notice">${warningIcon()}<span>${escapeHtml(message)}</span></div>`,
-      )
-      .join("");
-    const warning = `${structuralHistoryWarning}${trackerWarnings}`;
+    const noteCount = state.warnings.length + Number(Boolean(this.session?.partialHistory));
     const user = this.userPlayer(state);
     const headings = RESOURCE_ORDER.map(
       (resource) =>
@@ -5300,19 +5358,28 @@ export class AssistantOverlay {
       this.board?.bankVisible && this.board.bank
         ? this.renderBankRow(this.board.bank)
         : "";
-    const model = displayedWinAnalysis
-      ? `<div class="model-strip"><span>${escapeHtml(displayedWinAnalysis.model)}</span><b>${displayedWinAnalysis.simulations ? `${displayedWinAnalysis.simulations} ROLLOUTS` : "DETERMINISTIC"}</b></div>`
-      : "";
-    const detailsOpen = this.shadow.querySelector<HTMLDetailsElement>(".dice-details")?.open;
-    return `${warning}
-      <header class="cards-heading"><h2>Table cards</h2><span>PUBLIC EVIDENCE</span></header>
+    return `<header class="cards-heading"><h2>Table cards</h2><button class="details-link ${noteCount ? "has-notes" : ""}" data-action="view" data-view="details">${noteCount ? `Details · ${noteCount} note${noteCount === 1 ? "" : "s"}` : "Dice & details"}</button></header>
       <div class="matrix-head"><span>PLAYER</span>${headings}<span>Σ</span></div>
-      <section class="player-matrix" aria-label="Tracked player resources">${rows}${bankRow}</section>
-      <details class="dice-details"${detailsOpen ? " open" : ""}>
-        <summary>Dice &amp; model details</summary>
-        ${this.renderDiceDistribution(state)}
-        ${model}
-      </details>`;
+      <section class="player-matrix" aria-label="Tracked player resources">${rows}${bankRow}</section>`;
+  }
+
+  private renderDiagnostics(state?: TrackerState, analysis?: DecisionAnalysis): string {
+    const historyNote = this.session?.partialHistory
+      ? `<section class="diagnostic-note"><h3>Partial card history</h3><p>${escapeHtml(this.session.cardHistoryDetail ?? "Some earlier card events were unavailable.")}</p><p>This can happen in a new game when the public log attaches late. Opponent card ranges remain conservative. Dice history is checked separately.</p></section>`
+      : "";
+    const warnings = (state?.warnings ?? []).map((message) =>
+      `<section class="diagnostic-note"><p>${escapeHtml(message)}</p></section>`,
+    ).join("");
+    const runtime = this.decisionRuntimeError
+      ? `<section class="diagnostic-note"><h3>Strategist paused</h3><p>${escapeHtml(this.decisionRuntimeError)}</p><p>Automatic actions remain paused until the required evidence or engine result is available.</p></section>`
+      : "";
+    return `<section class="diagnostics-view" aria-label="Game diagnostics">
+      <header class="diagnostics-heading"><button class="details-link" data-action="view" data-view="advice">← Back to table</button><h2>Game details</h2></header>
+      ${runtime}${historyNote}${warnings}
+      ${!runtime && !historyNote && !warnings ? '<p class="diagnostics-copy">No card-history warnings.</p>' : ""}
+      ${state ? this.renderDiceDistribution(state) : ""}
+      ${analysis ? `<p class="diagnostics-copy">${escapeHtml(analysis.model)}</p>` : ""}
+    </section>`;
   }
 
   private renderDiceDistribution(state: TrackerState): string {
@@ -5477,8 +5544,8 @@ export class AssistantOverlay {
             : "",
           pathLabel,
           portLabel,
-          (this.board?.players?.[player]?.developmentCards ?? meta.devCards.length)
-            ? `${this.board?.players?.[player]?.developmentCards ?? meta.devCards.length} DEV`
+          (this.board?.players?.[player]?.developmentCards ?? meta.devCards?.length ?? 0)
+            ? `${this.board?.players?.[player]?.developmentCards ?? meta.devCards?.length ?? 0} DEV`
             : "",
         ]
           .filter(Boolean)
@@ -5496,7 +5563,7 @@ export class AssistantOverlay {
     return `<article class="matrix-row ${isUser ? "is-user" : ""}" style="--player:${safeColor(meta.color)}">
       <span class="player-name"><i class="player-stripe"></i><b>${escapeHtml(player)}${awards ? `<span class="player-awards">${awards}</span>` : ""}</b><small>${escapeHtml(metaLabel)}</small></span>
       ${resources}
-      <span class="total-cell">${formatRange(estimate.totalMinimum, estimate.totalMaximum, estimate.approximate)}</span>
+      <span class="total-cell ${estimate.totalMinimum === estimate.totalMaximum ? "exact" : "range"}">${formatRange(estimate.totalMinimum, estimate.totalMaximum, estimate.approximate)}</span>
     </article>`;
   }
 

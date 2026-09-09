@@ -14,7 +14,7 @@ export const OVERLAY_STYLES = `
     --ca-danger: #ef7c72;
     all: initial;
     color: var(--ca-ink);
-    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-family: "Archivo Narrow", "Arial Narrow", system-ui, sans-serif;
     font-size: 13px;
     line-height: 1.4;
   }
@@ -43,11 +43,14 @@ export const OVERLAY_STYLES = `
     box-shadow: 0 2px 8px rgba(0, 0, 0, .28), 0 20px 56px rgba(3, 10, 15, .54);
     zoom: var(--ca-interface-scale, 1.15);
   }
-  .assistant.collapsed { width: min(286px, var(--ca-interface-width, 286px)); }
+  .assistant.collapsed {
+    width: min(286px, var(--ca-interface-width, 286px));
+    height: auto;
+  }
   .topbar {
     display: flex;
     align-items: center;
-    min-height: 56px;
+    min-height: 48px;
     padding: 0 8px 0 13px;
     border-bottom: 1px solid var(--ca-line);
     background: var(--ca-chrome);
@@ -162,7 +165,7 @@ export const OVERLAY_STYLES = `
   .body {
     display: flex;
     min-height: 0;
-    max-height: calc(var(--ca-interface-max-height, min(72vh, 650px)) - 56px);
+    max-height: calc(var(--ca-interface-max-height, min(72vh, 650px)) - 48px);
     flex: 1;
     flex-direction: column;
   }
@@ -171,6 +174,7 @@ export const OVERLAY_STYLES = `
     min-height: 0;
     flex: 1;
     overflow: auto;
+    scrollbar-gutter: stable;
     scrollbar-width: thin;
     scrollbar-color: var(--ca-line-strong) var(--ca-bg);
   }
@@ -180,7 +184,7 @@ export const OVERLAY_STYLES = `
   .model-strip {
     display: flex;
     width: 100%;
-    min-height: 34px;
+    min-height: 30px;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
@@ -439,9 +443,9 @@ export const OVERLAY_STYLES = `
     min-width: 0;
     overflow-wrap: anywhere;
     color: var(--ca-ink);
-    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
-    font-size: 11.5px;
-    font-weight: 650;
+    font-family: "Archivo Narrow", "Arial Narrow", system-ui, sans-serif;
+    font-size: 16px;
+    font-weight: 700;
     font-variant-numeric: tabular-nums;
   }
   .discard-decision .why { margin-top: 14px; }
@@ -818,15 +822,20 @@ export const OVERLAY_STYLES = `
   .resource-cell,
   .total-cell {
     display: grid;
+    min-width: 0;
     min-height: 30px;
     place-items: center;
     color: var(--ca-ink);
-    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
-    font-size: 11.5px;
-    font-weight: 650;
+    font-family: "Archivo Narrow", "Arial Narrow", system-ui, sans-serif;
+    font-size: 17px;
+    font-weight: 700;
     font-variant-numeric: tabular-nums;
+    line-height: 1.15;
+    overflow-wrap: anywhere;
   }
-  .resource-cell.range {
+  .resource-cell.range,
+  .total-cell.range {
+    font-size: 14px;
     color: var(--ca-accent);
     text-decoration: underline dashed;
     text-underline-offset: 3px;
@@ -1032,42 +1041,56 @@ export const OVERLAY_STYLES = `
   .empty h1 { max-width: 300px; margin: 0; font-size: 23px; line-height: 1.05; }
   .empty p { max-width: 300px; margin: 8px 0 0; color: var(--ca-copy); font-size: 12.5px; }
   .compact-empty { min-height: 190px; }
-  /* Keep the card ledger visible even when an error or explanation is long. */
+  /* One scroll owner. Secondary diagnostics have their own view instead of
+     expanding inside the card ledger or nesting a second advice scrollbar. */
   .overview {
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    max-height: calc(var(--ca-interface-max-height, min(72vh, 650px)) - 56px);
+    display: block;
   }
   .advice-pane {
-    flex: 1 1 auto;
-    min-height: 110px;
-    overflow: auto;
-    scrollbar-width: thin;
-    scrollbar-color: var(--ca-line-strong) var(--ca-raised);
+    min-height: 0;
   }
   .cards-pane { flex: 0 0 auto; }
-  .overview .decision { padding: 13px 14px 14px; }
-  .overview .decision-meta { margin-bottom: 9px; }
+  .overview .decision { padding: 10px 12px; }
+  .overview .decision-meta { margin-bottom: 6px; }
   .overview .decision h1 { font-size: 23px; }
-  .overview .why { margin: 9px 0 11px; overflow-wrap: anywhere; }
+  .overview .why { margin: 7px 0 8px; overflow-wrap: anywhere; }
   .overview .empty { min-height: 130px; padding: 18px 14px; }
   .overview .empty-mark { display: none; }
   .overview .empty h1 { font-size: 21px; }
-  .overview .cards-heading { min-height: 36px; justify-content: space-between; gap: 8px; }
+  .overview .cards-heading { min-height: 30px; justify-content: space-between; gap: 8px; }
   .cards-heading > span { color: var(--ca-quiet); font-size: 10px; letter-spacing: .045em; }
-  .overview .matrix-row { min-height: 44px; }
-  .overview .matrix-head { min-height: 30px; }
-  .dice-details { border-bottom: 1px solid var(--ca-line); }
-  .dice-details > summary {
-    padding: 10px 14px;
+  .overview .matrix-row { min-height: 40px; }
+  .overview .matrix-head { min-height: 28px; }
+  .details-link {
+    min-height: 30px;
+    padding: 4px 6px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
     color: var(--ca-copy);
     font-size: 12px;
     cursor: pointer;
   }
-  .dice-details > summary:hover { color: var(--ca-accent); }
-  .dice-details[open] > summary { color: var(--ca-accent); }
-  .dice-details .dice-distribution { border-top: 1px solid var(--ca-line); }
+  .details-link:hover { color: var(--ca-ink); background: var(--ca-raised); }
+  .details-link.has-notes { color: var(--ca-accent); }
+  .diagnostics-heading {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 12px;
+    background: var(--ca-chrome);
+    border-bottom: 1px solid var(--ca-line);
+  }
+  .diagnostics-heading h2 { margin: 0; font-size: 15px; }
+  .diagnostic-note { padding: 10px 12px; border-bottom: 1px solid var(--ca-line); }
+  .diagnostic-note h3 { margin: 0 0 5px; color: var(--ca-accent); font-size: 14px; }
+  .diagnostic-note p { margin: 0; color: var(--ca-copy); overflow-wrap: anywhere; }
+  .diagnostic-note p + p { margin-top: 6px; }
+  .diagnostics-copy { margin: 0; padding: 10px 12px; color: var(--ca-copy); }
   @media (max-width: 700px) {
     .assistant {
       width: var(--ca-interface-width, calc(100vw - 16px));
