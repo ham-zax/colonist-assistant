@@ -1,12 +1,16 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GameSession } from "../src/content/session";
+import { hashString } from "../src/content/dom";
 import { AssistantOverlay, isSessionCompatibleWithBoard } from "../src/content/overlay";
 import { DEFAULT_SETTINGS } from "../src/content/settings";
 import {
   appendPublicDiceRoll,
   buildLiveDecisionStochasticInput,
+  createDiceHistoryState,
+  serializeDiceHistoryState,
 } from "../src/core/dice-history";
+import { sessionStorageKey } from "../src/core/local-data";
 import type { BoardPlayerPublicState, BoardSnapshot } from "../src/core/placement";
 
 const mockPublicPlayer = (
@@ -506,5 +510,272 @@ describe("stale session game rollover regression", () => {
       gameKey: "subset", diceMode: "balanced", initialPlacement: false, gameplayRollCount: 1,
       playerOrder: boardRoster, hexes: [], vertices: [], edges: [],
     })).toBe(true);
+  });
+
+  it("reattaches root container without losing existing dice rolls or events", async () => {
+    const root1 = document.createElement("div");
+    document.body.append(root1);
+    const session = await build4PStaleSession(root1, "ongoing-reattach");
+    expect(session.diceHistory.rolls.length).toBe(104);
+    const initialEventsCount = session.events.length;
+
+    const root2 = document.createElement("div");
+    document.body.append(root2);
+    session.attachRoot(root2);
+
+    expect(session.diceHistory.rolls.length).toBe(104);
+    expect(session.events.length).toBe(initialEventsCount);
+  });
+
+  it("partitions session identity across distinct room hashes", () => {
+    const originalHash = window.location.hash;
+    try {
+      window.location.hash = "#roomA";
+      const sessionA = new GameSession(document.createElement("div"), vi.fn());
+      window.location.hash = "#roomB";
+      const sessionB = new GameSession(document.createElement("div"), vi.fn());
+      expect(sessionA.id).not.toEqual(sessionB.id);
+      expect(sessionA.id).toBe("room:roomA");
+      expect(sessionB.id).toBe("room:roomB");
+    } finally {
+      window.location.hash = originalHash;
+    }
+  });
+
+  it.each(["matching-key", "another-game"])("migrates the legacy storage key only for the same game: %s", async (storedGameKey) => {
+    const originalHash = window.location.hash;
+    try {
+      window.location.hash = "#roomA";
+      const root = document.createElement("div");
+      document.body.append(root);
+      const session = new GameSession(root, vi.fn(), "matching-key");
+      sessions.push(session);
+
+      const basePage = window.location.origin + window.location.pathname + window.location.search;
+      const legacyId = hashString(basePage);
+      const history = createDiceHistoryState();
+      appendPublicDiceRoll(history, {
+        actor: "Alice", total: 8, eventId: "board-roll:0:Alice",
+      });
+      storage.set(sessionStorageKey(legacyId), {
+        schema: 4,
+        id: legacyId,
+        gameKey: storedGameKey,
+        page: basePage,
+        startedAt: 1000,
+        events: [],
+        seenIds: [],
+        unmatchedCount: 0,
+        partialHistory: false,
+        diceHistory: serializeDiceHistoryState(history),
+      });
+
+      await session.start();
+      expect(session.gameKey).toBe("matching-key");
+      if (storedGameKey === "matching-key") {
+        expect(session.startedAt).toBe(1000);
+        expect(session.diceHistory.rolls).toEqual(history.rolls);
+      } else {
+        expect(session.startedAt).not.toBe(1000);
+        expect(session.diceHistory.rolls).toEqual([]);
+      }
+      session.stop();
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      expect(storage.get(sessionStorageKey(session.id))).toMatchObject({
+        id: session.id,
+        page: basePage + "#roomA",
+        gameKey: "matching-key",
+      });
+    } finally {
+      window.location.hash = originalHash;
+    }
+  });
+
+  it("preserves history and pauses compatibility on a midgame bot replacement", async () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const session = await build4PStaleSession(root, "/|wall5593|1");
+    sessions.push(session);
+    expect(session.diceHistory.rolls.length).toBe(104);
+
+    const novelSnapshot: BoardSnapshot = {
+      gameKey: "/|wall5593|1",
+      diceMode: "balanced",
+      initialPlacement: false,
+      gameplayRollCount: 120,
+      turn: 58,
+      currentPlayer: "hamzax",
+      playerOrder: [...threePlayerRoster, "Bot Easy"],
+      players: Object.fromEntries([...threePlayerRoster, "Bot Easy"].map((p) => [p, mockPublicPlayer()])),
+      hexes: [],
+      vertices: [],
+      edges: [],
+    };
+
+    expect(session.reconcileBoardSnapshot(novelSnapshot)).toBe(false);
+    expect(session.diceHistory.rolls.length).toBe(104);
+    expect(isSessionCompatibleWithBoard(session, novelSnapshot)).toBe(false);
+  });
+
+  it("preserves recorded rolls when a midgame board count regresses", async () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const session = await build4PStaleSession(root, "/|same-roster|1");
+    sessions.push(session);
+    expect(session.diceHistory.rolls.length).toBe(104);
+
+    const rollDropSnapshot: BoardSnapshot = {
+      gameKey: "/|same-roster|1",
+      diceMode: "balanced",
+      initialPlacement: false,
+      gameplayRollCount: 4,
+      turn: 10,
+      currentPlayer: "hamzax",
+      playerOrder: fourPlayerRoster,
+      players: Object.fromEntries(fourPlayerRoster.map((p) => [p, mockPublicPlayer()])),
+      hexes: [],
+      vertices: [],
+      edges: [],
+    };
+
+    expect(session.reconcileBoardSnapshot(rollDropSnapshot)).toBe(false);
+    expect(session.diceHistory.rolls.length).toBe(104);
+    expect(isSessionCompatibleWithBoard(session, rollDropSnapshot)).toBe(true);
+    expect(() => buildLiveDecisionStochasticInput(
+      "balanced", session.diceHistory, fourPlayerRoster, 4,
+    )).toThrow();
+    expect(buildLiveDecisionStochasticInput(
+      "balanced", session.diceHistory, fourPlayerRoster, 104,
+    ).rolls).toHaveLength(104);
+  });
+
+  it("reports accurate diagnostic reasons for different incompatible session states", async () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS, engine: "deep-search" },
+      { reset: vi.fn() },
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    // 1. No session attached
+    overlay.update(undefined);
+    expect((overlay as any).diceEvidenceDetail()).toContain(
+      "The public game log is still attaching",
+    );
+
+    // 2. Setup with rolls from previous game
+    const sessionWithRolls = await build4PStaleSession(root, "diag-setup");
+    sessions.push(sessionWithRolls);
+    (overlay as any).session = sessionWithRolls;
+    const setupBoard: BoardSnapshot = {
+      gameKey: "diag-setup",
+      diceMode: "balanced",
+      initialPlacement: true,
+      gameplayRollCount: 0,
+      turn: 1,
+      playerOrder: fourPlayerRoster,
+      players: Object.fromEntries(fourPlayerRoster.map((p) => [p, mockPublicPlayer()])),
+      hexes: [],
+      vertices: [],
+      edges: [],
+    };
+    (overlay as any).board = setupBoard;
+    expect((overlay as any).diceEvidenceDetail()).toContain(
+      "Game session contains rolls from a previous game while board is in setup",
+    );
+
+    // 3. Midgame with genuinely incompatible roster (novel player + extraneous player)
+    const midgameRosterMismatchBoard: BoardSnapshot = {
+      gameKey: "diag-roster",
+      diceMode: "balanced",
+      initialPlacement: false,
+      gameplayRollCount: 150,
+      turn: 60,
+      playerOrder: ["Alice", "Xavier"],
+      players: { Alice: mockPublicPlayer(), Xavier: mockPublicPlayer() },
+      hexes: [],
+      vertices: [],
+      edges: [],
+    };
+    (overlay as any).board = midgameRosterMismatchBoard;
+    expect((overlay as any).diceEvidenceDetail()).toContain(
+      "Game session is incompatible with current board roster",
+    );
+  });
+
+  it("preserves session during normal live turn rolls and 1-roll DOM skews without midgame reset", async () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const session = await build4PStaleSession(root, "/|live-turn|1");
+    sessions.push(session);
+
+    // Simulate 28 recorded rolls at turn 36
+    session.diceHistory.rolls = session.diceHistory.rolls.slice(0, 28);
+    expect(session.diceHistory.rolls.length).toBe(28);
+
+    // 1. Hamzax rolls: board records board-roll:28:hamzax
+    appendPublicDiceRoll(session.diceHistory, {
+      actor: "hamzax",
+      total: 11,
+      eventId: "board-roll:28:hamzax",
+    });
+    expect(session.diceHistory.rolls.length).toBe(29);
+
+    // 2. An intermediate snapshot arrives with gameplayRollCount = 28 (before count increment or on turn-end toggle)
+    const turn36Board: BoardSnapshot = {
+      gameKey: "/|live-turn|1",
+      diceMode: "balanced",
+      initialPlacement: false,
+      gameplayRollCount: 28,
+      turn: 36,
+      currentPlayer: "hamzax",
+      playerOrder: fourPlayerRoster,
+      players: Object.fromEntries(fourPlayerRoster.map((p) => [p, mockPublicPlayer()])),
+      hexes: [],
+      vertices: [],
+      edges: [],
+    };
+
+    // Must NOT reset the session!
+    expect(session.reconcileBoardSnapshot(turn36Board)).toBe(false);
+    expect(session.diceHistory.rolls.length).toBe(29);
+    expect(isSessionCompatibleWithBoard(session, turn36Board)).toBe(true);
+
+    // 3. DOM log renders next roll before bridge snapshot advances: indexedCount = limit + 1
+    const rollWithLogIndex = session.diceHistory.rolls[session.diceHistory.rolls.length - 1]!;
+    (rollWithLogIndex as any).logIndex = 227;
+
+    expect(session.reconcileBoardSnapshot(turn36Board)).toBe(false);
+    expect(session.diceHistory.rolls.length).toBe(29);
+    expect(isSessionCompatibleWithBoard(session, turn36Board)).toBe(true);
+  });
+
+  it("preserves session when a player departs or disconnects midgame", async () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const session = await build4PStaleSession(root, "/|departure|1");
+    sessions.push(session);
+    expect(session.diceHistory.rolls.length).toBe(104);
+
+    // Neda1311 disconnects/departs: board roster only has threePlayerRoster
+    const departureBoard: BoardSnapshot = {
+      gameKey: "/|departure|1",
+      diceMode: "balanced",
+      initialPlacement: false,
+      gameplayRollCount: 104,
+      turn: 40,
+      currentPlayer: "hamzax",
+      playerOrder: threePlayerRoster,
+      players: Object.fromEntries(threePlayerRoster.map((p) => [p, mockPublicPlayer()])),
+      hexes: [],
+      vertices: [],
+      edges: [],
+    };
+
+    // Midgame departure alone must NOT reset session or mark it incompatible
+    expect(session.reconcileBoardSnapshot(departureBoard)).toBe(false);
+    expect(session.diceHistory.rolls.length).toBe(104);
+    expect(isSessionCompatibleWithBoard(session, departureBoard)).toBe(true);
   });
 });

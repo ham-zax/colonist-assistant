@@ -291,4 +291,76 @@ describe("page manager generation", () => {
     });
     expect(progress.playerRosterKey).toBe("Alice,Bob");
   });
+
+  it("does not infer a new game from midgame roster changes", () => {
+    const progress = updateLiveGameProgress(undefined, {
+      completedTurns: 20,
+      placedPieces: 25,
+      initialPlacement: false,
+      gameplayRollCount: 20,
+      gameOver: false,
+      playerRosterKey: "Alice,Bob,Carol,Dave",
+      victoryTarget: 10,
+    });
+
+    // Names alone cannot distinguish replacement players from a new game.
+    const novelRosterFrame = {
+      completedTurns: 15,
+      placedPieces: 20,
+      initialPlacement: false,
+      gameplayRollCount: 15,
+      gameOver: false,
+      playerRosterKey: "Alice,Bob,Eve,Frank",
+      victoryTarget: 10,
+    };
+    expect(isGameGenerationRollover(progress, novelRosterFrame)).toBe(false);
+
+    // Midgame departure alone (subset, no novel players) must NOT rollover
+    const departureFrame = {
+      completedTurns: 21,
+      placedPieces: 26,
+      initialPlacement: false,
+      gameplayRollCount: 21,
+      gameOver: false,
+      playerRosterKey: "Alice,Bob,Carol",
+      victoryTarget: 10,
+    };
+    expect(isGameGenerationRollover(progress, departureFrame)).toBe(false);
+  });
+
+  it("preserves generation across stale midgame turn counts", () => {
+    const progress = updateLiveGameProgress(undefined, {
+      completedTurns: 50,
+      placedPieces: 40,
+      initialPlacement: false,
+      gameplayRollCount: 50,
+      gameOver: false,
+      playerRosterKey: "Alice,Bob",
+      victoryTarget: 10,
+    });
+
+    // Turn count drops by 5 turns midgame (e.g. new game joined at turn 45)
+    const turnDropFrame = {
+      completedTurns: 45,
+      placedPieces: 35,
+      initialPlacement: false,
+      gameplayRollCount: 45,
+      gameOver: false,
+      playerRosterKey: "Alice,Bob",
+      victoryTarget: 10,
+    };
+    expect(isGameGenerationRollover(progress, turnDropFrame)).toBe(false);
+
+    // Minor fluctuation / 1-turn skew does NOT trigger rollover
+    const sameTurnFrame = {
+      completedTurns: 49,
+      placedPieces: 39,
+      initialPlacement: false,
+      gameplayRollCount: 49,
+      gameOver: false,
+      playerRosterKey: "Alice,Bob",
+      victoryTarget: 10,
+    };
+    expect(isGameGenerationRollover(progress, sameTurnFrame)).toBe(false);
+  });
 });

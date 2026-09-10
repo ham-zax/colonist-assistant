@@ -62,7 +62,7 @@ export interface LiveGameSnapshotInput {
   isReplay?: boolean;
 }
 
-const isResolvedRoster = (key?: string): boolean => {
+const isResolvedRoster = (key?: string): key is string => {
   if (!key) return false;
   const players = key.split(",").filter(Boolean);
   if (players.length < 2) return false;

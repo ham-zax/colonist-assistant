@@ -87,6 +87,37 @@ const rollPlayers = (session: GameSession): string[] =>
   );
 
 describe("live log session scanning", () => {
+  it("keeps evidence through remounts and observes newly hydrated dice on the replacement root", async () => {
+    const root = document.createElement("div");
+    root.append(diceMessage(0, "Alice", 3, 5));
+    document.body.append(root);
+    const session = new GameSession(root, vi.fn(), "remounted-log");
+    try {
+      await session.start();
+      const replacement = document.createElement("div");
+      replacement.append(diceMessage(0, "Alice", 3, 5));
+      document.body.append(replacement);
+      session.attachRoot(replacement);
+      expect(session.diceHistory.rolls).toHaveLength(1);
+
+      const pending = diceMessage(1, "Bob", 2, 4);
+      for (const die of pending.querySelectorAll("img")) die.alt = "loading-die";
+      replacement.append(pending);
+      await vi.waitFor(() => expect(session.diceHistory.ambiguousLogIndices).toContain(1));
+      pending.querySelectorAll("img")[0]!.alt = "dice_white2";
+      pending.querySelectorAll("img")[1]!.alt = "dice_white4";
+      await vi.waitFor(() => expect(session.diceHistory.rolls).toHaveLength(2));
+      expect(session.diceHistory.ambiguousLogIndices).toEqual([]);
+
+      root.append(diceMessage(2, "Carol", 6, 6));
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      expect(rollPlayers(session)).toEqual(["Alice", "Bob"]);
+      expect(buildLiveDecisionStochasticInput("balanced", session.diceHistory, ["Alice", "Bob"], 2).rolls).toHaveLength(2);
+    } finally {
+      session.stop();
+    }
+  });
+
   it("owns ordered public dice history and complete indexed provenance", async () => {
     const root = document.createElement("div");
     root.append(diceMessage(0, "Alice", 3, 5), diceMessage(1, "Bob", 6, 1));

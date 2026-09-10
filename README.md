@@ -48,6 +48,11 @@ Partial card history can occur even in a new game when the public log attaches
 late. Details explains missing opening entries when known; this warning does
 not mean that dice history is necessarily incomplete. Same-tab reloads preserve
 observed progress, and confirmed new-game boundaries discard the old history.
+Log-container remounts preserve the active session and rescan hydrated text and
+icons. Midgame roster or roll-count contradictions pause analysis without
+deleting evidence; a bot replacement may still need a resolved public seat mapping.
+Older hashless storage records migrate to the room-specific key only when their
+base URL and game identity match. Unrelated rooms' records are never adopted.
 For a fresh test, reload the extension and refresh the game tab before starting
 a new game. Resetting halfway through a game cannot establish missing rolls.
 

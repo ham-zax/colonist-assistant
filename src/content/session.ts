@@ -304,7 +304,8 @@ const enqueueStorage = (operation: () => Promise<void>): Promise<void> => {
   return next;
 };
 
-const pageIdentity = (): string => `${location.origin}${location.pathname}${location.search}`;
+const pageIdentity = (): string =>
+  `${location.origin}${location.pathname}${location.search}${location.hash}`;
 
 const canonicalPlayer = (
   player: string,
@@ -509,7 +510,8 @@ const normalizeEventJournal = (
 const deriveId = (): string => {
   const pathGameId = location.pathname.match(/\/game\/([^/?#]+)/)?.[1];
   const queryGameId = new URLSearchParams(location.search).get("gameId");
-  return pathGameId || queryGameId || hashString(pageIdentity());
+  const hashGameId = (location.hash.replace(/^#\/?/, "").split("?")[0] ?? "").trim();
+  return pathGameId || queryGameId || (hashGameId ? `room:${hashGameId}` : hashString(pageIdentity()));
 };
 
 export class GameSession {
@@ -524,7 +526,7 @@ export class GameSession {
   startedAt = Date.now();
   gameKey?: string;
 
-  private readonly root: HTMLElement;
+  private root: HTMLElement;
   private readonly seenIds = new Set<string>();
   /**
    * Colonist virtualizes its log and can reuse one DOM element for several
@@ -596,13 +598,23 @@ export class GameSession {
 
   async start(): Promise<void> {
     await this.restore();
+    if (this.disposed) return;
     this.recordInvestigation("restore", {
       phase: "session-start",
       events: this.events.length,
       partialHistory: this.partialHistory,
       ...this.investigationDiceSummary(),
     });
+    this.observeRoot();
     this.scan();
+    // A restored session can have no unseen log entries. Still claim it as the
+    // current game and prune records retained by older extension versions.
+    this.queueSave();
+    this.onUpdate(this);
+  }
+
+  private observeRoot(): void {
+    this.observer?.disconnect();
     this.observer = new MutationObserver(() => this.scan());
     this.observer.observe(this.root, {
       childList: true,
@@ -624,10 +636,13 @@ export class GameSession {
         "href",
       ],
     });
-    // A restored session can have no unseen log entries. Still claim it as the
-    // current game and prune records retained by older extension versions.
-    this.queueSave();
-    this.onUpdate(this);
+  }
+
+  attachRoot(root: HTMLElement): void {
+    if (this.disposed || this.root === root) return;
+    this.root = root;
+    this.observeRoot();
+    this.scan();
   }
 
   stop(): void {
@@ -809,15 +824,6 @@ export class GameSession {
     const boardRoster = snapshot.playerOrder?.length
       ? [...new Set(snapshot.playerOrder)]
       : Object.keys(snapshot.players ?? {});
-
-    // Roster hydration or a midgame departure is not a game boundary. Only
-    // recover stale same-key state when public turn progress confirms setup.
-    if (
-      !snapshot.initialPlacement ||
-      snapshot.gameplayRollCount !== 0 ||
-      !isSetupTurn(snapshot.turn, boardRoster.length)
-    ) return false;
-
     const validRosterName = (name: string) =>
       Boolean(name) && !/^Player \d+$/i.test(name);
     const validBoardRoster = boardRoster.filter(validRosterName);
@@ -829,22 +835,34 @@ export class GameSession {
         ...Object.keys(this.state.players),
       ].filter(validRosterName);
       const sessionSet = new Set(sessionPlayers);
-      if (
-        sessionSet.size >= 1 &&
-        [...sessionSet].some((player) => !boardSet.has(player))
-      ) {
-        this.recordInvestigation("system", {
-          phase: "stale-session-roster-mismatch-reset",
-        });
-        this.reset(false);
-        observeDiceSetupBoundary(this.diceHistory);
-        return true;
+
+      if (sessionSet.size >= 1) {
+        const hasExtraneousSessionPlayers = [...sessionSet].some((player) => !boardSet.has(player));
+
+        // Only a confirmed setup boundary can make roster differences destructive.
+        if (
+          snapshot.initialPlacement &&
+          snapshot.gameplayRollCount === 0 &&
+          isSetupTurn(snapshot.turn, boardRoster.length) &&
+          hasExtraneousSessionPlayers
+        ) {
+          this.recordInvestigation("system", {
+            phase: "stale-session-roster-mismatch-reset",
+          });
+          this.reset(false);
+          observeDiceSetupBoundary(this.diceHistory);
+          return true;
+        }
       }
     }
 
+    // Midgame contradictions pause analysis downstream; they never erase evidence.
     if (
-      this.diceHistory.rolls.length > 0 ||
-      this.events.some((event) => event.type === "roll")
+      snapshot.initialPlacement &&
+      snapshot.gameplayRollCount === 0 &&
+      isSetupTurn(snapshot.turn, boardRoster.length) &&
+      (this.diceHistory.rolls.length > 0 ||
+        this.events.some((event) => event.type === "roll"))
     ) {
       this.recordInvestigation("system", {
         phase: "stale-session-setup-roll-mismatch-reset",
@@ -1519,15 +1537,37 @@ export class GameSession {
       // evidence with that stale snapshot.
       await storageOperations;
       result = await chrome.storage.local.get(key);
+      // Previous releases keyed hash-room games by the URL without its hash.
+      // Never adopt another room's shared legacy record without exact game identity.
+      if (!result[key] && this.gameKey) {
+        const basePage = `${location.origin}${location.pathname}${location.search}`;
+        const legacyKey = sessionStorageKey(hashString(basePage));
+        if (legacyKey !== key) {
+          const legacyResult = await chrome.storage.local.get(legacyKey);
+          const legacy = legacyResult[legacyKey] as RestorableSession | undefined;
+          if (legacy?.page === basePage && legacy.gameKey === this.gameKey) {
+            result[key] = legacy;
+          }
+        }
+      }
     } catch (error) {
       if (isExtensionContextInvalidatedError(error)) return;
       throw error;
     }
     const stored = result[key] as RestorableSession | undefined;
+    const pageMatches =
+      stored?.page === pageIdentity() ||
+      Boolean(
+        stored?.page &&
+          !stored.page.includes("#") &&
+          stored.page.split("#")[0] === pageIdentity().split("#")[0] &&
+          this.gameKey &&
+          stored.gameKey === this.gameKey,
+      );
     if (
       !stored ||
       (stored.schema !== 3 && stored.schema !== 4) ||
-      stored.page !== pageIdentity()
+      !pageMatches
     ) {
       return;
     }

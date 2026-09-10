@@ -127,11 +127,22 @@ const boot = async (): Promise<void> => {
       return;
     }
     if (root === currentRoot) return;
+    if (
+      session &&
+      root &&
+      (!currentGameKey || !session.gameKey || session.gameKey === currentGameKey)
+    ) {
+      currentRoot = root;
+      session.attachRoot(root);
+      return;
+    }
     session?.stop();
     session = undefined;
     currentRoot = root;
-    overlay.update(undefined);
-    if (!root) return;
+    if (!root) {
+      overlay.update(undefined);
+      return;
+    }
     const next = new GameSession(
       root,
       publishSessionUpdate,

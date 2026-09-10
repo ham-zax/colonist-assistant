@@ -172,14 +172,16 @@ export const isSessionCompatibleWithBoard = (
       ...(sessionState?.playerOrder ?? []),
       ...Object.keys(sessionState?.players ?? {}),
     ].filter(validRosterName));
-    if (
-      [...sessionRoster].some((player) => !boardRosterSet.has(player))
-    ) {
-      return false;
+    if (sessionRoster.size >= 1) {
+      const hasNovelBoardPlayers = [...boardRosterSet].some((player) => !sessionRoster.has(player));
+      const hasExtraneousSessionPlayers = [...sessionRoster].some((player) => !boardRosterSet.has(player));
+      if (board.initialPlacement && hasExtraneousSessionPlayers) {
+        return false;
+      }
+      if (!board.initialPlacement && hasNovelBoardPlayers && hasExtraneousSessionPlayers) {
+        return false;
+      }
     }
-    // A partial card tracker can still own complete public dice evidence.
-    // The stochastic builder validates actors, ordinals and board roll count;
-    // reconciledState separately supplies a full roster for recommendations.
   }
   if (
     board.initialPlacement &&
@@ -2859,7 +2861,44 @@ export class AssistantOverlay {
 
   private diceEvidenceDetail(): string {
     const history = this.usableSessionDiceHistory(this.board);
-    if (!history) return "The public game log is still attaching; analysis resumes when usable evidence arrives";
+    if (!history) {
+      if (!this.session) {
+        return "The public game log is still attaching; analysis resumes when usable evidence arrives";
+      }
+      if (
+        this.board?.initialPlacement &&
+        this.board.gameplayRollCount === 0 &&
+        ((this.session.diceHistory?.rolls?.length ?? 0) > 0 ||
+          (this.session.events?.some((event) => event.type === "roll") ?? false))
+      ) {
+        return "Game session contains rolls from a previous game while board is in setup; analysis resumes when usable evidence arrives";
+      }
+      if (this.board) {
+        const boardRoster = boardPlayerRoster(this.board);
+        const validRosterName = (name: string) =>
+          Boolean(name) && !/^Player \d+$/i.test(name);
+        const validBoardRoster = boardRoster.filter(validRosterName);
+        if (validBoardRoster.length >= 2) {
+          const boardRosterSet = new Set(validBoardRoster);
+          const sessionState = this.session.state;
+          const sessionRoster = new Set([
+            ...(sessionState?.playerOrder ?? []),
+            ...Object.keys(sessionState?.players ?? {}),
+          ].filter(validRosterName));
+          if (sessionRoster.size >= 1) {
+            const hasNovelBoardPlayers = [...boardRosterSet].some((p) => !sessionRoster.has(p));
+            const hasExtraneousSessionPlayers = [...sessionRoster].some((p) => !boardRosterSet.has(p));
+            if (
+              (this.board.initialPlacement && hasExtraneousSessionPlayers) ||
+              (!this.board.initialPlacement && hasNovelBoardPlayers && hasExtraneousSessionPlayers)
+            ) {
+              return "Game session is incompatible with current board roster; analysis resumes when usable evidence arrives";
+            }
+          }
+        }
+      }
+      return "Game session is incompatible with current board state; analysis resumes when usable evidence arrives";
+    }
     const ranges = history.coverage.ranges.slice(0, 4).map(([start, end]) => `${start}-${end}`).join(",") || "none";
     const ambiguous = history.ambiguousLogIndices.slice(0, 8).join(",") || "none";
     return `Dice evidence: ${history.provenance}; ${history.rolls.length} observed roll${history.rolls.length === 1 ? "" : "s"}; board gameplay-roll count ${this.board?.gameplayRollCount ?? "not established"}; log coverage ${ranges}; ambiguous indexes ${ambiguous}; unlocated ambiguity ${history.hasUnlocatedRollAmbiguity ? "yes" : "no"}; missing prefix rolls ${history.missingPrefixRolls ?? "not established"}. Analysis resumes when usable evidence arrives. Export the record if this persists; resetting midgame cannot recover missing rolls`;
@@ -3162,7 +3201,8 @@ export class AssistantOverlay {
       this.decisionRuntimeError = displayedDetail;
       this.decisionRuntimeDetail = displayedDetail;
       this.decisionTraces.failure(traceKey, displayedDetail);
-      const reportFailure = this.decisionEvidenceWait !== undefined ? console.warn : console.error;
+      const isWait = this.decisionEvidenceWait !== undefined;
+      const reportFailure = isWait ? console.warn : console.error;
       const failureDiagnostic = {
         key,
         engine: this.settings.engine,
@@ -3170,8 +3210,11 @@ export class AssistantOverlay {
         policy: "selected-engine-only",
         fallbackStarted: false,
       };
+      const prefix = isWait
+        ? "[Colonist Assistant] Strategist waiting:"
+        : "[Colonist Assistant] Strategist failed:";
       reportFailure(
-        `[Colonist Assistant] Strategist failed: ${displayedDetail} ${JSON.stringify(failureDiagnostic)}`,
+        `${prefix} ${displayedDetail} ${JSON.stringify(failureDiagnostic)}`,
       );
       this.render();
     };
