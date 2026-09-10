@@ -225,9 +225,10 @@ const safeColor = (value: string): string =>
 
 const assistantMark = () => `
   <svg viewBox="0 0 32 32" aria-hidden="true">
-    <path d="M16 2.8 27.4 9.4v13.2L16 29.2 4.6 22.6V9.4L16 2.8Z" fill="none" stroke="currentColor" stroke-width="1.7"/>
-    <path d="M10 18.8 16 8l6 10.8M12.2 15h7.6M9.1 22.1h13.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="square"/>
-    <circle cx="16" cy="8" r="1.8" fill="currentColor"/>
+    <path d="M16 2.8 27.4 9.4v13.2L16 29.2 4.6 22.6V9.4L16 2.8Z" fill="none" stroke="currentColor" stroke-width="1.8"/>
+    <path d="M10 20 16 9l6 11M12.25 16h7.5" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="square"/>
+    <circle cx="13.75" cy="7" r="1.6" fill="currentColor"/>
+    <circle cx="18.25" cy="7" r="1.6" fill="currentColor"/>
   </svg>`;
 
 const resourceIcon = (resource: Resource): string => {
