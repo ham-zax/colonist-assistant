@@ -1119,7 +1119,7 @@ export class AssistantOverlay {
         this.activeView =
           requested === this.activeView ? "advice" : requested;
       }
-      if (action === "reset" && confirm("Reset the current Colonist Assistant session?")) {
+      if (action === "reset" && confirm("Reset the current Colonist Ally session?")) {
         void this.callbacks.reset();
       }
       if (action === "export-record") {
@@ -1680,10 +1680,10 @@ export class AssistantOverlay {
         </div>`;
     mount.innerHTML = `
       ${marker}
-      <section class="assistant ${this.collapsed ? "collapsed" : ""}" aria-label="Colonist Assistant">
+      <section class="assistant ${this.collapsed ? "collapsed" : ""}" aria-label="Colonist Ally">
         <header class="topbar">
           <span class="brand-mark">${assistantMark()}</span>
-          <span class="product-name">Colonist Assistant</span>
+          <span class="product-name">Colonist Ally</span>
           <span class="status ${ready ? "live" : ""}"><i></i>${ready ? (this.settings.recordGame ? "LIVE · REC" : "LIVE") : "WAITING"}</span>
           <button class="icon-button ${this.activeView === "settings" ? "active" : ""}" data-action="view" data-view="settings" aria-pressed="${this.activeView === "settings"}" aria-label="${this.activeView === "settings" ? "Back to your advice" : "Open assistant settings"}" title="${this.activeView === "settings" ? "Your advice" : "Settings"}">${settingsIcon()}</button>
           <button class="icon-button" data-action="collapse" aria-label="${this.collapsed ? "Expand assistant" : "Collapse assistant"}" title="${this.collapsed ? "Expand" : "Collapse"}">${collapseIcon(this.collapsed)}</button>

@@ -1,6 +1,6 @@
-# Colonist Assistant
+# Colonist Ally
 
-Colonist Assistant is an unofficial Chrome extension for friendly Colonist
+Colonist Ally is an unofficial Chrome extension for friendly Colonist
 games where all players agree to its use. It reads game data shown to the
 player, tracks known cards, keeps honest ranges for unknown cards, and marks
 one legal next step in the Colonist page.
@@ -69,6 +69,8 @@ a new game. Resetting halfway through a game cannot establish missing rolls.
 - Can carry out the next step when the user turns on autopilot. Autopilot is
   off by default. A settings delay of 1, 3, or 5 seconds paces each automatic
   click.
+- Optional Disable player trades limits you to bank and port trades.
+  Opponents are still assumed to trade among themselves in search.
 - Resets its game state when Colonist publishes a new game identity.
 
 Before each automatic step, the extension checks that the board still matches

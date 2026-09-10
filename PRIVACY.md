@@ -1,8 +1,8 @@
-# Colonist Assistant Privacy Policy
+# Colonist Ally Privacy Policy
 
 Last updated: July 30, 2026
 
-Colonist Assistant reads game data shown to you on `colonist.io`. It uses that
+Colonist Ally reads game data shown to you on `colonist.io`. It uses that
 data to track the game, give advice, and carry out moves when you turn on
 autopilot. It does not send game data to the developer.
 
@@ -79,7 +79,7 @@ data. You can clear synced settings through Chrome.
 
 ## Chrome Web Store data rules
 
-Colonist Assistant uses data only to provide or improve its stated game help
+Colonist Ally uses data only to provide or improve its stated game help
 features. Its use of data follows the
 [Chrome Web Store User Data Policy](https://developer.chrome.com/docs/webstore/program-policies/user-data-faq),
 including the Limited Use rules.

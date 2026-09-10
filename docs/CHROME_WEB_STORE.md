@@ -27,7 +27,7 @@ that misses this gate.
 ### Name
 
 ```text
-Colonist Assistant
+Colonist Ally
 ```
 
 The name comes from `manifest.json`.
@@ -43,7 +43,7 @@ The short description comes from `manifest.json`.
 ### Full description
 
 ```text
-Colonist Assistant gives local, board-aware help for friendly Colonist games
+Colonist Ally gives local, board-aware help for friendly Colonist games
 where all players agree to its use.
 
 On colonist.io, it reads game data shown to you. This may include player
@@ -63,6 +63,9 @@ Autopilot is off by default. Settings can add a 1, 3, or 5 second delay before
 each automatic click. Before each step, it checks that the board still matches
 the state used to pick the move. If the state has changed, it stops and plans
 again.
+
+Optional Disable player trades limits suggestions and automation to bank and
+port trades.
 
 Game work runs in your browser. The extension has no server, ads, tracking, or
 usage reports. It does not send game data to the developer.
@@ -172,10 +175,11 @@ Paste:
 2. Open https://colonist.io/ and start a base game where all players agreed to
    use the extension.
 3. If the Colonist tab was open before install, refresh it.
-4. The Colonist Assistant panel appears during the game.
+4. The Colonist Ally panel appears during the game.
 5. Use the extension popup to turn hints on or off, confirm the single
    Strategist engine status, turn on autopilot, or choose a 1, 3, or 5 second
    autopilot delay. Autopilot is off by default. There is no engine selector.
+   Optional Disable player trades limits help to bank and port trades.
 6. The panel reads shown game state and gives a legal next step.
 7. Use Reset session in the popup to clear the current game state.
 

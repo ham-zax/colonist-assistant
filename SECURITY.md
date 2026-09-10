@@ -2,7 +2,7 @@
 
 ## Data boundary
 
-Colonist Assistant is a Manifest V3 extension scoped to
+Colonist Ally is a Manifest V3 extension scoped to
 `https://colonist.io/*`. It has no backend, telemetry, analytics, advertising,
 remote JavaScript, or cross-site host access.
 

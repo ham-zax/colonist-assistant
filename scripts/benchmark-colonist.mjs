@@ -1431,7 +1431,7 @@ const options = readOptions(process.argv.slice(2));
 const manifest = JSON.parse(
   await readFile(resolve(DIST, "manifest.json"), "utf8"),
 );
-if (manifest.name !== "Colonist Assistant") {
+if (manifest.name !== "Colonist Ally") {
   throw new Error(
     "dist/ is missing or stale. Run npm run build before the live benchmark.",
   );
