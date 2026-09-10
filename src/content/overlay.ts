@@ -2515,7 +2515,7 @@ export class AssistantOverlay {
               : "Connecting",
         detail:
           observedRuntime === "background-gpu"
-            ? "The native CUDA companion is evaluating this position with resident rollouts."
+            ? "The native CUDA companion is evaluating this position with exact Deep MaxN."
             : observedRuntime === "background-wasm"
               ? "The background engine is evaluating this position with a bounded node budget."
               : "Waking Strategist before evaluating this position.",
@@ -2535,7 +2535,7 @@ export class AssistantOverlay {
       return {
         label: "Native CUDA GPU",
         detail: search
-          ? `Last GPU search completed in ${Math.max(1, Math.round(search.elapsedMs)).toLocaleString()} ms across ${search.rollouts.toLocaleString()} resident rollouts.`
+          ? `Last GPU search completed in ${Math.max(1, Math.round(search.elapsedMs)).toLocaleString()} ms across ${(search.nodes || search.rollouts).toLocaleString()} bounded nodes.`
           : this.decisionRuntimeDetail,
         state: "healthy",
       };

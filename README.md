@@ -81,10 +81,10 @@ opponents’ hidden cards, or hidden development cards. It does not use a
 server, ads, tracking, or usage reports. Game computation stays on your computer.
 The optional native GPU companion exposes two explicitly different capabilities:
 `gpu-root-rollout` for experimental diagnostics and
-`deep-maxn-cuda-exact-fixed-work-v1` as a same-policy acceleration candidate.
-Production `deep-search` decisions currently stay on CPU/WASM; exact CUDA is not
-promoted unless fixed-work parity, cancellation, packaged execution, and the
-end-to-end performance gate all pass. Companion availability never substitutes
+`deep-maxn-cuda-exact-fixed-work-v1` as a same-policy acceleration engine.
+Production `deep-search` decisions route to exact CUDA for eligible midgame decisions
+when a compatible companion is connected, while CPU/WASM remains the packaged default
+and owner for openings, pondering, and fallback. Companion availability never substitutes
 rollout search for the production MaxN policy.
 Chrome may sync settings through the user’s Google account when Chrome Sync is
 on.
