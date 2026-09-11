@@ -7,8 +7,8 @@ This file holds the text for the Chrome Web Store dashboard.
 Run:
 
 ```bash
-npm ci
-npm run verify
+bun install --frozen-lockfile
+bun run verify
 release_version=$(node -p "require('./package.json').version")
 (
   cd dist
@@ -16,7 +16,7 @@ release_version=$(node -p "require('./package.json').version")
 )
 ```
 
-The ZIP must have `manifest.json` at its root. `npm run verify` includes the
+The ZIP must have `manifest.json` at its root. `bun run verify` includes the
 packaged cold-WASM adapter regression: the single Strategist authority must
 return a legal weighted-belief Deep MaxN result in less than one second before
 packaging. Do not substitute an experimental arena policy or publish a build

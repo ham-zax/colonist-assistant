@@ -958,30 +958,27 @@ export const OVERLAY_STYLES = `
   }
   .tuning-disabled b { font-size: 12px; }
   .range-control {
+    position: relative;
     display: grid;
-    width: 145px;
-    flex: 0 0 145px;
-    gap: 2px;
+    width: 162px;
+    flex: 0 0 162px;
+    gap: 1px;
     align-items: center;
   }
   .range-dots {
     display: flex;
     justify-content: space-between;
-    margin-top: -9px;
-    padding: 0 2px;
+    margin: -7px 6px 0;
+    padding: 0;
     pointer-events: none;
   }
-  .range-dots::before {
-    content: "";
-    position: absolute;
-  }
   .range-dots i {
-    width: 4px;
-    height: 4px;
+    width: 3px;
+    height: 3px;
     border-radius: 50%;
     background: var(--ca-line-strong);
   }
-  .range-dots i.active { background: var(--ca-accent); box-shadow: 0 0 0 2px var(--ca-bg); }
+  .range-dots i.active { width: 5px; height: 5px; margin: -1px -1px 0; background: var(--ca-accent); box-shadow: 0 0 0 2px var(--ca-bg); }
   .range-control output {
     color: var(--ca-accent);
     font-size: 10px;
@@ -993,6 +990,11 @@ export const OVERLAY_STYLES = `
     border-radius: 3px;
     background: var(--ca-line-strong);
   }
+  .range-control input[type="range"] {
+    appearance: none;
+    outline: none;
+    background: transparent;
+  }
   .range-control input[type="range"]::-webkit-slider-thumb {
     width: 13px;
     height: 13px;
@@ -1002,7 +1004,9 @@ export const OVERLAY_STYLES = `
     background: var(--ca-accent);
     appearance: none;
   }
-  .range-control input[type="range"]::-moz-range-track { height: 3px; background: var(--ca-line-strong); }
+  .range-control input[type="range"]:focus-visible { outline: none; }
+  .range-control:focus-within { filter: drop-shadow(0 0 2px rgba(241, 200, 75, .38)); }
+  .range-control input[type="range"]::-moz-range-track { height: 3px; border-radius: 3px; background: var(--ca-line-strong); }
   .range-control input[type="range"]::-moz-range-thumb { width: 10px; height: 10px; border: 2px solid var(--ca-bg); border-radius: 50%; background: var(--ca-accent); }
   .settings-version {
     display: flex;

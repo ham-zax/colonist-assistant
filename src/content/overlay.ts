@@ -749,7 +749,7 @@ export class AssistantOverlay {
             ...this.settings,
             engineTuning: {
               ...this.settings.engineTuning,
-              [this.settings.engine]: getTuningProfile(this.settings.engine, profile as "heavy" | "high" | "medium" | "fast"),
+              [this.settings.engine]: getTuningProfile(this.settings.engine, profile as "extra-high" | "high" | "medium" | "fast" | "max"),
             },
           });
         }
@@ -3837,7 +3837,7 @@ export class AssistantOverlay {
     const tuning = getEngineTuning(this.settings);
     const isDeep = isDeepDecisionEngine(this.settings.engine);
     const selectedProfile = isDeep
-      ? (["heavy", "high", "medium", "fast"] as const).find(
+      ? (["extra-high", "high", "medium", "fast", "max"] as const).find(
           (profile) =>
             JSON.stringify(getTuningProfile(this.settings.engine, profile)) ===
             JSON.stringify(tuning),
@@ -3861,7 +3861,14 @@ export class AssistantOverlay {
       min: number,
       max: number,
       step: number,
-    ): string => `<label class="settings-field tuning-field"><span><b>${label}</b><small>${detail}</small></span><span class="range-control"><input class="tuning-input" type="range" data-tuning="${key}" min="${min}" max="${max}" step="${step}" value="${tuning[key]}"><span class="range-dots" aria-hidden="true"></span><output data-tuning-value="${key}">${Number(tuning[key]).toLocaleString()}</output></span></label>`;
+    ): string => {
+      const rangeValue = Number(tuning[key]);
+      const tickCount = 7;
+      const activeTick = Math.round(
+        ((rangeValue - min) / Math.max(1, max - min)) * (tickCount - 1),
+      );
+      return `<label class="settings-field tuning-field"><span><b>${label}</b><small>${detail}</small></span><span class="range-control"><input class="tuning-input" type="range" data-tuning="${key}" min="${min}" max="${max}" step="${step}" value="${rangeValue}"><span class="range-dots" aria-hidden="true">${Array.from({ length: tickCount }, (_, index) => `<i class="${index === activeTick ? "active" : ""}"></i>`).join("")}</span><output data-tuning-value="${key}">${rangeValue.toLocaleString()}</output></span></label>`;
+    };
     const stepPicker = (
       key: string,
       values: readonly number[],
@@ -3874,7 +3881,7 @@ export class AssistantOverlay {
     const tuningPanel = isDeep
       ? `<section class="tuning-panel">
           <div class="tuning-heading"><b>Search budget</b><small>These values are saved separately for each deep engine.</small></div>
-          <label class="settings-field tuning-field profile-field"><span><b>Performance profile</b><small>Start with a tested balance, then fine-tune the sliders.</small></span><select data-setting="tuningProfile" aria-label="Performance profile"><option value="heavy"${selectedProfile === "heavy" ? " selected" : ""}>Heavy</option><option value="high"${selectedProfile === "high" ? " selected" : ""}>High</option><option value="medium"${selectedProfile === "medium" ? " selected" : ""}>Medium</option><option value="fast"${selectedProfile === "fast" ? " selected" : ""}>Fast</option><option value="custom"${selectedProfile === "custom" ? " selected" : ""}>Custom</option></select></label>
+          <label class="settings-field tuning-field profile-field"><span><b>Performance profile</b><small>Start with a tested balance, then fine-tune the sliders.</small></span><select data-setting="tuningProfile" aria-label="Performance profile"><option value="extra-high"${selectedProfile === "extra-high" ? " selected" : ""}>Extra High</option><option value="high"${selectedProfile === "high" ? " selected" : ""}>High</option><option value="medium"${selectedProfile === "medium" ? " selected" : ""}>Medium</option><option value="fast"${selectedProfile === "fast" ? " selected" : ""}>Fast</option><option value="max"${selectedProfile === "max" ? " selected" : ""}>MAX</option><option value="custom"${selectedProfile === "custom" ? " selected" : ""}>Custom</option></select></label>
           ${tuningInput("maxDepth", "Search depth", "Turns of strategic look-ahead.", 1, 6, 1)}
           ${tuningInput("branchCap", "Branch cap", "Legal actions considered at each node.", 4, 24, 1)}
           ${tuningInput("maxNodes", "Node budget", "Maximum states searched per decision.", 2_000, 100_000, 1_000)}

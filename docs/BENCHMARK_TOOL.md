@@ -63,7 +63,7 @@ does not make arena PUCT the live engine, and its results must remain
 explicitly experimental.
 
 ```bash
-npm run benchmark:local -- \
+bun run benchmark:local -- \
   --candidate maxn \
   --players 3,4 \
   --baselines weighted,alphabeta,uct,puct \
@@ -109,7 +109,7 @@ in the arena's win rate.
 Read a checkpoint during a run or after an interruption with:
 
 ```bash
-npm run benchmark:checkpoint -- benchmark-results/four-engine.jsonl
+bun run benchmark:checkpoint -- benchmark-results/four-engine.jsonl
 ```
 
 The reader ignores an incomplete trailing line and prints the latest valid
@@ -137,8 +137,8 @@ Colonist score table. The internal live WASM request is `maxn`; the
 legacy `deep` alias.
 
 ```bash
-npm run build
-npm run benchmark:colonist -- \
+bun run build
+bun run benchmark:colonist -- \
   --difficulties Easy,Medium,Hard \
   --games 3 \
   --jobs 2 \
@@ -157,7 +157,7 @@ For release screenshots, run exactly one headed game and provide a temporary
 capture directory:
 
 ```bash
-npm run benchmark:colonist -- \
+bun run benchmark:colonist -- \
   --difficulties Easy --games 1 --jobs 1 \
   --store-screenshots /tmp/colonist-assistant-store-screenshots \
   --output /tmp/colonist-assistant-store-smoke

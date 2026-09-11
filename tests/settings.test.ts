@@ -40,6 +40,16 @@ describe("assistant settings", () => {
       beliefParticles: 8,
       maxThinkingTimeMs: 500,
     });
+    expect(getTuningProfile("deep-search", "max")).toEqual({
+      maxDepth: 6,
+      branchCap: 24,
+      maxNodes: 100_000,
+      beliefParticles: 128,
+      strategicParticleLimit: 64,
+      iterations: 2_000,
+      rolloutActions: 300,
+      maxThinkingTimeMs: 5_000,
+    });
     expect(normalizeFallbackEngine("alpha-beta-fast")).toBe("alpha-beta-fast");
     expect(normalizeFallbackEngine("unknown")).toBe("none");
   });

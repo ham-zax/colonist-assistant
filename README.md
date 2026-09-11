@@ -69,8 +69,8 @@ Requirements:
 - `wasm-bindgen-cli`
 
 ```bash
-npm ci
-npm run verify
+bun install --frozen-lockfile
+bun run verify
 ```
 
 The unpacked extension is written to `dist/`. Load that directory from
@@ -83,8 +83,8 @@ For the Chrome Web Store field copy, test steps, and release package command,
 see [docs/CHROME_WEB_STORE.md](docs/CHROME_WEB_STORE.md).
 
 `Background WASM` means the packaged Rust Strategist is authoritative. A
-normal live request uses depth 4, a branch cap of 16, at most 4,000 strategic
-nodes, and a cooperative 350 ms strategic-search deadline. The generated-WASM
+normal live request uses the selected profile and a user-configurable hard
+thinking-time cap. The generated-WASM
 cold-adapter regression must return a legal action in less than one second.
 The `WASM · 1s+` label and twelve-second client cutoff are failure-containment
 limits, not acceptable target latency. At the client cutoff the request is
@@ -108,6 +108,10 @@ nodes, 32 belief particles, pruning, and the same cap. Open **How it thinks**
 to customize depth, branch cap, node budget, belief particles, PUCT
 iterations/rollouts, and maximum thinking time independently for each deep
 engine; the panel also shows an estimate for the selected budget.
+The same panel includes Extra High, High, Medium, Fast, and MAX profiles, a visual
+step-picker for autopilot delay, and an optional fallback: quick depth-2
+AlphaBeta is action-capable, while the weighted estimate fallback is
+explicitly advice-only.
 
 The bundled learned policy and value heads are both unpromoted and disabled
 because their grouped validation evidence did not pass the production gates.

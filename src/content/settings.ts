@@ -2,7 +2,7 @@ import type { DecisionEngine, EngineTuning, FallbackEngine } from "../core/engin
 import { isExtensionContextInvalidatedError } from "./extension-context";
 
 export type AutopilotDelaySeconds = 0 | 1 | 3 | 5;
-export type TuningProfile = "heavy" | "high" | "medium" | "fast" | "custom";
+export type TuningProfile = "extra-high" | "high" | "medium" | "fast" | "max" | "custom";
 
 export const AUTOPILOT_DELAY_OPTIONS: readonly AutopilotDelaySeconds[] = [
   0, 1, 3, 5,
@@ -29,10 +29,11 @@ export interface AssistantSettings {
 }
 
 export const TUNING_PROFILE_LABELS: Record<Exclude<TuningProfile, "custom">, string> = {
-  heavy: "Heavy",
+  "extra-high": "Extra High",
   high: "High",
   medium: "Medium",
   fast: "Fast",
+  max: "MAX",
 };
 
 export const getTuningProfile = (
@@ -41,10 +42,10 @@ export const getTuningProfile = (
 ): EngineTuning => {
   const defaults = ENGINE_TUNING_DEFAULTS[engine];
   const overrides: Partial<EngineTuning> = {
-    heavy: {
-      maxDepth: 4, branchCap: 18, maxNodes: 40_000, beliefParticles: 96,
-      strategicParticleLimit: 48, iterations: 1_000, rolloutActions: 220,
-      maxThinkingTimeMs: 3_000,
+    "extra-high": {
+      maxDepth: 5, branchCap: 22, maxNodes: 64_000, beliefParticles: 112,
+      strategicParticleLimit: 56, iterations: 1_600, rolloutActions: 260,
+      maxThinkingTimeMs: 4_000,
     },
     high: {
       maxDepth: 3, branchCap: 16, maxNodes: 24_000, beliefParticles: 64,
@@ -56,6 +57,16 @@ export const getTuningProfile = (
       maxDepth: 2, branchCap: 8, maxNodes: 4_000, beliefParticles: 8,
       strategicParticleLimit: 4, iterations: 128, rolloutActions: 48,
       maxThinkingTimeMs: 500,
+    },
+    max: {
+      maxDepth: 6,
+      branchCap: 24,
+      maxNodes: 100_000,
+      beliefParticles: 128,
+      strategicParticleLimit: 64,
+      iterations: 2_000,
+      rolloutActions: 300,
+      maxThinkingTimeMs: 5_000,
     },
   }[profile];
   return normalizeEngineTuning(engine, { ...defaults, ...overrides });

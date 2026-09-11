@@ -5,7 +5,7 @@ import process from "node:process";
 
 function usage() {
   console.error(
-    "Usage: npm run benchmark:checkpoint -- CHECKPOINT.jsonl [...] [--json] [--split-lineup]",
+    "Usage: bun run benchmark:checkpoint -- CHECKPOINT.jsonl [...] [--json] [--split-lineup]",
   );
 }
 
