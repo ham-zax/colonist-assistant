@@ -1306,6 +1306,32 @@ describe("overlay settings interaction", () => {
     }
   });
 
+  it.each(["ready", "failed"])("does not let a late %s warm-up overwrite a newer evidence error", async (outcome) => {
+    let finishWarm!: (value: unknown) => void;
+    sendMessage.mockImplementationOnce(() => new Promise((resolve) => { finishWarm = resolve; }));
+    const overlay = new AssistantOverlay({ ...DEFAULT_SETTINGS }, { reset: vi.fn() });
+    const internals = overlay as unknown as {
+      decisionKey: string;
+      decisionRuntimeError: string;
+      decisionRuntimeDetail: string;
+      render: () => void;
+    };
+    vi.spyOn(internals, "render").mockImplementation(() => undefined);
+    try {
+      internals.decisionKey = "newer-board-decision";
+      internals.decisionRuntimeError = "Public dice evidence is inconsistent";
+      internals.decisionRuntimeDetail = internals.decisionRuntimeError;
+      finishWarm(outcome === "ready"
+        ? { id: 1, runtime: "background-wasm", engineRevision: "test-engine" }
+        : { id: 1, error: "Old initialization failure" });
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      expect(internals.decisionRuntimeError).toBe("Public dice evidence is inconsistent");
+      expect(internals.decisionRuntimeDetail).toBe("Public dice evidence is inconsistent");
+    } finally {
+      overlay.destroy();
+    }
+  });
+
   it("reuses the completed deep target for the placement-modal continuation", async () => {
     const tracker = reduceTracker(createTrackerState(), {
       type: "discover",

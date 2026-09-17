@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   NATIVE_GPU_EXACT_ALGORITHM,
+  NATIVE_GPU_HANDSHAKE_TIMEOUT_MS,
   NATIVE_GPU_ROLLOUT_ALGORITHM,
   NativeGpuClient,
   nativeGpuSupportsExactMaxn,
@@ -11,6 +12,7 @@ import { M0_FAIR_IID_2D6_V1 as M0, MREF_COLONIST_LINKED_2024_V1 as MREF } from "
 const clients: NativeGpuClient[] = [];
 afterEach(() => {
   for (const client of clients.splice(0)) client.release();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -32,6 +34,8 @@ const companion = ({
   includeCapabilities = true,
 }: CompanionOptions = {}) => {
   let receive: (message: unknown) => void = () => undefined;
+  let disconnectHost: () => void = () => undefined;
+  const disconnect = vi.fn();
   const capabilities = {
     algorithms: [
       NATIVE_GPU_ROLLOUT_ALGORITHM,
@@ -82,18 +86,91 @@ const companion = ({
     runtime: {
       connectNative: () => ({
         postMessage,
-        disconnect: vi.fn(),
+        disconnect,
         onMessage: { addListener: (listener: typeof receive) => { receive = listener; } },
-        onDisconnect: { addListener: vi.fn() },
+        onDisconnect: { addListener: (listener: typeof disconnectHost) => { disconnectHost = listener; } },
       }),
     },
   });
   const client = new NativeGpuClient();
   clients.push(client);
-  return { client, postMessage };
+  return { client, postMessage, disconnect, disconnectHost: () => disconnectHost() };
 };
 
 describe("native Mref capability and returned authority", () => {
+  it("bounds a silent hello and leaves later decisions free to use WASM", async () => {
+    vi.useFakeTimers();
+    const { client, postMessage, disconnect } = companion();
+    postMessage.mockImplementationOnce(() => {});
+    const first = client.status();
+    const second = client.status();
+    await vi.advanceTimersByTimeAsync(NATIVE_GPU_HANDSHAKE_TIMEOUT_MS);
+    await expect(first).resolves.toBeUndefined();
+    await expect(second).resolves.toBeUndefined();
+    await expect(client.status()).resolves.toBeUndefined();
+    expect(postMessage).toHaveBeenCalledOnce();
+    expect(disconnect).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("closes a silent reconnect after a previously healthy companion", async () => {
+    vi.useFakeTimers();
+    const { client, postMessage, disconnect, disconnectHost } = companion();
+    await client.status();
+    disconnectHost();
+    postMessage.mockImplementationOnce(() => {});
+    const reconnect = expect(client.status()).rejects.toThrow(/handshake timed out/u);
+    await vi.advanceTimersByTimeAsync(NATIVE_GPU_HANDSHAKE_TIMEOUT_MS);
+    await reconnect;
+    expect(disconnect).toHaveBeenCalledOnce();
+    await expect(client.status()).resolves.toMatchObject({ runtime: "gpu-native" });
+  });
+
+  it("does not let a released handshake poison its replacement", async () => {
+    vi.useFakeTimers();
+    const { client, postMessage } = companion();
+    postMessage.mockImplementationOnce(() => {});
+    const released = expect(client.status()).rejects.toThrow(/released/u);
+    client.release();
+    const replacement = await client.status();
+    await released;
+    await expect(client.status()).resolves.toBe(replacement);
+    expect(postMessage).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("honors cancellation that arrives while the hello is pending", async () => {
+    vi.useFakeTimers();
+    const { client, postMessage } = companion();
+    const reply = postMessage.getMockImplementation()!;
+    postMessage.mockImplementationOnce(() => {});
+    const controller = new AbortController();
+    const cancelled = expect(client.analyzeExact({}, 1, controller.signal)).rejects.toThrow(/stale/u);
+    controller.abort(new Error("Decision cancelled as stale"));
+    reply({ type: "hello", id: 1 });
+    await cancelled;
+    expect(postMessage).toHaveBeenCalledOnce();
+  });
+
+  it("does not publish readiness if the port closes just after the hello reply", async () => {
+    const { client, postMessage, disconnectHost } = companion();
+    const reply = postMessage.getMockImplementation()!;
+    postMessage.mockImplementationOnce((request) => {
+      reply(request);
+      queueMicrotask(disconnectHost);
+    });
+    await expect(client.status()).resolves.toBeUndefined();
+    await expect(client.status()).resolves.toBeUndefined();
+  });
+
+  it("caches a missing companion without reconnecting on every decision", async () => {
+    const { client, postMessage, disconnectHost } = companion();
+    postMessage.mockImplementationOnce(() => queueMicrotask(disconnectHost));
+    await expect(client.status()).resolves.toBeUndefined();
+    await expect(client.status()).resolves.toBeUndefined();
+    expect(postMessage).toHaveBeenCalledOnce();
+  });
+
   it("rejects protocol-6 companions instead of guessing algorithm capability", async () => {
     const { client } = companion({ protocolVersion: 6 });
     await expect(client.status()).rejects.toThrow(/incompatible/u);

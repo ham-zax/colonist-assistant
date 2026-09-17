@@ -93,6 +93,12 @@ Production `deep-search` decisions route to exact CUDA for eligible midgame deci
 when a compatible companion is connected, while CPU/WASM remains the packaged default
 and owner for openings, pondering, and fallback. Companion availability never substitutes
 rollout search for the production MaxN policy.
+Native initialization has a two-second handshake limit. A silent or disconnected
+companion falls back to CPU/WASM with the requested stochastic model preserved.
+GPU ownership and cancellation are scoped to the requesting tab and document;
+concurrent decisions use the same MaxN policy on WASM while the GPU is occupied.
+Engine readiness has its own 12-second safety limit and cannot clear a newer
+decision's evidence error.
 Chrome may sync settings through the user’s Google account when Chrome Sync is
 on.
 

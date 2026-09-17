@@ -485,6 +485,34 @@ describe("action guide autopilot", () => {
     expect(confirmClicks).toHaveBeenCalledOnce();
   });
 
+  it("validates the board again before a development-card confirmation click", async () => {
+    const card = document.createElement("div");
+    card.className = "cardContainer-fixture";
+    card.innerHTML = '<img src="card_knight.fixture.svg">';
+    const confirmClicks = vi.fn();
+    let stillCurrent = true;
+    card.addEventListener("click", () => {
+      const modal = document.createElement("div");
+      modal.className = "actionBox-fixture";
+      const confirm = document.createElement("button");
+      confirm.className = "confirmButton-fixture";
+      confirm.textContent = "Confirm";
+      confirm.addEventListener("click", confirmClicks);
+      modal.append(confirm);
+      document.body.append(modal);
+      stillCurrent = false;
+    });
+    document.body.append(card);
+    renderActionGuide({
+      kind: "development", card: "knight", label: "Play knight", signature: "stale-card-confirm", confidence: 1,
+    }, {
+      highlight: true, autonomous: true, validate: () => stillCurrent, validateContinuation: () => stillCurrent,
+    });
+    await vi.advanceTimersByTimeAsync(1_200);
+    expect(stillCurrent).toBe(false);
+    expect(confirmClicks).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["knight", "robber"],
     ["road-building", "road"],

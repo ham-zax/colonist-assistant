@@ -24,6 +24,23 @@ import {
 
 const nativeGpu = new NativeGpuClient();
 
+interface ActiveDecision {
+  nativeId: number;
+  controller: AbortController;
+}
+
+const activeDecisions = new Map<string, ActiveDecision>();
+let nextNativeDecisionId = 1;
+let gpuOwner: ActiveDecision | undefined;
+
+const decisionKey = (sender: chrome.runtime.MessageSender, id: number): string =>
+  JSON.stringify([sender.tab?.id, sender.documentId, sender.frameId, id]);
+
+const cancelDecision = (decision: ActiveDecision): void => {
+  decision.controller.abort(new Error("Decision cancelled as stale"));
+  nativeGpu.cancelDecision(decision.nativeId);
+};
+
 export const withRemainingDecisionBudget = (
   message: DecisionMessage,
   localStartedAt: number,
@@ -74,7 +91,7 @@ const errorDetail = (error: unknown, fallback: string): string => {
 };
 
 const isNativeGpuTransportFailure = (error: unknown): boolean =>
-  /(?:native host has exited|native messaging host|gpu companion (?:is )?disconnected|gpu companion message could not be sent|disconnected port)/iu.test(
+  /(?:native host has exited|native messaging host|gpu companion (?:is )?disconnected|gpu companion handshake timed out|gpu companion message could not be sent|disconnected port)/iu.test(
     errorDetail(error, ""),
   );
 
@@ -118,7 +135,7 @@ const isDecisionMessage = (value: unknown): value is DecisionMessage => {
 };
 
 chrome.runtime.onMessage.addListener(
-  (message: unknown, _sender, sendResponse) => {
+  (message: unknown, sender, sendResponse) => {
     if (
       message &&
       typeof message === "object" &&
@@ -126,7 +143,8 @@ chrome.runtime.onMessage.addListener(
         DECISION_CANCEL_MESSAGE_TYPE &&
       typeof (message as Partial<DecisionCancelMessage>).id === "number"
     ) {
-      nativeGpu.cancelDecision((message as DecisionCancelMessage).id);
+      const decision = activeDecisions.get(decisionKey(sender, (message as DecisionCancelMessage).id));
+      if (decision) cancelDecision(decision);
       return undefined;
     }
     if (
@@ -140,7 +158,12 @@ chrome.runtime.onMessage.addListener(
       const startedAt = performance.now();
       void (async () => {
         if (status.engine === "deep-search") {
-          const gpu = await nativeGpu.status();
+          let gpu;
+          try {
+            gpu = await nativeGpu.status();
+          } catch (error) {
+            if (!isNativeGpuTransportFailure(error)) throw error;
+          }
           if (gpu && nativeGpuSupportsProductionExactMaxn(gpu)) {
             const response: DecisionStatusMessageResponse = {
               id: status.id,
@@ -154,7 +177,7 @@ chrome.runtime.onMessage.addListener(
             return;
           }
         }
-        if (status.engine === "weighted") nativeGpu.release();
+        if (status.engine === "weighted" && !gpuOwner) nativeGpu.release();
         const wasm = await warmDeepSearchEngine();
         const response: DecisionStatusMessageResponse = {
           id: status.id,
@@ -173,14 +196,34 @@ chrome.runtime.onMessage.addListener(
       return true;
     }
     if (!isDecisionMessage(message)) return undefined;
+    const key = decisionKey(sender, message.id);
+    const previous = activeDecisions.get(key);
+    if (previous) cancelDecision(previous);
+    const decision: ActiveDecision = {
+      nativeId: nextNativeDecisionId++,
+      controller: new AbortController(),
+    };
+    activeDecisions.set(key, decision);
+    const { signal } = decision.controller;
+    const finish = () => {
+      if (activeDecisions.get(key) === decision) activeDecisions.delete(key);
+      if (gpuOwner === decision) gpuOwner = undefined;
+    };
     void (async () => {
       const backgroundStartedAt = performance.now();
       const nativeGpuEligible = shouldUseNativeGpu(message);
-      if (nativeGpuEligible) {
+      // One native search owns the companion at a time. Concurrent documents
+      // use the same MaxN/stochastic policy on WASM rather than canceling the
+      // owner's work or waiting away their live decision allowance.
+      const gpuBusy = nativeGpuEligible && gpuOwner !== undefined;
+      if (nativeGpuEligible && !gpuBusy) {
+        gpuOwner = decision;
         let gpu;
         try {
           gpu = await nativeGpu.status();
+          signal.throwIfAborted();
         } catch (error) {
+          signal.throwIfAborted();
           if (!isNativeGpuTransportFailure(error)) throw error;
           return analyzeAfterNativeGpuTransportFailure(
             message,
@@ -199,7 +242,7 @@ chrome.runtime.onMessage.addListener(
           try {
             const analysis = await analyzeDecisionRequest(
               withRemainingDecisionBudget(message, backgroundStartedAt),
-              (request) => nativeGpu.analyzeExact(request, message.id),
+              (request) => nativeGpu.analyzeExact(request, decision.nativeId, signal),
             );
             return {
               ...analysis,
@@ -208,6 +251,7 @@ chrome.runtime.onMessage.addListener(
               ...(gpu.build ? { nativeGpuBuild: gpu.build } : {}),
             };
           } catch (error) {
+            signal.throwIfAborted();
             if (!isNativeGpuTransportFailure(error)) throw error;
             return analyzeAfterNativeGpuTransportFailure(
               message,
@@ -217,7 +261,8 @@ chrome.runtime.onMessage.addListener(
           }
         }
       }
-      if (message.engine === "weighted") nativeGpu.release();
+      signal.throwIfAborted();
+      if (message.engine === "weighted" && !gpuOwner) nativeGpu.release();
       const analysis = await analyzeDecisionRequest(
         withRemainingDecisionBudget(message, backgroundStartedAt),
       );
@@ -233,6 +278,8 @@ chrome.runtime.onMessage.addListener(
           ? `Strategy policy ${message.strategyPolicy} remains on its CPU/WASM owner`
             : message.engine === "deep-search" && message.board.initialPlacement
               ? "Dedicated opening solver runs on WASM/CPU"
+              : gpuBusy
+                ? "Native GPU busy with another decision; using WASM Deep MaxN"
               : nativeGpuEligible
                 ? "Native GPU unavailable; using WASM Deep MaxN"
                 : message.engine === "deep-search"
@@ -250,6 +297,8 @@ chrome.runtime.onMessage.addListener(
       };
     })()
       .then((analysis) => {
+        signal.throwIfAborted();
+        finish();
         const response: DecisionMessageResponse = {
           id: message.id,
           analysis,
@@ -258,6 +307,7 @@ chrome.runtime.onMessage.addListener(
         sendResponse(response);
       })
       .catch((error: unknown) => {
+        finish();
         const response: DecisionMessageResponse = {
           id: message.id,
           error: errorDetail(error, "Decision analysis failed"),

@@ -38,14 +38,23 @@ const openPage = (saved: Record<string, string> = {}, turn = 25) => {
     playerStates,
   };
   const controller = {
+    myColor: undefined as number | undefined,
+    isMyTurn: false,
     currentState, playOrder: [1, 2, 3, 4],
     getPlayerNameWithColor: (color: number) => ["Alice", "Bob", "Carol", "Dave"][color - 1],
     getPlayerState: (color: number) => playerStates[color],
     diceState: { diceThrown: true, dice1: 3, dice2: 4 },
   };
+  const store = {
+    gameState,
+    gameSettings: { roomId: "same-room", victoryPointsToWin: 10 },
+    gameClientConfig: { currentUserId: undefined as string | undefined },
+    gameUserStates: { userStates: [] as Array<{ username: string; selectedColor: number; userId: string }> },
+    actionBox: { actionBoxData: undefined as unknown },
+  };
   const manager = {
     gameController: controller, gameState, mapController: { mapView: {} },
-    gameStore: { getState: () => ({ gameState, gameSettings: { roomId: "same-room", victoryPointsToWin: 10 } }) },
+    gameStore: { getState: () => store },
   };
   const runtime = Object.assign(() => ({ manager }), {
     m: { manager: function initializeGameManager() { return "completeInitialization"; } },
@@ -60,7 +69,7 @@ const openPage = (saved: Record<string, string> = {}, turn = 25) => {
   window.postMessage = (message) => { messages.push(message); };
   window.eval(bridgeSource);
   return {
-    window, currentState, playerStates, messages,
+    window, currentState, playerStates, messages, controller, store,
     refresh: () => window.dispatchEvent(new window.Event("resize")),
     snapshot: () => messages.at(-1)?.payload,
     saved: () => Object.fromEntries(Array.from({ length: window.sessionStorage.length }, (_, index) => {
@@ -71,6 +80,42 @@ const openPage = (saved: Record<string, string> = {}, turn = 25) => {
 };
 
 describe("page bridge progress boundaries", () => {
+  it("reads a robber victim prompt from public store evidence without DOM text or selectors", () => {
+    const page = openPage();
+    page.controller.myColor = 1;
+    page.controller.isMyTurn = true;
+    page.store.gameClientConfig.currentUserId = "local-user";
+    page.store.gameUserStates.userStates = [
+      { username: "Alice", selectedColor: 1, userId: "local-user" },
+      { username: "Bob", selectedColor: 2, userId: "bob-user" },
+    ];
+    page.playerStates[2] = { resourceCards: { cards: [0, 0] } };
+    const prompt = {
+      type: "pickPlayer",
+      props: {
+        title: { key: "strings:game.tips.robber.title" },
+        body: { key: "strings:game.prompts.selectWhoToRobFrom" },
+        playerValidators: [{ color: 1 }, { color: 2 }, { color: 2 }, { color: 3 }, { color: 99 }, null],
+      },
+    };
+    page.store.actionBox.actionBoxData = prompt;
+    page.refresh();
+    expect(page.snapshot()).toMatchObject({
+      myPlayer: "Alice", robberVictimSelection: true, robberVictimPlayers: ["Bob"],
+    });
+    prompt.props.body.key = "strings:game.prompts.masterMerchant";
+    page.refresh();
+    expect(page.snapshot()?.robberVictimSelection).toBeUndefined();
+    prompt.props.body.key = "strings:game.prompts.selectWhoToRobFrom";
+    page.controller.isMyTurn = false;
+    page.refresh();
+    expect(page.snapshot()?.robberVictimSelection).toBeUndefined();
+    page.controller.isMyTurn = true;
+    page.store.gameClientConfig.currentUserId = "unresolved-user";
+    page.refresh();
+    expect(page.snapshot()?.robberVictimSelection).toBeUndefined();
+  });
+
   it("rejects midgame setup hydration before publishing or overwriting persisted progress", () => {
     const page = openPage();
     const before = page.snapshot();

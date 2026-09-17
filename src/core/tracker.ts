@@ -291,7 +291,13 @@ const transfer = (
   const valid = state.worlds.filter((world) => hasResources(ensureHand(world, from), cards));
   if (!valid.length) {
     addWarning(state, "A transfer referenced cards from before tracking began.");
-    for (const world of state.worlds) addResources(ensureHand(world, to), cards);
+    for (const world of state.worlds) {
+      const hand = ensureHand(world, from);
+      for (const resource of RESOURCE_ORDER) {
+        hand[resource] = Math.max(0, hand[resource] - (cards[resource] ?? 0));
+      }
+      addResources(ensureHand(world, to), cards);
+    }
     return;
   }
   for (const world of valid) {

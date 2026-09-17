@@ -88,6 +88,7 @@ export class DecisionWorkerClient {
     engineOrCallback: DecisionEngine | ((status: DecisionServiceStatus) => void),
     maybeCallback?: (status: DecisionServiceStatus) => void,
   ): void {
+    if (this.destroyed) return;
     const engine =
       typeof engineOrCallback === "function" ? "deep-search" : engineOrCallback;
     const callback =
@@ -394,7 +395,7 @@ export class DecisionWorkerClient {
     });
   }
 
-  private queryStatus(
+  private async queryStatus(
     engine: DecisionEngine,
   ): Promise<DecisionStatusMessageResponse> {
     const message: DecisionStatusMessage = {
@@ -402,7 +403,19 @@ export class DecisionWorkerClient {
       id: this.nextId++,
       engine,
     };
-    return chrome.runtime.sendMessage<DecisionStatusMessageResponse>(message);
+    let timer: ReturnType<typeof globalThis.setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        chrome.runtime.sendMessage<DecisionStatusMessageResponse>(message),
+        new Promise<never>((_resolve, reject) => {
+          timer = globalThis.setTimeout(() => {
+            reject(new Error("Decision engine initialization exceeded the 12-second safety limit"));
+          }, HARD_DECISION_MS);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) globalThis.clearTimeout(timer);
+    }
   }
 
   reset(): void {
@@ -415,6 +428,7 @@ export class DecisionWorkerClient {
 
   destroy(): void {
     this.destroyed = true;
+    this.readiness = undefined;
     this.reset();
   }
 }

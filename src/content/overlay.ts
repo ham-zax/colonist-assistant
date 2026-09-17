@@ -463,7 +463,15 @@ export class AssistantOverlay {
   }
 
   private warmDecisionEngine(): void {
+    const decisionKey = this.decisionKey;
     this.decisionWorker.warm(this.settings.engine, (status) => {
+      // Initialization can finish after a board decision has established an
+      // evidence error or a more recent runtime result. Readiness is not
+      // authority to clear that decision's safety gate.
+      if (
+        this.decisionKey !== decisionKey &&
+        status.detail !== EXTENSION_CONTEXT_RELOAD_MESSAGE
+      ) return;
       if (
         status.runtime === "background-gpu" ||
         status.runtime === "background-wasm"
@@ -2151,7 +2159,7 @@ export class AssistantOverlay {
       if (this.settings.disablePlayerTrades && next.verdict !== "decline") {
         return false;
       }
-      const trade = board.activeTrades?.[next.offerIndex];
+      const trade = board.activeTrades?.find((offer) => offer.id === next.tradeId);
       return Boolean(
         trade?.incoming &&
         trade.id === next.tradeId &&
@@ -2161,7 +2169,7 @@ export class AssistantOverlay {
     }
     if (next.kind === "trade-partner") {
       if (this.settings.disablePlayerTrades) return false;
-      const trade = board.activeTrades?.[next.offerIndex];
+      const trade = board.activeTrades?.find((offer) => offer.id === next.tradeId);
       return Boolean(
         trade &&
         trade.id === next.tradeId &&
@@ -2170,7 +2178,7 @@ export class AssistantOverlay {
       );
     }
     if (next.kind === "trade-cancel") {
-      const trade = board.activeTrades?.[next.offerIndex];
+      const trade = board.activeTrades?.find((offer) => offer.id === next.tradeId);
       return Boolean(
         trade &&
         trade.id === next.tradeId &&
@@ -2195,7 +2203,11 @@ export class AssistantOverlay {
       return Boolean(board.isMyTurn) && board.action === "none";
     }
     if (next.kind === "build") {
-      return Boolean(board.isMyTurn) && board.action === "none";
+      return Boolean(
+        board.isMyTurn && board.action === "none" &&
+        board.hasRolled !== false && board.ownHand &&
+        hasResources(board.ownHand, BUILD_COSTS[next.build]),
+      );
     }
     if (next.kind === "resource") return Boolean(board.isMyTurn);
     return true;
@@ -2239,10 +2251,8 @@ export class AssistantOverlay {
     if (next.kind === "player") {
       return Boolean(
         board.isMyTurn &&
-        (
-          board.robberVictimSelection ||
-          board.action === "none"
-        ),
+        board.robberVictimSelection &&
+        board.robberVictimPlayers?.includes(next.player),
       );
     }
     if (next.kind === "trade-builder") {
@@ -2259,7 +2269,7 @@ export class AssistantOverlay {
     }
     if (next.kind === "trade" && next.verdict === "counter") {
       if (this.settings.disablePlayerTrades) return false;
-      const trade = board.activeTrades?.[next.offerIndex];
+      const trade = board.activeTrades?.find((offer) => offer.id === next.tradeId);
       return Boolean(
         trade?.incoming &&
         trade.id === next.tradeId &&

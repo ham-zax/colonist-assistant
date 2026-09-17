@@ -585,7 +585,7 @@ import {
         /choose a player to steal/iu.test(element.textContent ?? "")
       );
     });
-    const robberVictimPlayers = visibleRobberVictimPrompt
+    const visibleRobberVictimPlayers = visibleRobberVictimPrompt
       ? [
           ...visibleRobberVictimPrompt.querySelectorAll<HTMLElement>(
             "[class*='playerName-']",
@@ -596,6 +596,22 @@ import {
             (player, index, players) =>
               Boolean(player) && players.indexOf(player) === index,
           )
+      : [];
+    // The public action-box store identifies this prompt independently of
+    // translated DOM copy and CSS module names. Other pickPlayer dialogs
+    // (for example Master Merchant) must not become robber authority.
+    const storeRobberVictimSelection =
+      actionBoxData?.type === "pickPlayer" &&
+      actionBoxData.props?.title?.key === "strings:game.tips.robber.title" &&
+      actionBoxData.props?.body?.key === "strings:game.prompts.selectWhoToRobFrom" &&
+      Array.isArray(actionBoxData.props?.playerValidators);
+    const storeRobberVictimColors: number[] = storeRobberVictimSelection
+      ? actionBoxData.props.playerValidators.flatMap((candidate: { color?: unknown } | null) =>
+          typeof candidate?.color === "number" &&
+          Number.isInteger(candidate.color) &&
+          candidate.color !== myColor && playOrder.includes(candidate.color)
+            ? [candidate.color] : [],
+        )
       : [];
     const visibleDiscardCount = Number(
       visibleDiscardMatch?.[1] ?? visibleDiscardMatch?.[2] ?? 0,
@@ -941,6 +957,11 @@ import {
         hasLongestRoad: Number(victoryPointsState[4] ?? 0) > 0,
       };
     }
+    const robberVictimPlayers = [...new Set(storeRobberVictimSelection
+      ? storeRobberVictimColors
+          .map((color) => playerName(gameController, color))
+          .filter((name) => ((publicPlayers[name] as { handSize?: number })?.handSize ?? 0) > 0)
+      : visibleRobberVictimPlayers)];
     const ownCards = identityResolved
       ? playerStates[myColor]?.resourceCards?.cards ??
         gameController.getAllCardsInHand?.(myColor)
@@ -1321,7 +1342,8 @@ import {
       ),
       assets,
       ...(discardCount ? { discardCount } : {}),
-      ...(visibleRobberVictimPrompt
+      ...(identityResolved && !gameOver && Boolean(gameController.isMyTurn) &&
+        (storeRobberVictimSelection || visibleRobberVictimPrompt)
         ? {
             robberVictimSelection: true,
             robberVictimPlayers,

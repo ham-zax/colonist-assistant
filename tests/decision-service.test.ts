@@ -19,6 +19,45 @@ afterEach(() => {
 });
 
 describe("decision service client", () => {
+  it("expires silent warm-up status and allows a later readiness retry", async () => {
+    vi.useFakeTimers();
+    const sendMessage = vi.fn()
+      .mockImplementationOnce(() => new Promise(() => {}))
+      .mockImplementationOnce(async (message: { id: number }) => ({
+        id: message.id, runtime: "background-wasm", engineRevision: "test-revision",
+      }));
+    vi.stubGlobal("chrome", { runtime: { sendMessage } });
+    const client = new DecisionWorkerClient();
+    const first = vi.fn();
+    client.warm(first);
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(first).toHaveBeenCalledWith({
+      runtime: "engine-error", detail: expect.stringMatching(/initialization.*12-second/u),
+    });
+    const retry = vi.fn();
+    client.warm(retry);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(retry).toHaveBeenCalledWith({ runtime: "background-wasm", detail: "test-revision ready" });
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+    client.destroy();
+  });
+
+  it("ignores a late warm-up status after the client is destroyed", async () => {
+    let complete!: (value: unknown) => void;
+    const sendMessage = vi.fn(() => new Promise((resolve) => { complete = resolve; }));
+    vi.stubGlobal("chrome", { runtime: { sendMessage } });
+    const client = new DecisionWorkerClient();
+    const callback = vi.fn();
+    client.warm(callback);
+    client.destroy();
+    complete({ id: 1, runtime: "background-wasm", engineRevision: "old-session" });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    client.warm(callback);
+    expect(callback).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledOnce();
+  });
+
   it("warms the packaged WASM service before the first board decision", async () => {
     const sendMessage = vi.fn(async (message: { id: number }) => ({
       id: message.id,

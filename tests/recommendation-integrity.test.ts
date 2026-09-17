@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { AssistantOverlay } from "../src/content/overlay";
+import type { NextClick } from "../src/content/action-guide";
 import { createCoachReport } from "../src/core/coach";
 import { parseLogSnapshot } from "../src/core/parser";
 import {
@@ -46,6 +47,66 @@ const decisionSignature = (
 };
 
 describe("recommendation state integrity", () => {
+  it("rejects a stale paid build after the hand can no longer afford it", () => {
+    const method = (AssistantOverlay.prototype as unknown as {
+      nextClickStillLegal: (next: NextClick) => boolean;
+    }).nextClickStillLegal;
+    const board = makeBoard(["a", "b"], { ownHand: resources({ lumber: 1, brick: 1 }) });
+    const next: NextClick = { kind: "build", build: "road", label: "Build road", signature: "road", confidence: 1 };
+    expect(method.call({ board }, next)).toBe(true);
+    board.ownHand = resources({ lumber: 1 });
+    expect(method.call({ board }, next)).toBe(false);
+    board.ownHand = resources({ lumber: 1, brick: 1 });
+    board.hasRolled = false;
+    expect(method.call({ board }, next)).toBe(false);
+    board.hasRolled = true;
+    board.ownHand = undefined;
+    expect(method.call({ board }, next)).toBe(false);
+  });
+
+  it.each(["trade", "trade-partner", "trade-cancel"] as const)(
+    "keeps %s attached to its trade ID after offers reorder",
+    (kind) => {
+      const methods = AssistantOverlay.prototype as unknown as {
+        nextClickStillLegal: (next: NextClick) => boolean;
+        workflowContinuationStillLegal: (next: NextClick) => boolean;
+      };
+      const target = incomingTrade("b", {
+        id: "target", incoming: kind === "trade", acceptedPlayers: ["b"],
+      });
+      const other = incomingTrade("b", { id: "other" });
+      const board = makeBoard(["a", "b"], { activeTrades: [other, target] });
+      const next: NextClick = {
+        kind, offerIndex: 0, tradeId: "target", verdict: "counter", acceptedIndex: 0,
+        player: "b", label: "Trade", signature: "trade", confidence: 1,
+      };
+      const context = { board, settings: { disablePlayerTrades: false } };
+      expect(methods.nextClickStillLegal.call(context, next)).toBe(true);
+      if (kind === "trade") {
+        expect(methods.workflowContinuationStillLegal.call(context, next)).toBe(true);
+      }
+      board.activeTrades = [other];
+      expect(methods.nextClickStillLegal.call(context, next)).toBe(false);
+      if (kind === "trade") {
+        expect(methods.workflowContinuationStillLegal.call(context, next)).toBe(false);
+      }
+    },
+  );
+
+  it("stops a victim workflow when its prompt closes or its target becomes illegal", () => {
+    const method = (AssistantOverlay.prototype as unknown as {
+      workflowContinuationStillLegal: (next: NextClick) => boolean;
+    }).workflowContinuationStillLegal;
+    const board = makeBoard(["a", "b"], { robberVictimSelection: true, robberVictimPlayers: ["b"] });
+    const next: NextClick = { kind: "player", player: "b", label: "Steal", signature: "steal", confidence: 1 };
+    expect(method.call({ board }, next)).toBe(true);
+    board.robberVictimPlayers = [];
+    expect(method.call({ board }, next)).toBe(false);
+    board.robberVictimPlayers = ["b"];
+    board.robberVictimSelection = false;
+    expect(method.call({ board }, next)).toBe(false);
+  });
+
   it("keeps sampled representative worlds on the exact source support", () => {
     const worlds = [
       { weight: 0.6, hands: { a: resources({ lumber: 3 }) } },

@@ -68,6 +68,41 @@ const acceptedTradePosterior = () => {
 };
 
 describe("tracker posterior integrity", () => {
+  it("debits the known part of a transfer when earlier receipts are missing", () => {
+    let state = createTrackerState();
+    for (const player of ["Sender", "Receiver"]) {
+      state = reduceTracker(state, { type: "discover", player });
+    }
+    state.worlds = [{
+      hands: { Sender: resources(1, 0, 0, 0, 1), Receiver: resources(0, 0, 0, 0, 0) },
+      weight: 1,
+    }];
+    const transferred = reduceTracker(state, {
+      type: "transfer", from: "Sender", to: "Receiver", cards: resources(2, 0, 0, 0, 0), reason: "trade",
+    });
+    expect(transferred.worlds[0]?.hands.Sender).toEqual(resources(0, 0, 0, 0, 1));
+    expect(transferred.worlds[0]?.hands.Receiver).toEqual(resources(2, 0, 0, 0, 0));
+    expect(transferred.warnings).toContain("A transfer referenced cards from before tracking began.");
+    expect(state.worlds[0]?.hands.Sender).toEqual(resources(1, 0, 0, 0, 1));
+  });
+
+  it("conditions an affordable transfer on valid worlds and conserves their cards", () => {
+    let state = createTrackerState();
+    for (const player of ["Sender", "Receiver"]) {
+      state = reduceTracker(state, { type: "discover", player });
+    }
+    state.worlds = [1, 2].map((lumber) => ({
+      hands: { Sender: resources(lumber, 0, 0, 0, 0), Receiver: resources(0, 0, 0, 0, 0) }, weight: 0.5,
+    }));
+    const transferred = reduceTracker(state, {
+      type: "transfer", from: "Sender", to: "Receiver", cards: resources(2, 0, 0, 0, 0), reason: "trade",
+    });
+    expect(transferred.worlds).toEqual([{
+      hands: { Sender: resources(0, 0, 0, 0, 0), Receiver: resources(2, 0, 0, 0, 0) }, weight: 1,
+    }]);
+    expect(transferred.warnings).toEqual([]);
+  });
+
   it("keeps accepted-trade tails at their Bayesian mass instead of rejuvenating them", () => {
     const state = acceptedTradePosterior();
     const supported = state.worlds.filter(

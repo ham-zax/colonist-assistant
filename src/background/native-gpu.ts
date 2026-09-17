@@ -5,6 +5,7 @@ import { M0_FAIR_IID_2D6_V1, MREF_COLONIST_LINKED_2024_V1 } from "../core/dice-h
 export const NATIVE_GPU_HOST = "io.colonist_assistant.gpu";
 export const NATIVE_GPU_PROTOCOL_VERSION = 7;
 export const NATIVE_GPU_STATE_SCHEMA_VERSION = 3;
+export const NATIVE_GPU_HANDSHAKE_TIMEOUT_MS = 2_000;
 export const NATIVE_GPU_ROLLOUT_ALGORITHM = "gpu-root-rollout";
 export const NATIVE_GPU_EXACT_ALGORITHM =
   "deep-maxn-cuda-exact-fixed-work-v1";
@@ -128,6 +129,7 @@ export class NativeGpuClient {
   private everReady = false;
   private activeAnalyzeId?: number;
   private activeDecisionId?: number;
+  private connectionGeneration = 0;
 
   async status(): Promise<NativeGpuStatus | undefined> {
     if (this.statusValue && this.port) return this.statusValue;
@@ -144,6 +146,7 @@ export class NativeGpuClient {
   }
 
   release(): void {
+    this.connectionGeneration += 1;
     const port = this.port;
     this.port = undefined;
     this.statusValue = undefined;
@@ -193,6 +196,7 @@ export class NativeGpuClient {
   async analyzeExact(
     request: unknown,
     decisionId?: number,
+    signal?: AbortSignal,
   ): Promise<WasmSearchResponse> {
     return this.analyzeWithType(
       "analyze-exact",
@@ -200,6 +204,7 @@ export class NativeGpuClient {
       request,
       decisionId,
       true,
+      signal,
     );
   }
 
@@ -209,8 +214,11 @@ export class NativeGpuClient {
     request: unknown,
     decisionId: number | undefined,
     requireExactCapability: boolean,
+    signal?: AbortSignal,
   ): Promise<WasmSearchResponse> {
+    signal?.throwIfAborted();
     const status = await this.status();
+    signal?.throwIfAborted();
     if (!status) throw new Error("GPU companion is not installed");
     if (requireExactCapability && !nativeGpuSupportsExactMaxn(status)) {
       throw new NativeGpuCompatibilityError(
@@ -232,6 +240,8 @@ export class NativeGpuClient {
     const { id, response } = this.beginRequest({ type, request });
     this.activeAnalyzeId = id;
     this.activeDecisionId = decisionId;
+    const abort = () => this.cancelAnalyze(id, "GPU search cancelled as stale");
+    signal?.addEventListener("abort", abort, { once: true });
     try {
       const result = await response;
       if (result.error) throw new Error(result.error);
@@ -255,6 +265,7 @@ export class NativeGpuClient {
       }
       return result.response;
     } finally {
+      signal?.removeEventListener("abort", abort);
       if (this.activeAnalyzeId === id) {
         this.activeAnalyzeId = undefined;
         this.activeDecisionId = undefined;
@@ -272,16 +283,20 @@ export class NativeGpuClient {
   }
 
   private async connect(): Promise<NativeGpuStatus | undefined> {
+    const generation = ++this.connectionGeneration;
     try {
       const port = chrome.runtime.connectNative(NATIVE_GPU_HOST);
       this.port = port;
       port.onMessage.addListener((message: unknown) => this.onMessage(message));
       port.onDisconnect.addListener(() => this.onDisconnect(port));
-      const hello = await this.request({
+      const hello = await this.beginRequest({
         type: "hello",
         protocolVersion: NATIVE_GPU_PROTOCOL_VERSION,
         stateSchemaVersion: NATIVE_GPU_STATE_SCHEMA_VERSION,
-      });
+      }, NATIVE_GPU_HANDSHAKE_TIMEOUT_MS).response;
+      if (generation !== this.connectionGeneration || this.port !== port) {
+        throw new Error("GPU companion disconnected during initialization");
+      }
       if (hello.error) {
         if (hello.error.startsWith("GPU companion protocol mismatch:")) {
           throw new NativeGpuCompatibilityError(hello.error);
@@ -328,11 +343,14 @@ export class NativeGpuClient {
       this.unavailable = false;
       return status;
     } catch (error) {
+      // A released handshake may settle after a new connection has started.
+      // Its completion must not clear or poison the new connection's state.
+      if (generation !== this.connectionGeneration) throw error;
       this.connectPromise = undefined;
+      this.closePort();
       const detail =
         error instanceof Error ? error.message : "GPU companion connection failed";
       if (error instanceof NativeGpuCompatibilityError) {
-        this.closePort();
         this.fatalError = error;
         throw error;
       }
@@ -340,17 +358,12 @@ export class NativeGpuClient {
         this.fatalError = new Error(detail);
         throw this.fatalError;
       }
-      this.closePort();
       this.unavailable = true;
       return undefined;
     }
   }
 
-  private request(payload: Record<string, unknown>): Promise<NativeGpuResponse> {
-    return this.beginRequest(payload).response;
-  }
-
-  private beginRequest(payload: Record<string, unknown>): {
+  private beginRequest(payload: Record<string, unknown>, timeoutMs?: number): {
     id: number;
     response: Promise<NativeGpuResponse>;
   } {
@@ -362,12 +375,23 @@ export class NativeGpuClient {
       };
     }
     const response = new Promise<NativeGpuResponse>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = timeoutMs === undefined ? undefined : globalThis.setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error("GPU companion handshake timed out"));
+      }, timeoutMs);
+      const clearTimer = () => {
+        if (timer !== undefined) globalThis.clearTimeout(timer);
+      };
+      const pending: PendingNativeRequest = {
+        resolve: (value) => { clearTimer(); resolve(value); },
+        reject: (error) => { clearTimer(); reject(error); },
+      };
+      this.pending.set(id, pending);
       try {
         this.port!.postMessage({ ...payload, id });
       } catch (error) {
         this.pending.delete(id);
-        reject(
+        pending.reject(
           error instanceof Error
             ? error
             : new Error("GPU companion message could not be sent"),

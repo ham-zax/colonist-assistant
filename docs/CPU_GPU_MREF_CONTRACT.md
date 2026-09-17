@@ -39,6 +39,22 @@ worlds by a separate dice-world population.
 
 Production browser decisions route eligible midgame Deep MaxN requests to `deep-maxn-cuda-exact-fixed-work-v1` when an installed companion satisfies capability checks, with CPU/WASM remaining the packaged default, opening owner, and fallback. Companion availability cannot substitute `gpu-root-rollout`; that algorithm remains explicit experimental tooling. Opening remains unsupported by exact CUDA and therefore stays on the same-policy CPU opening path.
 
+Native `hello` is bounded to 2,000 ms. Silent initialization and transport
+disconnects use the same-policy CPU/WASM path; semantic/protocol/model mismatches
+remain errors. Decision identities include tab, document, frame, and client
+request ID, with a separate native correlation ID. One request owns native
+search at a time; concurrent requests use WASM with their stochastic authority
+preserved. A weighted request in another document cannot release the active
+native owner's port. Cancellation received during initialization prevents that
+request from subsequently starting native search.
+
+Readiness queries have a separate 12-second safety limit and can retry after
+failure. A delayed readiness response cannot overwrite the evidence gate or
+runtime result of a newer board decision. These are transport/lifecycle fixes,
+not new CUDA parity or live win-rate evidence. See the
+[September 17 follow-up review](ENGINE_TIMEOUT_AND_GPU_REVIEW_2026-09-17.md#follow-up-review-and-fixes)
+for regression coverage and the remaining discard-state limitation.
+
 For offline CPU/exact-MaxN parity, explicit `effort.decisionTimeMs: 0` (or legacy `timeBudgetMs: 0` when no effort object is supplied) disables the wall-clock deadline and evidence escalation. Node and depth limits remain active, and native cancellation remains supported. Positive decision times retain the 50–10,000 ms normalization; omitted effort retains the existing defaults. Live requests supply positive budgets. Experimental rollout and other modes retain their positive time floor. Parity tooling must assert the returned zero decision time and matching effective effort before comparing fixed work.
 
 For timed MaxN, the search budget is a cooperative target, not a promise of an
