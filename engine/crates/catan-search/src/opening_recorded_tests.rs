@@ -99,6 +99,28 @@ const TASK9783_HEXES: [((i8, i8), Option<Resource>, u8); 19] = [
     ((0, 0), Some(Resource::Ore), 11),
 ];
 
+const HILL6758_HEXES: [((i8, i8), Option<Resource>, u8); 19] = [
+    ((0, -2), Some(Resource::Brick), 5),
+    ((-1, -1), Some(Resource::Brick), 2),
+    ((-2, 0), Some(Resource::Wool), 6),
+    ((-2, 1), Some(Resource::Ore), 3),
+    ((-2, 2), Some(Resource::Lumber), 8),
+    ((-1, 2), Some(Resource::Wool), 10),
+    ((0, 2), Some(Resource::Grain), 9),
+    ((1, 1), Some(Resource::Ore), 12),
+    ((2, 0), Some(Resource::Lumber), 11),
+    ((2, -1), Some(Resource::Grain), 4),
+    ((2, -2), Some(Resource::Grain), 8),
+    ((1, -2), Some(Resource::Wool), 10),
+    ((0, -1), Some(Resource::Grain), 9),
+    ((-1, 0), None, 0),
+    ((-1, 1), Some(Resource::Lumber), 4),
+    ((0, 1), Some(Resource::Ore), 5),
+    ((1, 0), Some(Resource::Brick), 6),
+    ((1, -1), Some(Resource::Lumber), 3),
+    ((0, 0), Some(Resource::Wool), 11),
+];
+
 const TASK394_HEXES: [((i8, i8), Option<Resource>, u8); 19] = [
     ((0, -2), Some(Resource::Lumber), 9),
     ((-1, -1), Some(Resource::Grain), 10),
@@ -167,6 +189,18 @@ const TASK9783_PORTS: [(&str, Port); 9] = [
     ("e:3,0,1", Port::Resource(Resource::Ore)),
     ("e:3,-2,2", Port::Resource(Resource::Wool)),
     ("e:2,-3,2", Port::Resource(Resource::Brick)),
+];
+
+const HILL6758_PORTS: [(&str, Port); 9] = [
+    ("e:0,-2,0", Port::Generic),
+    ("e:-1,-1,1", Port::Resource(Resource::Wool)),
+    ("e:-2,1,1", Port::Generic),
+    ("e:-2,2,2", Port::Resource(Resource::Lumber)),
+    ("e:-1,3,0", Port::Resource(Resource::Brick)),
+    ("e:1,2,0", Port::Generic),
+    ("e:3,0,1", Port::Resource(Resource::Grain)),
+    ("e:3,-2,2", Port::Generic),
+    ("e:2,-3,2", Port::Resource(Resource::Ore)),
 ];
 
 const TASK394_PORTS: [(&str, Port); 9] = [
@@ -519,6 +553,20 @@ fn task9783_d3() -> GameState {
     state
 }
 
+fn hill6758_d5() -> GameState {
+    let mut state = recorded_state(&HILL6758_HEXES, &HILL6758_PORTS, 3);
+    place_settlement(&mut state, "v:-2,2,0");
+    place_road(&mut state, "e:-1,1,2");
+    place_settlement(&mut state, "v:-1,2,0");
+    place_road(&mut state, "e:0,1,1");
+    place_settlement(&mut state, "v:0,-1,0");
+    place_road(&mut state, "e:1,-2,1");
+    place_settlement(&mut state, "v:1,0,1");
+    place_road(&mut state, "e:1,1,1");
+    assert_setup_turn(&state, 3, 4);
+    state
+}
+
 fn hand2325_d1() -> GameState {
     let mut state = recorded_state_with_rules(&HAND2325_HEXES, &HAND2325_PORTS, 1, 2, 15);
     place_settlement(&mut state, "v:-2,1,0");
@@ -607,8 +655,10 @@ fn hand2325_d1_does_not_sacrifice_half_the_production_for_a_generic_port() {
         .as_ref()
         .expect("the recorded setup state has legal opening roots");
     assert_ne!(
-        chosen, &weak_port,
-        "a 5-pip generic-port root must not win through fractional maritime credit"
+        chosen,
+        &weak_port,
+        "a 5-pip generic-port root must not win through fractional maritime credit: {:#?}",
+        report.actions.iter().take(5).collect::<Vec<_>>()
     );
     assert!(
         candidate_value(&report, chosen) > candidate_value(&report, &weak_port),
@@ -762,6 +812,68 @@ fn task9783_equal_pips_complete_portfolio_beats_speculative_repair_in_both_trade
             candidate_value(&report, &complete) > candidate_value(&report, &historical),
             "the complete task9783 portfolio must outrank the repair-dependent historical root"
         );
+    }
+}
+
+#[test]
+fn hill6758_multiplayer_objective_keeps_own_economy_and_causal_denial_separate() {
+    for player_trades_enabled in [false, true] {
+        let mut state = hill6758_d5();
+        state.player_trades_enabled = player_trades_enabled;
+        state.domestic_trade_disabled = if player_trades_enabled { 0 } else { 1 << 3 };
+        let historical = settlement_action(&state, "v:2,-2,1");
+        let all_five = settlement_action(&state, "v:0,0,0");
+        let brick_port = settlement_action(&state, "v:-1,3,0");
+        let report = solve_opening(&state, 3, live_opening_config());
+        let evidence = |action: &Action| {
+            report
+                .actions
+                .iter()
+                .find(|candidate| &candidate.action == action)
+                .and_then(|candidate| candidate.evidence)
+                .unwrap_or_else(|| panic!("missing completed evidence for {action:?}"))
+        };
+        let historical_evidence = evidence(&historical);
+        let all_five_evidence = evidence(&all_five);
+        let port_evidence = evidence(&brick_port);
+
+        assert_eq!(
+            historical_evidence.production_pips,
+            [2.0, 5.0, 0.0, 8.0, 5.0]
+        );
+        assert_eq!(all_five_evidence.production_pips, [2.0, 5.0, 2.0, 4.0, 5.0]);
+        if !player_trades_enabled {
+            assert!(
+                all_five_evidence.own_value > historical_evidence.own_value,
+                "the demonstrated no-player-trade state must retain the repaired own-value ordering",
+            );
+        }
+        assert!(
+            candidate_value(&report, &all_five) > candidate_value(&report, &historical),
+            "generic rival strength must not reverse the better own hill6758 portfolio; player_trades_enabled={player_trades_enabled}: {:#?}",
+            report.actions.iter().take(3).collect::<Vec<_>>()
+        );
+        assert_eq!(historical_evidence.rival_weight, 0.0);
+        assert_eq!(all_five_evidence.rival_weight, 0.0);
+        assert!(
+            (candidate_value(&report, &historical)
+                - historical_evidence.own_value
+                - historical_evidence.causal_denial_term)
+                .abs()
+                < 1e-5,
+        );
+        assert!(
+            (candidate_value(&report, &all_five)
+                - all_five_evidence.own_value
+                - all_five_evidence.causal_denial_term)
+                .abs()
+                < 1e-5,
+        );
+
+        assert_eq!(port_evidence.maritime_ratios[Resource::Brick.index()], 2);
+        assert!(port_evidence.port_build_gain > 0.0);
+        assert!(port_evidence.expansion_project_eta_rolls.is_some());
+        assert!(port_evidence.expansion_realization < 1.0);
     }
 }
 

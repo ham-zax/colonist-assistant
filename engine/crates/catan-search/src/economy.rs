@@ -91,6 +91,28 @@ pub(crate) fn build_conversion_efficiency(
     required as f32 / cards.max(required) as f32
 }
 
+/// Realizable value of one complete build from the present economy.
+///
+/// ETA prices when the whole cost can be assembled, including complete
+/// maritime batches. Conversion efficiency then prices how many produced
+/// cards survive that conversion. Keeping both facts in one term prevents a
+/// port from receiving credit merely because its printed ratio improved.
+pub(crate) fn complete_build_conversion_value(
+    production: &[f32; 5],
+    hand: &ResourceHand,
+    ratios: &ResourceHand,
+    cost: &ResourceHand,
+) -> f32 {
+    if build_fundable_at_rolls(production, hand, ratios, cost, 0.0) {
+        return 1.0;
+    }
+    let eta = build_eta_rolls(production, hand, ratios, cost);
+    if !eta.is_finite() {
+        return 0.0;
+    }
+    build_conversion_efficiency(production, ratios, cost) / (1.0 + eta / 18.0)
+}
+
 /// Guaranteed bank stock using only the actor's hand and public opponent hand
 /// totals. Never inspect sampled opponent resource identities in action policy.
 pub(crate) fn guaranteed_hidden_bank_lower_bound(state: &GameState, player: u8) -> ResourceHand {

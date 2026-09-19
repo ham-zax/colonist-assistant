@@ -6,7 +6,7 @@ use colonist_catan_core::{
     SETTLEMENT_COST,
 };
 
-use crate::economy::build_eta_rolls;
+use crate::economy::{build_conversion_efficiency, build_eta_rolls, build_fundable_at_rolls};
 
 const PIPS: [f32; 13] = [
     0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 0.0, 5.0, 4.0, 3.0, 2.0, 1.0,
@@ -15,9 +15,6 @@ const PIPS: [f32; 13] = [
 /// build race, production, and ports below.
 const BASE_RESOURCE_WEIGHTS: [f32; 5] = [0.98, 0.98, 0.73, 1.22, 1.10];
 const BUILD_COSTS: [ResourceHand; 4] = [ROAD_COST, SETTLEMENT_COST, CITY_COST, DEVELOPMENT_COST];
-// Preserve the former 0.7 ceiling for a fully utilized new 2:1 port while
-// pricing only the production that can actually use an improved trade ratio.
-const PORT_VALUE_PER_RATIO_STEP: f32 = 0.35;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ExpansionOption {
@@ -696,8 +693,15 @@ fn expansion_option_value_with_routes_and_weights(
             continue;
         }
         let survival = expansion_site_survival(state, player, vertex, route_maps, arrival_scores);
-        let site =
-            vertex_value_with_weights(state, vertex as u8, resource_weights, player, &production);
+        let exact_hand_visible = exact_rival_hands || observer == Some(player);
+        let site = vertex_value_with_weights_and_knowledge(
+            state,
+            vertex as u8,
+            resource_weights,
+            player,
+            &production,
+            exact_hand_visible,
+        );
         let road_cost = distance as f32 * 1.45;
         let immediate_window = turns_until_action(state, player) + distance as f32 * 0.08;
         let economic_delay =
@@ -1242,12 +1246,25 @@ pub(crate) fn vertex_value(state: &GameState, vertex: u8, player: u8) -> f32 {
     vertex_value_with_weights(state, vertex, &weights, player, &production)
 }
 
+/// Setup-site values under one stable view of the player's current economy.
+/// Computing the dynamic weights and production once is important for opening
+/// denial counterfactuals, which compare many vertices without changing the
+/// opponent's portfolio.
+pub(crate) fn opening_site_values(state: &GameState, player: u8) -> Vec<f32> {
+    let weights = dynamic_resource_weights(state, player);
+    let production = production_pips(state, player);
+    (0..state.board.vertices.len())
+        .map(|vertex| vertex_value_with_weights(state, vertex as u8, &weights, player, &production))
+        .collect()
+}
+
 fn prospective_port_option_value(
     state: &GameState,
     vertex: u8,
     player: u8,
     current_production: &[f32; 5],
     site_production: &[f32; 5],
+    exact_hand_visible: bool,
 ) -> f32 {
     let Some(port) = state.board.vertices[vertex as usize].port else {
         return 0.0;
@@ -1266,20 +1283,40 @@ fn prospective_port_option_value(
     }
     let prospective_production: [f32; 5] =
         std::array::from_fn(|resource| current_production[resource] + site_production[resource]);
-    let total_production = prospective_production.iter().sum::<f32>();
-    if total_production <= f32::EPSILON {
+    if prospective_production.iter().sum::<f32>() <= f32::EPSILON {
         return 0.0;
     }
-    before
+    // Opponent resource identities are private outside an exact-world view.
+    // Use no identity-specific starting cards in that case; production and
+    // the public maritime ratios still price the future conversion engine.
+    let hidden_hand = [0; 5];
+    let hand = if exact_hand_visible {
+        &state.players[usize::from(player)].resources
+    } else {
+        &hidden_hand
+    };
+    let complete_build_access = |ratios: &ResourceHand, cost: &ResourceHand| {
+        // Sample whole-build access at the same 18-roll scale used by the
+        // strategic economy. A ratio change earns no access credit unless it
+        // completes the entire cost at one of these horizons.
+        let access = [0.0, 18.0, 36.0]
+            .into_iter()
+            .filter(|rolls| {
+                build_fundable_at_rolls(&prospective_production, hand, ratios, cost, *rolls)
+            })
+            .count() as f32
+            / 3.0;
+        access
+    };
+    let gains = BUILD_COSTS
         .iter()
-        .zip(after)
-        .enumerate()
-        .map(|(resource, (before, after))| {
-            before.saturating_sub(after) as f32 * prospective_production[resource]
-                / total_production
+        .map(|cost| {
+            (complete_build_access(&after, cost) - complete_build_access(&before, cost)).max(0.0)
+                * build_conversion_efficiency(&prospective_production, &after, cost)
         })
-        .sum::<f32>()
-        * PORT_VALUE_PER_RATIO_STEP
+        .collect::<Vec<_>>();
+    let build_families_advanced = gains.iter().filter(|gain| **gain > f32::EPSILON).count() as f32;
+    gains.iter().sum::<f32>() * build_families_advanced / BUILD_COSTS.len() as f32
 }
 
 fn vertex_value_with_weights(
@@ -1288,6 +1325,24 @@ fn vertex_value_with_weights(
     weights: &[f32; 5],
     player: u8,
     current_production: &[f32; 5],
+) -> f32 {
+    vertex_value_with_weights_and_knowledge(
+        state,
+        vertex,
+        weights,
+        player,
+        current_production,
+        true,
+    )
+}
+
+fn vertex_value_with_weights_and_knowledge(
+    state: &GameState,
+    vertex: u8,
+    weights: &[f32; 5],
+    player: u8,
+    current_production: &[f32; 5],
+    exact_hand_visible: bool,
 ) -> f32 {
     let mut value: f32 = 0.0;
     let mut numbers = 0u16;
@@ -1307,8 +1362,14 @@ fn vertex_value_with_weights(
     }
     value += numbers.count_ones() as f32 * 0.16;
     value += resources.count_ones() as f32 * 0.22;
-    value +=
-        prospective_port_option_value(state, vertex, player, current_production, &site_production);
+    value += prospective_port_option_value(
+        state,
+        vertex,
+        player,
+        current_production,
+        &site_production,
+        exact_hand_visible,
+    );
     value
 }
 
@@ -1718,7 +1779,10 @@ mod tests {
         let matched = vertex_value(&matched, candidate as u8, 0);
 
         assert!((mismatched - plain).abs() < 1e-5);
-        assert!(generic > plain);
+        assert!(
+            (generic - plain).abs() < 1e-5,
+            "a printed ratio improvement gets no value until it advances a complete build"
+        );
         assert!(matched > generic);
     }
 

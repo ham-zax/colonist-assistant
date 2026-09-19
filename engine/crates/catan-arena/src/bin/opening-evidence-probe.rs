@@ -247,12 +247,14 @@ fn main() {
                     continue;
                 }
                 let expansion = expansion_option_value(&endpoint, spec.root_player);
-                let term = expansion.value * 0.32 + expansion.portfolio_value * 0.22;
+                let shared_term = expansion.value * 0.32 + expansion.portfolio_value * 0.22;
+                let term = shared_term * evidence.expansion_realization;
                 matches.push((
                     (term - target).abs(),
                     action_label(&settlement),
                     action_label(&road),
                     expansion,
+                    shared_term,
                     term,
                 ));
             }
@@ -262,12 +264,13 @@ fn main() {
             matches
                 .into_iter()
                 .take(3)
-                .map(|(delta, settlement, road, expansion, term)| {
+                .map(|(delta, settlement, road, expansion, shared_term, term)| {
                     json!({
                         "deltaFromEvidenceTerm": delta,
                         "opponentSettlement": settlement,
                         "opponentRoad": road,
-                        "expansionTerm": term,
+                        "sharedExpansionTerm": shared_term,
+                        "openingExpansionTerm": term,
                         "bestVertex": expansion.vertex.map(|id| vertex_ids[id as usize].clone()),
                         "roadsRequired": expansion.roads_required,
                         "bestValue": expansion.value,
@@ -304,8 +307,15 @@ fn main() {
                     "conversionEfficiencyTerm": evidence.conversion_efficiency_term,
                     "portBuildGain": evidence.port_build_gain,
                     "expansionTerm": evidence.expansion_term,
+                    "expansionVertex": evidence.expansion_vertex.map(|id| vertex_ids[id as usize].clone()),
+                    "expansionRoadsRequired": evidence.expansion_roads_required,
+                    "expansionProjectEtaRolls": evidence.expansion_project_eta_rolls,
+                    "expansionProjectConversionEfficiency": evidence.expansion_project_conversion_efficiency,
+                    "expansionRealization": evidence.expansion_realization,
+                    "expansionPortBuildGain": evidence.expansion_port_build_gain,
                     "scarcityTerm": evidence.scarcity_term,
                     "concentrationPenalty": evidence.concentration_penalty,
+                    "causalDenialTerm": evidence.causal_denial_term,
                     "ownValue": evidence.own_value,
                     "rivalValue": evidence.rival_value,
                     "rivalWeight": evidence.rival_weight,

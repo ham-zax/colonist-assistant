@@ -1,14 +1,17 @@
 use std::collections::HashMap;
 
 use colonist_catan_core::{
-    Action, CITY_COST, DEVELOPMENT_COST, GameState, Phase, ROAD_COST, ResourceHand,
+    Action, Building, CITY_COST, DEVELOPMENT_COST, GameState, Phase, ROAD_COST, ResourceHand,
     SETTLEMENT_COST, SplitMix64,
 };
 
 use crate::deadline::CooperativeDeadline;
-use crate::economy::{build_conversion_efficiency, build_eta_rolls};
+use crate::economy::{
+    build_conversion_efficiency, build_eta_rolls, complete_build_conversion_value,
+};
 use crate::eval::{
-    closed_economy_value, evaluate, expansion_option_value, production_pips, vertex_value,
+    closed_economy_value, evaluate, expansion_option_value, opening_site_values, production_pips,
+    vertex_value,
 };
 use crate::policy::{choose_rollout_action, normalize_priors};
 
@@ -92,6 +95,57 @@ fn opening_build_economy(state: &GameState, player: u8) -> OpeningBuildEconomy {
     opening_build_economy_from_inputs(&production, &hand, &ratios)
 }
 
+fn opening_port_conversion_gains(
+    production: &[f32; 5],
+    hand: &ResourceHand,
+    before: &ResourceHand,
+    after: &ResourceHand,
+) -> [f32; 4] {
+    OPENING_BUILD_COSTS.map(|(cost, importance)| {
+        let access = |ratios: &ResourceHand| {
+            [0.0, 18.0, 36.0]
+                .into_iter()
+                .filter(|rolls| {
+                    crate::economy::build_fundable_at_rolls(production, hand, ratios, &cost, *rolls)
+                })
+                .count() as f32
+                / 3.0
+        };
+        importance
+            * (access(after) - access(before)).max(0.0)
+            * build_conversion_efficiency(production, after, &cost)
+    })
+}
+
+fn opening_port_conversion_gain(
+    production: &[f32; 5],
+    hand: &ResourceHand,
+    before: &ResourceHand,
+    after: &ResourceHand,
+) -> f32 {
+    let gains = opening_port_conversion_gains(production, hand, before, after);
+    let build_families_advanced = gains.iter().filter(|gain| **gain > f32::EPSILON).count() as f32;
+    // A port is a portfolio conversion engine only to the extent that it
+    // advances multiple whole builds. Scale the total complete-build gain by
+    // that breadth so one isolated horizon crossing cannot masquerade as a
+    // generally useful port, while a concentrated 2:1 engine that advances
+    // settlement and city completion keeps its legitimate value.
+    gains.into_iter().sum::<f32>() * build_families_advanced / gains.len() as f32
+}
+
+fn opening_economic_terms(state: &GameState, player: u8) -> (f32, f32, f32) {
+    let production = production_pips(state, player);
+    let hand = state.players[usize::from(player)].resources;
+    let without_port = opening_build_economy_from_inputs(&production, &hand, &[4; 5]);
+    let ratios = state.trade_ratios(player);
+    let port_build_gain = opening_port_conversion_gain(&production, &hand, &[4; 5], &ratios);
+    (
+        without_port.weighted_access * 0.82,
+        without_port.weighted_efficiency * 0.30,
+        port_build_gain,
+    )
+}
+
 /// Setup-specific endpoint value. Expected production and conversion-aware
 /// complete-build access are the main economic terms. Resource/color diversity
 /// and roll-number distribution remain only residual flexibility/variance
@@ -144,14 +198,16 @@ fn opening_position_bonus(state: &GameState, player: u8) -> f32 {
         .count() as f32;
     let ore_access = f32::from(production[4] > 0.0);
     let total_production = production.iter().sum::<f32>();
-    let build_economy = opening_build_economy(state, player);
+    let (build_access_term, conversion_efficiency_term, port_build_gain) =
+        opening_economic_terms(state, player);
 
     total_production * 0.055
         + unique_strike_ways * 0.030
         + settlement_resource_diversity * 0.10
         + ore_access * 0.04
-        + build_economy.weighted_access * 0.82
-        + build_economy.weighted_efficiency * 0.30
+        + build_access_term
+        + conversion_efficiency_term
+        + port_build_gain
         + closed_economy_value(state, player)
         - duplicate_number_exposure * 0.04
         - shared_hex_exposure * 0.38
@@ -247,22 +303,139 @@ fn opening_robber_concentration(state: &GameState, player: u8) -> f32 {
     peak / total
 }
 
-fn opening_expansion_value(state: &GameState, player: u8) -> f32 {
-    let expansion = expansion_option_value(state, player);
-    if expansion.vertex.is_none() {
+#[derive(Clone, Copy, Debug, Default)]
+struct OpeningExpansionEconomics {
+    value: f32,
+    vertex: Option<u8>,
+    roads_required: u8,
+    project_eta_rolls: Option<f32>,
+    project_conversion_efficiency: f32,
+    realization: f32,
+    prospective_port_build_gain: f32,
+}
+
+fn prospective_port_build_gain(state: &GameState, player: u8, vertex: u8) -> f32 {
+    let mut with_settlement = state.clone();
+    if with_settlement.buildings[usize::from(vertex)].is_some() {
         return 0.0;
     }
+    with_settlement.buildings[usize::from(vertex)] = Some(Building::Settlement(player));
+    let production = production_pips(&with_settlement, player);
+    let hand = state.players[usize::from(player)].resources;
+    opening_port_conversion_gain(
+        &production,
+        &hand,
+        &state.trade_ratios(player),
+        &with_settlement.trade_ratios(player),
+    )
+}
 
-    // The shared expansion owner already charges road-plus-settlement arrival
-    // cost, but it also upweights scarce resources. During setup that can make
-    // a repair site look like extra upside even when it merely fixes a resource
-    // hole the opening created. Preserve most of the option value while
-    // discounting that speculative repair when current production has poor
-    // bank/port conversion efficiency.
+fn opening_expansion_economics(state: &GameState, player: u8) -> OpeningExpansionEconomics {
+    let expansion = expansion_option_value(state, player);
+    let Some(vertex) = expansion.vertex else {
+        return OpeningExpansionEconomics::default();
+    };
+
+    // A future site is only worth its route's complete road-plus-settlement
+    // project. The same exact cost is used for both the funding ETA and the
+    // expansion target, so a missing settlement resource cannot receive full
+    // "repair" credit before the present economy can import or produce it.
+    let mut project_cost = SETTLEMENT_COST;
+    project_cost[0] = project_cost[0].saturating_add(expansion.roads_required);
+    project_cost[1] = project_cost[1].saturating_add(expansion.roads_required);
+    let production = production_pips(state, player);
+    let hand = state.players[usize::from(player)].resources;
+    let eta = opening_build_eta_rolls(
+        &production,
+        &hand,
+        &state.trade_ratios(player),
+        &project_cost,
+    );
+    let project_conversion_efficiency =
+        build_conversion_efficiency(&production, &state.trade_ratios(player), &project_cost);
+    let realization = complete_build_conversion_value(
+        &production,
+        &hand,
+        &state.trade_ratios(player),
+        &project_cost,
+    );
     let raw_value = expansion.value * 0.32 + expansion.portfolio_value * 0.22;
-    let build_economy = opening_build_economy(state, player);
-    let realization = 0.70 + build_economy.weighted_efficiency.clamp(0.0, 1.0) * 0.30;
-    raw_value * realization
+    OpeningExpansionEconomics {
+        value: raw_value * realization,
+        vertex: Some(vertex),
+        roads_required: expansion.roads_required,
+        project_eta_rolls: eta.is_finite().then_some(eta),
+        project_conversion_efficiency,
+        realization,
+        prospective_port_build_gain: prospective_port_build_gain(state, player, vertex),
+    }
+}
+
+fn opening_expansion_value(state: &GameState, player: u8) -> f32 {
+    opening_expansion_economics(state, player).value
+}
+
+fn opening_settlement_vertex_open(state: &GameState, vertex: usize) -> bool {
+    state.buildings[vertex].is_none()
+        && state.board.vertices[vertex]
+            .adjacent_vertices
+            .iter()
+            .all(|neighbor| state.buildings[usize::from(*neighbor)].is_none())
+}
+
+/// Multiplayer interaction term. Removing exactly one root settlement creates
+/// the nearest counterfactual in which that placement did not occupy or
+/// distance-block a setup site. Only the opponent's lost best-site value is
+/// credited, and the benefit is shared across all non-root seats because
+/// denying one rival also helps the others.
+fn causal_opening_denial_value(state: &GameState, root: u8) -> f32 {
+    if state.board.num_players <= 2
+        || matches!(
+            state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        )
+    {
+        return 0.0;
+    }
+    let opponents = (0..state.board.num_players)
+        .filter(|player| *player != root)
+        .collect::<Vec<_>>();
+    let site_values = opponents
+        .iter()
+        .map(|player| opening_site_values(state, *player))
+        .collect::<Vec<_>>();
+    let mut denied = 0.0_f32;
+    for (vertex, building) in state.buildings.iter().enumerate() {
+        if !building.is_some_and(|piece| piece.player() == root) {
+            continue;
+        }
+        let mut without_root = state.clone();
+        without_root.buildings[vertex] = None;
+        for values in &site_values {
+            let actual_best = values
+                .iter()
+                .enumerate()
+                .filter(|(candidate, _)| opening_settlement_vertex_open(state, *candidate))
+                .map(|(_, value)| *value)
+                .fold(0.0, f32::max);
+            let counterfactual_best = without_root
+                .board
+                .vertices
+                .iter()
+                .enumerate()
+                .filter(|(candidate, _)| {
+                    !opening_settlement_vertex_open(state, *candidate)
+                        && opening_settlement_vertex_open(&without_root, *candidate)
+                })
+                .map(|(candidate, _)| values[candidate])
+                .fold(actual_best, f32::max);
+            denied = denied.max(counterfactual_best - actual_best);
+        }
+    }
+    // `vertex_value` is expressed in weighted production-pip units. Convert
+    // the lost-site gap into the opening objective's production-value scale,
+    // then share it across the non-root seats.
+    denied.max(0.0) * 0.055 / f32::from(state.board.num_players - 1)
 }
 
 fn opening_position_value(state: &GameState, player: u8) -> f32 {
@@ -300,12 +473,19 @@ pub struct OpeningEvidence {
     pub production_diversity_term: f32,
     pub build_access_term: f32,
     pub conversion_efficiency_term: f32,
-    /// Counterfactual component delta with the same production/hand and 4:1
-    /// everywhere. It is already inside the build terms, not an added bonus.
+    /// Counterfactual complete-build realization delta with the same
+    /// production/hand and 4:1 everywhere.
     pub port_build_gain: f32,
     pub expansion_term: f32,
+    pub expansion_vertex: Option<u8>,
+    pub expansion_roads_required: u8,
+    pub expansion_project_eta_rolls: Option<f32>,
+    pub expansion_project_conversion_efficiency: f32,
+    pub expansion_realization: f32,
+    pub expansion_port_build_gain: f32,
     pub scarcity_term: f32,
     pub concentration_penalty: f32,
+    pub causal_denial_term: f32,
     pub own_value: f32,
     pub rival_value: f32,
     pub rival_weight: f32,
@@ -315,9 +495,9 @@ fn opening_evidence(state: &GameState, root: u8) -> OpeningEvidence {
     let production = production_pips(state, root);
     let economy = opening_build_economy(state, root);
     let hand = state.players[usize::from(root)].resources;
-    let without_port = opening_build_economy_from_inputs(&production, &hand, &[4; 5]);
-    let build_access_term = economy.weighted_access * 0.82;
-    let conversion_efficiency_term = economy.weighted_efficiency * 0.30;
+    let (build_access_term, conversion_efficiency_term, port_build_gain) =
+        opening_economic_terms(state, root);
+    let expansion = opening_expansion_economics(state, root);
     let mut settlement_vertices = [None; 2];
     for (slot, (vertex, _)) in settlement_vertices.iter_mut().zip(
         state
@@ -348,18 +528,25 @@ fn opening_evidence(state: &GameState, root: u8) -> OpeningEvidence {
         victory_term: f32::from(state.players[usize::from(root)].public_victory_points) * 1.8,
         production_diversity_term: opening_position_bonus(state, root)
             - build_access_term
-            - conversion_efficiency_term,
+            - conversion_efficiency_term
+            - port_build_gain,
         build_access_term,
         conversion_efficiency_term,
-        port_build_gain: build_access_term + conversion_efficiency_term
-            - (without_port.weighted_access * 0.82 + without_port.weighted_efficiency * 0.30),
-        expansion_term: opening_expansion_value(state, root),
+        port_build_gain,
+        expansion_term: expansion.value,
+        expansion_vertex: expansion.vertex,
+        expansion_roads_required: expansion.roads_required,
+        expansion_project_eta_rolls: expansion.project_eta_rolls,
+        expansion_project_conversion_efficiency: expansion.project_conversion_efficiency,
+        expansion_realization: expansion.realization,
+        expansion_port_build_gain: expansion.prospective_port_build_gain,
         scarcity_term: production
             .iter()
             .zip(board_resource_scarcity(state))
             .map(|(pips, scarce)| pips * scarce * 0.012)
             .sum(),
         concentration_penalty: opening_robber_concentration(state, root) * 0.22,
+        causal_denial_term: causal_opening_denial_value(state, root),
         own_value: opening_position_value(state, root),
         rival_value: (0..state.board.num_players)
             .filter(|player| *player != root)
@@ -368,9 +555,21 @@ fn opening_evidence(state: &GameState, root: u8) -> OpeningEvidence {
         rival_weight: if state.board.num_players == 2 {
             1.0
         } else {
-            0.34
+            0.0
         },
     }
+}
+
+fn opening_static_value(state: &GameState, root: u8) -> f32 {
+    let own = opening_position_value(state, root);
+    if state.board.num_players > 2 {
+        return own + causal_opening_denial_value(state, root);
+    }
+    let rival = (0..state.board.num_players)
+        .filter(|player| *player != root)
+        .map(|player| opening_position_value(state, player))
+        .fold(f32::NEG_INFINITY, f32::max);
+    own - rival.max(0.0)
 }
 
 #[derive(Clone, Debug)]
@@ -457,17 +656,7 @@ struct OpeningSolver {
 
 impl OpeningSolver {
     fn static_value(&self, state: &GameState) -> f32 {
-        let own = opening_position_value(state, self.root);
-        let rival = (0..state.board.num_players)
-            .filter(|player| *player != self.root)
-            .map(|player| opening_position_value(state, player))
-            .fold(f32::NEG_INFINITY, f32::max);
-        let rival_weight = if state.board.num_players == 2 {
-            1.0
-        } else {
-            0.34
-        };
-        own - rival.max(0.0) * rival_weight
+        opening_static_value(state, self.root)
     }
 
     fn value(&self, state: &GameState) -> f32 {
@@ -873,7 +1062,7 @@ fn opening_root_node_budgets(
     maximum_nodes: u32,
     remaining_setup_pairs: u8,
 ) -> Vec<u32> {
-    if remaining_setup_pairs <= 3 && root_count > 0 {
+    if remaining_setup_pairs <= 4 && root_count > 0 {
         let base = maximum_nodes / root_count as u32;
         let remainder = maximum_nodes % root_count as u32;
         (0..root_count)
@@ -952,7 +1141,7 @@ pub(crate) fn solve_opening_excluding(
         .num_players
         .saturating_mul(2)
         .saturating_sub(state.setup_step);
-    let deep_count = if remaining_setup_pairs <= 3 {
+    let deep_count = if remaining_setup_pairs <= 4 {
         static_actions.len()
     } else {
         static_actions.len().min(solver.config.root_width.max(12))
@@ -1112,7 +1301,8 @@ mod tests {
     use colonist_catan_core::{Action, Building, GameState, Phase, SETTLEMENT_COST};
 
     use super::{
-        OpeningConfig, OpeningVisitValue, opening_position_bonus, opening_position_value,
+        OpeningConfig, OpeningVisitValue, causal_opening_denial_value, opening_expansion_economics,
+        opening_position_bonus, opening_position_value, opening_static_value,
         opening_visit_is_better, solve_opening,
     };
 
@@ -1221,6 +1411,97 @@ mod tests {
     }
 
     #[test]
+    fn multiplayer_static_value_does_not_subtract_unrelated_rival_strength() {
+        let mut state = GameState::standard(102, 4);
+        while matches!(
+            state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        ) {
+            state.apply(&state.legal_actions()[0].clone()).unwrap();
+        }
+        let before = opening_static_value(&state, 0);
+        let strongest = (1..state.board.num_players)
+            .max_by(|left, right| {
+                opening_position_value(&state, *left)
+                    .total_cmp(&opening_position_value(&state, *right))
+            })
+            .unwrap();
+        let rival_before = opening_position_value(&state, strongest);
+        state.players[usize::from(strongest)].public_victory_points += 1;
+        let rival_after = opening_position_value(&state, strongest);
+
+        assert!(rival_after > rival_before + 1.0);
+        assert!((opening_static_value(&state, 0) - before).abs() < 1e-5);
+    }
+
+    #[test]
+    fn multiplayer_denial_exists_only_for_a_site_the_root_actually_blocks() {
+        let mut state = GameState::standard(104, 4);
+        state.phase = Phase::PreRoll;
+        state.current_player = 0;
+        state.buildings.fill(None);
+        state.roads.fill(None);
+        let target = state
+            .board
+            .vertices
+            .iter()
+            .enumerate()
+            .find(|(_, vertex)| vertex.adjacent_hexes.len() == 3)
+            .map(|(vertex, _)| vertex)
+            .unwrap();
+        let target_hexes = state.board.vertices[target].adjacent_hexes.clone();
+        let board = Arc::make_mut(&mut state.board);
+        for hex in &mut board.hexes {
+            if hex.resource.is_some() {
+                hex.number = 2;
+            }
+        }
+        for hex in target_hexes {
+            if board.hexes[usize::from(hex)].resource.is_some() {
+                board.hexes[usize::from(hex)].number = 6;
+            }
+        }
+        state.buildings[target] = Some(Building::Settlement(0));
+
+        let denied = causal_opening_denial_value(&state, 0);
+        assert!(
+            denied > 0.0,
+            "root settlement must price its removed high-value site"
+        );
+        state.buildings[target] = None;
+        assert_eq!(causal_opening_denial_value(&state, 0), 0.0);
+    }
+
+    #[test]
+    fn opening_expansion_realization_requires_the_complete_project_to_self_fund() {
+        let mut state = GameState::standard(106, 4);
+        while matches!(
+            state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        ) {
+            let action = state.legal_actions()[0].clone();
+            state.apply(&action).unwrap();
+        }
+        state.players[0].resources = [0; 5];
+        let starved = opening_expansion_economics(&state, 0);
+        assert!(starved.vertex.is_some());
+        assert!(starved.project_eta_rolls.is_some_and(|eta| eta > 0.0));
+        assert!(starved.realization < 1.0);
+
+        state.players[0].resources = [
+            1 + starved.roads_required,
+            1 + starved.roads_required,
+            1,
+            1,
+            0,
+        ];
+        let funded = opening_expansion_economics(&state, 0);
+        assert_eq!(funded.project_eta_rolls, Some(0.0));
+        assert!((funded.realization - 1.0).abs() < f32::EPSILON);
+        assert!(funded.value > starved.value);
+    }
+
+    #[test]
     fn completed_opening_expansion_prices_rival_affordability() {
         let mut state = GameState::standard(103, 3);
         state.phase = Phase::PreRoll;
@@ -1262,13 +1543,15 @@ mod tests {
             }
         }
 
+        let funded_rival_expansion = opening_expansion_economics(&state, 0);
         let funded_rival = opening_position_value(&state, 0);
         state.players[1].resources = [0; 5];
+        let starved_rival_expansion = opening_expansion_economics(&state, 0);
         let starved_rival = opening_position_value(&state, 0);
 
         assert!(
             starved_rival > funded_rival + 0.05,
-            "completed opening value must discount expansion sites that a funded rival can win before a resource-starved rival",
+            "completed opening value must discount expansion sites that a funded rival can win before a resource-starved rival: funded={funded_rival} {funded_rival_expansion:?}, starved={starved_rival} {starved_rival_expansion:?}",
         );
     }
 

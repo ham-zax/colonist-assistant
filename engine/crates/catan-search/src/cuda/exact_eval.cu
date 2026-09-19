@@ -53,7 +53,6 @@ static const float BASE_RESOURCE_WEIGHTS[5] = {
     0.98f, 0.98f, 0.73f, 1.22f, 1.10f,
 };
 
-static const float PORT_VALUE_PER_RATIO_STEP = 0.35f;
 
 static const uint32_t BUILD_COSTS[4][5] = {
     {1u, 1u, 0u, 0u, 0u},
@@ -799,6 +798,21 @@ static inline __device__ float build_eta_rolls(
     return high;
 }
 
+static inline __device__ float conversion_efficiency(
+    const float production[5], const uint32_t ratios[5], const uint32_t cost[5]
+) {
+    uint32_t required = 0u, best_ratio = 0xffffffffu;
+    for (uint32_t r = 0; r < 5; ++r) {
+        required += cost[r];
+        if (production[r] > 0.0f && ratios[r] < best_ratio) best_ratio = ratios[r];
+    }
+    if (required == 0u) return 1.0f;
+    if (best_ratio == 0xffffffffu) return 0.0f;
+    uint32_t cards = 0u;
+    for (uint32_t r = 0; r < 5; ++r) cards += cost[r] * (production[r] > 0.0f ? 1u : best_ratio);
+    return (float)required / (float)(cards > required ? cards : required);
+}
+
 static inline __device__ float expansion_arrival_score(
     const uint32_t *state,
     uint32_t player,
@@ -957,14 +971,32 @@ static inline __device__ float prospective_port_option_value(
         return 0.0f;
     }
 
-    float value = 0.0f;
+    uint32_t hand[5];
     for (uint32_t resource = 0u; resource < 5u; ++resource) {
-        const uint32_t improvement = before[resource] > after[resource]
-            ? before[resource] - after[resource]
-            : 0u;
-        value += (float)improvement * prospective_production[resource] / total_production;
+        hand[resource] = resource_count(state, player, resource);
     }
-    return value * PORT_VALUE_PER_RATIO_STEP;
+    float value = 0.0f;
+    uint32_t build_families_advanced = 0u;
+    for (uint32_t kind = 0u; kind < 4u; ++kind) {
+        const float horizons[3] = {0.0f, 18.0f, 36.0f};
+        float before_access = 0.0f;
+        float after_access = 0.0f;
+        for (uint32_t horizon = 0u; horizon < 3u; ++horizon) {
+            before_access += build_fundable_at_rolls(
+                prospective_production, hand, before, BUILD_COSTS[kind], horizons[horizon]
+            ) ? (1.0f / 3.0f) : 0.0f;
+            after_access += build_fundable_at_rolls(
+                prospective_production, hand, after, BUILD_COSTS[kind], horizons[horizon]
+            ) ? (1.0f / 3.0f) : 0.0f;
+        }
+        const float access_gain = fmaxf(after_access - before_access, 0.0f);
+        const float build_gain = access_gain * conversion_efficiency(
+            prospective_production, after, BUILD_COSTS[kind]
+        );
+        value += build_gain;
+        build_families_advanced += build_gain > F32_EPSILON ? 1u : 0u;
+    }
+    return value * (float)build_families_advanced / 4.0f;
 }
 
 static inline __device__ float vertex_value_with_weights(
@@ -1443,21 +1475,6 @@ static inline __device__ float speculative_road_penalty(
     const uint32_t excess = roads_built > supported ? roads_built - supported : 0u;
     const float excess_f = (float)excess;
     return excess_f * 0.48f + excess_f * excess_f * 0.035f;
-}
-
-static inline __device__ float conversion_efficiency(
-    const float production[5], const uint32_t ratios[5], const uint32_t cost[5]
-) {
-    uint32_t required = 0u, best_ratio = 0xffffffffu;
-    for (uint32_t r = 0; r < 5; ++r) {
-        required += cost[r];
-        if (production[r] > 0.0f && ratios[r] < best_ratio) best_ratio = ratios[r];
-    }
-    if (required == 0u) return 1.0f;
-    if (best_ratio == 0xffffffffu) return 0.0f;
-    uint32_t cards = 0u;
-    for (uint32_t r = 0; r < 5; ++r) cards += cost[r] * (production[r] > 0.0f ? 1u : best_ratio);
-    return (float)required / (float)(cards > required ? cards : required);
 }
 
 static inline __device__ float closed_economy_value(
