@@ -128,13 +128,21 @@ Development-card purchases should likewise expose an information-set-safe next-d
 
 This distinction matters. An earlier D17 experiment withheld exact road-intent evidence and Jev preferred a locally attractive road. Once the mechanical facts were inspected, the Jev road was clearly weaker and the matched continuation confirmed it. Withholding authoritative mechanics can create false positives just as leaking engine scores can create confirmation bias.
 
-## Atomic questions
+## Direct judgment versus decomposed dimensions
 
-Avoid one giant question such as "What is the best move?"
+Do not assume that decomposing a decision into many Jev dimensions is automatically better than asking one direct typed question.
 
-Score each candidate on independent dimensions, then aggregate.
+Use three competing shapes:
 
-Current main-game dimensions include:
+1. **direct judgment** — one bounded question such as "Which of these two completed openings gives the actor the stronger route to the victory target?";
+2. **decomposed dimensions** — several narrower scores such as self-sufficiency, settlement cadence, port realization, liquidity resilience, or route optionality;
+3. **deterministic/code features** — exact quantities such as production, build ETAs, conversion ratios, route length, survival, or self-funding cost.
+
+Measure all three against labeled counterfactual outcomes before deciding which shape belongs in the research loop.
+
+A direct question is preferable when it is already strong and stable. Decomposition is worth the extra cost only when it adds independent signal on held-out data. The supplied Jev study is a useful warning: dimensions improved a difficult Japanese NLI task but degraded an already-easy task and produced dramatically worse false positives on hard benign examples. The lesson for strategy research is not "use dimensions"; it is "test whether dimensions help this question family."
+
+When decomposition is warranted, current main-game dimensions include:
 
 - immediate strategic value;
 - resource efficiency;
@@ -158,7 +166,32 @@ Examples for a second settlement:
 - number resilience;
 - long-horizon portfolio.
 
-This decomposition makes disagreements diagnosable. Instead of "Jev likes vertex 24," we can see whether the disagreement is about resource coverage, expansion flexibility, or some other concept.
+Decomposition is especially useful for diagnosis. Instead of "Jev likes vertex 24," we can see whether the disagreement is about resource coverage, expansion flexibility, or some other concept. Do not promote the arithmetic mean of those dimensions into production authority without validating that the dimensions and combination predict outcomes.
+
+## Feature semantics before weights
+
+A badly defined feature cannot be repaired reliably by fitting a better coefficient.
+
+Before tuning a weight, threshold, or linear combination, ask whether the feature measures the causal concept we actually care about.
+
+Examples from Colonist Assistant:
+
+- a "port value" feature is wrong if it only rewards owning a 2:1 port instead of measuring how that port changes complete-build affordability and conversion;
+- an "expansion value" feature is wrong if it credits a future repair settlement that the current economy cannot self-fund;
+- a "rival value" feature is wrong if it penalizes a strong opponent who would have been strong regardless of our move; denial must measure the opportunity our move actually removed or worsened;
+- a "resource scarcity" feature is wrong if it considers only the nearest currently affordable build and therefore treats an irreplaceable imported ore as expendable.
+
+Use this sequence:
+
+```text
+define causal concept
+  -> compute/ask feature
+  -> construct hard positive and hard negative cases
+  -> validate feature against matched outcomes
+  -> only then fit weight/threshold
+```
+
+If hard negatives expose the wrong semantics, redesign the feature. Do not respond by repeatedly changing its weight.
 
 ## False-positive control
 
@@ -175,13 +208,21 @@ Useful additions are facts that are:
 - stable under candidate ordering;
 - directly relevant to the questioned dimension.
 
-### 2. Confidence-weight the score aggregation
+### 2. Treat Jev confidence as a feature to calibrate, not as correctness probability
 
-The atomic score pass records Jev confidence per dimension.
+The atomic score pass records Jev confidence per question, and the current harness can compute confidence-weighted aggregates. That is useful as an experimental signal, not proof that confidence weighting improves decisions.
 
-The harness now computes both ordinary mean score and a confidence-weighted score. Candidate ranking for atomic passes uses the confidence-weighted score first.
+Calibrate confidence separately for each question family against held-out labels. The supplied Jev study found examples where answers reported confidence >= 0.9 while accuracy on those cases was much lower. Do not assume that 0.9 confidence means 90% correctness.
 
-Low-confidence judgments therefore contribute less than high-confidence ones without being discarded entirely.
+Compare at least:
+
+- raw direct score;
+- direct score plus its confidence as a screening variable;
+- unweighted dimension combination;
+- confidence-weighted dimension combination;
+- locally fitted combination on training data only.
+
+Keep the simplest variant that improves the held-out error profile.
 
 ### 3. Require a meaningful margin
 
@@ -218,7 +259,22 @@ Maintain examples of:
 
 Use this corpus to tune evidence, prompts, thresholds, and questions.
 
-### 6. Separate screening from proof
+### 6. Keep direct and decomposed judgments independent
+
+Do not automatically feed a good direct Jev judgment into the dimensional model as one more feature. That can destroy the direct judge's useful error profile.
+
+Treat direct judgment and decomposed dimensions as independent comparators unless a specific stacking experiment on held-out data shows that combining them improves the deployment-relevant metric.
+
+For strategy research the useful question is often whether their errors are orthogonal:
+
+- cases solved only by the direct judge;
+- cases solved only by the dimensions;
+- cases both miss;
+- cases where deterministic mechanics dominate both.
+
+That error matrix is more informative than one aggregate accuracy number.
+
+### 7. Separate screening from proof
 
 A screened-in Jev disagreement is only a counterfactual candidate.
 
@@ -300,6 +356,45 @@ At the matched intermediate horizon, the Jev line produced more development: mor
 
 Lesson: "better development" is not automatically "better win race." Counterfactual evaluation must include terminal conversion and opponent acceleration, not only the actor's local economy.
 
+### hill6758: feature semantics and multi-player objective failure
+
+The live four-player opening chose a second settlement with production approximately:
+
+```text
+lumber 2
+brick 5
+wool 0
+grain 8
+ore 5
+```
+
+The opening deliberately accepted zero wool because future expansion credit assumed that a later settlement could repair the hole. That repair was not free: a settlement itself requires wool, so the no-player-trade economy first had to import the missing resource.
+
+The live setup road had also already created a corridor toward a legal 9-grain / 10-wool settlement on a 2:1 brick port. The opening evaluator saw that site but priced the port mostly as a small local ratio bonus instead of asking how 2:1 brick conversion changes complete-build economics.
+
+Matched continuation on one controlled future stream produced:
+
+- historical zero-wool root: win on turn 96;
+- all-five-resource root: win on turn 92;
+- 9/10 wool + 2:1 brick-port root: win on turn 84.
+
+One stream is evidence, not a universal ranking. The more fundamental result came from the evaluator decomposition: after a self-funding correction, the actor's own opening value already preferred the all-five root, but the final four-player score flipped back because it subtracted a fixed fraction of the strongest rival's value.
+
+That exposed a modeling error. Opponent seats were already choosing strong actions for themselves during the snake draft. Subtracting generic strongest-rival strength again at the leaf double-counted adversarial pressure and confused **opponent strength** with **causal denial**.
+
+The correct distinction is:
+
+```text
+generic strong opponent
+  != value we denied
+
+causal denial
+  = opponent opportunity without our root
+    - opponent opportunity after our root
+```
+
+Lesson: when a feature changes the winner for the wrong semantic reason, revisit the building block before fitting its weight. In multiplayer search, model opponents choosing for themselves and value only interaction effects that our action actually caused.
+
 ### D31: an apparent Jev win exposed research flaws
 
 The engine preferred BuyDevelopment with search value around 0.072 versus roughly 0.033 for EndTurn.
@@ -358,9 +453,59 @@ For a candidate set:
 - compare the top action;
 - compare dimension-level scores;
 - inspect confidence;
+- swap candidate order;
+- vary wording without changing semantics;
 - flag unstable rankings.
 
 A useful critic should not require perfect numerical repeatability, but a preference that flips frequently without new evidence should not drive production changes.
+
+## Calibration and evaluation protocol
+
+Calibrate per question family. Do not create one global "Jev threshold."
+
+Examples of separate families:
+
+- opening portfolio comparison;
+- setup-road target quality;
+- prospective-port realization;
+- save-versus-spend;
+- development-card timing;
+- contested expansion / denial;
+- tactical closeout.
+
+For each family:
+
+1. **Define labels first.** Use matched counterfactual outcomes, exact mechanics, or another independent authority. Do not use the current engine choice as ground truth.
+2. **Define the split before fitting.** Group by board, game seed, scenario family, or other structure that prevents near-duplicate positions from leaking across train and test.
+3. **Print a cheap baseline.** For Catan this can be an existing deterministic heuristic, exact feature rule, or current engine score. If the cheap baseline already meets the target, Jev decomposition may add no value.
+4. **Measure the direct judge.** A strong direct typed question is the default comparator.
+5. **Measure decomposed dimensions.** Fit combinations only on the training split and evaluate once on held-out groups.
+6. **Inspect error overlap.** Count direct-only wins, dimensions-only wins, shared misses, and mechanically dominated errors.
+7. **Calibrate threshold/margin on training data only.** Report held-out precision, false-positive rate, coverage, and abstention/escalation rate.
+8. **Test invariance.** Swap option order, paraphrase the question, change batching, and repeat calls.
+9. **Test ranking validity before sorting many candidates.** Pairwise consistency and score ordinality must be demonstrated; a score that works for thresholding is not automatically a valid global sort key.
+10. **Keep a locked holdout.** Do not tune prompts, dimensions, or thresholds repeatedly against the same final evaluation set.
+
+Use metrics that match the research risk. Overall agreement is rarely enough. For a critic that triggers expensive simulations or production investigations, false-positive rate and useful-signal precision can matter more than raw accuracy.
+
+### Hard-positive and hard-negative corpus
+
+Every question family should include cases designed to expose semantic shortcuts.
+
+Opening hard negatives should include:
+
+- a 2:1 port with too little matching production to exploit it;
+- five-resource coverage with disastrously weak total throughput;
+- a high-value repair target that cannot be self-funded;
+- apparent denial against an opponent who was not meaningfully constrained by our root;
+- high raw pips concentrated on fragile/correlated numbers;
+- a nearby expansion site that looks good locally but destroys a stronger route portfolio.
+
+Road hard negatives should include mechanically dominated routes such as D17.
+
+Save/spend hard negatives should include cases where preserving a scarce resource looks prudent but an immediate forced conversion is objectively decisive.
+
+Do not add a hard case merely to make Jev fail. Each case should represent a real confusion the production system or critic could plausibly make.
 
 ## Research artifact discipline
 
@@ -369,20 +514,27 @@ Keep local research artifacts under ignored paths such as `benchmark-results/jev
 Each experiment should preserve:
 
 - board seed;
-- chance seed;
+- pre-root chance history and post-root continuation seed(s);
 - game index;
 - decision index;
 - state hash;
 - actor;
 - phase;
 - rules/player-trade mode;
+- question family and question version;
+- split/group identifier;
 - engine-selected action;
-- Jev-selected action;
+- direct Jev answer/score/confidence;
+- decomposed dimension scores/confidences when used;
+- deterministic feature vector;
 - sanitized candidate facts;
-- Jev answers/confidence;
+- option order / batching metadata;
 - screening result;
 - forced counterfactual action;
-- terminal or cutoff result.
+- terminal or cutoff result;
+- counterfactual label and label provenance.
+
+Store raw critic outputs separately from fitted weights and thresholds. Raw extraction is the paid/networked step; fitting, threshold sweeps, ablations, and error analysis should be repeatable locally without another Jev call.
 
 Never store credentials.
 
@@ -397,12 +549,15 @@ Good changes:
 - add missing exact mechanics;
 - make a question more local;
 - separate two concepts previously mixed in one dimension;
+- remove or redesign a dimension that fails hard negatives;
 - clarify what evidence is authoritative;
 - forbid invented hidden information;
 - distinguish guaranteed actions from proposals;
-- confidence-weight outputs;
+- compare direct versus decomposed judgment instead of assuming either wins;
+- calibrate confidence/thresholds per question family;
 - add deterministic dominance screening;
-- validate thresholds against known true and false positives.
+- validate thresholds against grouped held-out true and false positives;
+- test order, wording, batching, and repeatability invariance.
 
 Bad changes:
 
@@ -410,9 +565,13 @@ Bad changes:
 - include engine utility in a blind strategic pass;
 - add examples that say "the correct answer is X" for the current position;
 - change prompts until Jev agrees with a preferred production choice;
+- average many dimensions and call the result truth without held-out validation;
+- use one global confidence threshold for unrelated question families;
 - treat Jev confidence as calibrated game probability;
+- use a Jev score as a global ranking key before testing ordinality/pairwise consistency;
 - ask Jev to recompute exact arithmetic;
-- tune only against successful Jev disagreements and forget false positives.
+- tune only against successful Jev disagreements and forget false positives;
+- repeatedly tune on the final holdout.
 
 The goal is not agreement. The goal is a critic whose disagreements have high information value.
 
@@ -438,16 +597,20 @@ Give the critic a bounded candidate set with enough context to judge each option
 
 Keep exact facts and candidate descriptions stable. Hide the incumbent system's winner and score.
 
-### Step 3: ask orthogonal questions
+### Step 3: establish the direct baseline before decomposing
 
-Replace "Which is best?" with dimensions that map to real system concepts.
+Start with one well-bounded direct typed judgment. Measure it before deciding that decomposition is necessary.
+
+If the direct judge is already strong, stable under option order/wording, and has an acceptable false-positive profile, keep it as the research critic. Do not add twelve dimensions merely because decomposition is possible.
+
+When the direct judge is weak or its errors suggest missing structure, add dimensions that map to real system concepts.
 
 A useful dimension should either:
 
 - correspond to an existing production concept; or
 - expose a missing concept that could plausibly be implemented deterministically.
 
-If a dimension cannot be translated into a testable production hypothesis, it is probably too vague.
+If a dimension cannot be translated into a testable production hypothesis, it is probably too vague. If it fires on hard negatives for the wrong reason, redesign the dimension before fitting its weight.
 
 ### Step 4: screen cheaply
 
@@ -505,15 +668,19 @@ A change that fixes the example but breaks the false-positive corpus is not a su
 ## Practical heuristics
 
 1. **Ask code first.** If a number can be computed, compute it.
-2. **Use common random numbers by causal event family.** Matched stochastic streams dramatically improve counterfactual signal, but branches that consume different event types must not shift one shared generator. Partition streams by logically independent sources such as rolls, hidden draws, steals, arrivals, or service outcomes.
-3. **Force only the root action.** Let normal policy resume afterward unless the experiment is explicitly about a multi-action forced plan.
-4. **Compare intermediate and terminal state.** Either alone can mislead.
-5. **Keep false positives.** They are training data for the research process.
-6. **Prefer missing concepts over new weights.** A weight change is useful only after the concept being weighted is correct.
-7. **Check arbitration before evaluation.** The engine may already know the right answer and discard it later.
-8. **Do not confuse confidence with probability.** Jev confidence describes its answer, not the chance an action wins.
-9. **Do not overfit one seed.** Strong deterministic tactical facts can be proven with one state; strategic long-horizon claims usually need repeated matched continuations.
-10. **Keep the critic removable.** Production should remain correct and usable if Jev disappears tomorrow.
+2. **Measure the direct judge before decomposing.** More questions are not automatically more accurate.
+3. **Validate feature meaning before feature weight.** A wrong semantic dimension cannot be rescued reliably by coefficient tuning.
+4. **Use common random numbers by causal event family.** Matched stochastic streams dramatically improve counterfactual signal, but branches that consume different event types must not shift one shared generator. Partition streams by logically independent sources such as rolls, hidden draws, steals, arrivals, or service outcomes.
+5. **Force only the root action.** Let normal policy resume afterward unless the experiment is explicitly about a multi-action forced plan.
+6. **Compare intermediate and terminal state.** Either alone can mislead.
+7. **Keep false positives.** They are training data for the research process.
+8. **Prefer missing concepts over new weights.** A weight change is useful only after the concept being weighted is correct.
+9. **Check arbitration before evaluation.** The engine may already know the right answer and discard it later.
+10. **Do not confuse confidence with probability.** Calibrate confidence per question family before using it as a gate.
+11. **Do not assume score ordinality.** A score suitable for thresholding may still be a poor global ranking key.
+12. **Design the split before the dataset grows.** Group by board/scenario family to prevent near-duplicate leakage.
+13. **Do not overfit one seed.** Strong deterministic tactical facts can be proven with one state; strategic long-horizon claims usually need repeated matched continuations.
+14. **Keep the critic removable.** Production should remain correct and usable if Jev disappears tomorrow.
 
 ## Recommended admission standard
 
@@ -521,13 +688,15 @@ A production strategy change should satisfy all of the following:
 
 1. a reproducible engine/Jev disagreement exists;
 2. exact mechanical evidence does not invalidate the Jev preference;
-3. independent analysis can state the strategic reason without referring to Jev authority;
-4. matched counterfactual evidence supports the alternative;
-5. the responsible production owner is identified;
-6. the repair is deterministic and local to that owner;
-7. the original case improves;
-8. relevant counterexamples and false-positive cases do not regress;
-9. both player-trade modes are checked when applicable;
-10. the live engine has no runtime dependency on Jev.
+3. the question family has a known direct/decomposed error profile, or the individual case is supported by stronger independent evidence;
+4. independent analysis can state the strategic reason without referring to Jev authority;
+5. the relevant feature semantics survive hard-positive and hard-negative cases;
+6. matched counterfactual evidence supports the alternative with causally matched randomness;
+7. the responsible production owner is identified;
+8. the repair is deterministic and local to that owner;
+9. the original case improves;
+10. relevant counterexamples, false positives, and held-out groups do not regress;
+11. both player-trade modes are checked when applicable;
+12. the live engine has no runtime dependency on Jev.
 
-That standard keeps Jev useful without allowing it to become an unverified oracle.
+That standard keeps Jev useful without allowing it to become an unverified oracle or turning a calibration artifact into production truth.
