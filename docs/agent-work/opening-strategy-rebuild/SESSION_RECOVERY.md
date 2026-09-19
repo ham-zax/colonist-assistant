@@ -50,10 +50,15 @@ A2 completed in the same Agent A session at `034b01f`. Its durable mission file 
 R2 passed in the same Agent R session. Its durable mission file is:
 `/home/hamza/repo/colonist-opening-orchestration/docs/agent-work/opening-strategy-rebuild/R2-opening-evaluator-repair-review.md`
 
-Wave 3 deterministic validation is assigned to C1. Mission file:
+Wave 3 deterministic validation was assigned to C1. Mission file:
 `/home/hamza/repo/colonist-opening-orchestration/docs/agent-work/opening-strategy-rebuild/C1-opening-wave3-validation.md`
 
-The user reports Agent C is working.
+The original Codex Agent C session ended due usage limits after the user capped the terminal campaign at 15 valid arms. The inherited worktree is substantially complete at `8146fe5` with one expected untracked final report.
+
+A fresh web recovery session is assigned as Agent E / Mission E1. Mission file:
+`/home/hamza/repo/colonist-opening-orchestration/docs/agent-work/opening-strategy-rebuild/E1-c1-recovery-finalization.md`
+
+E1 must reuse the existing C1 worktree, verify artifacts, preserve the 15-arm cap, add the post-D2 qualification, and commit the final report without restarting the campaign.
 
 D31 resource-liquidity diagnosis completed as D1 at `c58fa11`. Mission file:
 `/home/hamza/repo/colonist-opening-orchestration/docs/agent-work/opening-strategy-rebuild/D1-d31-resource-liquidity-diagnosis.md`
@@ -196,12 +201,14 @@ Do not mix the preserved D31/road lanes into the opening Wave 3 validation/calib
 8. D2 completed at `e068c5d`, repairing persistent production weighting in CPU `eval.rs` and mirrored CUDA `exact_eval.cu` while preserving dynamic weights for marginal uses.
 9. R3 passed `1b2a0c2..e068c5d` and discharged the D1+D2 review gate.
 10. D1+D2 are integrated onto `orchestration/opening-rebuild` as `a4bb9e6` + `35815e3`.
-11. Let C1 finish its current validation. Then determine whether its matched-terminal/continuation evidence was invalidated by D2; if so, use a bounded same-session C2 refresh rather than rerunning the full campaign.
-12. Continue B2 in the same Agent B session only after final post-D2 labels/splits exist and a local `TYPESAFE_API_KEY` is available.
-13. Treat `research/d31-road-wip@300914b` as a diagnostic/evidence donor, not an integration candidate. Do not cherry-pick it wholesale.
-14. Keep `wip/road-intent-deadline@2592caf` separate from D1/D2; it overlaps `depth.rs` and remains unreviewed.
-15. Merge back to main only after the opening final-validation disposition plus any required C2 refresh and B2 disposition.
-16. Independently review the road-intent candidate before any eventual integration; its focused regression passed, but the policy override still needs broader causal validation because earlier road disagreements produced Jev false positives.
+11. The original C1 Codex session ended after completing the user-capped 15-arm campaign. Use fresh web Agent E / E1 to verify and finalize the inherited C1 evidence package; do not rerun completed arms merely for confidence.
+12. E1 must state explicitly that the 15 terminal outcomes were generated before D2 changed shared main-game `strategic_utility`. Because all four C1 pairwise comparisons are inconclusive and `admittedLabels` is empty, no stale terminal label is currently admitted as B2 ground truth.
+13. Create a post-D2 C2 terminal refresh only if E1 establishes that final-semantic terminal directionality is materially required. Do not create one merely to force a conclusive ranking.
+14. Continue B2 in the same Agent B session only after E1 finalizes the handoff/disposition and a local `TYPESAFE_API_KEY` is available.
+15. Treat `research/d31-road-wip@300914b` as a diagnostic/evidence donor, not an integration candidate. Do not cherry-pick it wholesale.
+16. Keep `wip/road-intent-deadline@2592caf` separate from D1/D2; it overlaps `depth.rs` and remains unreviewed.
+17. Merge back to main only after the opening final-validation disposition plus B2 disposition and any explicitly required post-D2 refresh.
+18. Independently review the road-intent candidate before any eventual integration; its focused regression passed, but the policy override still needs broader causal validation because earlier road disagreements produced Jev false positives.
 
 ## Copy-paste recovery prompt for a future ChatGPT session
 
@@ -244,7 +251,7 @@ Important preserved lanes:
 Do not assume preserved WIP branches are reviewed or integration-ready.
 Do not blindly merge research/d31-road-wip and wip/road-intent-deadline because they overlap in depth.rs.
 
-First report the verified current frontier. A1+A2 are reviewed and integrated as 70e1461 + 8496200. D1+D2 are reviewed and integrated as a4bb9e6 + 35815e3 after R3 passed 1b2a0c2..e068c5d. C1 may be active on opening Wave 3 validation; once C1 finishes, decide whether a bounded C2 matched-terminal refresh is required because D2 changed shared strategic_utility. Keep research/d31-road-wip@300914b as an evidence donor only and keep wip/road-intent-deadline@2592caf separate. B2 remains blocked until final post-D2 labels/splits exist and a local TYPESAFE_API_KEY is available.
+First report the verified current frontier. A1+A2 and D1+D2 are reviewed and integrated. The original Codex C1 session ended at 8146fe5 after the user-capped 15-arm campaign; the inherited validation worktree has one expected untracked final report. E1 is the next action in a fresh web session and must finalize C1 without restarting the campaign, explicitly qualifying its terminal outcomes as pre-D2 continuation evidence. Keep research/d31-road-wip@300914b as an evidence donor only and keep wip/road-intent-deadline@2592caf separate. B2 remains blocked until E1 finalizes the handoff/disposition and a local TYPESAFE_API_KEY is available.
 ```
 
 ## Recovery rule

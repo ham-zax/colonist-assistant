@@ -38,9 +38,13 @@ Current frontier
 │  COMPLETE + REVIEWED + INTEGRATED
 │  Reviewed semantics integrated as 70e1461 + 8496200.
 │
-├─ Wave 3 deterministic validation / C1 / Agent C
-│  CONTINUE
-│  User reports Agent C is working in /home/hamza/repo/colonist-opening-validation.
+├─ Wave 3 deterministic validation / C1 / former Codex Agent C
+│  CHECKPOINTED — SESSION ENDED
+│  Tooling commits 3e2268f + 8146fe5; 15-arm user-capped campaign complete; final report untracked.
+│
+├─ C1 recovery/finalization / E1 / Agent E
+│  READY — NEW WEB SESSION
+│  Reuse /home/hamza/repo/colonist-opening-validation; verify artifacts, qualify pre-D2 terminal evidence, commit final report.
 │
 ├─ D31 resource-liquidity / D1+D2
 │  COMPLETE + REVIEWED + INTEGRATED
@@ -70,7 +74,8 @@ Planned effort: 80% COMPLETE | 10% READY deterministic validation | 10% BLOCKED 
 | A | A1 | COMPLETE + INTEGRATED | implement | /home/hamza/repo/colonist-opening-architecture | integrated as 70e1461 | yes |
 | A | A2 | COMPLETE + INTEGRATED | implement repair | /home/hamza/repo/colonist-opening-architecture | integrated as 8496200 | yes |
 | B | B1 | COMPLETE + INTEGRATED | investigate + research tooling | /home/hamza/repo/colonist-jev-calibration | COMPLETE; reuse as B2 after final post-D2 labels + credential | yes |
-| C | C1 | CONTINUE | independent validation + research tooling | /home/hamza/repo/colonist-opening-validation | user reports working | no |
+| C | C1 | CHECKPOINTED — SESSION ENDED | independent validation + research tooling | /home/hamza/repo/colonist-opening-validation | Codex usage ended after 15-arm cap | no |
+| E | E1 | READY — NEW WEB SESSION | validation recovery + finalization | /home/hamza/repo/colonist-opening-validation | NEW WEB SESSION now | no |
 | D | D1 | COMPLETE + INTEGRATED | investigation + research tooling | /home/hamza/repo/colonist-d31-liquidity | integrated as a4bb9e6 | yes |
 | D | D2 | COMPLETE + INTEGRATED | implementation repair | /home/hamza/repo/colonist-d31-liquidity | integrated as 35815e3 | yes |
 | R | R1 | COMPLETE — BLOCKING FINDINGS | independent review | read-only target a169b28..15b2365 | COMPLETE | yes |
@@ -83,8 +88,8 @@ Planned effort: 80% COMPLETE | 10% READY deterministic validation | 10% BLOCKED 
 | Blocked item | Blocker | Owner | Discharge condition | Status/evidence |
 | --- | --- | --- | --- | --- |
 | A1/A2 integration | R2 re-review | R2 | R2 reports pass | DISCHARGED — R2 passed; integrated as 70e1461 + 8496200 |
-| Wave 3 deterministic validation | reviewed A1+A2 integration | C1/C2 | C1 returns recorded/generated evidence; any continuation evidence invalidated by D2 is refreshed against final semantics | CONTINUE — C1 active; C2 conditional |
-| B2 live/held-out Jev calibration | local TypeSafe credential + final C1/C2 label handoff | B2/C1 | local TYPESAFE_API_KEY exists and post-D2 labels/splits are final | BLOCKED — credential currently unset; C1 in progress and bounded C2 refresh may be required |
+| Wave 3 deterministic validation | C1 recovery/finalization | E1 | E1 verifies C1 artifacts, commits final report, and explicitly separates pre-D2 terminal evidence from static opening evidence | READY — C1 artifacts are substantially complete |
+| B2 live/held-out Jev calibration | local TypeSafe credential + final validation disposition | B2/E1 | local TYPESAFE_API_KEY exists and final C1 handoff is accepted; any post-D2 terminal rerun is explicitly required or waived | BLOCKED — credential unset; E1 pending |
 | merge back to main | final deterministic validation + B2 disposition | planner | post-D2 deterministic evidence is sufficient and held-out calibration is completed or explicitly waived by user | BLOCKED |
 | D1 diagnosis | reviewed opening/economy base | D1 | establish/falsify general defect | DISCHARGED — c58fa11 established persistent-production invariant violation |
 | D1+D2 integration | independent review | R3 | Agent R reports no blocking findings on 1b2a0c2..e068c5d | DISCHARGED — R3 passed; integrated as a4bb9e6 + 35815e3 |
@@ -93,11 +98,11 @@ Planned effort: 80% COMPLETE | 10% READY deterministic validation | 10% BLOCKED 
 ## Dependency map
 
 ```text
-A1 ─> R1 BLOCK ─> A2 ─> R2 PASS ─> reviewed integration ─> C1 deterministic validation ─> C2? post-D2 continuation refresh ─┐
-B1 calibration framework ───────────────────────────────────────────────────────────────> B2 live/held-out calibration ───────────┤
-                                                                                                                               └─> main merge
+A1 ─> R1 BLOCK ─> A2 ─> R2 PASS ─> reviewed integration ─> C1 checkpoint ─> E1 recovery/finalization ─┐
+B1 calibration framework ─────────────────────────────────────────────────────────────────────────> B2 ───────────┤
+                                                                                                                     └─> main merge
 
-D1+D2 are complete, independently reviewed, and integrated. Because D2 changes shared main-game strategic utility, any C1 matched-terminal evidence that depends on continuation policy may need a bounded C2 refresh after C1 finishes. Static opening/corpus evidence remains separable from this continuation-policy refresh. The road-intent WIP remains separate and held.
+D1+D2 are complete, independently reviewed, and integrated. The capped C1 campaign already produced 27/0/1 recorded-corpus results, a 36-case generated cohort, and 15 completed trades-off terminal arms, but all terminal pairwise comparisons are inconclusive and the B2 handoff admits zero labels. E1 must finalize that evidence package and explicitly mark the terminal outcomes as pre-D2 continuation evidence. Do not manufacture more terminal work merely to force a ranking.
 ```
 
 ## Shared contracts
@@ -140,13 +145,14 @@ The user explicitly authorized experimentation, tests, simulations, regression f
 
 ## Execution lifetime
 
-A1+A2 and D1+D2 are complete, reviewed, and integrated. C1 is continuing validation on the pre-D2 continuation policy and may require a bounded C2 matched-terminal refresh afterward. B1 is complete; reuse the same Agent B session as B2 after final post-D2 labels/splits exist and a local Jev credential is available.
+A1+A2 and D1+D2 are complete, reviewed, and integrated. The original Codex C1 session ended after completing the user-capped 15-arm campaign; E1 is a fresh web recovery/finalization session over the same worktree. B1 is complete; reuse the same Agent B session as B2 only after E1 finalizes the handoff and a local Jev credential is available.
 
 ## Future / blocked work
 
-- C1 — deterministic Wave 3 validation is continuing.
-- C2 — PLANNED/CONDITIONAL after C1: refresh only matched-terminal/continuation evidence invalidated by integrated D2 semantics.
-- B2 — live Jev collection/final calibration is blocked by local `TYPESAFE_API_KEY` and the final post-D2 label handoff.
+- C1 — CHECKPOINTED at `8146fe5`; the former Codex session ended. Recorded corpus, generated cohort, and the user-capped 15 terminal arms are complete; final report is untracked.
+- E1 — READY in a NEW web session to verify and finalize C1 without restarting the campaign.
+- C2 — CONDITIONAL only if E1 concludes that final-semantic terminal directionality is required; it is not authorized merely to manufacture conclusive labels.
+- B2 — live Jev collection/final calibration is blocked by local `TYPESAFE_API_KEY` and E1's final handoff/disposition.
 - Main merge — blocked by post-D2 deterministic validation plus B2/final calibration disposition.
 - D1+D2 — COMPLETE + REVIEWED + INTEGRATED as `a4bb9e6` + `35815e3`.
 - R3 — COMPLETE — PASS; review blocker discharged.
@@ -172,3 +178,4 @@ A1+A2 and D1+D2 are complete, reviewed, and integrated. C1 is continuing validat
 - 2026-09-19: D2 completed at `e068c5d`. It fixed persistent-production valuation in CPU and exact CUDA, kept dynamic weights for marginal uses, converted the H1 probe into a permanent invariant regression, preserved spend-now guards, and resolved the D1 report whitespace. Planner verification confirms the worktree is clean and `git diff --check 1b2a0c2..e068c5d` passes.
 - 2026-09-19: R3 passed with no blocker, major, or directly related minor finding. It independently re-ran the invariant/spend-now tests and the 69-case hardware CPU/CUDA parity check, and approved `1b2a0c2..e068c5d` for integration.
 - 2026-09-19: planner integrated D1+D2 onto `orchestration/opening-rebuild` as `a4bb9e6` + `35815e3`. The integrated D1+D2 code/report surfaces are content-identical to reviewed HEAD `e068c5d`; `git diff --check 241f1e4..35815e3` passes.
+- 2026-09-19: the Codex C1 session ended due usage limits after the user reduced the terminal campaign to 15 valid arms. Planner inspection found C1 substantially complete at `8146fe5`: recorded corpus 27/0/1, 36 generated cases, exactly 15 admitted terminal arms, zero cutoffs, all four pairwise comparisons inconclusive, and `b2-handoff-v1.json` contains `admittedLabels: []`. Generated/matched/recorded/prior SHA manifests all verify. A fresh web recovery session E1 is READY to finalize the report and add the post-D2 qualification.
