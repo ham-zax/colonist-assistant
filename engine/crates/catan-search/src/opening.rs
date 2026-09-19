@@ -6,9 +6,7 @@ use colonist_catan_core::{
 };
 
 use crate::deadline::CooperativeDeadline;
-use crate::economy::{
-    build_conversion_efficiency, build_eta_rolls, complete_build_conversion_value,
-};
+use crate::economy::{build_conversion_efficiency, build_eta_rolls, build_fundable_at_rolls};
 use crate::eval::{
     closed_economy_value, evaluate, expansion_option_value, opening_site_values, production_pips,
     vertex_value,
@@ -353,12 +351,22 @@ fn opening_expansion_economics(state: &GameState, player: u8) -> OpeningExpansio
     );
     let project_conversion_efficiency =
         build_conversion_efficiency(&production, &state.trade_ratios(player), &project_cost);
-    let realization = complete_build_conversion_value(
+    // `expansion.value` already contains the exact-hand ETA accessibility
+    // factor from `expansion_arrival_score`. Apply only the non-temporal
+    // conversion bottleneck here so road-plus-settlement ETA is discounted
+    // once. The portfolio side prevents a fundable repair site from receiving
+    // full credit when the current opening remains broadly conversion-poor.
+    let realization = if build_fundable_at_rolls(
         &production,
         &hand,
         &state.trade_ratios(player),
         &project_cost,
-    );
+        0.0,
+    ) {
+        1.0
+    } else {
+        project_conversion_efficiency.min(opening_build_economy(state, player).weighted_efficiency)
+    };
     let raw_value = expansion.value * 0.32 + expansion.portfolio_value * 0.22;
     OpeningExpansionEconomics {
         value: raw_value * realization,
@@ -375,67 +383,87 @@ fn opening_expansion_value(state: &GameState, player: u8) -> f32 {
     opening_expansion_economics(state, player).value
 }
 
-fn opening_settlement_vertex_open(state: &GameState, vertex: usize) -> bool {
-    state.buildings[vertex].is_none()
-        && state.board.vertices[vertex]
-            .adjacent_vertices
-            .iter()
-            .all(|neighbor| state.buildings[usize::from(*neighbor)].is_none())
-}
-
-/// Multiplayer interaction term. Removing exactly one root settlement creates
-/// the nearest counterfactual in which that placement did not occupy or
-/// distance-block a setup site. Only the opponent's lost best-site value is
-/// credited, and the benefit is shared across all non-root seats because
-/// denying one rival also helps the others.
-fn causal_opening_denial_value(state: &GameState, root: u8) -> f32 {
+/// Opportunity removed from one opponent at that opponent's actual settlement
+/// decision. All intervening placements remain fixed; only the candidate root
+/// settlement is removed for the nearest counterfactual.
+fn opening_denial_opportunity_loss(
+    state: &GameState,
+    root: u8,
+    root_vertex: u8,
+    opponent: u8,
+) -> f32 {
     if state.board.num_players <= 2
-        || matches!(
-            state.phase,
-            Phase::SetupSettlement | Phase::SetupRoad { .. }
-        )
+        || state.phase != Phase::SetupSettlement
+        || state.actor() != opponent
+        || opponent == root
+        || !state.buildings[usize::from(root_vertex)]
+            .is_some_and(|building| building.player() == root)
     {
         return 0.0;
     }
-    let opponents = (0..state.board.num_players)
-        .filter(|player| *player != root)
-        .collect::<Vec<_>>();
-    let site_values = opponents
-        .iter()
-        .map(|player| opening_site_values(state, *player))
-        .collect::<Vec<_>>();
-    let mut denied = 0.0_f32;
-    for (vertex, building) in state.buildings.iter().enumerate() {
-        if !building.is_some_and(|piece| piece.player() == root) {
-            continue;
+
+    let site_values = opening_site_values(state, opponent);
+    let best = |candidate: &GameState| {
+        candidate
+            .legal_actions()
+            .into_iter()
+            .filter_map(|action| match action {
+                Action::PlaceSettlement { vertex } => Some(site_values[usize::from(vertex)]),
+                _ => None,
+            })
+            .fold(0.0, f32::max)
+    };
+    let actual_best = best(state);
+    let mut without_root = state.clone();
+    without_root.buildings[usize::from(root_vertex)] = None;
+    (best(&without_root) - actual_best).max(0.0)
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct OpeningDenialContext {
+    root_vertex: Option<u8>,
+    maximum_opportunity_loss: f32,
+}
+
+impl OpeningDenialContext {
+    fn for_root_action(state: &GameState, root: u8, action: &Action) -> Self {
+        if state.board.num_players <= 2 || state.actor() != root {
+            return Self::default();
         }
-        let mut without_root = state.clone();
-        without_root.buildings[vertex] = None;
-        for values in &site_values {
-            let actual_best = values
-                .iter()
-                .enumerate()
-                .filter(|(candidate, _)| opening_settlement_vertex_open(state, *candidate))
-                .map(|(_, value)| *value)
-                .fold(0.0, f32::max);
-            let counterfactual_best = without_root
-                .board
-                .vertices
-                .iter()
-                .enumerate()
-                .filter(|(candidate, _)| {
-                    !opening_settlement_vertex_open(state, *candidate)
-                        && opening_settlement_vertex_open(&without_root, *candidate)
-                })
-                .map(|(candidate, _)| values[candidate])
-                .fold(actual_best, f32::max);
-            denied = denied.max(counterfactual_best - actual_best);
+        let Action::PlaceSettlement { vertex } = action else {
+            return Self::default();
+        };
+        Self {
+            root_vertex: Some(*vertex),
+            maximum_opportunity_loss: 0.0,
         }
     }
-    // `vertex_value` is expressed in weighted production-pip units. Convert
-    // the lost-site gap into the opening objective's production-value scale,
-    // then share it across the non-root seats.
-    denied.max(0.0) * 0.055 / f32::from(state.board.num_players - 1)
+
+    fn observe(self, state: &GameState, root: u8) -> Self {
+        let Some(root_vertex) = self.root_vertex else {
+            return self;
+        };
+        if state.phase != Phase::SetupSettlement || state.actor() == root {
+            return self;
+        }
+        Self {
+            maximum_opportunity_loss: self.maximum_opportunity_loss.max(
+                opening_denial_opportunity_loss(state, root, root_vertex, state.actor()),
+            ),
+            ..self
+        }
+    }
+
+    fn term(self, num_players: u8) -> f32 {
+        if num_players <= 2 {
+            return 0.0;
+        }
+        // `vertex_value` is expressed in weighted production-pip units.
+        // Convert the single largest causal opportunity loss into the opening
+        // scale and share it across the non-root seats. Taking the maximum
+        // prevents one placement from being credited repeatedly.
+        self.maximum_opportunity_loss.max(0.0) * 0.055 / f32::from(num_players - 1)
+    }
 }
 
 fn opening_position_value(state: &GameState, player: u8) -> f32 {
@@ -481,6 +509,8 @@ pub struct OpeningEvidence {
     pub expansion_roads_required: u8,
     pub expansion_project_eta_rolls: Option<f32>,
     pub expansion_project_conversion_efficiency: f32,
+    /// Conversion-efficiency remainder. The expansion option has already
+    /// applied the complete-project ETA accessibility exactly once.
     pub expansion_realization: f32,
     pub expansion_port_build_gain: f32,
     pub scarcity_term: f32,
@@ -491,7 +521,11 @@ pub struct OpeningEvidence {
     pub rival_weight: f32,
 }
 
-fn opening_evidence(state: &GameState, root: u8) -> OpeningEvidence {
+fn opening_evidence(
+    state: &GameState,
+    root: u8,
+    denial_context: OpeningDenialContext,
+) -> OpeningEvidence {
     let production = production_pips(state, root);
     let economy = opening_build_economy(state, root);
     let hand = state.players[usize::from(root)].resources;
@@ -546,7 +580,7 @@ fn opening_evidence(state: &GameState, root: u8) -> OpeningEvidence {
             .map(|(pips, scarce)| pips * scarce * 0.012)
             .sum(),
         concentration_penalty: opening_robber_concentration(state, root) * 0.22,
-        causal_denial_term: causal_opening_denial_value(state, root),
+        causal_denial_term: denial_context.term(state.board.num_players),
         own_value: opening_position_value(state, root),
         rival_value: (0..state.board.num_players)
             .filter(|player| *player != root)
@@ -560,10 +594,10 @@ fn opening_evidence(state: &GameState, root: u8) -> OpeningEvidence {
     }
 }
 
-fn opening_static_value(state: &GameState, root: u8) -> f32 {
+fn opening_static_value(state: &GameState, root: u8, denial_context: OpeningDenialContext) -> f32 {
     let own = opening_position_value(state, root);
     if state.board.num_players > 2 {
-        return own + causal_opening_denial_value(state, root);
+        return own + denial_context.term(state.board.num_players);
     }
     let rival = (0..state.board.num_players)
         .filter(|player| *player != root)
@@ -650,17 +684,17 @@ struct OpeningSolver {
     deadline_reached: bool,
     completed_setups: u32,
     budget_cutoffs: u32,
-    memo: HashMap<u64, OpeningVisitValue>,
+    memo: HashMap<(u64, Option<u8>, u32), OpeningVisitValue>,
     deadline: CooperativeDeadline,
 }
 
 impl OpeningSolver {
-    fn static_value(&self, state: &GameState) -> f32 {
-        opening_static_value(state, self.root)
+    fn static_value(&self, state: &GameState, denial_context: OpeningDenialContext) -> f32 {
+        opening_static_value(state, self.root, denial_context)
     }
 
-    fn value(&self, state: &GameState) -> f32 {
-        let static_value = self.static_value(state);
+    fn value(&self, state: &GameState, denial_context: OpeningDenialContext) -> f32 {
+        let static_value = self.static_value(state, denial_context);
         if matches!(
             state.phase,
             Phase::SetupSettlement | Phase::SetupRoad { .. }
@@ -677,14 +711,19 @@ impl OpeningSolver {
         static_value * 0.68 + rollout * 0.32
     }
 
-    fn scout_completion_value(&self, state: &GameState) -> f32 {
+    fn scout_completion_value(
+        &self,
+        state: &GameState,
+        mut denial_context: OpeningDenialContext,
+    ) -> f32 {
         let mut cursor = state.clone();
         while matches!(
             cursor.phase,
             Phase::SetupSettlement | Phase::SetupRoad { .. }
         ) {
+            denial_context = denial_context.observe(&cursor, self.root);
             if self.deadline.has_elapsed() {
-                return self.static_value(state);
+                return self.static_value(state, denial_context);
             }
             let actor = cursor.actor();
             let legal = cursor.legal_actions();
@@ -704,7 +743,7 @@ impl OpeningSolver {
                 break;
             }
         }
-        self.static_value(&cursor)
+        self.static_value(&cursor, denial_context)
     }
 
     fn rollout_leaf(&self, state: &GameState) -> f32 {
@@ -775,6 +814,7 @@ impl OpeningSolver {
         &mut self,
         state: &GameState,
         ranked: &[(Action, f32)],
+        denial_context: OpeningDenialContext,
     ) -> OpeningVisitValue {
         // In a two-player snake draft this opponent owns both consecutive
         // settlement/road pairs. Compare complete policy-led portfolios after
@@ -792,7 +832,7 @@ impl OpeningSolver {
                 next.apply(action)
                     .ok()
                     .and_then(|()| self.greedy_opponent_handoff(next, actor))
-                    .map(|handoff| self.visit(&handoff))
+                    .map(|handoff| self.visit(&handoff, denial_context))
             } else {
                 None
             };
@@ -813,13 +853,18 @@ impl OpeningSolver {
         }
         best.map(|(value, _)| value)
             .unwrap_or_else(|| OpeningVisitValue {
-                value: self.value(state),
+                value: self.value(state, denial_context),
                 endpoint_complete: false,
                 evidence: None,
             })
     }
 
-    fn visit(&mut self, state: &GameState) -> OpeningVisitValue {
+    fn visit(
+        &mut self,
+        state: &GameState,
+        denial_context: OpeningDenialContext,
+    ) -> OpeningVisitValue {
+        let denial_context = denial_context.observe(state, self.root);
         let endpoint_complete = !matches!(
             state.phase,
             Phase::SetupSettlement | Phase::SetupRoad { .. }
@@ -828,9 +873,10 @@ impl OpeningSolver {
             self.aborted = true;
             self.budget_cutoffs = self.budget_cutoffs.saturating_add(1);
             return OpeningVisitValue {
-                value: self.value(state),
+                value: self.value(state, denial_context),
                 endpoint_complete,
-                evidence: endpoint_complete.then(|| opening_evidence(state, self.root)),
+                evidence: endpoint_complete
+                    .then(|| opening_evidence(state, self.root, denial_context)),
             };
         }
         if self.deadline.expired_at_checkpoint(self.nodes, 8) {
@@ -838,21 +884,27 @@ impl OpeningSolver {
             self.budget_cutoffs = self.budget_cutoffs.saturating_add(1);
             self.deadline_reached = true;
             return OpeningVisitValue {
-                value: self.value(state),
+                value: self.value(state, denial_context),
                 endpoint_complete,
-                evidence: endpoint_complete.then(|| opening_evidence(state, self.root)),
+                evidence: endpoint_complete
+                    .then(|| opening_evidence(state, self.root, denial_context)),
             };
         }
         self.nodes += 1;
         if endpoint_complete {
             self.completed_setups += 1;
             return OpeningVisitValue {
-                value: self.value(state),
+                value: self.value(state, denial_context),
                 endpoint_complete: true,
-                evidence: Some(opening_evidence(state, self.root)),
+                evidence: Some(opening_evidence(state, self.root, denial_context)),
             };
         }
-        if let Some(value) = self.memo.get(&state.state_hash()) {
+        let memo_key = (
+            state.state_hash(),
+            denial_context.root_vertex,
+            denial_context.maximum_opportunity_loss.to_bits(),
+        );
+        if let Some(value) = self.memo.get(&memo_key) {
             return *value;
         }
         let before_cutoffs = self.budget_cutoffs;
@@ -876,7 +928,7 @@ impl OpeningSolver {
                 .filter_map(|(action, prior)| {
                     let mut next = state.clone();
                     next.apply(&action).ok()?;
-                    Some((action, prior, self.static_value(&next)))
+                    Some((action, prior, self.static_value(&next, denial_context)))
                 })
                 .collect::<Vec<_>>();
             candidates.sort_by(|left, right| {
@@ -891,7 +943,7 @@ impl OpeningSolver {
                 .map(|(action, prior, _)| {
                     let mut next = state.clone();
                     let score = if next.apply(&action).is_ok() {
-                        self.scout_completion_value(&next)
+                        self.scout_completion_value(&next, denial_context)
                     } else {
                         f32::NEG_INFINITY
                     };
@@ -934,7 +986,7 @@ impl OpeningSolver {
                         let slice = remaining / (candidate_count - index) as u32;
                         self.node_limit = self.nodes.saturating_add(slice).min(parent_limit);
                     }
-                    let candidate = self.visit(&next);
+                    let candidate = self.visit(&next, denial_context);
                     self.node_limit = parent_limit;
                     if opening_visit_is_better(candidate, best) {
                         best = candidate;
@@ -944,7 +996,7 @@ impl OpeningSolver {
                             return best;
                         }
                         return OpeningVisitValue {
-                            value: self.value(state),
+                            value: self.value(state, denial_context),
                             endpoint_complete: false,
                             evidence: None,
                         };
@@ -957,7 +1009,7 @@ impl OpeningSolver {
             && state.setup_step == 1
             && state.phase == Phase::SetupSettlement
         {
-            self.opponent_portfolio_value(state, &ranked)
+            self.opponent_portfolio_value(state, &ranked, denial_context)
         } else if self.config.opponent_maximizes {
             // Opponents greedily maximize their own setup-aware leaf features
             // over a pruned candidate set, then the draft continues. This is
@@ -982,17 +1034,17 @@ impl OpeningSolver {
             if let Some(action) = best_action {
                 let mut next = state.clone();
                 if next.apply(&action).is_ok() {
-                    self.visit(&next)
+                    self.visit(&next, denial_context)
                 } else {
                     OpeningVisitValue {
-                        value: self.value(state),
+                        value: self.value(state, denial_context),
                         endpoint_complete: false,
                         evidence: None,
                     }
                 }
             } else {
                 OpeningVisitValue {
-                    value: self.value(state),
+                    value: self.value(state, denial_context),
                     endpoint_complete: false,
                     evidence: None,
                 }
@@ -1013,12 +1065,12 @@ impl OpeningSolver {
                 }
                 let mut next = state.clone();
                 if next.apply(&action).is_ok() {
-                    let candidate = self.visit(&next);
+                    let candidate = self.visit(&next, denial_context);
                     weighted += candidate.value * prior;
                     all_contributions_complete &= candidate.endpoint_complete;
                     if self.deadline_reached {
                         return OpeningVisitValue {
-                            value: self.value(state),
+                            value: self.value(state, denial_context),
                             endpoint_complete: false,
                             evidence: None,
                         };
@@ -1036,7 +1088,7 @@ impl OpeningSolver {
             result
         } else {
             OpeningVisitValue {
-                value: self.value(state),
+                value: self.value(state, denial_context),
                 endpoint_complete: false,
                 evidence: None,
             }
@@ -1051,7 +1103,7 @@ impl OpeningSolver {
             && before_cutoffs == self.budget_cutoffs
             && self.config.rollout_count == 0
         {
-            self.memo.insert(state.state_hash(), result);
+            self.memo.insert(memo_key, result);
         }
         result
     }
@@ -1127,7 +1179,8 @@ pub(crate) fn solve_opening_excluding(
         .filter_map(|(action, prior)| {
             let mut next = state.clone();
             next.apply(action).ok()?;
-            Some((action.clone(), *prior, solver.value(&next)))
+            let denial_context = OpeningDenialContext::for_root_action(state, root, action);
+            Some((action.clone(), *prior, solver.value(&next, denial_context)))
         })
         .collect::<Vec<_>>();
     static_actions.sort_by(|left, right| {
@@ -1159,31 +1212,33 @@ pub(crate) fn solve_opening_excluding(
         }
         let before_nodes = solver.nodes;
         let node_budget = budgets.get(index).copied().unwrap_or(0);
-        let (value, endpoint_complete, evidence) =
-            if index >= deep_count || solver.deadline.has_elapsed() {
-                if solver.deadline.has_elapsed() {
-                    solver.aborted = true;
-                    solver.deadline_reached = true;
-                }
-                (static_value, false, None)
-            } else {
-                let per_root_budget = budgets.get(index).copied().unwrap_or(1).max(1);
-                solver.node_limit = solver
-                    .nodes
-                    .saturating_add(per_root_budget)
-                    .min(solver.config.maximum_nodes);
-                if solver.nodes < solver.config.maximum_nodes {
-                    let deep = solver.visit(&next);
-                    if deep.value.is_finite() && deep.endpoint_complete {
-                        (deep.value, true, deep.evidence)
-                    } else {
-                        (static_value, false, None)
-                    }
+        let (value, endpoint_complete, evidence) = if index >= deep_count
+            || solver.deadline.has_elapsed()
+        {
+            if solver.deadline.has_elapsed() {
+                solver.aborted = true;
+                solver.deadline_reached = true;
+            }
+            (static_value, false, None)
+        } else {
+            let per_root_budget = budgets.get(index).copied().unwrap_or(1).max(1);
+            solver.node_limit = solver
+                .nodes
+                .saturating_add(per_root_budget)
+                .min(solver.config.maximum_nodes);
+            if solver.nodes < solver.config.maximum_nodes {
+                let denial_context = OpeningDenialContext::for_root_action(state, root, &action);
+                let deep = solver.visit(&next, denial_context);
+                if deep.value.is_finite() && deep.endpoint_complete {
+                    (deep.value, true, deep.evidence)
                 } else {
-                    solver.aborted = true;
                     (static_value, false, None)
                 }
-            };
+            } else {
+                solver.aborted = true;
+                (static_value, false, None)
+            }
+        };
         actions.push(OpeningActionValue {
             action,
             value,
@@ -1300,10 +1355,12 @@ mod tests {
 
     use colonist_catan_core::{Action, Building, GameState, Phase, SETTLEMENT_COST};
 
+    use crate::eval::expansion_option_value;
+
     use super::{
-        OpeningConfig, OpeningVisitValue, causal_opening_denial_value, opening_expansion_economics,
-        opening_position_bonus, opening_position_value, opening_static_value,
-        opening_visit_is_better, solve_opening,
+        OpeningConfig, OpeningDenialContext, OpeningVisitValue, opening_build_economy,
+        opening_denial_opportunity_loss, opening_expansion_economics, opening_position_bonus,
+        opening_position_value, opening_static_value, opening_visit_is_better, solve_opening,
     };
 
     #[test]
@@ -1419,7 +1476,7 @@ mod tests {
         ) {
             state.apply(&state.legal_actions()[0].clone()).unwrap();
         }
-        let before = opening_static_value(&state, 0);
+        let before = opening_static_value(&state, 0, OpeningDenialContext::default());
         let strongest = (1..state.board.num_players)
             .max_by(|left, right| {
                 opening_position_value(&state, *left)
@@ -1431,16 +1488,15 @@ mod tests {
         let rival_after = opening_position_value(&state, strongest);
 
         assert!(rival_after > rival_before + 1.0);
-        assert!((opening_static_value(&state, 0) - before).abs() < 1e-5);
+        assert!(
+            (opening_static_value(&state, 0, OpeningDenialContext::default()) - before).abs()
+                < 1e-5
+        );
     }
 
     #[test]
     fn multiplayer_denial_exists_only_for_a_site_the_root_actually_blocks() {
         let mut state = GameState::standard(104, 4);
-        state.phase = Phase::PreRoll;
-        state.current_player = 0;
-        state.buildings.fill(None);
-        state.roads.fill(None);
         let target = state
             .board
             .vertices
@@ -1461,15 +1517,63 @@ mod tests {
                 board.hexes[usize::from(hex)].number = 6;
             }
         }
-        state.buildings[target] = Some(Building::Settlement(0));
+        state
+            .apply(&Action::PlaceSettlement {
+                vertex: target as u8,
+            })
+            .unwrap();
+        let road = state
+            .legal_actions()
+            .into_iter()
+            .find(|action| matches!(action, Action::PlaceRoad { .. }))
+            .unwrap();
+        state.apply(&road).unwrap();
+        assert_eq!(state.phase, Phase::SetupSettlement);
+        assert_eq!(state.actor(), 1);
 
-        let denied = causal_opening_denial_value(&state, 0);
+        let denied = opening_denial_opportunity_loss(&state, 0, target as u8, 1);
         assert!(
             denied > 0.0,
             "root settlement must price its removed high-value site"
         );
         state.buildings[target] = None;
-        assert_eq!(causal_opening_denial_value(&state, 0), 0.0);
+        assert_eq!(
+            opening_denial_opportunity_loss(&state, 0, target as u8, 1),
+            0.0
+        );
+    }
+
+    #[test]
+    fn player_zero_final_settlement_cannot_deny_completed_opponents() {
+        let mut state = GameState::standard(105, 4);
+        while state.setup_step < 7 {
+            let action = state.legal_actions()[0].clone();
+            state.apply(&action).unwrap();
+        }
+        assert_eq!(state.phase, Phase::SetupSettlement);
+        assert_eq!(state.actor(), 0);
+
+        let report = solve_opening(
+            &state,
+            0,
+            OpeningConfig {
+                maximum_nodes: 8_000,
+                rollout_count: 0,
+                ..OpeningConfig::default()
+            },
+        );
+        assert!(report.completed_setups > 0);
+        for action in report
+            .actions
+            .iter()
+            .filter(|action| action.endpoint_complete)
+        {
+            let evidence = action.evidence.expect("completed action needs evidence");
+            assert_eq!(
+                evidence.causal_denial_term, 0.0,
+                "P0's last setup settlement has no future opponent decision to deny"
+            );
+        }
     }
 
     #[test]
@@ -1486,7 +1590,6 @@ mod tests {
         let starved = opening_expansion_economics(&state, 0);
         assert!(starved.vertex.is_some());
         assert!(starved.project_eta_rolls.is_some_and(|eta| eta > 0.0));
-        assert!(starved.realization < 1.0);
 
         state.players[0].resources = [
             1 + starved.roads_required,
@@ -1499,6 +1602,39 @@ mod tests {
         assert_eq!(funded.project_eta_rolls, Some(0.0));
         assert!((funded.realization - 1.0).abs() < f32::EPSILON);
         assert!(funded.value > starved.value);
+    }
+
+    #[test]
+    fn opening_expansion_applies_project_eta_discount_exactly_once() {
+        let mut state = GameState::standard(107, 4);
+        while matches!(
+            state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        ) {
+            let action = state.legal_actions()[0].clone();
+            state.apply(&action).unwrap();
+        }
+        state.players[0].resources = [0; 5];
+
+        let option = expansion_option_value(&state, 0);
+        assert!(option.vertex.is_some());
+        let economics = opening_expansion_economics(&state, 0);
+        let eta = economics
+            .project_eta_rolls
+            .expect("expected finite project ETA");
+        assert!(eta > 0.0);
+        let raw_value = option.value * 0.32 + option.portfolio_value * 0.22;
+        let conversion_remainder = economics
+            .project_conversion_efficiency
+            .min(opening_build_economy(&state, 0).weighted_efficiency);
+        let expected = raw_value * conversion_remainder;
+        assert!((economics.value - expected).abs() < 1e-5);
+
+        let duplicated_eta_value = expected / (1.0 + eta / 18.0);
+        assert!(
+            economics.value > duplicated_eta_value + 1e-5,
+            "the final expansion term must not apply the option's ETA accessibility twice"
+        );
     }
 
     #[test]

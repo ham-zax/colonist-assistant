@@ -15,19 +15,20 @@ against the hill6758 outcome.
   zero-sum comparison.
 - Opponent snake-draft branches are unchanged: every opponent continues to
   maximize that opponent's own setup-aware value.
-- Causal denial removes one root settlement at a time, finds opponent setup
-  sites made newly legal by that removal, and values only the best opportunity
-  loss relative to the opponent's best actually legal site. The lost weighted
-  production gap is converted to the opening production scale and shared among
-  the non-root seats.
+- Causal denial follows the evaluated root settlement through the setup
+  recursion. At each later opponent settlement decision, it compares that
+  decision-time set of legal sites with and without the root settlement. Only the
+  largest future opportunity loss is retained, converted to the opening
+  production scale, and shared among the non-root seats.
 - Port value is a breadth-adjusted sum of improvements in complete road,
   settlement, city, and development-card affordability at 0, 18, and 36 roll
   horizons, multiplied by after-port conversion efficiency. A printed ratio
   change that advances no complete build receives no value.
-- Expansion realization uses the exact road-plus-settlement project cost. An
-  already funded project realizes fully; otherwise its raw site and portfolio
-  value is multiplied by project conversion efficiency divided by
-  `1 + ETA / 18`.
+- Expansion realization uses the exact road-plus-settlement project cost. The
+  expansion owner already applies `1 / (1 + ETA / 18)`, so an unfunded option
+  receives only the non-temporal conversion bottleneck: the lower of project
+  conversion efficiency and existing opening-portfolio conversion efficiency.
+  An already funded project realizes fully.
 
 ## Focused and corpus validation
 
@@ -58,7 +59,8 @@ Results:
 - Final `colonist-catan-search` release suite: 219 unit tests passed, 15
   intentionally ignored diagnostics, and all 3 integration tests passed.
 
-The no-player-trade hill6758 evidence probe reported:
+The no-player-trade hill6758 evidence probe reported the following A1 values
+before the A2 temporal-causality and single-ETA corrections:
 
 | Root | Production pips | Own value | Causal denial | Final value |
 | --- | --- | ---: | ---: | ---: |
@@ -101,3 +103,43 @@ though it does not change the exact hill6758 setup-root evidence. At the
 user's direction, the expensive terminal replay was not repeated; therefore
 84/116/116 is development-branch evidence, not a terminal result verified on
 the exact final commit.
+
+## A2 review-repair addendum
+
+A2 repaired the two R1 blockers without rerunning the recorded corpus or
+matched simulations:
+
+- Denial is accumulated only at future opponent settlement decisions in the
+  actual snake order. The memoization key includes the root settlement and the
+  accumulated maximum opportunity loss, so paths with different causal
+  histories cannot alias. P0's final four-player settlement has no future
+  opponent decision and therefore receives zero denial.
+- The expansion option's existing exact-hand ETA accessibility is retained.
+  The old `complete_build_conversion_value()` multiplier was removed; the
+  remaining realization is conversion-only and therefore cannot apply the
+  same ETA a second time. The portfolio-conversion bottleneck keeps speculative
+  repair from overriding task9783's present portfolio completeness.
+
+Focused A2 commands used the debug test profile and selected only the named
+regressions:
+
+```text
+cargo test -p colonist-catan-search player_zero_final_settlement_cannot_deny_completed_opponents
+cargo test -p colonist-catan-search multiplayer_denial_exists_only_for_a_site_the_root_actually_blocks
+cargo test -p colonist-catan-search opening_expansion_applies_project_eta_discount_exactly_once
+cargo test -p colonist-catan-search opening_expansion_realization_requires_the_complete_project_to_self_fund
+cargo test -p colonist-catan-search hill6758_multiplayer_objective_keeps_own_economy_and_causal_denial_separate
+cargo test -p colonist-catan-search task9783_equal_pips_complete_portfolio_beats_speculative_repair_in_both_trade_modes
+cargo test -p colonist-catan-search hand2325_d1_does_not_sacrifice_half_the_production_for_a_generic_port
+cargo test -p colonist-catan-search concentrated_port_engine_can_beat_balanced_build_access_without_making_diversity_absolute
+cargo test -p colonist-catan-search multiplayer_static_value_does_not_subtract_unrelated_rival_strength
+cargo test -p colonist-catan-search grain8695_final_settlement_matches_exhaustive_endpoints_with_either_trade_policy
+cargo test -p colonist-catan-search grain8695_opponent_uses_completed_portfolio_with_either_trade_policy
+```
+
+Every selected regression passed. hill6758 and task9783 each exercised both
+trade modes. The grain8695 endpoint test preserved exact two-player
+own-minus-rival semantics in both policies, and its opponent-portfolio test
+preserved opponent self-maximization. `eval.rs` and CUDA sources were not
+changed by A2, so the conditional public-hidden-hand and CPU/CUDA parity checks
+were not rerun.

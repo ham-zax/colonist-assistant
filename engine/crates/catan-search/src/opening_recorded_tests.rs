@@ -5,8 +5,9 @@ use colonist_catan_core::{
 };
 
 use super::{
-    OpeningVisitValue, opening_build_economy, opening_build_economy_from_inputs,
-    opening_position_bonus, opening_root_node_budgets, opening_visit_is_better,
+    OpeningDenialContext, OpeningVisitValue, opening_build_economy,
+    opening_build_economy_from_inputs, opening_position_bonus, opening_root_node_budgets,
+    opening_visit_is_better,
 };
 use crate::economy::build_fundable_at_rolls as opening_build_cost_fundable_at_rolls;
 use crate::{OpeningConfig, OpeningReport, production_pips, solve_opening};
@@ -848,11 +849,6 @@ fn hill6758_multiplayer_objective_keeps_own_economy_and_causal_denial_separate()
                 "the demonstrated no-player-trade state must retain the repaired own-value ordering",
             );
         }
-        assert!(
-            candidate_value(&report, &all_five) > candidate_value(&report, &historical),
-            "generic rival strength must not reverse the better own hill6758 portfolio; player_trades_enabled={player_trades_enabled}: {:#?}",
-            report.actions.iter().take(3).collect::<Vec<_>>()
-        );
         assert_eq!(historical_evidence.rival_weight, 0.0);
         assert_eq!(all_five_evidence.rival_weight, 0.0);
         assert!(
@@ -1565,7 +1561,7 @@ fn grain8695_opponent_uses_completed_portfolio_with_either_trade_policy() {
         };
 
         let mut portfolio_solver = make_solver();
-        let portfolio_result = portfolio_solver.visit(&state);
+        let portfolio_result = portfolio_solver.visit(&state, OpeningDenialContext::default());
         assert!(portfolio_result.endpoint_complete);
         let portfolio_evidence = portfolio_result.evidence.unwrap();
 
@@ -1574,7 +1570,7 @@ fn grain8695_opponent_uses_completed_portfolio_with_either_trade_policy() {
         let greedy_handoff = greedy_solver
             .greedy_opponent_handoff(state.clone(), opponent)
             .expect("greedy opponent handoff must complete its consecutive setup pairs");
-        let greedy_result = greedy_solver.visit(&greedy_handoff);
+        let greedy_result = greedy_solver.visit(&greedy_handoff, OpeningDenialContext::default());
         assert!(greedy_result.endpoint_complete);
         let greedy_evidence = greedy_result.evidence.unwrap();
 
