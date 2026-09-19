@@ -27,6 +27,10 @@ struct Config {
     max_turns: u16,
     search_depth: u8,
     ordinary_nodes: u32,
+    opening_nodes: u32,
+    opening_time_ms: u32,
+    trade_response_nodes: u32,
+    trade_response_time_ms: u32,
     chance_seed: Option<u64>,
     continuation_seed: Option<u64>,
     force_decision_index: Option<u32>,
@@ -48,6 +52,10 @@ impl Default for Config {
             max_turns: 220,
             search_depth: 3,
             ordinary_nodes: 48_000,
+            opening_nodes: 12_000,
+            opening_time_ms: 1_200,
+            trade_response_nodes: 2_000,
+            trade_response_time_ms: 350,
             chance_seed: None,
             continuation_seed: None,
             force_decision_index: None,
@@ -61,8 +69,16 @@ impl Default for Config {
 }
 
 fn parse_config() -> Config {
+    parse_config_from(env::args().skip(1))
+}
+
+fn parse_config_from<I, S>(args: I) -> Config
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
     let mut config = Config::default();
-    let args = env::args().skip(1).collect::<Vec<_>>();
+    let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
     let mut i = 0usize;
     while i < args.len() {
         let value = args.get(i + 1).map(String::as_str);
@@ -81,6 +97,18 @@ fn parse_config() -> Config {
             }
             "--ordinary-nodes" => {
                 config.ordinary_nodes = value.and_then(|v| v.parse().ok()).unwrap_or(48_000);
+            }
+            "--opening-nodes" => {
+                config.opening_nodes = value.and_then(|v| v.parse().ok()).unwrap_or(12_000);
+            }
+            "--opening-time-ms" => {
+                config.opening_time_ms = value.and_then(|v| v.parse().ok()).unwrap_or(1_200);
+            }
+            "--trade-response-nodes" => {
+                config.trade_response_nodes = value.and_then(|v| v.parse().ok()).unwrap_or(2_000);
+            }
+            "--trade-response-time-ms" => {
+                config.trade_response_time_ms = value.and_then(|v| v.parse().ok()).unwrap_or(350);
             }
             "--chance-seed" => {
                 config.chance_seed = value.and_then(|v| v.parse().ok());
@@ -120,6 +148,8 @@ fn parse_config() -> Config {
                 println!(
                     "jev-strategy-lab [--players 2|3|4] [--games N] [--seed N] \
                      [--output PATH] [--max-turns N] [--depth N] [--ordinary-nodes N] \
+                     [--opening-nodes N] [--opening-time-ms N] \
+                     [--trade-response-nodes N] [--trade-response-time-ms N] \
                      [--chance-seed N] [--continuation-seed N] \
                      [--force-decision-index N (--force-settlement-vertex V|--force-action SPEC)] \
                      [--replay-prefix JSONL --replay-game N] [--state-spec JSON] \
@@ -984,10 +1014,10 @@ fn main() {
                 "depth": config.search_depth,
                 "branchCap": 12,
                 "ordinaryNodes": config.ordinary_nodes,
-                "openingNodes": 12_000,
-                "openingTimeMs": 1_200,
-                "tradeResponseNodes": 2_000,
-                "tradeResponseTimeMs": 350,
+                "openingNodes": config.opening_nodes,
+                "openingTimeMs": config.opening_time_ms,
+                "tradeResponseNodes": config.trade_response_nodes,
+                "tradeResponseTimeMs": config.trade_response_time_ms,
                 "strategyPolicy": "baseline",
             }
         }),
@@ -1077,9 +1107,9 @@ fn main() {
                     state.phase,
                     Phase::SetupSettlement | Phase::SetupRoad { .. }
                 ) {
-                    (12_000, 1_200)
+                    (config.opening_nodes, config.opening_time_ms)
                 } else if state.phase == Phase::TradeResponses {
-                    (2_000, 350)
+                    (config.trade_response_nodes, config.trade_response_time_ms)
                 } else {
                     (config.ordinary_nodes, 0)
                 };
@@ -1276,5 +1306,29 @@ fn main() {
         .expect("game end must serialize");
         writer.write_all(b"\n").expect("game end newline");
         writer.flush().expect("lab output must flush");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deterministic_search_budgets_are_configurable() {
+        let config = parse_config_from([
+            "--opening-nodes",
+            "13000",
+            "--opening-time-ms",
+            "0",
+            "--trade-response-nodes",
+            "2100",
+            "--trade-response-time-ms",
+            "0",
+        ]);
+
+        assert_eq!(config.opening_nodes, 13_000);
+        assert_eq!(config.opening_time_ms, 0);
+        assert_eq!(config.trade_response_nodes, 2_100);
+        assert_eq!(config.trade_response_time_ms, 0);
     }
 }
