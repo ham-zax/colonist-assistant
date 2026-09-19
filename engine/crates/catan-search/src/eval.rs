@@ -1026,8 +1026,8 @@ pub fn strategic_utility_breakdown(state: &GameState, player: u8) -> StrategicUt
     let resource_weights = dynamic_resource_weights(state, player);
     let weighted_production_raw = production
         .iter()
-        .enumerate()
-        .map(|(index, pips)| *pips * resource_weights[index])
+        .zip(BASE_RESOURCE_WEIGHTS)
+        .map(|(pips, weight)| *pips * weight)
         .sum::<f32>();
     let distinct_numbers = state
         .buildings
@@ -1116,10 +1116,13 @@ fn strategic_utility_with_routes_and_knowledge(
     let victory = player_state.victory_points() as f32;
     let production = production_pips(state, player);
     let weights = dynamic_resource_weights(state, player);
+    // Production is a persistent board asset. Keep its value independent of
+    // transient hand scarcity; dynamic weights still price marginal hand and
+    // prospective board choices below.
     let weighted_production = production
         .iter()
-        .enumerate()
-        .map(|(index, pips)| *pips * weights[index])
+        .zip(BASE_RESOURCE_WEIGHTS)
+        .map(|(pips, weight)| *pips * weight)
         .sum::<f32>();
     let distinct_numbers = state
         .buildings
@@ -1723,7 +1726,7 @@ mod tests {
         expansion_site_survival, expected_discard_loss, marginal_development_value,
         prepare_road_frontier_context, production_pips, public_strategic_utility,
         road_frontier_value, road_intent_with_context, robber_denial, rolls_before_next_spend,
-        vertex_value,
+        strategic_utility_breakdown, vertex_value,
     };
 
     fn after_setup(seed: u64, players: u8) -> GameState {
@@ -1810,16 +1813,9 @@ mod tests {
     }
 
     #[test]
-    fn d1_h1_unchanged_production_probe() {
+    fn unchanged_production_value_does_not_change_when_hand_is_spent() {
         let production_term = |state: &GameState| {
-            let production = production_pips(state, 0);
-            let weights = dynamic_resource_weights(state, 0);
-            production
-                .iter()
-                .enumerate()
-                .map(|(index, pips)| *pips * weights[index])
-                .sum::<f32>()
-                * 0.17
+            strategic_utility_breakdown(state, 0).weighted_production
         };
 
         for player_trades_enabled in [false, true] {
@@ -1836,12 +1832,12 @@ mod tests {
             let after = production_term(&state);
 
             println!(
-                "h1-positive trades={} production={production:?} before={before:.6} after={after:.6} delta={:.6}",
+                "h1-fixed trades={} production={production:?} before={before:.6} after={after:.6} delta={:.6}",
                 player_trades_enabled,
                 after - before
             );
             assert_eq!(production, production_pips(&state, 0));
-            assert!(after > before);
+            assert!((after - before).abs() < 1e-6);
         }
 
         let mut counterexample = after_setup(71, 3);

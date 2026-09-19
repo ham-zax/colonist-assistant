@@ -2,8 +2,8 @@
 
 Status: **complete — general evaluator defect established (H1)**
 
-Workspace: `/home/hamza/repo/colonist-d31-liquidity`  
-Branch: `agent/d1-d31-liquidity`  
+Workspace: `/home/hamza/repo/colonist-d31-liquidity`
+Branch: `agent/d1-d31-liquidity`
 Reviewed base: `1b2a0c2`, containing reviewed A1+A2 integration `70e1461` + `8496200`.
 
 D1 does not implement a production repair. The source changes in this mission are behavior-neutral research diagnostics and focused research tests only.

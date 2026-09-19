@@ -1535,7 +1535,9 @@ static inline __device__ float strategic_utility(
     dynamic_resource_weights(state, topology, player, weights);
     float weighted_production = 0.0f;
     for (uint32_t resource = 0u; resource < 5u; ++resource) {
-        weighted_production += production[resource] * weights[resource];
+        // Mirror CPU: persistent production must not be revalued by transient
+        // hand scarcity. Dynamic weights still price marginal uses below.
+        weighted_production += production[resource] * BASE_RESOURCE_WEIGHTS[resource];
     }
 
     uint32_t distinct_numbers = 0u;

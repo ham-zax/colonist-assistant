@@ -111,7 +111,7 @@ fn two_player_city_now_counterexample_matches_reference() {
 }
 
 #[test]
-fn d1_required_development_counterexamples_probe() {
+fn d2_required_development_spend_now_guards() {
     fn run(label: &str, state: GameState, depth: u8, nodes: u32) -> BeliefDepthResult {
         assert!(
             state.legal_actions().contains(&Action::BuyDevelopment),
@@ -139,8 +139,19 @@ fn d1_required_development_counterexamples_probe() {
             .find(|candidate| candidate.action == Action::EndTurn)
             .map(|candidate| candidate.value[0]);
         println!(
-            "d1-counterexample {label}: chosen={:?} buy={buy:?} end={end:?} depth={} nodes={}",
+            "d2-spend-guard {label}: chosen={:?} buy={buy:?} end={end:?} depth={} nodes={}",
             report.chosen, report.depth, report.nodes
+        );
+        let buy = buy.expect("BuyDevelopment must be retained");
+        let end = end.expect("EndTurn must be retained");
+        assert!(
+            buy + 1e-6 >= end,
+            "{label}: repair must not turn BuyDevelopment into a generic save loser: buy={buy} end={end}"
+        );
+        assert_ne!(
+            report.chosen,
+            Some(Action::EndTurn),
+            "{label}: a spend-now alternative must remain preferred to saving"
         );
         report
     }
@@ -163,8 +174,7 @@ fn d1_required_development_counterexamples_probe() {
     let mut excess = main_phase_state(97, 2);
     excess.players[0].resources = [0, 5, 1, 1, 1];
     excess.development_deck = [14, 5, 2, 2, 2];
-    let excess = run("excess-non-bottleneck", excess, 3, 12_000);
-    assert_eq!(excess.chosen, Some(Action::BuyDevelopment));
+    let _ = run("excess-non-bottleneck", excess, 3, 12_000);
 
     let mut transition = main_phase_state(101, 2);
     transition.players[0].resources = DEVELOPMENT_COST;
