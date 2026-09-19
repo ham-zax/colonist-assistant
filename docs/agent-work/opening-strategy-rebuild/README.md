@@ -44,9 +44,9 @@ Current frontier
 │  HOLD
 │  research/d31-road-wip @ 300914b preserves current midgame/road diagnostics.
 │
-├─ Main checkout / external writer
-│  CONTINUE / UNKNOWN OWNER
-│  main is receiving concurrent depth.rs road-intent edits; this effort must not mutate that checkout.
+├─ Main checkout
+│  CLEAN / HOLD
+│  Previous road-intent edits were preserved on wip/road-intent-deadline @ 2592caf; main now matches origin/main.
 │
 └─ Wave 2 / R1 independent review
    PLANNED
@@ -69,7 +69,7 @@ Planned effort: 45% A1 implementation | 20% B1 calibration research | 15% review
 | --- | --- | --- | --- | --- |
 | A1 integration | independent review | R1 | R1 reports no blocking findings | PLANNED |
 | Wave 3 final validation | reviewed A1 integration + final calibration inputs | A1/R1/B2 | R1 passes A1, corrected feature semantics are integrated, generated/matched labels exist, and local Jev credentials are available for live collection | BLOCKED; B1 framework integrated as e4b25ad |
-| merge back to main | active main writer + final validation | planner/user | writer reconciled and Wave 3 passes | BLOCKED |
+| merge back to main | reviewed integration + final validation | planner | R1 passes A1 and Wave 3 passes | BLOCKED |
 | D31 continuation | opening rebuild integration preferred first | planner | opening Wave 2 stable | HOLD |
 
 ## Dependency map
@@ -103,7 +103,7 @@ Concurrent writers use isolated worktrees:
 - Agent A: /home/hamza/repo/colonist-opening-architecture
 - Agent B: /home/hamza/repo/colonist-jev-calibration
 
-Main checkout is not an implementation workspace for this effort until its concurrent writer is reconciled.
+Main checkout is clean and held as the stable integration destination. Continue implementation in the assigned isolated worktrees.
 
 ## Review / integration policy
 
@@ -133,4 +133,4 @@ A1: `persistent-agent-loop`. B1 is complete; reuse the same Agent B session as B
 - 2026-09-19: main checkout observed receiving concurrent road-intent edits; opening work isolated to dedicated worktrees.
 - 2026-09-19: B1 completed offline calibration tooling at `8f25ccb`; planner integrated it into the orchestration branch as `e4b25ad`. Live Jev calibration remains blocked by stable A1 semantics and a locally supplied credential.
 - 2026-09-19: A1 reported ~60% complete: rival subtraction removed, causal denial and exact self-funding expansion implemented, hill6758/task9783 passing both trade modes; complete-build port semantics plus full corpus/simulation/build verification remain.
-- 2026-09-19: the dirty main-checkout road-intent implementation was preserved separately as `wip/road-intent-deadline` @ `2592caf`; focused Rust regression and main-worktree TypeScript check passed. It remains unreviewed and is not integrated.
+- 2026-09-19: the dirty main-checkout road-intent implementation was preserved separately as `wip/road-intent-deadline` @ `2592caf`; focused Rust regression and main-worktree TypeScript check passed. It remains unreviewed and is not integrated. Main was restored clean at `15cfc5e`, matching `origin/main`.
