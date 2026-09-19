@@ -1,5 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
+import {
+  jevRequestCacheKey,
+  readCachedJevResponse,
+  writeCachedJevResponse,
+} from "./jev-raw-cache.mjs";
 
 const API_URL = "https://api.typesafe.ai/v1/systemone";
 const MODEL = "jev-1.13.0";
@@ -12,6 +17,9 @@ function parseArgs(argv) {
     limit: 24,
     game: null,
     stage: "all",
+    cacheDir: "benchmark-results/jev-lab/raw-cache",
+    candidateOrder: "canonical",
+    wordingVariant: "standard",
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -21,8 +29,11 @@ function parseArgs(argv) {
     else if (arg === "--limit") config.limit = Number.parseInt(argv[++i], 10);
     else if (arg === "--game") config.game = Number.parseInt(argv[++i], 10);
     else if (arg === "--stage") config.stage = argv[++i];
+    else if (arg === "--cache-dir") config.cacheDir = argv[++i];
+    else if (arg === "--candidate-order") config.candidateOrder = argv[++i];
+    else if (arg === "--wording-variant") config.wordingVariant = argv[++i];
     else if (arg === "--help" || arg === "-h") {
-      console.log("node scripts/jev-strategy-lab.mjs --input decisions.jsonl --output jev.jsonl [--pass pass1|pass2|pass3|pass4|pass5] [--limit N] [--game N] [--stage all|setup|main]");
+      console.log("node scripts/jev-strategy-lab.mjs --input decisions.jsonl --output jev.jsonl [--pass direct|pass1|pass2|pass3|pass4|pass5] [--limit N] [--game N] [--stage all|setup|main] [--cache-dir PATH] [--candidate-order canonical|reverse] [--wording-variant standard|alternate]");
       process.exit(0);
     } else {
       throw new Error(`Unknown argument: ${arg}`);
@@ -31,6 +42,15 @@ function parseArgs(argv) {
   if (!Number.isFinite(config.limit) || config.limit < 1) throw new Error("--limit must be positive");
   if (!["all", "setup", "main"].includes(config.stage)) {
     throw new Error("--stage must be all, setup, or main");
+  }
+  if (!["direct", "pass1", "pass2", "pass3", "pass4", "pass5"].includes(config.pass)) {
+    throw new Error("--pass must be direct, pass1, pass2, pass3, pass4, or pass5");
+  }
+  if (!["canonical", "reverse"].includes(config.candidateOrder)) {
+    throw new Error("--candidate-order must be canonical or reverse");
+  }
+  if (!["standard", "alternate"].includes(config.wordingVariant)) {
+    throw new Error("--wording-variant must be standard or alternate");
   }
   return config;
 }
@@ -529,13 +549,16 @@ function blindMechanicalStrategicEvidence(record, action) {
   };
 }
 
-function candidateOptions(record, max = 12, blind = false) {
+function candidateOptions(record, max = 12, blind = false, candidateOrder = "canonical") {
   const actor = record.actor;
   const state = record.publicState;
   const shortlist = [...record.candidateActions]
     .sort((a, b) => b.actorValue - a.actorValue)
     .slice(0, max);
-  if (blind) shortlist.sort((a, b) => a.action.localeCompare(b.action));
+  if (blind) {
+    shortlist.sort((a, b) => a.action.localeCompare(b.action));
+    if (candidateOrder === "reverse") shortlist.reverse();
+  }
 
   return shortlist.reduce((options, candidate, index) => {
     const key = `c${index}`;
@@ -794,6 +817,31 @@ function pass2Questions(options, record) {
   };
 }
 
+function directQuestion(options, record, wordingVariant) {
+  const actorState = record.publicState.players.find((player) => player.player === record.actor);
+  const isSetupSettlement = record.phase === "SetupSettlement";
+  const isFirstSettlement = isSetupSettlement && (actorState?.settlementsBuilt ?? 0) === 0;
+  const stage = isFirstSettlement
+    ? "first setup settlement; a second setup settlement will later complement it"
+    : isSetupSettlement
+      ? "second setup settlement; this completes the actor's opening production portfolio"
+      : record.phase.startsWith("SetupRoad")
+        ? "setup road; evaluate its direction and reachable frontier"
+        : "main-game decision";
+  return {
+    direct_best_candidate: choiceQuestion(
+      {
+        question: wordingVariant === "alternate"
+          ? "Considering the full strategic position, which one candidate gives the actor the strongest choice?"
+          : "Which single candidate is strategically best for the actor?",
+        stage,
+        evidenceRule: "Use supplied exact mechanics as authoritative, do not infer hidden cards, and judge the candidate as a whole. Return one independent direct judgment; do not decompose or average named dimensions.",
+      },
+      options,
+    ),
+  };
+}
+
 const CANDIDATE_SCORE_LEVELS = [
   "Actively harmful or strategically dead-ended on this dimension",
   "Weak: materially compromised with no convincing compensation on this dimension",
@@ -802,7 +850,7 @@ const CANDIDATE_SCORE_LEVELS = [
   "Exceptional: robust, flexible, and unusually strong on this dimension",
 ];
 
-function pass3Questions(options, record) {
+function pass3Questions(options, record, wordingVariant = "standard") {
   const actorState = record.publicState.players.find((player) => player.player === record.actor);
   const isSetupSettlement = record.phase === "SetupSettlement";
   const isFirstSettlement = isSetupSettlement && (actorState?.settlementsBuilt ?? 0) === 0;
@@ -866,7 +914,9 @@ function pass3Questions(options, record) {
       questions[`${key}__${dimension}`] = {
         type: "score",
         instructions: {
-          question,
+          question: wordingVariant === "alternate"
+            ? `Considering only this dimension, rate the candidate: ${question}`
+            : question,
           candidatePath: `candidates.${key}`,
           stage,
           focus,
@@ -918,8 +968,8 @@ function aggregateScores(answers, options) {
       };
     })
     .sort((a, b) =>
-      b.confidenceWeightedScore - a.confidenceWeightedScore
-      || b.meanScore - a.meanScore
+      b.meanScore - a.meanScore
+      || b.confidenceWeightedScore - a.confidenceWeightedScore
       || b.meanConfidence - a.meanConfidence
     );
 }
@@ -955,7 +1005,7 @@ function assessJevSignal(ranking, options, engineSelected) {
     return { status: "agreement", counterfactualCandidate: false, reasons: [] };
   }
 
-  const margin = (top.confidenceWeightedScore - engine.confidenceWeightedScore) / 4;
+  const margin = (top.meanScore - engine.meanScore) / 4;
   const reasons = [];
   if (roadIntentMechanicallyDominated(options[top.option], options[engineSelected])) {
     reasons.push("jev road is mechanically dominated by the engine road");
@@ -969,6 +1019,8 @@ function assessJevSignal(ranking, options, engineSelected) {
     status: reasons.length ? "screened_out" : "counterfactual_candidate",
     counterfactualCandidate: reasons.length === 0,
     normalizedScoreMargin: margin,
+    confidenceWeightedNormalizedScoreMargin:
+      (top.confidenceWeightedScore - engine.confidenceWeightedScore) / 4,
     topMeanConfidence: top.meanConfidence,
     reasons,
   };
@@ -995,19 +1047,32 @@ function aggregateChoices(answers, options) {
     .sort((a, b) => b.meanProbability - a.meanProbability);
 }
 
-async function queryJev(apiKey, state, questions) {
+async function queryJev(apiKey, state, questions, cacheDirectory) {
+  const request = { state, model: MODEL, questions };
+  const cacheKey = jevRequestCacheKey(request);
+  const cached = readCachedJevResponse(cacheDirectory, cacheKey);
+  if (cached) {
+    return { response: cached.record.response, cacheKey, cacheHit: true };
+  }
+  if (!apiKey) {
+    throw new Error(
+      `TYPESAFE_API_KEY is required for uncached Jev request ${cacheKey}; cached requests can be replayed offline`,
+    );
+  }
   const response = await fetch(API_URL, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ state, model: MODEL, questions }),
+    body: JSON.stringify(request),
     signal: AbortSignal.timeout(15_000),
   });
   const body = await response.text();
   if (!response.ok) throw new Error(`TypeSafe HTTP ${response.status}: ${body.slice(0, 500)}`);
-  return JSON.parse(body);
+  const parsed = JSON.parse(body);
+  writeCachedJevResponse(cacheDirectory, cacheKey, request, parsed);
+  return { response: parsed, cacheKey, cacheHit: false };
 }
 
 function selectRecords(records, config) {
@@ -1031,7 +1096,6 @@ function selectRecords(records, config) {
 async function main() {
   const config = parseArgs(process.argv.slice(2));
   const apiKey = process.env.TYPESAFE_API_KEY;
-  if (!apiKey) throw new Error("TYPESAFE_API_KEY is required in the environment");
 
   const records = readJsonl(config.input);
   const selected = selectRecords(records, config);
@@ -1041,15 +1105,17 @@ async function main() {
   let index = 0;
   for (const record of selected) {
     const blind = config.pass !== "pass1";
-    const options = candidateOptions(record, 12, blind);
+    const options = candidateOptions(record, 12, blind, config.candidateOrder);
     const engineSelected = selectedOption(record, options);
     if (!engineSelected || Object.keys(options).length < 2) continue;
 
-    const questions = ["pass3", "pass4", "pass5"].includes(config.pass)
-      ? pass3Questions(options, record)
-      : blind
-        ? pass2Questions(options, record)
-        : pass1Questions(options, engineSelected);
+    const questions = config.pass === "direct"
+      ? directQuestion(options, record, config.wordingVariant)
+      : ["pass3", "pass4", "pass5"].includes(config.pass)
+        ? pass3Questions(options, record, config.wordingVariant)
+        : blind
+          ? pass2Questions(options, record)
+          : pass1Questions(options, engineSelected);
     const state = {
       experiment: blind
         ? {
@@ -1066,7 +1132,8 @@ async function main() {
       candidates: options,
     };
 
-    const response = await queryJev(apiKey, state, questions);
+    const query = await queryJev(apiKey, state, questions, config.cacheDir);
+    const response = query.response;
     const atomicScorePass = ["pass3", "pass4", "pass5"].includes(config.pass);
     const ranking = atomicScorePass
       ? aggregateScores(response.answers, options)
@@ -1075,14 +1142,19 @@ async function main() {
       recordType: "jevEvaluation",
       schemaVersion: 1,
       pass: config.pass,
+      candidateOrder: Object.values(options).map((option) => option.action),
+      candidateOrderVariant: config.candidateOrder,
+      wordingVariant: config.wordingVariant,
       source: {
         game: record.game,
         boardSeed: record.boardSeed,
+        chanceSeed: record.chanceSeed,
         decisionIndex: record.decisionIndex,
         stateHash: record.stateHash,
         turn: record.turn,
         phase: record.phase,
         actor: record.actor,
+        playerTradesEnabled: record.publicState.playerTradesEnabled,
       },
       engineSelected,
       engineSelectedAction: options[engineSelected].action,
@@ -1095,6 +1167,8 @@ async function main() {
       answers: response.answers,
       model: response.model,
       usage: response.usage,
+      rawCacheKey: query.cacheKey,
+      rawCacheHit: query.cacheHit,
       candidates: options,
     };
     writer.write(JSON.stringify(result) + "\n");

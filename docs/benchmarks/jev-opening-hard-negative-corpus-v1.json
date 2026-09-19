@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "kind": "jev-opening-corpus-manifest",
+  "rule": "A manifest entry is not an outcome label. Only a completed matched-terminal comparison may populate a calibration case label.",
+  "entries": [
+    {
+      "caseKey": "hill6758",
+      "questionFamily": "second_settlement",
+      "class": "positive_strategic_disagreement",
+      "status": "single_stream_evidence_available",
+      "requiredEvidence": ["recorded state", "corrected deterministic features", "matched terminal streams", "both trade modes"]
+    },
+    {
+      "caseKey": "task9783",
+      "questionFamily": "second_settlement",
+      "class": "positive_strategic_disagreement",
+      "status": "recorded_regression_available",
+      "requiredEvidence": ["equal-pip alternatives", "both trade modes", "matched terminal streams before calibration authority"]
+    },
+    {
+      "caseKey": "D17",
+      "questionFamily": "setup_road",
+      "class": "known_jev_false_positive",
+      "status": "matched_example_available",
+      "requiredEvidence": ["road target", "roads remaining", "expected rolls", "survival probability", "matched terminal streams"]
+    },
+    {
+      "caseKey": "generated-attractive-bad-port",
+      "questionFamily": "second_settlement",
+      "class": "required_hard_negative",
+      "status": "generation_required",
+      "constructionConstraint": "Port access looks attractive but complete-build conversion throughput and terminal outcomes favor the non-port alternative."
+    },
+    {
+      "caseKey": "generated-five-resource-low-throughput",
+      "questionFamily": "second_settlement",
+      "class": "required_hard_negative",
+      "status": "generation_required",
+      "constructionConstraint": "All five resources are covered, but low production or correlated numbers make the portfolio terminally worse."
+    },
+    {
+      "caseKey": "generated-self-unfundable-repair",
+      "questionFamily": "second_settlement",
+      "class": "required_hard_negative",
+      "status": "generation_required",
+      "constructionConstraint": "A repair target exists topologically but the current economy cannot fund the required road-plus-settlement project in time."
+    },
+    {
+      "caseKey": "generated-unreachable-repair",
+      "questionFamily": "second_settlement",
+      "class": "required_hard_negative",
+      "status": "generation_required",
+      "constructionConstraint": "A repair target looks valuable but has no legal or survivable route from the setup road frontier."
+    },
+    {
+      "caseKey": "generated-non-causal-denial",
+      "questionFamily": "first_settlement",
+      "class": "required_hard_negative",
+      "status": "generation_required",
+      "constructionConstraint": "A candidate appears to deny a rival, but it does not remove or worsen an opportunity the rival would otherwise choose."
+    },
+    {
+      "caseKey": "generated-mechanically-dominated-road",
+      "questionFamily": "setup_road",
+      "class": "required_hard_negative",
+      "status": "generation_required",
+      "constructionConstraint": "The attractive road is no better on target value, survival, roads remaining, and expected rolls, and is materially worse on at least one."
+    }
+  ]
+}

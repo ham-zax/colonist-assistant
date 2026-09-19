@@ -1,0 +1,238 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://colonist-assistant.local/schemas/jev-opening-calibration-v1.json",
+  "title": "Jev opening calibration case",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "recordType",
+    "schemaVersion",
+    "caseId",
+    "questionFamily",
+    "splitGroup",
+    "partition",
+    "featureSemantics",
+    "source",
+    "candidates",
+    "judgments",
+    "screening",
+    "matchedComparisons",
+    "corpusTags"
+  ],
+  "properties": {
+    "recordType": { "const": "openingCalibrationCase" },
+    "schemaVersion": { "const": 1 },
+    "caseId": { "type": "string", "minLength": 1 },
+    "questionFamily": {
+      "enum": ["first_settlement", "second_settlement", "setup_road"]
+    },
+    "splitGroup": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Frozen before fitting. Board/template variants, seat rotations, trade modes, and chance-seed repetitions that can share position structure use one group."
+    },
+    "partition": {
+      "enum": ["calibration", "holdout"],
+      "description": "The calibration partition is the only fitting/tuning partition. The holdout remains locked until the analysis plan is frozen."
+    },
+    "featureSemantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "status"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["draft", "validated"] }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "boardTemplateId",
+        "game",
+        "boardSeed",
+        "chanceSeed",
+        "decisionIndex",
+        "stateHash",
+        "phase",
+        "actor",
+        "playerCount",
+        "playerTradesEnabled",
+        "questionVersion"
+      ],
+      "properties": {
+        "boardTemplateId": { "type": "string", "minLength": 1 },
+        "game": { "type": "integer", "minimum": 0 },
+        "boardSeed": { "type": "integer", "minimum": 0 },
+        "chanceSeed": { "type": "integer", "minimum": 0 },
+        "decisionIndex": { "type": "integer", "minimum": 0 },
+        "stateHash": { "type": "string", "minLength": 1 },
+        "phase": { "type": "string", "minLength": 1 },
+        "actor": { "type": "integer", "minimum": 0 },
+        "playerCount": { "type": "integer", "minimum": 2, "maximum": 4 },
+        "playerTradesEnabled": { "type": "boolean" },
+        "questionVersion": { "type": "string", "minLength": 1 }
+      }
+    },
+    "candidates": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["candidateId", "action", "incumbent", "deterministicFeatures"],
+        "properties": {
+          "candidateId": { "type": "string", "minLength": 1 },
+          "action": { "type": "string", "minLength": 1 },
+          "incumbent": { "type": "boolean" },
+          "deterministicScore": { "type": "number" },
+          "deterministicFeatures": {
+            "type": "object",
+            "additionalProperties": { "type": "number" }
+          }
+        }
+      }
+    },
+    "judgments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["direct", "dimensions"],
+      "properties": {
+        "direct": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["runs"],
+          "properties": {
+            "runs": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/directRun" }
+            }
+          }
+        },
+        "dimensions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["runs"],
+          "properties": {
+            "runs": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/dimensionRun" }
+            }
+          }
+        }
+      }
+    },
+    "screening": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["status", "reasons"],
+      "properties": {
+        "status": {
+          "enum": ["passed", "mechanically_dominated", "invalid", "ambiguous"]
+        },
+        "reasons": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "matchedComparisons": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/matchedComparison" }
+    },
+    "corpusTags": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    }
+  },
+  "$defs": {
+    "rawCacheKey": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "directRun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rawCacheKey", "candidateOrder", "wordingVariant", "probabilities", "confidence"],
+      "properties": {
+        "rawCacheKey": { "$ref": "#/$defs/rawCacheKey" },
+        "candidateOrder": { "type": "array", "items": { "type": "string" } },
+        "wordingVariant": { "type": "string", "minLength": 1 },
+        "probabilities": {
+          "type": "object",
+          "additionalProperties": { "type": "number", "minimum": 0, "maximum": 1 }
+        },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "dimensionJudgment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["score", "confidence"],
+      "properties": {
+        "score": { "type": "number", "minimum": 0, "maximum": 4 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "dimensionRun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rawCacheKey", "candidateOrder", "wordingVariant", "scores"],
+      "properties": {
+        "rawCacheKey": { "$ref": "#/$defs/rawCacheKey" },
+        "candidateOrder": { "type": "array", "items": { "type": "string" } },
+        "wordingVariant": { "type": "string", "minLength": 1 },
+        "scores": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": { "$ref": "#/$defs/dimensionJudgment" }
+          }
+        }
+      }
+    },
+    "matchedComparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "leftCandidateId",
+        "rightCandidateId",
+        "label",
+        "authority",
+        "terminal",
+        "pairedSamples",
+        "continuationSeeds",
+        "meanDelta",
+        "ci95"
+      ],
+      "properties": {
+        "leftCandidateId": { "type": "string" },
+        "rightCandidateId": { "type": "string" },
+        "label": { "enum": ["left", "right", "tie", "inconclusive"] },
+        "authority": { "const": "matched_terminal_simulation" },
+        "terminal": { "const": true },
+        "pairedSamples": { "type": "integer", "minimum": 1 },
+        "continuationSeeds": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "integer", "minimum": 0 },
+          "description": "One common-random-number base seed per paired branch comparison; streams are partitioned by causal event family by the simulator."
+        },
+        "meanDelta": { "type": ["number", "null"] },
+        "ci95": {
+          "type": "array",
+          "prefixItems": [
+            { "type": ["number", "null"] },
+            { "type": ["number", "null"] }
+          ],
+          "minItems": 2,
+          "maxItems": 2
+        }
+      }
+    }
+  }
+}
