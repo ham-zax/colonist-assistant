@@ -24,6 +24,11 @@ import {
 
 const nativeGpu = new NativeGpuClient();
 
+// Temporary validation lane: keep the native companion built and available,
+// but force production decisions through CPU/WASM so strategy changes can be
+// evaluated without CUDA backend differences.
+const NATIVE_GPU_ENABLED = false;
+
 interface ActiveDecision {
   nativeId: number;
   controller: AbortController;
@@ -70,6 +75,7 @@ const hasPendingIncomingTrade = (message: DecisionMessage): boolean =>
   );
 
 export const shouldUseNativeGpu = (message: DecisionMessage): boolean =>
+  NATIVE_GPU_ENABLED &&
   nativeGpuSupportsStochasticModel(message.stochastic?.model) &&
   message.engine === "deep-search" &&
   // Explicit strategy policies remain on their declared CPU/WASM owner until
@@ -157,7 +163,7 @@ chrome.runtime.onMessage.addListener(
       const status = message as DecisionStatusMessage;
       const startedAt = performance.now();
       void (async () => {
-        if (status.engine === "deep-search") {
+        if (status.engine === "deep-search" && NATIVE_GPU_ENABLED) {
           let gpu;
           try {
             gpu = await nativeGpu.status();
@@ -274,11 +280,13 @@ chrome.runtime.onMessage.addListener(
       const runtimeReason =
         analysis.runtimeReason ??
         (runtime === "background-wasm"
-          ? message.strategyPolicy
-          ? `Strategy policy ${message.strategyPolicy} remains on its CPU/WASM owner`
-            : message.engine === "deep-search" && message.board.initialPlacement
-              ? "Dedicated opening solver runs on WASM/CPU"
-              : gpuBusy
+          ? !NATIVE_GPU_ENABLED && message.engine === "deep-search"
+            ? "Native GPU disabled for CPU/WASM validation; using WASM Deep MaxN"
+            : message.strategyPolicy
+              ? `Strategy policy ${message.strategyPolicy} remains on its CPU/WASM owner`
+              : message.engine === "deep-search" && message.board.initialPlacement
+                ? "Dedicated opening solver runs on WASM/CPU"
+                : gpuBusy
                 ? "Native GPU busy with another decision; using WASM Deep MaxN"
               : nativeGpuEligible
                 ? "Native GPU unavailable; using WASM Deep MaxN"
