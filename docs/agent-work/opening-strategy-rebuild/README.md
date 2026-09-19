@@ -56,15 +56,17 @@ Current frontier
 │  DEFERRED / NON-PRODUCTION RESEARCH
 │  No conclusive labels are available under the user-capped campaign and TYPESAFE_API_KEY is unset.
 │
-├─ Road-intent candidate
-│  HOLD
-│  wip/road-intent-deadline @ 2592caf remains separate and unreviewed.
+├─ Road-intent candidate / F1 / Agent F
+│  READY — NEW WEB SESSION
+│  Current-main validation branch agent/f1-road-intent-validation @ 2d29125.
+│  Old wip/road-intent-deadline @ 2592caf remains provenance only.
+│  Admission requires exact D27 reconstruction + matched terminal evidence; no production tuning in F1.
 │
 └─ Main checkout
    COMPLETE — LOCAL MAIN INTEGRATED
-   Fast-forwarded from 15cfc5e to 1850977 after review gates and user-capped final validation.
+   Current local main 9aee018; origin/main remains 15cfc5e.
 
-Planned effort: 95% COMPLETE | 5% OPTIONAL/DEFERRED research calibration
+Planned effort: 90% COMPLETE/INTEGRATED | 5% F1 ROAD ADMISSION | 5% OPTIONAL/DEFERRED B2
 
 ## Session Ledger
 
@@ -80,6 +82,7 @@ Planned effort: 95% COMPLETE | 5% OPTIONAL/DEFERRED research calibration
 | R | R1 | COMPLETE — BLOCKING FINDINGS | independent review | read-only target a169b28..15b2365 | COMPLETE | yes |
 | R | R2 | COMPLETE — PASS | independent re-review | read-only repair range 15b2365..034b01f | review blocker discharged | yes |
 | R | R3 | COMPLETE — PASS | independent review | read-only target 1b2a0c2..e068c5d | review blocker discharged | yes |
+| F | F1 | READY — NEW WEB SESSION | causal validation + research tooling | /home/hamza/repo/colonist-road-intent-validation | exact D27 admission study on 2d29125 | no |
 | D31 preserved branch | evidence donor | PRESERVED | historical diagnostics | research/d31-road-wip @ 300914b | do not cherry-pick wholesale | yes |
 
 ## Blocker Ledger
@@ -89,10 +92,11 @@ Planned effort: 95% COMPLETE | 5% OPTIONAL/DEFERRED research calibration
 | A1/A2 integration | R2 re-review | R2 | R2 reports pass | DISCHARGED — R2 passed; integrated as 70e1461 + 8496200 |
 | Wave 3 deterministic validation | C1 recovery/finalization | E1 | E1 verifies C1 artifacts, commits final report, and separates pre-D2 terminal evidence from static opening evidence | DISCHARGED — E1 complete at ad1eb59; integrated as 0e270f4 |
 | B2 live/held-out Jev calibration | conclusive labels + local TypeSafe credential | B2 | conclusive terminal labels exist and local TYPESAFE_API_KEY is available | DEFERRED — user capped terminal evidence at 15 arms; all four comparisons inconclusive; admittedLabels=[]; credential unset |
-| merge back to main | reviewed production changes + user-capped final validation | planner | production review gates pass and capped final validation finds no blocking production defect | DISCHARGED — local main fast-forwarded to 1850977 |
+| merge back to main | reviewed production changes + user-capped final validation | planner | production review gates pass and capped final validation finds no blocking production defect | DISCHARGED — local main at 9aee018 |
 | D1 diagnosis | reviewed opening/economy base | D1 | establish/falsify general defect | DISCHARGED — c58fa11 established persistent-production invariant violation |
 | D1+D2 integration | independent review | R3 | Agent R reports no blocking findings on 1b2a0c2..e068c5d | DISCHARGED — R3 passed; integrated as a4bb9e6 + 35815e3 |
-| road-intent continuation | broader causal evidence + separate review | planner | D27 matched evidence establishes admission case | HOLD |
+| road-intent admission | exact D27 reconstruction + matched terminal evidence | F1 | exact gate reproduced, negative controls hold, and matched continuation establishes a coherent advantage | READY — current-main candidate branch 2d29125 |
+| road-intent integration | F1 admission + F2 hardening + independent review | F2/Agent R | F1 admits, F2 rebuilds/synchronizes current-base package, Agent R reports no blockers | BLOCKED |
 
 ## Dependency map
 
@@ -102,6 +106,10 @@ D1 ─> D2 ─> R3 PASS ──────────────────�
 
 B1 calibration framework ─> B2 DEFERRED
                            └─ needs conclusive labels + local TYPESAFE_API_KEY
+
+road-intent 2592caf provenance ─> current-main carry 2d29125 ─> F1 causal admission
+                                                         ├─ REJECT/HOLD -> stop
+                                                         └─ ADMIT -> F2 hardening -> R4 review -> optional main integration
 
 Under the user's 15-arm cap, final deterministic validation is complete: recorded corpus 27/0/1, generated cohort 36 cases, terminal campaign 15/15 with zero cutoffs, all four terminal comparisons inconclusive, and zero admitted B2 labels. Static opening evidence remains valid after D2; terminal outcomes are explicitly pre-D2 continuation evidence. No production defect was found, so inconclusive terminal ranking evidence is not treated as a production blocker.
 ```
@@ -129,6 +137,7 @@ Concurrent writers use isolated worktrees:
 - Agent B: /home/hamza/repo/colonist-jev-calibration
 - Agent C: /home/hamza/repo/colonist-opening-validation
 - Agent D: /home/hamza/repo/colonist-d31-liquidity
+- Agent F: /home/hamza/repo/colonist-road-intent-validation
 
 Main checkout is clean and held as the stable integration destination. Continue implementation in the assigned isolated worktrees.
 
@@ -154,10 +163,12 @@ A1+A2 and D1+D2 are complete, reviewed, and integrated. C1+E1 are complete and i
 - E1 — COMPLETE; finalized report integrated as `0e270f4`.
 - C2 — NOT REQUIRED for the current conclusion. It becomes optional only if final-semantics terminal directionality is later desired.
 - B2 — DEFERRED. The capped campaign produced zero conclusive labels and `TYPESAFE_API_KEY` is unset, so the calibration contract cannot currently be satisfied. This is research-only and does not block production integration.
-- Main merge — COMPLETE locally at `1850977`. `origin/main` is not updated by this orchestration step.
+- Main merge — COMPLETE locally at `9aee018`. `origin/main` is not updated by this orchestration step.
 - D1+D2 — COMPLETE + REVIEWED + INTEGRATED as `a4bb9e6` + `35815e3`.
 - R3 — COMPLETE — PASS; review blocker discharged.
-- Road-intent — remains HOLD on `wip/road-intent-deadline@2592caf`; do not combine it with D1/D2.
+- Road-intent F1 — READY in a fresh web session on `agent/f1-road-intent-validation@2d29125`, which carries the preserved candidate onto current local main. Validate exact D27 causally before any hardening/review.
+- Old road-intent branch — `wip/road-intent-deadline@2592caf` remains provenance only; do not integrate it directly.
+- F2 — CONDITIONAL on F1 admission. If admitted, rebuild/synchronize generated WASM/frontend artifacts from the current base, then require independent Agent R review before integration.
 
 ## Transition log
 
@@ -183,3 +194,4 @@ A1+A2 and D1+D2 are complete, reviewed, and integrated. C1+E1 are complete and i
 - 2026-09-20: E1 completed at `ad1eb59`, verified the capped evidence package, corrected one research-only provenance boolean in ignored artifacts, and finalized the report. The report explicitly marks all 15 terminal arms as pre-D2 continuation evidence while preserving the static A1+A2 opening evidence. C2 is not required for the current conclusion.
 - 2026-09-20: planner integrated C1 tooling/report onto `orchestration/opening-rebuild` as `002b6a8`, `213ae85`, and `0e270f4`. Clean cherry-picks preserved the already integrated D1 diagnostic consumer in `jev-strategy-lab`; `git diff --check 6edfde6..0e270f4` passes. Under the user's explicit 15-arm cap, B2 is deferred rather than treated as a production blocker because there are no conclusive labels to calibrate against.
 - 2026-09-20: local `main` was fast-forwarded from `15cfc5e` to `1850977` after all required production review gates and the user-capped final-validation disposition were complete. This workflow did not push `origin/main`.
+- 2026-09-20: planner reopened the held road-intent lane as F1. A fresh validation worktree `/home/hamza/repo/colonist-road-intent-validation` on `agent/f1-road-intent-validation` was created from current local main `9aee018`, and preserved candidate `2592caf` was cleanly cherry-picked as `2d29125`. F1 is diagnostic/admission-only: exact hill6758 D27 reconstruction, deterministic gate reproduction, 4-stream event-family CRN forced-root comparison, deeper-search diagnostic, and D17-style negative controls.
