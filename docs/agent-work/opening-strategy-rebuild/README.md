@@ -39,12 +39,12 @@ Current frontier
 │  Commit 15b2365 remains unintegrated.
 │
 ├─ Wave 2 repair / A2 / Agent A
-│  READY — SAME SESSION
-│  Repair temporal denial causality and duplicated expansion ETA only.
+│  COMPLETE
+│  Repair commit 034b01f; worktree clean.
 │
 ├─ Review / R2 / Agent R
-│  BLOCKED -> A2
-│  Re-review the narrow A2 repair in the same reviewer session.
+│  READY — REVIEW / SAME SESSION
+│  Narrow repair range 15b2365..034b01f; blocks integration.
 │
 ├─ Wave 1 / B1 / Agent B
 │  COMPLETE + INTEGRATED
@@ -64,18 +64,18 @@ Planned effort: 45% A1 implementation | 20% B1 calibration research | 15% review
 
 | Agent | Mission | Status | Role | Workspace | Disposition | Reusable |
 | --- | --- | --- | --- | --- | --- | --- |
-| A | A1 | COMPLETE — BLOCKED BY REVIEW | implement | /home/hamza/repo/colonist-opening-architecture | REUSE AS A2 NOW | yes |
-| A | A2 | READY — SAME SESSION | implement repair | /home/hamza/repo/colonist-opening-architecture | SAME AGENT A SESSION | yes |
+| A | A1 | COMPLETE — BLOCKED BY REVIEW | implement | /home/hamza/repo/colonist-opening-architecture | COMPLETE | yes |
+| A | A2 | COMPLETE | implement repair | /home/hamza/repo/colonist-opening-architecture | COMPLETE @ 034b01f | yes |
 | B | B1 | COMPLETE + INTEGRATED | investigate + research tooling | /home/hamza/repo/colonist-jev-calibration | COMPLETE; reuse as B2 after reviewed A1/A2 integration | yes |
-| R | R1 | COMPLETE — BLOCKING FINDINGS | independent review | read-only target a169b28..15b2365 | REUSE AS R2 after A2 | yes |
-| R | R2 | BLOCKED -> A2 | independent re-review | read-only repair target after A2 | SAME AGENT R SESSION | yes |
+| R | R1 | COMPLETE — BLOCKING FINDINGS | independent review | read-only target a169b28..15b2365 | REUSE AS R2 NOW | yes |
+| R | R2 | READY — REVIEW | independent re-review | read-only repair range 15b2365..034b01f | SAME AGENT R SESSION NOW | yes |
 | D31 lane | preserved | HOLD | diagnostics | research/d31-road-wip @ 300914b | resume after opening frontier | yes |
 
 ## Blocker Ledger
 
 | Blocked item | Blocker | Owner | Discharge condition | Status/evidence |
 | --- | --- | --- | --- | --- |
-| A1 integration | two R1 blocking findings | A2/R2 | A2 repairs F1/F2 and R2 reports pass | BLOCKED — R1 found temporal-denial and duplicated-ETA defects |
+| A1 integration | R2 re-review | R2 | R2 reports pass on 15b2365..034b01f | READY — A2 complete @ 034b01f; awaiting R2 |
 | Wave 3 final validation | reviewed A1/A2 integration + final calibration inputs | A2/R2/B2 | R2 passes repair, corrected feature semantics are integrated, generated/matched labels exist, and local Jev credentials are available for live collection | BLOCKED; B1 framework integrated as e4b25ad |
 | merge back to main | reviewed integration + final validation | planner | R2 passes A2 and Wave 3 passes | BLOCKED |
 | D31 continuation | opening rebuild integration preferred first | planner | opening Wave 2 stable | HOLD |
@@ -125,12 +125,12 @@ The user explicitly authorized experimentation, tests, simulations, regression f
 
 ## Execution lifetime
 
-A1 is complete but review-blocked. Reuse the same Agent A session as A2 now. R2 reuses the same Agent R session after A2. B1 is complete; reuse the same Agent B session as B2 after reviewed A1/A2 integration and local Jev credentials are available.
+A1 and A2 are complete. R2 reuses the same Agent R session now. B1 is complete; reuse the same Agent B session as B2 after reviewed A1/A2 integration and local Jev credentials are available.
 
 ## Future / blocked work
 
-- Wave 2 repair — A2 is READY in the existing Agent A session; repair only R1 F1/F2.
-- R2 — blocked by A2; paste the re-review into the existing Agent R session after A2 commits.
+- Wave 2 repair — A2 COMPLETE at `034b01f`.
+- R2 — READY now; paste the re-review into the existing Agent R session.
 - B2 — live Jev collection/final calibration — blocked by reviewed/integrated A1/A2 feature semantics and local `TYPESAFE_API_KEY`.
 - Wave 3 — recorded corpus, generated boards, matched terminal streams, both trade modes, held-out Jev calibration — blocked by reviewed A1/A2 integration plus B2 inputs.
 - D31 — resume resource-liquidity/dev-card investigation from `research/d31-road-wip` after opening architecture is stable.
@@ -144,4 +144,5 @@ A1 is complete but review-blocked. Reuse the same Agent A session as A2 now. R2 
 - 2026-09-19: A1 reported ~60% complete: rival subtraction removed, causal denial and exact self-funding expansion implemented, hill6758/task9783 passing both trade modes; complete-build port semantics plus full corpus/simulation/build verification remain.
 - 2026-09-19: the dirty main-checkout road-intent implementation was preserved separately as `wip/road-intent-deadline` @ `2592caf`; focused Rust regression and main-worktree TypeScript check passed. It remains unreviewed and is not integrated. Main was restored clean at `15cfc5e`, matching `origin/main`.
 - 2026-09-19: A1 completed at `15b2365` on `agent/a1-opening-architecture`; worktree clean. Review range is `a169b28..15b2365`.
-- 2026-09-19: R1 returned two major blocking findings: (F1) causal denial was computed from the completed board rather than the root placement's decision-time setup state, allowing temporally impossible denial credit; (F2) unfunded expansion applied the same road+settlement ETA discount twice. Integration remains blocked. A2 is READY in the same Agent A session; R2 follows in the same Agent R session.
+- 2026-09-19: R1 returned two major blocking findings: (F1) causal denial was computed from the completed board rather than the root placement's decision-time setup state, allowing temporally impossible denial credit; (F2) unfunded expansion applied the same road+settlement ETA discount twice.
+- 2026-09-19: A2 completed at `034b01f`, repairing placement-time denial and removing the duplicate ETA denominator; focused validation passed and the worktree is clean. R2 is now READY in the same Agent R session.

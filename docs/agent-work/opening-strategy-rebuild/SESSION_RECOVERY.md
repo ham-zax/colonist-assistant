@@ -22,11 +22,12 @@ Do not reconstruct missing work from main. The unfinished lanes were preserved o
 - Mission: `A1`
 - Mission file:
   `/home/hamza/repo/colonist-opening-architecture/docs/agent-work/opening-strategy-rebuild/A1-opening-evaluator-architecture.md`
-- Status at this checkpoint: A1 complete and committed; R1 returned blocking findings.
+- Status at this checkpoint: A1 and A2 complete; R2 is ready.
 - A1 commit: `15b2365` — `Rebuild opening evaluator architecture`
+- A2 repair commit: `034b01f` — `Repair temporal opening evaluation`
 - Review base: `a169b28`
-- Worktree was clean after A1 and remains the repair workspace.
-- Integration is blocked until A2 repairs both R1 findings and R2 passes.
+- Worktree is clean.
+- Integration is blocked until R2 passes the narrow repair range `15b2365..034b01f`.
 
 A1 owns:
 
@@ -42,10 +43,11 @@ R1 found two major blockers:
 1. causal denial used the completed board rather than the placement-time setup state, allowing temporally impossible denial credit;
 2. unfunded expansion effectively applied the road+settlement ETA discount twice.
 
-A2 is READY in the same Agent A session. Its durable mission file is:
+A2 completed in the same Agent A session at `034b01f`. Its durable mission file is:
 `/home/hamza/repo/colonist-opening-orchestration/docs/agent-work/opening-strategy-rebuild/A2-opening-evaluator-review-repairs.md`
 
-After A2 commits, re-review only the repair in the same Agent R session as R2.
+R2 is READY in the same Agent R session. Its durable mission file is:
+`/home/hamza/repo/colonist-opening-orchestration/docs/agent-work/opening-strategy-rebuild/R2-opening-evaluator-repair-review.md`
 
 ### Agent B — Jev calibration framework
 
@@ -157,8 +159,8 @@ Do not mix the preserved D31/road lanes into the A1 review/repair loop.
 
 1. A1 is complete at `15b2365`.
 2. R1 is complete with two major blocking findings.
-3. Paste A2 into the existing Agent A session and repair only temporal denial causality plus duplicated expansion ETA.
-4. After A2 commits, paste R2 into the existing Agent R session.
+3. A2 is complete at `034b01f`, repairing only temporal denial causality plus duplicated expansion ETA.
+4. Paste R2 into the existing Agent R session now.
 5. If R2 passes, planner-integrate the reviewed A1+A2 range into the orchestration branch, then proceed to B2/Wave 3.
 6. After the opening architecture reaches a stable reviewed integration point, resume the pre-opening strategy lane.
 7. When resuming the earlier lane, inspect `research/d31-road-wip@300914b` and `wip/road-intent-deadline@2592caf` together before choosing what to carry forward. They overlap in `depth.rs`, so do **not** blindly merge or cherry-pick both.
@@ -207,7 +209,7 @@ Important preserved lanes:
 Do not assume preserved WIP branches are reviewed or integration-ready.
 Do not blindly merge research/d31-road-wip and wip/road-intent-deadline because they overlap in depth.rs.
 
-First report the verified current frontier. A1 is complete at 15b2365 and R1 returned two major blockers; A2 is the next action unless repository evidence shows a newer repair/review state. After the opening architecture is repaired, re-reviewed, and stable, resume the earlier D31/resource-liquidity and road-intent investigation from the preserved branches.
+First report the verified current frontier. A1 is complete at 15b2365, R1 returned two major blockers, and A2 is complete at 034b01f; R2 in the existing Agent R session is the next action unless repository evidence shows a newer review state. After the opening architecture is re-reviewed and stable, resume the earlier D31/resource-liquidity and road-intent investigation from the preserved branches.
 ```
 
 ## Recovery rule
