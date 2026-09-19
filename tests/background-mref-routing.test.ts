@@ -71,7 +71,10 @@ afterEach(() => {
 });
 
 describe("background Mref dispatch", () => {
-  it.each([
+  // Retain the native-concurrency integration cases for the lane that
+  // re-enables GPU routing. The CPU/WASM validation build never acquires a
+  // native owner, so these ownership assertions are intentionally dormant.
+  it.skip.each([
     { tab: { id: 2 }, documentId: "second", frameId: 0 },
     { tab: { id: 1 }, documentId: "replacement", frameId: 0 },
     { tab: { id: 1 }, documentId: "first", frameId: 1 },
@@ -98,7 +101,7 @@ describe("background Mref dispatch", () => {
     expect(native).toHaveBeenCalledOnce();
   });
 
-  it("remembers cancellation during initialization and permits a fresh decision", async () => {
+  it.skip("remembers cancellation during initialization and permits a fresh decision", async () => {
     const { dispatch, receive, status, native, cancel } = await setupRouter();
     let ready!: (status: typeof gpuStatus) => void;
     status.mockImplementationOnce(() => new Promise((resolve) => { ready = resolve; }));
@@ -114,7 +117,7 @@ describe("background Mref dispatch", () => {
     expect(native.mock.calls[0]?.[1]).not.toBe(cancel.mock.calls[0]?.[0]);
   });
 
-  it("cancels an active native search using its private request identity", async () => {
+  it.skip("cancels an active native search using its private request identity", async () => {
     const { dispatch, receive, native, cancel } = await setupRouter();
     native.mockImplementationOnce((_request, _id, signal) => new Promise((_resolve, reject) => {
       signal!.addEventListener("abort", () => reject(signal!.reason), { once: true });
@@ -129,13 +132,13 @@ describe("background Mref dispatch", () => {
     expect(analyze).toHaveBeenCalledOnce();
   });
 
-  it("uses WASM status after a native reconnect transport failure", async () => {
+  it("uses WASM status without probing the native companion while GPU routing is disabled", async () => {
     const { dispatch, status } = await setupRouter();
-    status.mockRejectedValueOnce(new Error("GPU companion handshake timed out"));
     const { warmDeepSearchEngine } = await import("../src/worker/deep-search");
     vi.mocked(warmDeepSearchEngine).mockResolvedValue({ engineRevision: "deep-maxn-v14", initializationMs: 2 });
     await expect(dispatch({ type: DECISION_STATUS_MESSAGE_TYPE, id: 1, engine: "deep-search" }, {}))
       .resolves.toMatchObject({ runtime: "background-wasm", engineRevision: "deep-maxn-v14" });
+    expect(status).not.toHaveBeenCalled();
   });
 
   it("subtracts only background-local elapsed time from the remaining decision allowance", async () => {
@@ -230,7 +233,7 @@ describe("background Mref dispatch", () => {
     });
   });
 
-  it("routes baseline non-opening Deep MaxN to exact CUDA when the companion is production-capable", async () => {
+  it("routes baseline non-opening Deep MaxN to CPU/WASM while native GPU validation is disabled", async () => {
     vi.resetModules();
     let receive: (message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => unknown;
     vi.stubGlobal("chrome", { runtime: { onMessage: { addListener: (listener: typeof receive) => { receive = listener; } } } });
@@ -246,13 +249,16 @@ describe("background Mref dispatch", () => {
       type: DECISION_MESSAGE_TYPE, id: 46, state: {}, rootPlayer: "P0", engine: "deep-search",
       board: { initialPlacement: false, isMyTurn: true }, stochastic: { model: M0 },
     }, {}, resolve));
-    expect(response).toMatchObject({ analysis: { runtime: "background-gpu", runtimeReason: "Exact CUDA MaxN on routing-fixture" } });
-    expect(status).toHaveBeenCalledOnce();
-    expect(native).toHaveBeenCalledWith({ stochastic: { model: M0 } }, expect.any(Number), expect.any(AbortSignal));
+    expect(response).toMatchObject({ analysis: {
+      runtime: "background-wasm",
+      runtimeReason: "Native GPU disabled for CPU/WASM validation; using WASM Deep MaxN",
+    } });
+    expect(status).not.toHaveBeenCalled();
+    expect(native).not.toHaveBeenCalled();
     expect(analyze).toHaveBeenCalledOnce();
   });
 
-  it("preserves Mref on WASM when the production companion disconnects", async () => {
+  it("preserves Mref on WASM without consulting the production companion", async () => {
     vi.resetModules();
     let receive: (message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => unknown;
     vi.stubGlobal("chrome", { runtime: { onMessage: { addListener: (listener: typeof receive) => { receive = listener; } } } });
@@ -270,17 +276,17 @@ describe("background Mref dispatch", () => {
     expect(response).toMatchObject({ analysis: {
       requestedModel: MREF,
       runtime: "background-wasm",
-      runtimeReason: expect.stringMatching(/Native GPU transport failed.*Mref preserved on CPU\/WASM Deep MaxN/u),
+      runtimeReason: "Native GPU disabled for CPU/WASM validation; using WASM Deep MaxN",
     } });
-    expect(status).toHaveBeenCalledOnce();
+    expect(status).not.toHaveBeenCalled();
     expect(native).not.toHaveBeenCalled();
-    expect(release).toHaveBeenCalledOnce();
+    expect(release).not.toHaveBeenCalled();
     expect(analyze).toHaveBeenCalledOnce();
     expect(analyze.mock.calls[0]?.[0]).toMatchObject({ stochastic: { model: MREF } });
     expect(analyze.mock.calls[0]?.[1]).toBeUndefined();
   });
 
-  it("reports the production MaxN runtime instead of rollout GPU availability", async () => {
+  it("reports CPU/WASM MaxN readiness without probing native GPU availability", async () => {
     vi.resetModules();
     let receive: (message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => unknown;
     vi.stubGlobal("chrome", { runtime: { onMessage: { addListener: (listener: typeof receive) => { receive = listener; } } } });
@@ -304,10 +310,10 @@ describe("background Mref dispatch", () => {
       ));
     expect(response).toMatchObject({
       id: 43,
-      runtime: "background-gpu",
+      runtime: "background-wasm",
       engineRevision: "deep-maxn-v14",
-      deviceName: "routing-fixture",
     });
-    expect(status).toHaveBeenCalledOnce();
+    expect(response).not.toMatchObject({ deviceName: expect.anything() });
+    expect(status).not.toHaveBeenCalled();
   });
 });
