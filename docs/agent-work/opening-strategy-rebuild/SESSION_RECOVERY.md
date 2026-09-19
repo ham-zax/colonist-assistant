@@ -213,10 +213,12 @@ Do not mix the preserved D31/road lanes into the opening Wave 3 validation/calib
 12. The final C1 report marks all 15 terminal outcomes as pre-D2 continuation evidence. All four pairwise comparisons are inconclusive and `admittedLabels` is empty.
 13. C2 is not required for the current conclusion. Create one only if post-D2 terminal directionality becomes a new research objective.
 14. B2 is deferred until conclusive labels plus a local `TYPESAFE_API_KEY` exist. It does not block production integration under the current user-directed cap.
-15. Local main was fast-forwarded from `15cfc5e` to `1850977` after the final coordination status was committed. `origin/main` was not pushed by this workflow.
+15. Local main is at `9aee018`; `origin/main` remains `15cfc5e` and was not pushed by this workflow.
 16. Treat `research/d31-road-wip@300914b` as a diagnostic/evidence donor, not an integration candidate. Do not cherry-pick it wholesale.
-17. Keep `wip/road-intent-deadline@2592caf` separate from D1/D2; it overlaps `depth.rs` and remains unreviewed.
-18. Independently review the road-intent candidate before any eventual integration; its focused regression passed, but the policy override still needs broader causal validation because earlier road disagreements produced Jev false positives.
+17. The preserved road-intent candidate `2592caf` was cleanly carried onto current local main in `/home/hamza/repo/colonist-road-intent-validation`, branch `agent/f1-road-intent-validation`, commit `2d29125`.
+18. Run fresh web Agent F / Mission F1 from `docs/agent-work/opening-strategy-rebuild/F1-road-intent-admission-validation.md`. F1 is causal admission only: exact D27 reconstruction, deterministic gate reproduction, bounded event-family CRN matched continuation, deeper-search diagnostic, and D17-style negative controls.
+19. If F1 rejects or remains inconclusive, keep road-intent on HOLD and do not tune it.
+20. If F1 admits, continue as F2 in the same Agent F session to rebuild/synchronize current-base WASM/frontend artifacts, then require independent Agent R review before any main integration.
 
 ## Copy-paste recovery prompt for a future ChatGPT session
 
@@ -259,7 +261,7 @@ Important preserved lanes:
 Do not assume preserved WIP branches are reviewed or integration-ready.
 Do not blindly merge research/d31-road-wip and wip/road-intent-deadline because they overlap in depth.rs.
 
-First report the verified current frontier. A1+A2 and D1+D2 are reviewed and integrated. C1+E1 are complete and integrated; under the 15-arm user cap all terminal comparisons are inconclusive and admittedLabels is empty, so no post-D2 C2 rerun is required for the current conclusion. B2 is deferred research until conclusive labels and a local TYPESAFE_API_KEY exist. Local main has been fast-forwarded through the reviewed opening/D31/C1 integration; origin/main has not been pushed by this workflow. Keep research/d31-road-wip@300914b as an evidence donor only and keep wip/road-intent-deadline@2592caf separate.
+First report the verified current frontier. A1+A2 and D1+D2 are reviewed and integrated. C1+E1 are complete and integrated; under the 15-arm user cap all terminal comparisons are inconclusive and admittedLabels is empty, so no post-D2 C2 rerun is required for the current conclusion. B2 is deferred research until conclusive labels and a local TYPESAFE_API_KEY exist. Local main is at 9aee018 and origin/main remains 15cfc5e. The road-intent lane is now F1-ready on /home/hamza/repo/colonist-road-intent-validation, branch agent/f1-road-intent-validation @ 2d29125; use 2592caf only as provenance and do not integrate it directly.
 ```
 
 ## Recovery rule
