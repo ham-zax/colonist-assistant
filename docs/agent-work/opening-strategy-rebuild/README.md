@@ -33,8 +33,8 @@ Rebuild the opening strategy evaluator around causally meaningful primitives ins
 
 Current frontier
 ├─ Wave 1 / A1 / Agent A
-│  CONTINUE
-│  Worktree has uncommitted opening/economy/eval implementation in progress.
+│  CONTINUE — self-reported ~60% complete
+│  Objective/denial/self-funding work is in place; complete-build port semantics and full validation remain.
 │
 ├─ Wave 1 / B1 / Agent B
 │  COMPLETE + INTEGRATED
@@ -58,7 +58,7 @@ Planned effort: 45% A1 implementation | 20% B1 calibration research | 15% review
 
 | Agent | Mission | Status | Role | Workspace | Disposition | Reusable |
 | --- | --- | --- | --- | --- | --- | --- |
-| A | A1 | CONTINUE | implement | /home/hamza/repo/colonist-opening-architecture | CONTINUE | yes |
+| A | A1 | CONTINUE (~60% self-reported) | implement | /home/hamza/repo/colonist-opening-architecture | CONTINUE | yes |
 | B | B1 | COMPLETE + INTEGRATED | investigate + research tooling | /home/hamza/repo/colonist-jev-calibration | COMPLETE; reuse as B2 after A1 | yes |
 | R | R1 | PLANNED | independent review | read-only target after A1 | NEW SESSION later | R2 |
 | D31 lane | preserved | HOLD | diagnostics | research/d31-road-wip @ 300914b | resume after opening frontier | yes |
@@ -132,3 +132,5 @@ A1: `persistent-agent-loop`. B1 is complete; reuse the same Agent B session as B
 - 2026-09-19: D31/road dirty state preserved on `research/d31-road-wip` @ `300914b`.
 - 2026-09-19: main checkout observed receiving concurrent road-intent edits; opening work isolated to dedicated worktrees.
 - 2026-09-19: B1 completed offline calibration tooling at `8f25ccb`; planner integrated it into the orchestration branch as `e4b25ad`. Live Jev calibration remains blocked by stable A1 semantics and a locally supplied credential.
+- 2026-09-19: A1 reported ~60% complete: rival subtraction removed, causal denial and exact self-funding expansion implemented, hill6758/task9783 passing both trade modes; complete-build port semantics plus full corpus/simulation/build verification remain.
+- 2026-09-19: the dirty main-checkout road-intent implementation was preserved separately as `wip/road-intent-deadline` @ `2592caf`; focused Rust regression and main-worktree TypeScript check passed. It remains unreviewed and is not integrated.
