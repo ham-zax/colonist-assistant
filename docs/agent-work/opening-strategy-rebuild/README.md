@@ -35,24 +35,24 @@ Rebuild the opening strategy evaluator around causally meaningful primitives ins
 
 Current frontier
 ├─ Wave 1 / A1 / Agent A
-│  CONTINUE — self-reported ~60% complete
-│  Objective/denial/self-funding work is in place; complete-build port semantics and full validation remain.
+│  COMPLETE
+│  Commit 15b2365; branch clean; integration blocked by R1.
 │
 ├─ Wave 1 / B1 / Agent B
 │  COMPLETE + INTEGRATED
-│  Calibration framework integrated as e4b25ad; live numeric calibration waits for A1 semantics and local credentials.
+│  Calibration framework integrated as e4b25ad; live numeric calibration waits for reviewed A1 semantics and local credentials.
+│
+├─ Review / R1 / Agent R
+│  READY — REVIEW / NEW SESSION
+│  Review target a169b28..15b2365; blocks A1 integration.
 │
 ├─ D31 / preserved WIP
 │  HOLD
 │  research/d31-road-wip @ 300914b preserves current midgame/road diagnostics.
 │
-├─ Main checkout
-│  CLEAN / HOLD
-│  Previous road-intent edits were preserved on wip/road-intent-deadline @ 2592caf; main now matches origin/main.
-│
-└─ Wave 2 / R1 independent review
-   PLANNED
-   Blocks A1 integration once A1 reports complete.
+└─ Main checkout
+   CLEAN / HOLD
+   Previous road-intent edits were preserved on wip/road-intent-deadline @ 2592caf; main matches origin/main.
 
 Planned effort: 45% A1 implementation | 20% B1 calibration research | 15% review/integration | 20% final validation
 
@@ -60,16 +60,16 @@ Planned effort: 45% A1 implementation | 20% B1 calibration research | 15% review
 
 | Agent | Mission | Status | Role | Workspace | Disposition | Reusable |
 | --- | --- | --- | --- | --- | --- | --- |
-| A | A1 | CONTINUE (~60% self-reported) | implement | /home/hamza/repo/colonist-opening-architecture | CONTINUE | yes |
-| B | B1 | COMPLETE + INTEGRATED | investigate + research tooling | /home/hamza/repo/colonist-jev-calibration | COMPLETE; reuse as B2 after A1 | yes |
-| R | R1 | PLANNED | independent review | read-only target after A1 | NEW SESSION later | R2 |
+| A | A1 | COMPLETE | implement | /home/hamza/repo/colonist-opening-architecture | COMPLETE; reuse as A2 only if R1 blocks | yes |
+| B | B1 | COMPLETE + INTEGRATED | investigate + research tooling | /home/hamza/repo/colonist-jev-calibration | COMPLETE; reuse as B2 after reviewed A1 integration | yes |
+| R | R1 | READY — REVIEW | independent review | read-only target a169b28..15b2365 | NEW SESSION now | R2 |
 | D31 lane | preserved | HOLD | diagnostics | research/d31-road-wip @ 300914b | resume after opening frontier | yes |
 
 ## Blocker Ledger
 
 | Blocked item | Blocker | Owner | Discharge condition | Status/evidence |
 | --- | --- | --- | --- | --- |
-| A1 integration | independent review | R1 | R1 reports no blocking findings | PLANNED |
+| A1 integration | independent review | R1 | R1 reports no blocking findings | READY — review target a169b28..15b2365 |
 | Wave 3 final validation | reviewed A1 integration + final calibration inputs | A1/R1/B2 | R1 passes A1, corrected feature semantics are integrated, generated/matched labels exist, and local Jev credentials are available for live collection | BLOCKED; B1 framework integrated as e4b25ad |
 | merge back to main | reviewed integration + final validation | planner | R1 passes A1 and Wave 3 passes | BLOCKED |
 | D31 continuation | opening rebuild integration preferred first | planner | opening Wave 2 stable | HOLD |
@@ -95,7 +95,7 @@ D31 WIP remains separate and resumes after opening integration.
 - Do not replace one unvalidated universal score with another.
 - Player trades OFF and ON are both first-class validation modes.
 - Preserve the CPU/WASM-only runtime gate unless a mission explicitly owns runtime routing.
-- Do not touch the active main checkout while its concurrent writer remains unresolved.
+- Keep main clean as the stable integration destination; implementation remains in assigned isolated worktrees.
 
 ## Workspace policy
 
@@ -119,12 +119,12 @@ The user explicitly authorized experimentation, tests, simulations, regression f
 
 ## Execution lifetime
 
-A1: `persistent-agent-loop`. B1 is complete; reuse the same Agent B session as B2 after A1 publishes stable feature semantics.
+A1 is complete. B1 is complete; reuse the same Agent B session as B2 after A1 passes review/integration and local Jev credentials are available.
 
 ## Future / blocked work
 
-- Wave 2 — independent review + A1 integration — blocked by A1 completion.
-- B2 — live Jev collection/final calibration — blocked by stable A1 feature semantics and local `TYPESAFE_API_KEY`.
+- Wave 2 — independent review + A1 integration — R1 is READY now.
+- B2 — live Jev collection/final calibration — blocked by reviewed/integrated A1 feature semantics and local `TYPESAFE_API_KEY`.
 - Wave 3 — recorded corpus, generated boards, matched terminal streams, both trade modes, held-out Jev calibration — blocked by reviewed A1 integration plus B2 inputs.
 - D31 — resume resource-liquidity/dev-card investigation from `research/d31-road-wip` after opening architecture is stable.
 
@@ -136,3 +136,4 @@ A1: `persistent-agent-loop`. B1 is complete; reuse the same Agent B session as B
 - 2026-09-19: B1 completed offline calibration tooling at `8f25ccb`; planner integrated it into the orchestration branch as `e4b25ad`. Live Jev calibration remains blocked by stable A1 semantics and a locally supplied credential.
 - 2026-09-19: A1 reported ~60% complete: rival subtraction removed, causal denial and exact self-funding expansion implemented, hill6758/task9783 passing both trade modes; complete-build port semantics plus full corpus/simulation/build verification remain.
 - 2026-09-19: the dirty main-checkout road-intent implementation was preserved separately as `wip/road-intent-deadline` @ `2592caf`; focused Rust regression and main-worktree TypeScript check passed. It remains unreviewed and is not integrated. Main was restored clean at `15cfc5e`, matching `origin/main`.
+- 2026-09-19: A1 completed at `15b2365` on `agent/a1-opening-architecture`; worktree clean. Review range is `a169b28..15b2365`. R1 is now the active integration blocker.
