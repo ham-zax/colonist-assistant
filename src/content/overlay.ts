@@ -406,6 +406,7 @@ export class AssistantOverlay {
   private decisionRuntime?: DecisionRuntime;
   private decisionRuntimeDetail = "Connecting to the packaged search engine.";
   private decisionRuntimeError = "";
+  private lastDecisionRuntimeError = "";
   /** Evidence failures retry only when their public input changes, not every render. */
   private decisionEvidenceWait?: string;
   private decisionContextInvalidated = false;
@@ -477,17 +478,23 @@ export class AssistantOverlay {
         status.runtime === "background-wasm"
       ) {
         this.decisionRuntime = status.runtime;
-        this.decisionRuntimeError = "";
-        this.decisionRuntimeDetail =
-          `${status.detail}${status.initializationMs !== undefined ? ` in ${Math.max(1, Math.round(status.initializationMs))} ms` : ""}.`;
+        if (!this.decisionRuntimeError) {
+          this.decisionRuntimeDetail =
+            `${status.detail}${status.initializationMs !== undefined ? ` in ${Math.max(1, Math.round(status.initializationMs))} ms` : ""}.`;
+        }
       } else {
         this.decisionRuntime = undefined;
-        this.decisionEvidenceWait = undefined;
-        this.decisionRuntimeError = status.detail;
         if (status.detail === EXTENSION_CONTEXT_RELOAD_MESSAGE) {
+          this.lastDecisionRuntimeError = status.detail;
+          this.decisionEvidenceWait = undefined;
+          this.decisionRuntimeError = status.detail;
+          this.decisionRuntimeDetail = status.detail;
           this.decisionContextInvalidated = true;
+        } else if (!this.decisionRuntimeError) {
+          this.lastDecisionRuntimeError = status.detail;
         }
       }
+      this.captureGameRecord();
       this.render();
     });
   }
@@ -732,6 +739,7 @@ export class AssistantOverlay {
       this.decisionSlowKey = "";
       this.decisionWaitingForPreviousSearch = false;
       this.decisionRuntimeError = "";
+      this.lastDecisionRuntimeError = "";
       this.decisionWorker.reset();
       this.winPredictions.reset();
       this.confirmedPlacement = undefined;
@@ -1027,6 +1035,7 @@ export class AssistantOverlay {
     this.decisionSlowKey = "";
     this.decisionWaitingForPreviousSearch = false;
     this.decisionRuntimeError = "";
+    this.lastDecisionRuntimeError = "";
     this.decisionWorker.reset();
     this.winPredictions.reset();
     this.activeSpatial = undefined;
@@ -1518,6 +1527,71 @@ export class AssistantOverlay {
     void saveSettings(settings);
   }
 
+  private liveDiceAuthorityForRecord() {
+    const board = this.board;
+    const expectedRollCount = board?.gameplayRollCount;
+    if (
+      !board ||
+      board.diceMode !== "balanced" ||
+      expectedRollCount === undefined ||
+      !Number.isInteger(expectedRollCount) ||
+      !board.playerOrder?.length
+    ) {
+      return undefined;
+    }
+    const history = this.usableSessionDiceHistory(board);
+    if (!history) {
+      return {
+        status: "rejected" as const,
+        expectedRollCount,
+        reason: "Compatible public dice history is unavailable.",
+      };
+    }
+    const currentRoll =
+      board.hasRolled === true &&
+      board.currentPlayer &&
+      board.lastRoll !== undefined &&
+      Number.isInteger(board.lastRoll) &&
+      expectedRollCount > 0
+        ? {
+            ordinal: expectedRollCount - 1,
+            actor: board.currentPlayer,
+            total: board.lastRoll,
+          }
+        : undefined;
+    try {
+      const stochastic = buildLiveDecisionStochasticInput(
+        board.diceMode,
+        history,
+        board.playerOrder,
+        expectedRollCount,
+        currentRoll,
+      );
+      return {
+        status: "accepted" as const,
+        expectedRollCount,
+        model: stochastic.model,
+        ...(stochastic.provenance
+          ? { provenance: stochastic.provenance }
+          : {}),
+        rollCount: stochastic.rolls?.length ?? 0,
+        ...(stochastic.missingPrefixRolls !== undefined
+          ? { missingPrefixRolls: stochastic.missingPrefixRolls }
+          : {}),
+        gaps: stochastic.gaps?.map((gap) => ({ ...gap })) ?? [],
+      };
+    } catch (error) {
+      return {
+        status: "rejected" as const,
+        expectedRollCount,
+        reason:
+          error instanceof Error
+            ? error.message
+            : "Balanced Dice stochastic evidence is unavailable.",
+      };
+    }
+  }
+
   private captureGameRecord(finalize = false): void {
     if (!this.settings.recordGame || !this.session) return;
     const boardGameKey = this.board?.gameKey;
@@ -1533,6 +1607,7 @@ export class AssistantOverlay {
       return;
     }
     const gameKey = boardGameKey ?? sessionGameKey;
+    const liveDiceAuthority = this.liveDiceAuthorityForRecord();
     const capture = {
       scope: gameKey ?? this.session.id,
       sessionId: this.session.id,
@@ -1540,16 +1615,31 @@ export class AssistantOverlay {
       startedAt: this.session.startedAt,
       partialHistory: this.session.partialHistory,
       trackerWarnings: [...this.session.state.warnings],
+      ...(this.session.partialHistory
+        ? { cardHistoryDetail: this.session.cardHistoryDetail }
+        : {}),
       unmatchedCount: this.session.unmatchedCount,
       unmatchedIntegrityCount: this.session.unmatchedIntegrityCount,
       unmatchedSamples: this.session.unmatchedSamples.map((sample) => ({ ...sample })),
       diceHistory: this.session.diceHistory,
+      ...(liveDiceAuthority ? { liveDiceAuthority } : {}),
       playerOrder: [...this.session.state.playerOrder],
       assistant: {
         extensionBuild: this.buildInfo.identity,
         engine: this.settings.engine,
         disablePlayerTrades: this.settings.disablePlayerTrades,
         autopilot: this.settings.autonomousPrivateGames,
+        ...(this.decisionRuntime ? { runtime: this.decisionRuntime } : {}),
+        ...(this.decisionRuntimeDetail
+          ? { runtimeDetail: this.decisionRuntimeDetail }
+          : {}),
+        ...(this.decisionRuntimeError
+          ? { runtimeError: this.decisionRuntimeError }
+          : {}),
+        ...(this.lastDecisionRuntimeError
+          ? { lastRuntimeError: this.lastDecisionRuntimeError }
+          : {}),
+        ...(this.decisionContextInvalidated ? { contextInvalidated: true } : {}),
       },
       events: this.session.events,
       // Record Mode consumes bounded replay evidence only for decisions that
@@ -3035,20 +3125,6 @@ export class AssistantOverlay {
       this.decisionWaitingForPreviousSearch = false;
       return;
     }
-    if (this.decisionRuntimeError) {
-      this.decisionPendingKey = "";
-      this.decisionSlowKey = "";
-      this.decisionWaitingForPreviousSearch = false;
-      if (
-        this.decisionEvidenceWait === undefined ||
-        this.decisionEvidenceWait === this.stochasticEvidenceSignature(board)
-      ) return;
-      // A board snapshot can precede log attachment, parsing, or seat mapping.
-      // Re-run the same fail-closed constructor after that evidence changes.
-      // Runtime/transport failures still require an explicit retry.
-      this.decisionEvidenceWait = undefined;
-      this.decisionRuntimeError = "";
-    }
     if (
       board.initialPlacement &&
       !board.isMyTurn &&
@@ -3164,6 +3240,9 @@ export class AssistantOverlay {
       this.decisionKey = "";
       this.decisionPendingKey = "";
       this.decisionSlowKey = "";
+      this.decisionWaitingForPreviousSearch = false;
+      this.decisionRuntimeError = "";
+      this.decisionEvidenceWait = undefined;
       this.decisionTraces.supersedePending();
       this.decisionWorker.reset();
       return;
@@ -3176,6 +3255,29 @@ export class AssistantOverlay {
       searchConstraints,
     );
     const traceKey = decisionStateDigest(key);
+    if (this.decisionRuntimeError) {
+      this.decisionPendingKey = "";
+      this.decisionSlowKey = "";
+      this.decisionWaitingForPreviousSearch = false;
+      if (this.decisionEvidenceWait !== undefined) {
+        if (
+          this.decisionEvidenceWait === this.stochasticEvidenceSignature(board)
+        ) {
+          return;
+        }
+        // A board snapshot can precede log attachment, parsing, or seat
+        // mapping. Re-run the fail-closed constructor only after that public
+        // evidence changes.
+        this.decisionEvidenceWait = undefined;
+        this.decisionRuntimeError = "";
+      } else if (this.decisionKey === key) {
+        // Keep the failed position closed until explicit retry, but do not let
+        // one transport/runtime failure poison later board states.
+        return;
+      } else {
+        this.decisionRuntimeError = "";
+      }
+    }
     if (key !== this.decisionKey) {
       this.decisionKey = key;
       this.decisionAnalysis = undefined;
@@ -3211,6 +3313,7 @@ export class AssistantOverlay {
         : detail;
       this.decisionRuntimeError = displayedDetail;
       this.decisionRuntimeDetail = displayedDetail;
+      this.lastDecisionRuntimeError = displayedDetail;
       this.decisionTraces.failure(traceKey, displayedDetail);
       const isWait = this.decisionEvidenceWait !== undefined;
       const reportFailure = isWait ? console.warn : console.error;
@@ -3241,7 +3344,9 @@ export class AssistantOverlay {
       const detail = "Public dice roll arrived before the board turn snapshot; waiting for the board state to catch up";
       this.decisionRuntimeError = detail;
       this.decisionRuntimeDetail = detail;
+      this.lastDecisionRuntimeError = detail;
       this.decisionTraces.supersedePending();
+      this.captureGameRecord();
       this.render();
       return;
     }
@@ -3417,6 +3522,7 @@ export class AssistantOverlay {
       this.decisionContextInvalidated = true;
       this.decisionRuntimeError = EXTENSION_CONTEXT_RELOAD_MESSAGE;
       this.decisionRuntimeDetail = EXTENSION_CONTEXT_RELOAD_MESSAGE;
+      this.lastDecisionRuntimeError = EXTENSION_CONTEXT_RELOAD_MESSAGE;
       this.decisionTraces.failure(traceKey, EXTENSION_CONTEXT_RELOAD_MESSAGE);
     }
   }
@@ -3489,6 +3595,17 @@ export class AssistantOverlay {
         ? { bank: board.bank, resourceSupply }
         : {}),
     });
+    const publicFallback =
+      this.session?.partialHistory || !resources.worlds.length
+        ? this.stateFromPublicBoard(board)
+        : undefined;
+    if (this.session?.partialHistory && publicFallback?.worlds.length) {
+      // Once indexed card history is known incomplete, do not preserve a
+      // composition posterior whose missing transfers happened to satisfy the
+      // public hand-size filter. Keep tracked metadata, but replace hidden
+      // resource worlds with the current physical-card conditional.
+      return { ...resources, worlds: publicFallback.worlds };
+    }
     if (resources.worlds.length || !hasTrackedPlayers) return resources;
 
     // A midgame attach can recover enough public log history to discover the
@@ -3496,7 +3613,6 @@ export class AssistantOverlay {
     // the exact hand sizes/bank Colonist currently exposes. The public board is
     // authoritative at that boundary, so reuse the existing physical-card
     // fallback posterior instead of leaving the selected engine with no worlds.
-    const publicFallback = this.stateFromPublicBoard(board);
     return publicFallback?.worlds.length
       ? { ...resources, worlds: publicFallback.worlds }
       : resources;

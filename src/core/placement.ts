@@ -135,6 +135,7 @@ export interface LocalSeatDiagnostics {
   rawPlayOrderColors?: number[];
   currentActorColor?: number;
   currentActorPlayer?: string;
+  currentActorSource?: "turn-progress" | "controller" | "store";
   isMyTurn?: boolean;
   localActionState?: number;
   managerModuleId?: string;

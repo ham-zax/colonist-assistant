@@ -506,8 +506,8 @@ import {
     const diceState =
       gameController.diceState?.state ??
       gameController.diceState ??
-      storeGameState?.diceState ??
-      managerGameState?.diceState;
+      managerGameState?.diceState ??
+      storeGameState?.diceState;
     const bankState =
       gameController.bankState?.state ??
       gameController.bankState ??
@@ -625,6 +625,14 @@ import {
     action = resolveLocalBoardAction(action, discardPromptVisible);
     if (!identityResolved) action = "none";
     const initialPlacement = currentState.turnState === 0;
+    const setupTurnCount = 2 * playOrder.length;
+    if (
+      !initialPlacement &&
+      playOrder.length >= 2 &&
+      completedTurns < setupTurnCount
+    ) {
+      return undefined;
+    }
 
     const hexes = tileState._tiles.flatMap((tile: Record<string, any>, index: number) => {
       const resource = RESOURCE_BY_TILE_TYPE[tile.state?.type];
@@ -994,13 +1002,50 @@ import {
       !ownDevelopmentState?.hasUsedDevelopmentCardThisTurn
         ? subtractDevelopmentCards(ownDevelopmentCards, boughtThisTurn)
         : developmentCardVector([]);
-    const currentTurnPlayers: number[] = Array.isArray(
+    const controllerCurrentActorColor = Number(
+      currentState.currentTurnPlayerColor,
+    );
+    const storeCurrentTurnPlayers: number[] = Array.isArray(
       rootStoreState?.gameState?.experimentalMechanicState?.currentState
         ?.currentTurnPlayers,
     )
       ? rootStoreState.gameState.experimentalMechanicState.currentState
           .currentTurnPlayers
-      : [Number(currentState.currentTurnPlayerColor)].filter(Number.isFinite);
+          .map(Number)
+          .filter(Number.isFinite)
+      : [];
+    const expectedGameplayActorColor =
+      !initialPlacement &&
+      playOrder.length >= 2 &&
+      completedTurns >= setupTurnCount
+        ? playOrder[(completedTurns - setupTurnCount) % playOrder.length]
+        : undefined;
+    if (
+      expectedGameplayActorColor !== undefined &&
+      Number.isFinite(controllerCurrentActorColor) &&
+      controllerCurrentActorColor !== expectedGameplayActorColor
+    ) {
+      // Never publish a transition frame whose actor disagrees with the same
+      // completedTurns value used to construct the Balanced-Dice ordinal.
+      return undefined;
+    }
+    // After setup, completedTurns + playOrder is the actor authority paired
+    // with gameplayRollCount. During setup (or on older controller shapes),
+    // prefer the controller and retain Redux only as a compatibility fallback.
+    const currentTurnPlayers: number[] =
+      expectedGameplayActorColor !== undefined
+        ? [expectedGameplayActorColor]
+        : Number.isFinite(controllerCurrentActorColor)
+          ? [controllerCurrentActorColor]
+          : storeCurrentTurnPlayers;
+    const currentActorSource =
+      expectedGameplayActorColor !== undefined
+        ? "turn-progress"
+        : Number.isFinite(controllerCurrentActorColor)
+          ? "controller"
+          : storeCurrentTurnPlayers.length
+            ? "store"
+            : undefined;
     const activeTrades = identityResolved
       ? Object.values<Record<string, any>>(
           tradeState?.activeOffers ?? {},
@@ -1139,7 +1184,6 @@ import {
     // 2*N placement turns; the currently-thrown die belongs to the next ordinal
     // before completedTurns advances. Keep this semantic count separate from
     // the UI turn counter.
-    const setupTurnCount = 2 * playOrder.length;
     const gameplayRollCount = initialPlacement
       ? 0
       : playOrder.length >= 2 && completedTurns >= setupTurnCount
@@ -1276,6 +1320,7 @@ import {
           ? {
               currentActorColor: currentTurnPlayers[0],
               currentActorPlayer: playerName(gameController, currentTurnPlayers[0]),
+              ...(currentActorSource ? { currentActorSource } : {}),
             }
           : {}),
         isMyTurn: Boolean(gameController.isMyTurn),

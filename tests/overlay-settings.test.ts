@@ -1306,6 +1306,131 @@ describe("overlay settings interaction", () => {
     }
   });
 
+  it("keeps a warm-up failure advisory until an authoritative decision request fails", async () => {
+    let finishWarm!: (value: unknown) => void;
+    sendMessage.mockImplementationOnce(() => new Promise((resolve) => { finishWarm = resolve; }));
+    const overlay = new AssistantOverlay({ ...DEFAULT_SETTINGS }, { reset: vi.fn() });
+    const internals = overlay as unknown as {
+      decisionRuntimeError: string;
+      lastDecisionRuntimeError: string;
+      render: () => void;
+    };
+    vi.spyOn(internals, "render").mockImplementation(() => undefined);
+    try {
+      finishWarm({ id: 1, error: "Warm probe failed" });
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      expect(internals.decisionRuntimeError).toBe("");
+      expect(internals.lastDecisionRuntimeError).toBe("Warm probe failed");
+    } finally {
+      overlay.destroy();
+    }
+  });
+
+  it.each(["ready", "failed"])("does not let a %s same-key warm-up replace an active decision error", async (outcome) => {
+    let finishWarm!: (value: unknown) => void;
+    sendMessage.mockImplementationOnce(() => new Promise((resolve) => { finishWarm = resolve; }));
+    const overlay = new AssistantOverlay({ ...DEFAULT_SETTINGS }, { reset: vi.fn() });
+    const internals = overlay as unknown as {
+      decisionRuntimeError: string;
+      decisionRuntimeDetail: string;
+      lastDecisionRuntimeError: string;
+      render: () => void;
+    };
+    vi.spyOn(internals, "render").mockImplementation(() => undefined);
+    try {
+      internals.decisionRuntimeError = "Current decision failed";
+      internals.decisionRuntimeDetail = internals.decisionRuntimeError;
+      internals.lastDecisionRuntimeError = internals.decisionRuntimeError;
+      finishWarm(outcome === "ready"
+        ? {
+            id: 1,
+            runtime: "background-wasm",
+            engineRevision: "test-engine",
+            initializationMs: 1,
+          }
+        : { id: 1, error: "Older warm probe failed" });
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      expect(internals.decisionRuntimeError).toBe("Current decision failed");
+      expect(internals.decisionRuntimeDetail).toBe("Current decision failed");
+      expect(internals.lastDecisionRuntimeError).toBe("Current decision failed");
+    } finally {
+      overlay.destroy();
+    }
+  });
+
+  it("retries an engine failure after the board moves to a new decision key", async () => {
+    const tracker = reduceTracker(createTrackerState(), {
+      type: "discover",
+      player: "rodrgds",
+    });
+    const overlay = new AssistantOverlay({ ...DEFAULT_SETTINGS }, { reset: vi.fn() });
+    await Promise.resolve();
+    sendMessage.mockClear();
+    sendMessage.mockImplementation((message: { id: number }) =>
+      Promise.resolve({
+        id: message.id,
+        analysis: {
+          engine: "deep-search",
+          runtime: "background-wasm",
+          players: [],
+        },
+      }),
+    );
+    const internals = overlay as unknown as {
+      board: Parameters<AssistantOverlay["updateBoard"]>[0];
+      decisionKey: string;
+      decisionRuntimeError: string;
+      decisionEvidenceWait?: string;
+      decisionAnalysis?: unknown;
+      scheduleDecisionAnalysis: (
+        state: ReturnType<typeof createTrackerState>,
+        player: string,
+      ) => void;
+      render: () => void;
+    };
+    vi.spyOn(internals, "render").mockImplementation(() => undefined);
+    try {
+      internals.decisionKey = "failed-old-position";
+      internals.decisionRuntimeError = "Worker stopped.";
+      internals.decisionEvidenceWait = undefined;
+      internals.board = {
+        hexes: [],
+        vertices: [],
+        edges: [],
+        diceMode: "random",
+        gameKey: "runtime-recovery",
+        turn: 9,
+        myPlayer: "rodrgds",
+        currentPlayer: "rodrgds",
+        playerOrder: ["rodrgds"],
+        isMyTurn: true,
+        hasRolled: true,
+        action: "none",
+        localSeatDiagnostics: {
+          seatSource: "gameController.myColor+currentUserId+gameUserStates",
+          identity: {
+            status: "resolved",
+            reason: "cross-checked",
+            source: "controller+account-user-id+store-roster",
+            currentUserIdAvailable: true,
+            currentUserMatchColors: [1],
+            myColor: 1,
+            currentUserColor: 1,
+          },
+        },
+      };
+
+      internals.scheduleDecisionAnalysis(tracker, "rodrgds");
+
+      expect(internals.decisionRuntimeError).toBe("");
+      expect(sendMessage).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(internals.decisionAnalysis).toBeDefined());
+      expect(internals.decisionKey).not.toBe("failed-old-position");
+    } finally {
+      overlay.destroy();
+    }
+  });
+
   it.each(["ready", "failed"])("does not let a late %s warm-up overwrite a newer evidence error", async (outcome) => {
     let finishWarm!: (value: unknown) => void;
     sendMessage.mockImplementationOnce(() => new Promise((resolve) => { finishWarm = resolve; }));

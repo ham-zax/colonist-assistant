@@ -25,11 +25,30 @@ const openPage = (saved: Record<string, string> = {}, turn = 25) => {
   pages.push(page);
   const { window } = page;
   for (const [key, value] of Object.entries(saved)) window.sessionStorage.setItem(key, value);
-  const currentState: { turnState?: number; completedTurns?: number } = {
-    turnState: turn === 0 ? 0 : 1, completedTurns: turn,
+  const currentState: {
+    turnState?: number;
+    completedTurns?: number;
+    currentTurnPlayerColor?: number;
+  } = {
+    turnState: turn === 0 ? 0 : 1,
+    completedTurns: turn,
+    currentTurnPlayerColor:
+      turn === 0 ? 1 : [1, 2, 3, 4][(turn - 8) % 4],
   };
   const playerStates: Record<number, object> = { 1: {}, 2: {}, 3: {}, 4: {} };
-  const gameState = {
+  const gameState: {
+    mapState: {
+      tileState: {
+        _tiles: Array<{ hexFace: { x: number; y: number }; state: { type: number; diceNumber: number } }>;
+        _tileCorners: Array<{ hexCorner: { x: number; y: number; z: number }; owner: number; buildingType: number }>;
+        _tileEdges: unknown[];
+      };
+    };
+    playerStates: Record<number, object>;
+    experimentalMechanicState?: {
+      currentState: { currentTurnPlayers: number[] };
+    };
+  } = {
     mapState: { tileState: {
       _tiles: [{ hexFace: { x: 0, y: 0 }, state: { type: 1, diceNumber: 6 } }],
       _tileCorners: [{ hexCorner: { x: 0, y: 0, z: 0 }, owner: 1, buildingType: 1 }],
@@ -146,6 +165,76 @@ describe("page bridge progress boundaries", () => {
     page.playerStates[4] = {};
     page.refresh();
     expect(page.snapshot()?.playerOrder).toEqual(["Alice", "Bob", "Carol", "Dave"]);
+  });
+
+  it("keeps actor and roll ordinal on the same turn-progress generation", () => {
+    const page = openPage({}, 25);
+    page.store.gameState.experimentalMechanicState = {
+      currentState: { currentTurnPlayers: [3] },
+    };
+    page.currentState.currentTurnPlayerColor = 2;
+    page.refresh();
+
+    expect(page.snapshot()).toMatchObject({
+      turn: 25,
+      currentPlayer: "Bob",
+      gameplayRollCount: 18,
+      hasRolled: true,
+      lastRoll: 7,
+      localSeatDiagnostics: {
+        currentActorColor: 2,
+        currentActorPlayer: "Bob",
+        currentActorSource: "turn-progress",
+      },
+    });
+
+    page.currentState.completedTurns = 26;
+    page.currentState.currentTurnPlayerColor = 2;
+    page.refresh();
+    expect(page.messages.at(-1)?.type).toBe("clear");
+
+    page.currentState.currentTurnPlayerColor = 3;
+    page.refresh();
+    expect(page.snapshot()).toMatchObject({
+      turn: 26,
+      currentPlayer: "Carol",
+      gameplayRollCount: 19,
+      localSeatDiagnostics: {
+        currentActorColor: 3,
+        currentActorPlayer: "Carol",
+        currentActorSource: "turn-progress",
+      },
+    });
+  });
+
+  it("documents the irreducible same-pair dice ambiguity across a turn boundary", () => {
+    const page = openPage({}, 25);
+    page.currentState.currentTurnPlayerColor = 2;
+    page.refresh();
+    const before = page.snapshot();
+    expect(before).toMatchObject({
+      turn: 25,
+      currentPlayer: "Bob",
+      gameplayRollCount: 18,
+      hasRolled: true,
+      lastRoll: 7,
+    });
+
+    // No public dice-generation token exists in this bridge contract. If the
+    // turn advances while diceThrown and the pair remain unchanged, the same
+    // observed fields are compatible with either a stale pair or a legitimate
+    // immediate repeat roll. Do not invent a timeout-based distinction.
+    page.currentState.completedTurns = 26;
+    page.currentState.currentTurnPlayerColor = 3;
+    page.refresh();
+    expect(page.snapshot()).toMatchObject({
+      turn: 26,
+      currentPlayer: "Carol",
+      gameplayRollCount: 19,
+      hasRolled: true,
+      lastRoll: 7,
+    });
+    expect(page.snapshot()?.lastRoll).toBe(before?.lastRoll);
   });
 
   it("restores same-game dice after reload and rejects them for a new game in the same room", async () => {

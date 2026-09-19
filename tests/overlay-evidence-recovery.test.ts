@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AssistantOverlay } from "../src/content/overlay";
 import { DEFAULT_SETTINGS } from "../src/content/settings";
 import { createTrackerState, reduceTracker } from "../src/core/tracker";
+import { emptyResources } from "../src/core/resources";
 import { appendPublicDiceRoll, createDiceHistoryState, observeLogCoverage } from "../src/core/dice-history";
 import type { BoardSnapshot } from "../src/core/placement";
 
@@ -96,6 +97,72 @@ describe("live stochastic evidence recovery", () => {
         "Some earlier game history was unavailable; lower bounds were repaired.",
       ],
     });
+  });
+
+  it("re-seeds hidden resource worlds from the public board when card history is partial", async () => {
+    vi.stubGlobal("chrome", {
+      runtime: {
+        getURL: (path: string) => `chrome-extension://fixture/${path}`,
+        getManifest: () => ({ version: "0.9.1" }),
+        sendMessage: async (message: { id: number }) => ({
+          id: message.id,
+          runtime: "background-wasm",
+          engineRevision: "deep-maxn-v12",
+          initializationMs: 1,
+        }),
+      },
+      storage: {
+        local: { get: async () => ({}), set: async () => {}, remove: async () => {} },
+        sync: { set: async () => {} },
+      },
+    });
+    overlay = new AssistantOverlay({ ...DEFAULT_SETTINGS }, { reset: vi.fn() });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    let tracker = reduceTracker(createTrackerState(), { type: "discover", player: "Alice" });
+    tracker = reduceTracker(tracker, { type: "discover", player: "Bob" });
+    const alice = { ...emptyResources(), lumber: 1 };
+    const impossibleCertainty = { ...emptyResources(), lumber: 1 };
+    tracker = {
+      ...tracker,
+      worlds: [{
+        weight: 1,
+        hands: {
+          Alice: alice,
+          Bob: impossibleCertainty,
+        },
+      }],
+    };
+    const ratios = { ...emptyResources(), lumber: 4, brick: 4, wool: 4, grain: 4, ore: 4 };
+    const board: BoardSnapshot = {
+      hexes: [],
+      vertices: [],
+      edges: [],
+      diceMode: "random",
+      gameKey: "partial-resource-history",
+      turn: 12,
+      myPlayer: "Alice",
+      currentPlayer: "Alice",
+      playerOrder: ["Alice", "Bob"],
+      ownHand: alice,
+      players: {
+        Alice: { handSize: 1, tradeRatios: ratios, cardDiscardLimit: 7 },
+        Bob: { handSize: 1, tradeRatios: ratios, cardDiscardLimit: 7 },
+      },
+    };
+    const internals = overlay as unknown as {
+      board: BoardSnapshot;
+      session: { state: typeof tracker; partialHistory: boolean };
+      reconciledState: () => typeof tracker | undefined;
+    };
+    internals.board = board;
+    internals.session = { state: tracker, partialHistory: true };
+
+    const reconciled = internals.reconciledState();
+    expect(reconciled).toBeDefined();
+    expect(reconciled!.worlds.length).toBeGreaterThan(1);
+    expect(reconciled!.worlds.every((world) => world.hands.Alice?.lumber === 1)).toBe(true);
+    expect(reconciled!.worlds.some((world) => world.hands.Bob?.lumber !== 1)).toBe(true);
   });
 
   it("does not expose a heuristic click while the authoritative engine is paused", async () => {

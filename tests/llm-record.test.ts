@@ -167,6 +167,51 @@ describe("compact LLM game record", () => {
     });
   });
 
+  it("exports runtime, partial-card, and reconciled live-dice diagnostics", () => {
+    const record = new CompactGameBuilder().apply(
+      {
+        ...captureBase,
+        partialHistory: true,
+        cardHistoryDetail: "The public card log skipped indexed entries 17–51.",
+        liveDiceAuthority: {
+          status: "accepted",
+          expectedRollCount: 24,
+          model: "mref-colonist-linked-2024-v1",
+          provenance: "complete-from-first-gameplay-roll",
+          rollCount: 24,
+          gaps: [],
+        },
+        assistant: {
+          ...captureBase.assistant,
+          runtime: "background-gpu",
+          runtimeDetail: "deep-maxn-v12 ready",
+          runtimeError: "Transient live decision failure",
+          lastRuntimeError: "Transient live decision failure",
+        },
+        decisions: [],
+      },
+      false,
+    );
+
+    expect(record.meta.cardHistoryDetail).toContain("17–51");
+    expect(record.meta.liveDiceAuthority).toEqual({
+      status: "accepted",
+      expectedRollCount: 24,
+      model: "mref-colonist-linked-2024-v1",
+      provenance: "complete-from-first-gameplay-roll",
+      rollCount: 24,
+      gaps: [],
+    });
+    expect(record.assistant).toMatchObject({
+      runtime: "background-gpu",
+      runtimeError: "Transient live decision failure",
+      lastRuntimeError: "Transient live decision failure",
+    });
+    const exported = formatCompactGameRecord(record);
+    expect(exported).toContain('"liveDiceAuthority":{"status":"accepted"');
+    expect(exported).toContain('"lastRuntimeError":"Transient live decision failure"');
+  });
+
   it("records requested and effective stochastic identity on decisions", () => {
     const decision: DecisionTrace = {
       ...trace("mref-state", { kind: "turn-control", control: "end" }),

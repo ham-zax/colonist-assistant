@@ -7,6 +7,8 @@ import {
   diceHistoryDigest,
   M0_FAIR_IID_2D6_V1,
   serializeDiceHistoryState,
+  type DiceHistoryGap,
+  type DiceHistoryProvenance,
   type DiceHistoryState,
   type StoredDiceHistoryState,
 } from "./dice-history";
@@ -117,6 +119,11 @@ export interface CompactGameRecord {
     engine: string;
     disablePlayerTrades: boolean;
     autopilot: boolean;
+    runtime?: string;
+    runtimeDetail?: string;
+    runtimeError?: string;
+    lastRuntimeError?: string;
+    contextInvalidated?: boolean;
   };
   aliases: Record<string, string>;
   contracts: CompactRecordContracts;
@@ -140,6 +147,17 @@ export interface CompactGameRecord {
     playerCount?: number;
     unresolvedPlayers?: string[];
     trackerWarnings?: string[];
+    cardHistoryDetail?: string;
+    liveDiceAuthority?: {
+      status: "accepted" | "rejected";
+      expectedRollCount: number;
+      model?: string;
+      provenance?: DiceHistoryProvenance;
+      rollCount?: number;
+      missingPrefixRolls?: number;
+      gaps?: DiceHistoryGap[];
+      reason?: string;
+    };
     unmatchedSamples?: Array<{
       signature: string;
       count: number;
@@ -185,6 +203,8 @@ export interface CompactGameCapture {
   startedAt: number;
   partialHistory: boolean;
   trackerWarnings?: string[];
+  cardHistoryDetail?: string;
+  liveDiceAuthority?: CompactGameRecord["meta"]["liveDiceAuthority"];
   unmatchedCount: number;
   unmatchedIntegrityCount?: number;
   diceHistory?: DiceHistoryState;
@@ -1286,6 +1306,10 @@ export class CompactGameBuilder {
     record.aliases = aliasing.aliases;
     record.meta.trackerWarnings = input.trackerWarnings?.length
       ? [...new Set(input.trackerWarnings)]
+      : undefined;
+    record.meta.cardHistoryDetail = input.cardHistoryDetail;
+    record.meta.liveDiceAuthority = input.liveDiceAuthority
+      ? structuredClone(input.liveDiceAuthority)
       : undefined;
     record.meta.unmatchedSamples = input.unmatchedSamples?.length
       ? input.unmatchedSamples.slice(-MAX_UNMATCHED_SAMPLES).map((sample) => ({

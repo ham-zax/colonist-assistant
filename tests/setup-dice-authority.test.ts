@@ -102,6 +102,29 @@ describe("Balanced setup dice authority", () => {
     expect(() => construct(session)).toThrow(/usable public reference-dice history/);
   });
 
+  it("marks an internal post-setup log jump as partial card history", async () => {
+    const root = document.createElement("div");
+    for (let index = 0; index <= 16; index += 1) {
+      root.append(message(index, index === 0 ? "Happy settling!" : "Alice has reconnected."));
+    }
+    const session = sessionFor(root);
+    await session.start();
+    expect(session.partialHistory).toBe(false);
+
+    session.setInitialPlacement(false, gameKey);
+    root.append(roll(52, "Alice", 3, 5));
+    await vi.waitFor(() => expect(session.diceHistory.rolls).toHaveLength(1));
+
+    expect(session.partialHistory).toBe(true);
+    expect(session.cardHistoryDetail).toContain("17–51");
+    await vi.waitFor(() =>
+      expect(storage.get(`colonistAssistantSession:${session.id}`)).toMatchObject({
+        partialHistory: true,
+        missingInternalLogRange: [17, 51],
+      }),
+    );
+  });
+
   it("requires matching game identity before setup can establish the empty prefix", async () => {
     const session = sessionFor(document.createElement("div"), "other-game");
     await session.start();

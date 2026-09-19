@@ -33,14 +33,30 @@ beforeEach(() => {
     runtime: {
       getURL: (path: string) => `chrome-extension://fixture/${path}`,
       getManifest: () => ({ version: "0.9.1" }),
-      sendMessage: vi.fn(async (message: { id: number }) => ({
-        id: message.id,
-        analysis: {
-          runtime: "background-wasm",
-          engineRevision: "deep-maxn-v12",
-          initializationMs: 1,
-        },
-      })),
+      sendMessage: vi.fn(async (message: { id: number; type?: string }) => {
+        if (message.type === "colonist-assistant:decision-status") {
+          return {
+            id: message.id,
+            runtime: "background-wasm",
+            engineRevision: "deep-maxn-v12",
+            initializationMs: 1,
+          };
+        }
+        if (message.type === "colonist-assistant:decision") {
+          return {
+            id: message.id,
+            analysis: {
+              engine: "deep-search",
+              players: [],
+              actionScores: { road: 0, settlement: 0, city: 0, development: 0 },
+              simulations: 0,
+              model: "test-fixture",
+              runtime: "background-wasm",
+            },
+          };
+        }
+        return { id: message.id };
+      }),
     },
     storage: {
       local: {

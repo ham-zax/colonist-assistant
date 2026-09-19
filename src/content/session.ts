@@ -81,6 +81,7 @@ interface StoredSession extends Omit<StoredSessionV3, "schema"> {
   diceHistory: StoredDiceHistoryState;
   setupLogPrefixEnd?: number;
   partialHistoryFromMissingPrefix?: boolean;
+  missingInternalLogRange?: [number, number];
 }
 
 type RestorableSession = StoredSessionV3 | StoredSession;
@@ -556,6 +557,8 @@ export class GameSession {
   private setupLogPrefixEnd?: number;
   /** True only when partialHistory was introduced by a deferred setup-prefix miss. */
   private partialHistoryFromMissingPrefix = false;
+  /** First forward-only indexed span Colonist never exposed to this session. */
+  private missingInternalLogRange?: [number, number];
   private storageGeneration = 0;
   private storageSuppressed = false;
   private pruneSessionHistory = true;
@@ -700,6 +703,7 @@ export class GameSession {
     this.setupLogPrefixPending = false;
     this.setupLogPrefixEnd = undefined;
     this.partialHistoryFromMissingPrefix = false;
+    this.missingInternalLogRange = undefined;
     this.diceHistory = createDiceHistoryState();
     this.unmatchedCount = 0;
     this.unmatchedIntegrityCount = 0;
@@ -733,6 +737,7 @@ export class GameSession {
     this.setupLogPrefixPending = false;
     this.setupLogPrefixEnd = undefined;
     this.partialHistoryFromMissingPrefix = false;
+    this.missingInternalLogRange = undefined;
     this.diceHistory = createDiceHistoryState();
     this.unmatchedCount = 0;
     this.unmatchedIntegrityCount = 0;
@@ -775,6 +780,10 @@ export class GameSession {
     if (this.partialHistoryFromMissingPrefix && this.setupLogPrefixEnd !== undefined) {
       return `The public card log is missing its opening entries (0–${this.setupLogPrefixEnd}). Reloading the page does not recreate log entries that Colonist no longer exposes.`;
     }
+    if (this.missingInternalLogRange) {
+      const [start, end] = this.missingInternalLogRange;
+      return `The public card log skipped indexed entries ${start}–${end} while this game remained active. Hidden-resource composition is reconstructed from the current public board instead of treating that history as complete.`;
+    }
     return "Some card events were missing, conflicting, or outside the retained history. Counts remain estimates where the public evidence is incomplete.";
   }
 
@@ -800,7 +809,7 @@ export class GameSession {
     this.setupLogPrefixEnd = undefined;
     if (this.partialHistoryFromMissingPrefix) {
       this.partialHistoryFromMissingPrefix = false;
-      this.partialHistory = false;
+      this.partialHistory = Boolean(this.missingInternalLogRange);
     }
     return true;
   }
@@ -1164,6 +1173,29 @@ export class GameSession {
         candidate.logIndex !== undefined,
     );
     const firstCandidateLogIndex = indexedCandidates[0]?.logIndex;
+    const firstForwardLogIndex = indexedCandidates.find(
+      (candidate) => candidate.logIndex > priorMaxLogIndex,
+    )?.logIndex;
+    if (
+      this.initialPlacement === false &&
+      priorMaxLogIndex >= 0 &&
+      firstForwardLogIndex !== undefined &&
+      firstForwardLogIndex > priorMaxLogIndex + 1
+    ) {
+      const missingRange: [number, number] = [
+        priorMaxLogIndex + 1,
+        firstForwardLogIndex - 1,
+      ];
+      this.missingInternalLogRange ??= missingRange;
+      this.partialHistory = true;
+      this.recordInvestigation("system", {
+        phase: "internal-log-gap",
+        missingStart: missingRange[0],
+        missingEnd: missingRange[1],
+        previousMaxLogIndex: priorMaxLogIndex,
+        nextObservedLogIndex: firstForwardLogIndex,
+      });
+    }
     // Presentation changes, including index zero, are not game identity.
     // setGameKey() and explicit reset own history replacement; otherwise a
     // rerender could erase both accepted rolls and unresolved conflicts.
@@ -1196,7 +1228,7 @@ export class GameSession {
       this.setupLogPrefixEnd = undefined;
       if (recoveredMissingPrefix) {
         this.partialHistoryFromMissingPrefix = false;
-        this.partialHistory = false;
+        this.partialHistory = Boolean(this.missingInternalLogRange);
       }
     }
 
@@ -1590,6 +1622,17 @@ export class GameSession {
       this.partialHistory &&
       storedSetupLogPrefixEnd !== undefined,
     );
+    const storedInternalLogRange =
+      normalizedStored.schema === 4
+        ? normalizedStored.missingInternalLogRange
+        : undefined;
+    this.missingInternalLogRange =
+      storedInternalLogRange?.length === 2 &&
+      validStoredLogIndex(storedInternalLogRange[0]) &&
+      validStoredLogIndex(storedInternalLogRange[1]) &&
+      storedInternalLogRange[0] <= storedInternalLogRange[1]
+        ? [storedInternalLogRange[0], storedInternalLogRange[1]]
+        : undefined;
     this.setupLogPrefixPending = Boolean(
       storedSetupLogPrefixEnd !== undefined &&
       !this.partialHistoryFromMissingPrefix,
@@ -1686,6 +1729,9 @@ export class GameSession {
         : {}),
       ...(this.partialHistoryFromMissingPrefix
         ? { partialHistoryFromMissingPrefix: true }
+        : {}),
+      ...(this.missingInternalLogRange
+        ? { missingInternalLogRange: [...this.missingInternalLogRange] as [number, number] }
         : {}),
       unmatchedCount: this.unmatchedCount,
       unmatchedIntegrityCount: this.unmatchedIntegrityCount,
