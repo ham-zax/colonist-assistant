@@ -55,10 +55,18 @@ Wave 3 deterministic validation is assigned to C1. Mission file:
 
 The user reports Agent C is working.
 
-D31 resource-liquidity diagnosis may now run in parallel as D1. Mission file:
+D31 resource-liquidity diagnosis completed as D1 at `c58fa11`. Mission file:
 `/home/hamza/repo/colonist-opening-orchestration/docs/agent-work/opening-strategy-rebuild/D1-d31-resource-liquidity-diagnosis.md`
 
-D1 must start from reviewed A1+A2 semantics. Treat `research/d31-road-wip@300914b` as an evidence donor only, and keep `wip/road-intent-deadline@2592caf` separate.
+Durable D1 report:
+`/home/hamza/repo/colonist-d31-liquidity/docs/agent-work/opening-strategy-rebuild/D1-d31-resource-liquidity-diagnosis-report.md`
+
+D1 established a general evaluator defect: pure hand spending can increase the utility contribution of unchanged board production because persistent production is multiplied by hand-dependent `dynamic_resource_weights`. D31 still does not justify a generic development-card nerf.
+
+D2 is READY in the same Agent D session. Mission file:
+`/home/hamza/repo/colonist-opening-orchestration/docs/agent-work/opening-strategy-rebuild/D2-persistent-production-repair.md`
+
+D2 owns only CPU/CUDA persistent-production semantics. Treat `research/d31-road-wip@300914b` as an evidence donor only, and keep `wip/road-intent-deadline@2592caf` separate.
 
 B2 live/held-out Jev calibration remains blocked because `TYPESAFE_API_KEY` is currently unset in the orchestration environment. Do not paste the key into chat; supply it only in the local environment when ready.
 
@@ -177,12 +185,14 @@ Do not mix the preserved D31/road lanes into the opening Wave 3 validation/calib
 5. A1+A2 are integrated onto `orchestration/opening-rebuild` as `70e1461` + `8496200`.
 6. Run C1 deterministic Wave 3 validation from the integrated branch.
 7. After C1 produces frozen labels/splits and a local `TYPESAFE_API_KEY` exists, continue B2 in the same Agent B session.
-8. In parallel with C1, run D1 from the reviewed opening base. Preserve the corrected D31 result: BuyDevelopment wins the actor branch in 3/4 properly matched continuation streams and EndTurn in 1/4; no dev-card nerf is justified.
-9. Treat `research/d31-road-wip@300914b` as a diagnostic/evidence donor, not an integration candidate. Do not cherry-pick it wholesale.
-10. Keep `wip/road-intent-deadline@2592caf` separate from D1; it overlaps `depth.rs` and remains unreviewed.
-11. Merge back to main only after the opening final-validation disposition.
-12. If D1 proves a general production invariant, create a bounded D2 implementation mission and require independent review before integrating it.
-13. Independently review the road-intent candidate before any eventual integration; its focused regression passed, but the policy override still needs broader causal validation because earlier road disagreements produced Jev false positives.
+8. D1 completed at `c58fa11` and proved a general persistent-production revaluation defect while preserving the corrected D31 result: BuyDevelopment wins the actor branch in 3/4 properly matched continuation streams and EndTurn in 1/4; no generic dev-card nerf is justified.
+9. Continue in the same Agent D session as D2. Repair only persistent production weighting in CPU `eval.rs` and mirrored CUDA `exact_eval.cu`; preserve dynamic weights for genuinely marginal uses.
+10. After D2 commits, run an independent Agent R review over the entire `1b2a0c2..D2_HEAD` range before integrating D1/D2.
+11. Treat `research/d31-road-wip@300914b` as a diagnostic/evidence donor, not an integration candidate. Do not cherry-pick it wholesale.
+12. Keep `wip/road-intent-deadline@2592caf` separate from D1/D2; it overlaps `depth.rs` and remains unreviewed.
+13. Because D2 changes shared main-game strategic utility, any C1 matched-terminal evidence depending on continuation policy may need a bounded refresh after reviewed D2 integration.
+14. Merge back to main only after the opening final-validation disposition plus any required D2 refresh/review.
+15. Independently review the road-intent candidate before any eventual integration; its focused regression passed, but the policy override still needs broader causal validation because earlier road disagreements produced Jev false positives.
 
 ## Copy-paste recovery prompt for a future ChatGPT session
 
@@ -225,7 +235,7 @@ Important preserved lanes:
 Do not assume preserved WIP branches are reviewed or integration-ready.
 Do not blindly merge research/d31-road-wip and wip/road-intent-deadline because they overlap in depth.rs.
 
-First report the verified current frontier. A1+A2 are reviewed and integrated as 70e1461 + 8496200. C1 may be active on opening Wave 3 validation. D1 resource-liquidity diagnosis may run concurrently from a separate worktree using research/d31-road-wip@300914b only as an evidence donor. Keep wip/road-intent-deadline@2592caf separate. B2 remains blocked until C1 labels/splits exist and a local TYPESAFE_API_KEY is available.
+First report the verified current frontier. A1+A2 are reviewed and integrated as 70e1461 + 8496200. C1 may be active on opening Wave 3 validation. D1 is complete at c58fa11 and established the persistent-production invariant defect; D2 in the same Agent D session is the next repair action, followed by independent review of 1b2a0c2..D2_HEAD. Keep research/d31-road-wip@300914b as an evidence donor only and keep wip/road-intent-deadline@2592caf separate. B2 remains blocked until C1 labels/splits exist and a local TYPESAFE_API_KEY is available.
 ```
 
 ## Recovery rule
