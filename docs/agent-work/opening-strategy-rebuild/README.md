@@ -42,20 +42,16 @@ Current frontier
 │  CONTINUE
 │  User reports Agent C is working in /home/hamza/repo/colonist-opening-validation.
 │
-├─ D31 resource-liquidity diagnosis / D1 / Agent D
-│  COMPLETE — GENERAL DEFECT ESTABLISHED
-│  c58fa11 proves hand-dependent revaluation of persistent production.
-│
-├─ Persistent production repair / D2 / Agent D
-│  COMPLETE
-│  e068c5d stabilizes persistent production in CPU + exact CUDA.
+├─ D31 resource-liquidity / D1+D2
+│  COMPLETE + REVIEWED + INTEGRATED
+│  Source commits c58fa11 + e068c5d; integrated as a4bb9e6 + 35815e3.
 │
 ├─ Independent D1+D2 review / R3 / Agent R
-│  READY — SAME REVIEWER SESSION
-│  Review full range 1b2a0c2..e068c5d; blocks integration.
+│  COMPLETE — PASS
+│  Full range 1b2a0c2..e068c5d approved; review blocker discharged.
 │
 ├─ Jev calibration / B2 / Agent B
-│  BLOCKED -> C1 labels/splits + local TYPESAFE_API_KEY
+│  BLOCKED -> final C1/C2 labels + local TYPESAFE_API_KEY
 │
 ├─ Road-intent candidate
 │  HOLD
@@ -73,13 +69,13 @@ Planned effort: 80% COMPLETE | 10% READY deterministic validation | 10% BLOCKED 
 | --- | --- | --- | --- | --- | --- | --- |
 | A | A1 | COMPLETE + INTEGRATED | implement | /home/hamza/repo/colonist-opening-architecture | integrated as 70e1461 | yes |
 | A | A2 | COMPLETE + INTEGRATED | implement repair | /home/hamza/repo/colonist-opening-architecture | integrated as 8496200 | yes |
-| B | B1 | COMPLETE + INTEGRATED | investigate + research tooling | /home/hamza/repo/colonist-jev-calibration | COMPLETE; reuse as B2 when credential exists | yes |
+| B | B1 | COMPLETE + INTEGRATED | investigate + research tooling | /home/hamza/repo/colonist-jev-calibration | COMPLETE; reuse as B2 after final post-D2 labels + credential | yes |
 | C | C1 | CONTINUE | independent validation + research tooling | /home/hamza/repo/colonist-opening-validation | user reports working | no |
-| D | D1 | COMPLETE | investigation + research tooling | /home/hamza/repo/colonist-d31-liquidity | COMPLETE @ c58fa11 | yes |
-| D | D2 | COMPLETE | implementation repair | /home/hamza/repo/colonist-d31-liquidity | COMPLETE @ e068c5d | yes |
+| D | D1 | COMPLETE + INTEGRATED | investigation + research tooling | /home/hamza/repo/colonist-d31-liquidity | integrated as a4bb9e6 | yes |
+| D | D2 | COMPLETE + INTEGRATED | implementation repair | /home/hamza/repo/colonist-d31-liquidity | integrated as 35815e3 | yes |
 | R | R1 | COMPLETE — BLOCKING FINDINGS | independent review | read-only target a169b28..15b2365 | COMPLETE | yes |
 | R | R2 | COMPLETE — PASS | independent re-review | read-only repair range 15b2365..034b01f | review blocker discharged | yes |
-| R | R3 | READY — REVIEW | independent review | read-only target 1b2a0c2..e068c5d | SAME AGENT R SESSION NOW | yes |
+| R | R3 | COMPLETE — PASS | independent review | read-only target 1b2a0c2..e068c5d | review blocker discharged | yes |
 | D31 preserved branch | evidence donor | PRESERVED | historical diagnostics | research/d31-road-wip @ 300914b | do not cherry-pick wholesale | yes |
 
 ## Blocker Ledger
@@ -87,21 +83,21 @@ Planned effort: 80% COMPLETE | 10% READY deterministic validation | 10% BLOCKED 
 | Blocked item | Blocker | Owner | Discharge condition | Status/evidence |
 | --- | --- | --- | --- | --- |
 | A1/A2 integration | R2 re-review | R2 | R2 reports pass | DISCHARGED — R2 passed; integrated as 70e1461 + 8496200 |
-| Wave 3 deterministic validation | reviewed A1/A2 integration | C1 | C1 returns recorded/generated/matched evidence with no unresolved production blocker | READY |
-| B2 live/held-out Jev calibration | local TypeSafe credential + C1 label handoff | B2/C1 | local TYPESAFE_API_KEY exists and C1 produces frozen labels/splits | BLOCKED — credential currently unset; C1 pending |
-| merge back to main | C1 + B2 final validation | planner | deterministic validation passes and held-out calibration is completed or explicitly waived by user | BLOCKED |
+| Wave 3 deterministic validation | reviewed A1+A2 integration | C1/C2 | C1 returns recorded/generated evidence; any continuation evidence invalidated by D2 is refreshed against final semantics | CONTINUE — C1 active; C2 conditional |
+| B2 live/held-out Jev calibration | local TypeSafe credential + final C1/C2 label handoff | B2/C1 | local TYPESAFE_API_KEY exists and post-D2 labels/splits are final | BLOCKED — credential currently unset; C1 in progress and bounded C2 refresh may be required |
+| merge back to main | final deterministic validation + B2 disposition | planner | post-D2 deterministic evidence is sufficient and held-out calibration is completed or explicitly waived by user | BLOCKED |
 | D1 diagnosis | reviewed opening/economy base | D1 | establish/falsify general defect | DISCHARGED — c58fa11 established persistent-production invariant violation |
-| D1+D2 integration | independent review | R3 | Agent R reports no blocking findings on 1b2a0c2..e068c5d | BLOCKED — D2 complete, R3 READY |
+| D1+D2 integration | independent review | R3 | Agent R reports no blocking findings on 1b2a0c2..e068c5d | DISCHARGED — R3 passed; integrated as a4bb9e6 + 35815e3 |
 | road-intent continuation | broader causal evidence + separate review | planner | D27 matched evidence establishes admission case | HOLD |
 
 ## Dependency map
 
 ```text
-A1 ─> R1 BLOCK ─> A2 ─> R2 PASS ─> reviewed integration ─> C1 deterministic validation ─┐
-B1 calibration framework ────────────────────────────────────────> B2 live/held-out calibration ───────┤
-                                                                                                       └─> main merge
+A1 ─> R1 BLOCK ─> A2 ─> R2 PASS ─> reviewed integration ─> C1 deterministic validation ─> C2? post-D2 continuation refresh ─┐
+B1 calibration framework ───────────────────────────────────────────────────────────────> B2 live/held-out calibration ───────────┤
+                                                                                                                               └─> main merge
 
-D1+D2 are complete. R3 must independently review the full range before integration. Because D2 changes shared main-game strategic utility, any C1 matched-terminal evidence that depends on continuation policy may need a bounded refresh after D2 is reviewed and integrated. The road-intent WIP remains separate and held.
+D1+D2 are complete, independently reviewed, and integrated. Because D2 changes shared main-game strategic utility, any C1 matched-terminal evidence that depends on continuation policy may need a bounded C2 refresh after C1 finishes. Static opening/corpus evidence remains separable from this continuation-policy refresh. The road-intent WIP remains separate and held.
 ```
 
 ## Shared contracts
@@ -144,16 +140,16 @@ The user explicitly authorized experimentation, tests, simulations, regression f
 
 ## Execution lifetime
 
-A1+A2 are complete, reviewed, and integrated. C1 is continuing validation. D1+D2 are complete and await R3 in the existing Agent R reviewer session. B1 is complete; reuse the same Agent B session as B2 after C1 provides frozen labels/splits and a local Jev credential is available.
+A1+A2 and D1+D2 are complete, reviewed, and integrated. C1 is continuing validation on the pre-D2 continuation policy and may require a bounded C2 matched-terminal refresh afterward. B1 is complete; reuse the same Agent B session as B2 after final post-D2 labels/splits exist and a local Jev credential is available.
 
 ## Future / blocked work
 
-- C1 — deterministic Wave 3 validation is READY in a new session.
-- B2 — live Jev collection/final calibration is blocked by local `TYPESAFE_API_KEY` and the C1 label handoff.
-- Main merge — blocked by C1 plus B2/final calibration disposition.
-- D1 — COMPLETE at `c58fa11`; general persistent-production revaluation defect established.
-- D2 — COMPLETE at `e068c5d`; CPU and exact CUDA now use base weights for persistent production while preserving dynamic weights for marginal terms.
-- R3 — READY in the existing Agent R session; review `1b2a0c2..e068c5d` before D1+D2 integration.
+- C1 — deterministic Wave 3 validation is continuing.
+- C2 — PLANNED/CONDITIONAL after C1: refresh only matched-terminal/continuation evidence invalidated by integrated D2 semantics.
+- B2 — live Jev collection/final calibration is blocked by local `TYPESAFE_API_KEY` and the final post-D2 label handoff.
+- Main merge — blocked by post-D2 deterministic validation plus B2/final calibration disposition.
+- D1+D2 — COMPLETE + REVIEWED + INTEGRATED as `a4bb9e6` + `35815e3`.
+- R3 — COMPLETE — PASS; review blocker discharged.
 - Road-intent — remains HOLD on `wip/road-intent-deadline@2592caf`; do not combine it with D1/D2.
 
 ## Transition log
@@ -173,4 +169,6 @@ A1+A2 are complete, reviewed, and integrated. C1 is continuing validation. D1+D2
 - 2026-09-19: D31 may resume in parallel as D1 because reviewed A1+A2 semantics are integrated and C1 owns a separate worktree. D1 must use the corrected four-stream CRN result (BuyDevelopment actor win 3/4, EndTurn 1/4), treat `300914b` as an evidence donor rather than an integration candidate, and keep `2592caf` road-intent work separate.
 - 2026-09-19: D1 completed at `c58fa11`. It established a general evaluator defect: a pure hand spend can increase the strategic-utility contribution of unchanged board production because persistent production is multiplied by hand-dependent `dynamic_resource_weights`. D1 did not justify a generic dev-card penalty. D2 is now READY in the same Agent D session; CPU/CUDA persistent-production semantics are the narrow repair owner.
 - 2026-09-19: planner verification found `git diff --check 1b2a0c2..c58fa11` reported trailing whitespace on lines 5–6 of the D1 report despite the D1 finish report saying diff-check passed.
-- 2026-09-19: D2 completed at `e068c5d`. It fixed persistent-production valuation in CPU and exact CUDA, kept dynamic weights for marginal uses, converted the H1 probe into a permanent invariant regression, preserved spend-now guards, and resolved the D1 report whitespace. Planner verification confirms the worktree is clean and `git diff --check 1b2a0c2..e068c5d` passes. R3 is now READY in the existing Agent R session.
+- 2026-09-19: D2 completed at `e068c5d`. It fixed persistent-production valuation in CPU and exact CUDA, kept dynamic weights for marginal uses, converted the H1 probe into a permanent invariant regression, preserved spend-now guards, and resolved the D1 report whitespace. Planner verification confirms the worktree is clean and `git diff --check 1b2a0c2..e068c5d` passes.
+- 2026-09-19: R3 passed with no blocker, major, or directly related minor finding. It independently re-ran the invariant/spend-now tests and the 69-case hardware CPU/CUDA parity check, and approved `1b2a0c2..e068c5d` for integration.
+- 2026-09-19: planner integrated D1+D2 onto `orchestration/opening-rebuild` as `a4bb9e6` + `35815e3`. The integrated D1+D2 code/report surfaces are content-identical to reviewed HEAD `e068c5d`; `git diff --check 241f1e4..35815e3` passes.

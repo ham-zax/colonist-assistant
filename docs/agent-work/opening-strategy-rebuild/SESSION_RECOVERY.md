@@ -66,12 +66,15 @@ D1 established a general evaluator defect: pure hand spending can increase the u
 D2 completed in the same Agent D session at `e068c5d`. Mission file:
 `/home/hamza/repo/colonist-opening-orchestration/docs/agent-work/opening-strategy-rebuild/D2-persistent-production-repair.md`
 
-D2 repairs CPU/CUDA persistent-production semantics only. The D1+D2 range is not yet integrated.
-
-R3 is READY in the existing Agent R reviewer session. Mission file:
+R3 passed the exact range `1b2a0c2..e068c5d` with no blocker, major, or directly related minor finding. Mission file:
 `/home/hamza/repo/colonist-opening-orchestration/docs/agent-work/opening-strategy-rebuild/R3-d31-persistent-production-review.md`
 
-R3 must review the exact range `1b2a0c2..e068c5d`. Treat `research/d31-road-wip@300914b` as an evidence donor only, and keep `wip/road-intent-deadline@2592caf` separate.
+D1+D2 are integrated on the orchestration branch as:
+
+- `a4bb9e6 research(strategy): diagnose D31 resource liquidity`
+- `35815e3 fix(strategy): stabilize persistent production valuation`
+
+The integrated code/report surfaces are content-identical to reviewed HEAD `e068c5d`. Treat `research/d31-road-wip@300914b` as an evidence donor only, and keep `wip/road-intent-deadline@2592caf` separate.
 
 B2 live/held-out Jev calibration remains blocked because `TYPESAFE_API_KEY` is currently unset in the orchestration environment. Do not paste the key into chat; supply it only in the local environment when ready.
 
@@ -84,7 +87,7 @@ B2 live/held-out Jev calibration remains blocked because `TYPESAFE_API_KEY` is c
 - Status: B1 complete.
 - Integrated into orchestration branch as `e4b25ad`.
 
-B2 is a future continuation in the **same Agent B chat** after C1 provides frozen labels/splits and a local `TYPESAFE_API_KEY` is available. Never put the key in chat, source, docs, logs, or commits.
+B2 is a future continuation in the **same Agent B chat** after final post-D2 labels/splits exist (C1 plus bounded C2 refresh if required) and a local `TYPESAFE_API_KEY` is available. Never put the key in chat, source, docs, logs, or commits.
 
 ### Orchestration / source of truth
 
@@ -189,15 +192,15 @@ Do not mix the preserved D31/road lanes into the opening Wave 3 validation/calib
 4. R2 passed and discharged the review blocker.
 5. A1+A2 are integrated onto `orchestration/opening-rebuild` as `70e1461` + `8496200`.
 6. Run C1 deterministic Wave 3 validation from the integrated branch.
-7. After C1 produces frozen labels/splits and a local `TYPESAFE_API_KEY` exists, continue B2 in the same Agent B session.
-8. D1 completed at `c58fa11` and proved a general persistent-production revaluation defect while preserving the corrected D31 result: BuyDevelopment wins the actor branch in 3/4 properly matched continuation streams and EndTurn in 1/4; no generic dev-card nerf is justified.
-9. D2 completed at `e068c5d`, repairing persistent production weighting in CPU `eval.rs` and mirrored CUDA `exact_eval.cu` while preserving dynamic weights for marginal uses.
-10. Paste R3 into the existing Agent R reviewer session and review `1b2a0c2..e068c5d` before integrating D1/D2.
-11. If R3 passes, planner-integrate D1+D2 into the orchestration branch.
-12. Treat `research/d31-road-wip@300914b` as a diagnostic/evidence donor, not an integration candidate. Do not cherry-pick it wholesale.
-13. Keep `wip/road-intent-deadline@2592caf` separate from D1/D2; it overlaps `depth.rs` and remains unreviewed.
-14. Because D2 changes shared main-game strategic utility, any C1 matched-terminal evidence depending on continuation policy may need a bounded refresh after reviewed D2 integration.
-15. Merge back to main only after the opening final-validation disposition plus any required D2 refresh/review.
+7. D1 completed at `c58fa11` and proved a general persistent-production revaluation defect while preserving the corrected D31 result: BuyDevelopment wins the actor branch in 3/4 properly matched continuation streams and EndTurn in 1/4; no generic dev-card nerf is justified.
+8. D2 completed at `e068c5d`, repairing persistent production weighting in CPU `eval.rs` and mirrored CUDA `exact_eval.cu` while preserving dynamic weights for marginal uses.
+9. R3 passed `1b2a0c2..e068c5d` and discharged the D1+D2 review gate.
+10. D1+D2 are integrated onto `orchestration/opening-rebuild` as `a4bb9e6` + `35815e3`.
+11. Let C1 finish its current validation. Then determine whether its matched-terminal/continuation evidence was invalidated by D2; if so, use a bounded same-session C2 refresh rather than rerunning the full campaign.
+12. Continue B2 in the same Agent B session only after final post-D2 labels/splits exist and a local `TYPESAFE_API_KEY` is available.
+13. Treat `research/d31-road-wip@300914b` as a diagnostic/evidence donor, not an integration candidate. Do not cherry-pick it wholesale.
+14. Keep `wip/road-intent-deadline@2592caf` separate from D1/D2; it overlaps `depth.rs` and remains unreviewed.
+15. Merge back to main only after the opening final-validation disposition plus any required C2 refresh and B2 disposition.
 16. Independently review the road-intent candidate before any eventual integration; its focused regression passed, but the policy override still needs broader causal validation because earlier road disagreements produced Jev false positives.
 
 ## Copy-paste recovery prompt for a future ChatGPT session
@@ -241,7 +244,7 @@ Important preserved lanes:
 Do not assume preserved WIP branches are reviewed or integration-ready.
 Do not blindly merge research/d31-road-wip and wip/road-intent-deadline because they overlap in depth.rs.
 
-First report the verified current frontier. A1+A2 are reviewed and integrated as 70e1461 + 8496200. C1 may be active on opening Wave 3 validation. D1 is complete at c58fa11 and D2 is complete at e068c5d; R3 in the existing Agent R reviewer session is the next action and must review 1b2a0c2..e068c5d before D1+D2 integration. Keep research/d31-road-wip@300914b as an evidence donor only and keep wip/road-intent-deadline@2592caf separate. B2 remains blocked until C1 labels/splits exist and a local TYPESAFE_API_KEY is available.
+First report the verified current frontier. A1+A2 are reviewed and integrated as 70e1461 + 8496200. D1+D2 are reviewed and integrated as a4bb9e6 + 35815e3 after R3 passed 1b2a0c2..e068c5d. C1 may be active on opening Wave 3 validation; once C1 finishes, decide whether a bounded C2 matched-terminal refresh is required because D2 changed shared strategic_utility. Keep research/d31-road-wip@300914b as an evidence donor only and keep wip/road-intent-deadline@2592caf separate. B2 remains blocked until final post-D2 labels/splits exist and a local TYPESAFE_API_KEY is available.
 ```
 
 ## Recovery rule
