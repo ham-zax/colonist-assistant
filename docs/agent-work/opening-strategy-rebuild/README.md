@@ -61,8 +61,8 @@ Current frontier
 │  wip/road-intent-deadline @ 2592caf remains separate and unreviewed.
 │
 └─ Main checkout
-   READY — FAST-FORWARD INTEGRATION
-   Production review gates are discharged; user-directed 15-arm final validation found no production defect.
+   COMPLETE — LOCAL MAIN INTEGRATED
+   Fast-forwarded from 15cfc5e to 1850977 after review gates and user-capped final validation.
 
 Planned effort: 95% COMPLETE | 5% OPTIONAL/DEFERRED research calibration
 
@@ -89,7 +89,7 @@ Planned effort: 95% COMPLETE | 5% OPTIONAL/DEFERRED research calibration
 | A1/A2 integration | R2 re-review | R2 | R2 reports pass | DISCHARGED — R2 passed; integrated as 70e1461 + 8496200 |
 | Wave 3 deterministic validation | C1 recovery/finalization | E1 | E1 verifies C1 artifacts, commits final report, and separates pre-D2 terminal evidence from static opening evidence | DISCHARGED — E1 complete at ad1eb59; integrated as 0e270f4 |
 | B2 live/held-out Jev calibration | conclusive labels + local TypeSafe credential | B2 | conclusive terminal labels exist and local TYPESAFE_API_KEY is available | DEFERRED — user capped terminal evidence at 15 arms; all four comparisons inconclusive; admittedLabels=[]; credential unset |
-| merge back to main | reviewed production changes + user-capped final validation | planner | production review gates pass and capped final validation finds no blocking production defect | READY — deterministic gate discharged; B2 is non-production research and cannot calibrate without labels |
+| merge back to main | reviewed production changes + user-capped final validation | planner | production review gates pass and capped final validation finds no blocking production defect | DISCHARGED — local main fast-forwarded to 1850977 |
 | D1 diagnosis | reviewed opening/economy base | D1 | establish/falsify general defect | DISCHARGED — c58fa11 established persistent-production invariant violation |
 | D1+D2 integration | independent review | R3 | Agent R reports no blocking findings on 1b2a0c2..e068c5d | DISCHARGED — R3 passed; integrated as a4bb9e6 + 35815e3 |
 | road-intent continuation | broader causal evidence + separate review | planner | D27 matched evidence establishes admission case | HOLD |
@@ -154,7 +154,7 @@ A1+A2 and D1+D2 are complete, reviewed, and integrated. C1+E1 are complete and i
 - E1 — COMPLETE; finalized report integrated as `0e270f4`.
 - C2 — NOT REQUIRED for the current conclusion. It becomes optional only if final-semantics terminal directionality is later desired.
 - B2 — DEFERRED. The capped campaign produced zero conclusive labels and `TYPESAFE_API_KEY` is unset, so the calibration contract cannot currently be satisfied. This is research-only and does not block production integration.
-- Main merge — READY for planner-owned fast-forward integration.
+- Main merge — COMPLETE locally at `1850977`. `origin/main` is not updated by this orchestration step.
 - D1+D2 — COMPLETE + REVIEWED + INTEGRATED as `a4bb9e6` + `35815e3`.
 - R3 — COMPLETE — PASS; review blocker discharged.
 - Road-intent — remains HOLD on `wip/road-intent-deadline@2592caf`; do not combine it with D1/D2.
@@ -182,3 +182,4 @@ A1+A2 and D1+D2 are complete, reviewed, and integrated. C1+E1 are complete and i
 - 2026-09-19: the Codex C1 session ended due usage limits after the user reduced the terminal campaign to 15 valid arms. Planner inspection found C1 substantially complete at `8146fe5`: recorded corpus 27/0/1, 36 generated cases, exactly 15 admitted terminal arms, zero cutoffs, all four pairwise comparisons inconclusive, and `b2-handoff-v1.json` contains `admittedLabels: []`. Generated/matched/recorded/prior SHA manifests all verify.
 - 2026-09-20: E1 completed at `ad1eb59`, verified the capped evidence package, corrected one research-only provenance boolean in ignored artifacts, and finalized the report. The report explicitly marks all 15 terminal arms as pre-D2 continuation evidence while preserving the static A1+A2 opening evidence. C2 is not required for the current conclusion.
 - 2026-09-20: planner integrated C1 tooling/report onto `orchestration/opening-rebuild` as `002b6a8`, `213ae85`, and `0e270f4`. Clean cherry-picks preserved the already integrated D1 diagnostic consumer in `jev-strategy-lab`; `git diff --check 6edfde6..0e270f4` passes. Under the user's explicit 15-arm cap, B2 is deferred rather than treated as a production blocker because there are no conclusive labels to calibrate against.
+- 2026-09-20: local `main` was fast-forwarded from `15cfc5e` to `1850977` after all required production review gates and the user-capped final-validation disposition were complete. This workflow did not push `origin/main`.

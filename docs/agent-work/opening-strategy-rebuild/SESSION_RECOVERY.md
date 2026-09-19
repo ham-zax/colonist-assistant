@@ -213,7 +213,7 @@ Do not mix the preserved D31/road lanes into the opening Wave 3 validation/calib
 12. The final C1 report marks all 15 terminal outcomes as pre-D2 continuation evidence. All four pairwise comparisons are inconclusive and `admittedLabels` is empty.
 13. C2 is not required for the current conclusion. Create one only if post-D2 terminal directionality becomes a new research objective.
 14. B2 is deferred until conclusive labels plus a local `TYPESAFE_API_KEY` exist. It does not block production integration under the current user-directed cap.
-15. Planner may fast-forward main to the orchestration branch after final coordination status is committed.
+15. Local main was fast-forwarded from `15cfc5e` to `1850977` after the final coordination status was committed. `origin/main` was not pushed by this workflow.
 16. Treat `research/d31-road-wip@300914b` as a diagnostic/evidence donor, not an integration candidate. Do not cherry-pick it wholesale.
 17. Keep `wip/road-intent-deadline@2592caf` separate from D1/D2; it overlaps `depth.rs` and remains unreviewed.
 18. Independently review the road-intent candidate before any eventual integration; its focused regression passed, but the policy override still needs broader causal validation because earlier road disagreements produced Jev false positives.
@@ -259,7 +259,7 @@ Important preserved lanes:
 Do not assume preserved WIP branches are reviewed or integration-ready.
 Do not blindly merge research/d31-road-wip and wip/road-intent-deadline because they overlap in depth.rs.
 
-First report the verified current frontier. A1+A2 and D1+D2 are reviewed and integrated. C1+E1 are complete and integrated; under the 15-arm user cap all terminal comparisons are inconclusive and admittedLabels is empty, so no post-D2 C2 rerun is required for the current conclusion. B2 is deferred research until conclusive labels and a local TYPESAFE_API_KEY exist. Main integration is planner-owned and ready once coordination state is committed. Keep research/d31-road-wip@300914b as an evidence donor only and keep wip/road-intent-deadline@2592caf separate.
+First report the verified current frontier. A1+A2 and D1+D2 are reviewed and integrated. C1+E1 are complete and integrated; under the 15-arm user cap all terminal comparisons are inconclusive and admittedLabels is empty, so no post-D2 C2 rerun is required for the current conclusion. B2 is deferred research until conclusive labels and a local TYPESAFE_API_KEY exist. Local main has been fast-forwarded through the reviewed opening/D31/C1 integration; origin/main has not been pushed by this workflow. Keep research/d31-road-wip@300914b as an evidence donor only and keep wip/road-intent-deadline@2592caf separate.
 ```
 
 ## Recovery rule
