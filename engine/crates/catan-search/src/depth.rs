@@ -20,8 +20,8 @@ use crate::policy::{
     truncate_root_preserving_end_turn,
 };
 use crate::root_impact::{
-    IntroducedRoadFragility, RootPromotionReason, RootStrategicImpact, apply_closeout_root_impacts,
-    compute_spatial_root_impacts,
+    CLOSEOUT_COMPARABLE_VALUE_DELTA, IntroducedRoadFragility, RootPromotionReason,
+    RootStrategicImpact, apply_closeout_root_impacts, compute_spatial_root_impacts,
 };
 use crate::shared::{
     admit_promoted_roots, coalesce_identical_particles, immediate_winning_roots,
@@ -163,8 +163,9 @@ pub struct BeliefSearchProvenance {
     pub root_search_work: Vec<RootSearchWorkDiagnostic>,
     pub strategy_shadow: Option<StrategyShadowDiagnostics>,
     pub trade_hard_veto_threshold: f32,
-    /// Ordinary backed-up search winner before any later safety replacement.
+    /// Ordinary backed-up search winner before any later decisive-plan or safety replacement.
     pub search_winner: Option<Action>,
+    pub decisive_plan_replacement: Option<(Action, Action)>,
     pub exact_family_replacement: Option<(Action, Action)>,
     pub exact_family_results: Vec<(ExactActionFamily, ExactDecisionResult)>,
     pub safety_replacement: Option<(Action, Action)>,
@@ -183,6 +184,7 @@ impl Default for BeliefSearchProvenance {
             strategy_shadow: None,
             trade_hard_veto_threshold: HARD_VETO_POSTERIOR,
             search_winner: None,
+            decisive_plan_replacement: None,
             exact_family_replacement: None,
             exact_family_results: Vec::new(),
             safety_replacement: None,
@@ -647,6 +649,72 @@ fn normalize_belief_root_priors_with_diagnostics(
             quota_score: candidate.quota_score,
         })
         .collect()
+}
+
+const DECISIVE_CURRENT_TURN_MASS: f32 = 0.999;
+
+fn decisive_current_turn_plan_replacement_index(
+    actions: &[DepthActionValue],
+    actor: usize,
+    ranked_diagnostics: &[RankedRootDiagnostic],
+    current_index: usize,
+) -> usize {
+    let Some(current) = actions.get(current_index) else {
+        return current_index;
+    };
+    let diagnostic = |action: &Action| {
+        ranked_diagnostics
+            .iter()
+            .find(|candidate| candidate.action == *action)
+    };
+    let Some(current_diagnostic) = diagnostic(&current.action) else {
+        return current_index;
+    };
+    let Some(current_planner_value) = current_diagnostic.planner_value else {
+        return current_index;
+    };
+    if current_diagnostic.planner_completion_mass.unwrap_or(0.0) < DECISIVE_CURRENT_TURN_MASS {
+        return current_index;
+    }
+
+    let decisive = actions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, action)| {
+            let candidate = diagnostic(&action.action)?;
+            let planner_value = candidate.planner_value?;
+            (candidate.planner_completion_mass.unwrap_or(0.0) >= DECISIVE_CURRENT_TURN_MASS
+                && candidate
+                    .planner_decisive_completion_mass
+                    .unwrap_or(0.0)
+                    >= DECISIVE_CURRENT_TURN_MASS
+                && candidate.planner_response_windows.unwrap_or(f32::INFINITY)
+                    <= f32::EPSILON
+                && planner_value.is_finite())
+            .then_some((index, planner_value))
+        })
+        .collect::<Vec<_>>();
+    let Some(best_planner_value) = decisive
+        .iter()
+        .map(|(_, value)| *value)
+        .reduce(f32::max)
+    else {
+        return current_index;
+    };
+
+    if best_planner_value <= current_planner_value + CLOSEOUT_COMPARABLE_VALUE_DELTA {
+        return current_index;
+    }
+
+    decisive
+        .into_iter()
+        .filter(|(_, planner_value)| {
+            *planner_value + CLOSEOUT_COMPARABLE_VALUE_DELTA >= best_planner_value
+        })
+        .max_by(|(left, _), (right, _)| {
+            actions[*left].value[actor].total_cmp(&actions[*right].value[actor])
+        })
+        .map_or(current_index, |(index, _)| index)
 }
 
 fn closeout_plans_from_ranked_diagnostics(
@@ -1978,6 +2046,7 @@ fn belief_search_backend(
         strategy_shadow: strategy_admission,
         trade_hard_veto_threshold: HARD_VETO_POSTERIOR,
         search_winner: None,
+        decisive_plan_replacement: None,
         exact_family_replacement: None,
         exact_family_results,
         safety_replacement: None,
@@ -2302,16 +2371,23 @@ fn belief_search_backend(
         .collect::<Vec<_>>();
     actions.sort_by(|left, right| right.value[actor].total_cmp(&left.value[actor]));
     provenance.search_winner = actions.first().map(|entry| entry.action.clone());
-    let mut chosen_index = 0usize;
-    if let Some(leading) = actions.first() {
-        let leading_loss = forced_loss_weight(
+    let mut chosen_index =
+        decisive_current_turn_plan_replacement_index(&actions, actor, &ranked_diagnostics, 0);
+    if chosen_index > 0
+        && let (Some(leading), Some(replacement)) = (actions.first(), actions.get(chosen_index))
+    {
+        provenance.decisive_plan_replacement =
+            Some((leading.action.clone(), replacement.action.clone()));
+    }
+    if let Some(provisional) = actions.get(chosen_index) {
+        let provisional_loss = forced_loss_weight(
             posterior
                 .iter()
                 .map(|particle| (&particle.state, particle.weight)),
             observer,
-            &leading.action,
+            &provisional.action,
         );
-        if leading_loss >= 1.0 - 1e-6
+        if provisional_loss >= 1.0 - 1e-6
             && let Some(escape_index) = actions.iter().position(|candidate| {
                 forced_loss_weight(
                     posterior
@@ -2322,13 +2398,10 @@ fn belief_search_backend(
                 ) <= 1e-6
             })
         {
+            provenance.safety_replacement =
+                Some((provisional.action.clone(), actions[escape_index].action.clone()));
             chosen_index = escape_index;
         }
-    }
-    if chosen_index > 0
-        && let (Some(leading), Some(replacement)) = (actions.first(), actions.get(chosen_index))
-    {
-        provenance.safety_replacement = Some((leading.action.clone(), replacement.action.clone()));
     }
     let chosen = actions.get(chosen_index).map(|entry| entry.action.clone());
     if let Some(chosen_action) = chosen.as_ref()
@@ -4177,6 +4250,7 @@ fn cuda_belief_search_with_batch(
         strategy_shadow: strategy_admission,
         trade_hard_veto_threshold: HARD_VETO_POSTERIOR,
         search_winner: None,
+        decisive_plan_replacement: None,
         exact_family_replacement: None,
         exact_family_results,
         safety_replacement: None,
@@ -4444,16 +4518,25 @@ fn cuda_belief_search_with_batch(
             })
             .collect::<Vec<_>>();
         actions.sort_by(|left, right| right.value[actor].total_cmp(&left.value[actor]));
-        let mut chosen_index = 0usize;
-        if let Some(leading) = actions.first() {
-            let leading_loss = forced_loss_weight(
+        provenance.search_winner = actions.first().map(|entry| entry.action.clone());
+        let mut chosen_index =
+            decisive_current_turn_plan_replacement_index(&actions, actor, &ranked_diagnostics, 0);
+        if chosen_index > 0
+            && let (Some(leading), Some(replacement)) =
+                (actions.first(), actions.get(chosen_index))
+        {
+            provenance.decisive_plan_replacement =
+                Some((leading.action.clone(), replacement.action.clone()));
+        }
+        if let Some(provisional) = actions.get(chosen_index) {
+            let provisional_loss = forced_loss_weight(
                 posterior
                     .iter()
                     .map(|particle| (&particle.state, particle.weight)),
                 observer,
-                &leading.action,
+                &provisional.action,
             );
-            if leading_loss >= 1.0 - 1e-6
+            if provisional_loss >= 1.0 - 1e-6
                 && let Some(escape_index) = actions.iter().position(|candidate| {
                     forced_loss_weight(
                         posterior
@@ -4464,16 +4547,11 @@ fn cuda_belief_search_with_batch(
                     ) <= 1e-6
                 })
             {
+                provenance.safety_replacement =
+                    Some((provisional.action.clone(), actions[escape_index].action.clone()));
                 chosen_index = escape_index;
             }
         }
-        if chosen_index > 0
-            && let (Some(leading), Some(replacement)) = (actions.first(), actions.get(chosen_index))
-        {
-            provenance.safety_replacement =
-                Some((leading.action.clone(), replacement.action.clone()));
-        }
-        provenance.search_winner = actions.first().map(|entry| entry.action.clone());
         let chosen = actions.get(chosen_index).map(|entry| entry.action.clone());
         if let Some(chosen_action) = chosen.as_ref()
             && let Some(family) = exact_family_for_action(chosen_action)
@@ -4676,16 +4754,24 @@ fn cuda_belief_search_with_batch(
         })
         .collect::<Vec<_>>();
     actions.sort_by(|left, right| right.value[actor].total_cmp(&left.value[actor]));
-    let mut chosen_index = 0usize;
-    if let Some(leading) = actions.first() {
-        let leading_loss = forced_loss_weight(
+    provenance.search_winner = actions.first().map(|entry| entry.action.clone());
+    let mut chosen_index =
+        decisive_current_turn_plan_replacement_index(&actions, actor, &ranked_diagnostics, 0);
+    if chosen_index > 0
+        && let (Some(leading), Some(replacement)) = (actions.first(), actions.get(chosen_index))
+    {
+        provenance.decisive_plan_replacement =
+            Some((leading.action.clone(), replacement.action.clone()));
+    }
+    if let Some(provisional) = actions.get(chosen_index) {
+        let provisional_loss = forced_loss_weight(
             posterior
                 .iter()
                 .map(|particle| (&particle.state, particle.weight)),
             observer,
-            &leading.action,
+            &provisional.action,
         );
-        if leading_loss >= 1.0 - 1e-6
+        if provisional_loss >= 1.0 - 1e-6
             && let Some(escape_index) = actions.iter().position(|candidate| {
                 forced_loss_weight(
                     posterior
@@ -4696,15 +4782,11 @@ fn cuda_belief_search_with_batch(
                 ) <= 1e-6
             })
         {
+            provenance.safety_replacement =
+                Some((provisional.action.clone(), actions[escape_index].action.clone()));
             chosen_index = escape_index;
         }
     }
-    if chosen_index > 0
-        && let (Some(leading), Some(replacement)) = (actions.first(), actions.get(chosen_index))
-    {
-        provenance.safety_replacement = Some((leading.action.clone(), replacement.action.clone()));
-    }
-    provenance.search_winner = actions.first().map(|entry| entry.action.clone());
     let chosen = actions.get(chosen_index).map(|entry| entry.action.clone());
     if let Some(chosen_action) = chosen.as_ref()
         && let Some(family) = exact_family_for_action(chosen_action)
@@ -5034,7 +5116,8 @@ mod tests {
     use colonist_catan_core::{Action, DevCard, GameState, NodeKind, Phase, Resource, SplitMix64};
 
     use super::{
-        BeliefNodeBudgetMode, apply_action_friction, evidence_escalation_node_budget,
+        BeliefNodeBudgetMode, DepthActionValue, RankedRootDiagnostic, apply_action_friction,
+        decisive_current_turn_plan_replacement_index, evidence_escalation_node_budget,
         evidence_escalation_target_depth, normalize_belief_root_priors,
         realized_root_evidence_strengthened, search_belief_maxn, search_belief_maxn_bounded,
         search_maxn, search_paranoid, search_weighted_belief_maxn_bounded,
@@ -5043,6 +5126,102 @@ mod tests {
         should_escalate_binary_root_evidence,
     };
     use crate::mcts::BeliefParticle;
+
+    #[test]
+    fn task9783_decisive_current_turn_plan_beats_shallow_end_turn() {
+        let end_turn = Action::EndTurn;
+        let road_a = Action::BuildRoad { edge: 10 };
+        let road_b = Action::BuildRoad { edge: 11 };
+        let actions = vec![
+            DepthActionValue {
+                action: end_turn.clone(),
+                value: [0.3627, 0.0, 0.0, 0.0],
+                legal_weight: 1.0,
+                lower_confidence_value: [0.3169, 0.0, 0.0, 0.0],
+            },
+            DepthActionValue {
+                action: road_a.clone(),
+                value: [0.3474, 0.0, 0.0, 0.0],
+                legal_weight: 1.0,
+                lower_confidence_value: [0.2490, 0.0, 0.0, 0.0],
+            },
+            DepthActionValue {
+                action: road_b.clone(),
+                value: [0.3444, 0.0, 0.0, 0.0],
+                legal_weight: 1.0,
+                lower_confidence_value: [0.3085, 0.0, 0.0, 0.0],
+            },
+        ];
+        let diagnostic = |action, rank, planner_value, decisive_completion_mass, response_windows| {
+            RankedRootDiagnostic {
+                action,
+                rank,
+                prior: 0.0,
+                planner_value: Some(planner_value),
+                planner_completion_mass: Some(1.0),
+                planner_decisive_completion_mass: Some(decisive_completion_mass),
+                planner_response_windows: Some(response_windows),
+                quota_score: 0.0,
+            }
+        };
+        let ranked = vec![
+            diagnostic(end_turn, 4, 17.4961, 0.0, 3.0),
+            diagnostic(road_a, 3, 34.6522, 1.0, 0.0),
+            diagnostic(road_b, 1, 34.6189, 1.0, 0.0),
+        ];
+
+        assert_eq!(
+            decisive_current_turn_plan_replacement_index(&actions, 0, &ranked, 0),
+            1
+        );
+    }
+
+    #[test]
+    fn comparable_decisive_plan_does_not_override_search_winner() {
+        let end_turn = Action::EndTurn;
+        let road = Action::BuildRoad { edge: 10 };
+        let actions = vec![
+            DepthActionValue {
+                action: end_turn.clone(),
+                value: [0.51, 0.0, 0.0, 0.0],
+                legal_weight: 1.0,
+                lower_confidence_value: [0.51, 0.0, 0.0, 0.0],
+            },
+            DepthActionValue {
+                action: road.clone(),
+                value: [0.49, 0.0, 0.0, 0.0],
+                legal_weight: 1.0,
+                lower_confidence_value: [0.49, 0.0, 0.0, 0.0],
+            },
+        ];
+        let ranked = vec![
+            RankedRootDiagnostic {
+                action: end_turn,
+                rank: 1,
+                prior: 0.5,
+                planner_value: Some(10.0),
+                planner_completion_mass: Some(1.0),
+                planner_decisive_completion_mass: Some(0.0),
+                planner_response_windows: Some(3.0),
+                quota_score: 1.0,
+            },
+            RankedRootDiagnostic {
+                action: road,
+                rank: 2,
+                prior: 0.5,
+                planner_value: Some(10.1),
+                planner_completion_mass: Some(1.0),
+                planner_decisive_completion_mass: Some(1.0),
+                planner_response_windows: Some(0.0),
+                quota_score: 0.5,
+            },
+        ];
+
+        assert_eq!(
+            decisive_current_turn_plan_replacement_index(&actions, 0, &ranked, 0),
+            0
+        );
+    }
 
     #[test]
     fn evidence_escalation_requires_binary_completed_wave_disagreement() {

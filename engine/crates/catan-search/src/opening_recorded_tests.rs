@@ -77,6 +77,28 @@ const HAND2325_HEXES: [((i8, i8), Option<Resource>, u8); 19] = [
     ((0, 0), Some(Resource::Ore), 11),
 ];
 
+const TASK9783_HEXES: [((i8, i8), Option<Resource>, u8); 19] = [
+    ((0, -2), Some(Resource::Brick), 5),
+    ((-1, -1), Some(Resource::Grain), 2),
+    ((-2, 0), Some(Resource::Lumber), 6),
+    ((-2, 1), None, 0),
+    ((-2, 2), Some(Resource::Grain), 3),
+    ((-1, 2), Some(Resource::Wool), 8),
+    ((0, 2), Some(Resource::Ore), 10),
+    ((1, 1), Some(Resource::Brick), 9),
+    ((2, 0), Some(Resource::Wool), 12),
+    ((2, -1), Some(Resource::Grain), 11),
+    ((2, -2), Some(Resource::Wool), 4),
+    ((1, -2), Some(Resource::Lumber), 8),
+    ((0, -1), Some(Resource::Brick), 10),
+    ((-1, 0), Some(Resource::Lumber), 9),
+    ((-1, 1), Some(Resource::Wool), 4),
+    ((0, 1), Some(Resource::Grain), 5),
+    ((1, 0), Some(Resource::Lumber), 6),
+    ((1, -1), Some(Resource::Ore), 3),
+    ((0, 0), Some(Resource::Ore), 11),
+];
+
 const TASK394_HEXES: [((i8, i8), Option<Resource>, u8); 19] = [
     ((0, -2), Some(Resource::Lumber), 9),
     ((-1, -1), Some(Resource::Grain), 10),
@@ -133,6 +155,18 @@ const HAND2325_PORTS: [(&str, Port); 9] = [
     ("e:3,0,1", Port::Generic),
     ("e:3,-2,2", Port::Generic),
     ("e:2,-3,2", Port::Resource(Resource::Lumber)),
+];
+
+const TASK9783_PORTS: [(&str, Port); 9] = [
+    ("e:0,-2,0", Port::Generic),
+    ("e:-1,-1,1", Port::Generic),
+    ("e:-2,1,1", Port::Generic),
+    ("e:-2,2,2", Port::Resource(Resource::Lumber)),
+    ("e:-1,3,0", Port::Resource(Resource::Grain)),
+    ("e:1,2,0", Port::Generic),
+    ("e:3,0,1", Port::Resource(Resource::Ore)),
+    ("e:3,-2,2", Port::Resource(Resource::Wool)),
+    ("e:2,-3,2", Port::Resource(Resource::Brick)),
 ];
 
 const TASK394_PORTS: [(&str, Port); 9] = [
@@ -467,6 +501,24 @@ fn assert_setup_turn(state: &GameState, root: u8, setup_step: u8) {
     assert_eq!(state.phase, Phase::SetupSettlement);
 }
 
+fn task9783_d3() -> GameState {
+    let mut state = recorded_state(&TASK9783_HEXES, &TASK9783_PORTS, 1);
+    place_settlement(&mut state, "v:-1,-1,1");
+    place_road(&mut state, "e:-1,0,1");
+    place_settlement(&mut state, "v:1,0,1");
+    place_road(&mut state, "e:1,1,1");
+    place_settlement(&mut state, "v:1,-3,1");
+    place_road(&mut state, "e:1,-2,0");
+    place_settlement(&mut state, "v:-1,2,0");
+    place_road(&mut state, "e:0,1,2");
+    place_settlement(&mut state, "v:1,-1,0");
+    place_road(&mut state, "e:2,-2,1");
+    place_settlement(&mut state, "v:-1,0,1");
+    place_road(&mut state, "e:-1,1,0");
+    assert_setup_turn(&state, 1, 6);
+    state
+}
+
 fn hand2325_d1() -> GameState {
     let mut state = recorded_state_with_rules(&HAND2325_HEXES, &HAND2325_PORTS, 1, 2, 15);
     place_settlement(&mut state, "v:-2,1,0");
@@ -679,6 +731,38 @@ fn trade5301_weak_brick_closes_a_real_bottleneck_even_with_bank_conversion() {
         candidate_value(&report, &weak_brick) > candidate_value(&report, &higher_pip_no_brick),
         "the weak brick that closes the road/settlement bottleneck must outrank the raw-pip alternative with no brick"
     );
+}
+
+#[test]
+fn task9783_equal_pips_complete_portfolio_beats_speculative_repair_in_both_trade_modes() {
+    for domestic_trades_disabled in [true, false] {
+        let mut state = task9783_d3();
+        state.domestic_trade_disabled = u8::from(domestic_trades_disabled) << 1;
+        let complete = settlement_action(&state, "v:-1,3,0");
+        let historical = settlement_action(&state, "v:0,-2,1");
+
+        let mut complete_state = state.clone();
+        complete_state.apply(&complete).unwrap();
+        let complete_pips = production_pips(&complete_state, 1);
+        let mut historical_state = state.clone();
+        historical_state.apply(&historical).unwrap();
+        let historical_pips = production_pips(&historical_state, 1);
+        assert_eq!(complete_pips.iter().sum::<f32>(), 21.0);
+        assert_eq!(historical_pips.iter().sum::<f32>(), 21.0);
+        assert_eq!(complete_pips, [5.0, 4.0, 5.0, 4.0, 3.0]);
+        assert_eq!(historical_pips, [5.0, 11.0, 0.0, 5.0, 0.0]);
+
+        let report = solve_opening(&state, 1, live_opening_config());
+        assert_eq!(
+            report.chosen.as_ref(),
+            Some(&complete),
+            "task9783 must not spend speculative future expansion credit to prefer an equal-pip opening with no wool or ore; domestic_trades_disabled={domestic_trades_disabled}"
+        );
+        assert!(
+            candidate_value(&report, &complete) > candidate_value(&report, &historical),
+            "the complete task9783 portfolio must outrank the repair-dependent historical root"
+        );
+    }
 }
 
 #[test]
@@ -1198,9 +1282,11 @@ fn grain8695_final_settlement_matches_exhaustive_endpoints_with_either_trade_pol
         assert_eq!(evidence.starting_hand, [0, 1, 1, 1, 0]);
         assert_eq!(evidence.production_pips, [5.0, 3.0, 5.0, 2.0, 3.0]);
         assert_eq!(evidence.maritime_ratios, [4; 5]);
-        policy_results.push((chosen.clone(), best));
+        policy_results.push(chosen.clone());
     }
-    // Enabling offers supplies no guaranteed counterparty or extra starting cards.
+    // Enabling offers supplies no guaranteed counterparty or extra starting
+    // cards, so this fixture should retain the same best endpoint. Strategic
+    // self-reliance may still change the numeric value of that endpoint.
     assert_eq!(policy_results[0], policy_results[1]);
 }
 // Research-only comparison. It cannot change the production opening policy.
@@ -1353,7 +1439,7 @@ fn grain8695_opponent_uses_completed_portfolio_with_either_trade_policy() {
         state.domestic_trade_disabled = disabled;
         place_settlement(&mut state, "v:-1,1,1");
         place_road(&mut state, "e:-1,1,2");
-        let mut solver = super::OpeningSolver {
+        let make_solver = || super::OpeningSolver {
             root: 0,
             config: live_opening_config(),
             nodes: 0,
@@ -1365,14 +1451,27 @@ fn grain8695_opponent_uses_completed_portfolio_with_either_trade_policy() {
             memo: Default::default(),
             deadline: super::CooperativeDeadline::start(0),
         };
-        let result = solver.visit(&state);
-        assert!(result.endpoint_complete);
-        let evidence = result.evidence.unwrap();
+
+        let mut portfolio_solver = make_solver();
+        let portfolio_result = portfolio_solver.visit(&state);
+        assert!(portfolio_result.endpoint_complete);
+        let portfolio_evidence = portfolio_result.evidence.unwrap();
+
+        let mut greedy_solver = make_solver();
+        let opponent = state.actor();
+        let greedy_handoff = greedy_solver
+            .greedy_opponent_handoff(state.clone(), opponent)
+            .expect("greedy opponent handoff must complete its consecutive setup pairs");
+        let greedy_result = greedy_solver.visit(&greedy_handoff);
+        assert!(greedy_result.endpoint_complete);
+        let greedy_evidence = greedy_result.evidence.unwrap();
+
         assert!(
-            evidence.rival_value > 10.8,
-            "greedy predicted only 8.7086: {evidence:?}"
+            portfolio_evidence.rival_value > greedy_evidence.rival_value + 0.05,
+            "completed opponent portfolio must improve on the greedy setup handoff: portfolio={portfolio_evidence:?} greedy={greedy_evidence:?}"
         );
-        assert!(solver.nodes <= 12_000);
+        assert!(portfolio_solver.nodes <= 12_000);
+        assert!(greedy_solver.nodes <= 12_000);
     }
 }
 

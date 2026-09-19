@@ -1783,6 +1783,7 @@ impl NativeGpuSearchEngine {
             horizon_escalation,
             trade_hard_veto_threshold: HARD_VETO_POSTERIOR,
             search_winner: Some(action(chosen_root.action.clone())),
+            decisive_plan_replacement: None,
             exact_family_replacement: None,
             safety_replacement: None,
         };

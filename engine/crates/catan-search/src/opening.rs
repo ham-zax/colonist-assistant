@@ -7,7 +7,9 @@ use colonist_catan_core::{
 
 use crate::deadline::CooperativeDeadline;
 use crate::economy::{build_conversion_efficiency, build_eta_rolls};
-use crate::eval::{evaluate, expansion_option_value, production_pips, vertex_value};
+use crate::eval::{
+    closed_economy_value, evaluate, expansion_option_value, production_pips, vertex_value,
+};
 use crate::policy::{choose_rollout_action, normalize_priors};
 
 const NUMBER_PIPS: [f32; 13] = [
@@ -150,6 +152,7 @@ fn opening_position_bonus(state: &GameState, player: u8) -> f32 {
         + ore_access * 0.04
         + build_economy.weighted_access * 0.82
         + build_economy.weighted_efficiency * 0.30
+        + closed_economy_value(state, player)
         - duplicate_number_exposure * 0.04
         - shared_hex_exposure * 0.38
 }
@@ -250,11 +253,16 @@ fn opening_expansion_value(state: &GameState, player: u8) -> f32 {
         return 0.0;
     }
 
-    // The shared expansion owner already prices the complete road-plus-
-    // settlement cost and race arrival. Applying a second ETA multiplier here
-    // double-counts affordability and lets changes in one heuristic owner drift
-    // away from ordinary strategic road evaluation.
-    expansion.value * 0.32 + expansion.portfolio_value * 0.22
+    // The shared expansion owner already charges road-plus-settlement arrival
+    // cost, but it also upweights scarce resources. During setup that can make
+    // a repair site look like extra upside even when it merely fixes a resource
+    // hole the opening created. Preserve most of the option value while
+    // discounting that speculative repair when current production has poor
+    // bank/port conversion efficiency.
+    let raw_value = expansion.value * 0.32 + expansion.portfolio_value * 0.22;
+    let build_economy = opening_build_economy(state, player);
+    let realization = 0.70 + build_economy.weighted_efficiency.clamp(0.0, 1.0) * 0.30;
+    raw_value * realization
 }
 
 fn opening_position_value(state: &GameState, player: u8) -> f32 {

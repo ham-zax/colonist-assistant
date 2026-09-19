@@ -882,6 +882,7 @@ struct RootProvenanceOutput {
     horizon_escalation: Option<HorizonEscalationOutput>,
     trade_hard_veto_threshold: f32,
     search_winner: Option<ActionOutput>,
+    decisive_plan_replacement: Option<ActionReplacementOutput>,
     exact_family_replacement: Option<ActionReplacementOutput>,
     safety_replacement: Option<ActionReplacementOutput>,
 }
@@ -900,6 +901,7 @@ impl Default for RootProvenanceOutput {
             horizon_escalation: None,
             trade_hard_veto_threshold: HARD_VETO_POSTERIOR,
             search_winner: None,
+            decisive_plan_replacement: None,
             exact_family_replacement: None,
             safety_replacement: None,
         }
@@ -1702,6 +1704,9 @@ fn root_provenance_output(provenance: BeliefSearchProvenance) -> RootProvenanceO
         horizon_escalation: None,
         trade_hard_veto_threshold: provenance.trade_hard_veto_threshold,
         search_winner: provenance.search_winner.map(action),
+        decisive_plan_replacement: provenance
+            .decisive_plan_replacement
+            .map(replacement_output),
         exact_family_replacement: provenance.exact_family_replacement.map(replacement_output),
         safety_replacement: provenance.safety_replacement.map(replacement_output),
     }

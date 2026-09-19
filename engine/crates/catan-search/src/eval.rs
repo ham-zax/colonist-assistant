@@ -1063,7 +1063,7 @@ fn strategic_utility_with_routes(state: &GameState, player: u8, route_maps: &[Ve
     strategic_utility_with_routes_and_knowledge(state, player, route_maps, true, None)
 }
 
-fn closed_economy_value(state: &GameState, player: u8) -> f32 {
+pub(crate) fn closed_economy_value(state: &GameState, player: u8) -> f32 {
     let domestic_trades_disabled =
         !state.player_trades_enabled || state.domestic_trade_disabled & (1_u8 << player) != 0;
     let closure_weight = if domestic_trades_disabled {

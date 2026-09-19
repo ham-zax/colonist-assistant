@@ -15,7 +15,7 @@ use crate::resilience::{RoadResilience, analyze_road_resilience};
 /// Closeout may affect coverage only when planner endpoints are effectively a
 /// strategic tie. One public VP is ~7.4 utility in `eval`, so this band is
 /// deliberately much smaller than a material score/build difference.
-const CLOSEOUT_COMPARABLE_VALUE_DELTA: f32 = 0.20;
+pub(crate) const CLOSEOUT_COMPARABLE_VALUE_DELTA: f32 = 0.20;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RoadImpactDelta {
