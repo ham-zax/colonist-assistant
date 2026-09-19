@@ -97,16 +97,24 @@ fn port(value: Option<&str>) -> Option<Port> {
 
 fn main() {
     let path = env::args().nth(1).expect("state spec path required");
-    let spec: Spec = serde_json::from_str(&fs::read_to_string(&path).expect("read spec"))
-        .expect("parse spec");
+    let spec: Spec =
+        serde_json::from_str(&fs::read_to_string(&path).expect("read spec")).expect("parse spec");
 
-    let hex_ids = spec.hexes.iter().map(|hex| hex.id.clone()).collect::<Vec<_>>();
+    let hex_ids = spec
+        .hexes
+        .iter()
+        .map(|hex| hex.id.clone())
+        .collect::<Vec<_>>();
     let vertex_ids = spec
         .vertices
         .iter()
         .map(|vertex| vertex.id.clone())
         .collect::<Vec<_>>();
-    let edge_ids = spec.edges.iter().map(|edge| edge.id.clone()).collect::<Vec<_>>();
+    let edge_ids = spec
+        .edges
+        .iter()
+        .map(|edge| edge.id.clone())
+        .collect::<Vec<_>>();
 
     let board = Board {
         num_players: spec.num_players,
@@ -172,7 +180,9 @@ fn main() {
         state.roads[road.edge as usize] = Some(road.player);
     }
 
-    state.validate().expect("reconstructed D3 state must validate");
+    state
+        .validate()
+        .expect("reconstructed D3 state must validate");
 
     let report = solve_opening(
         &state,

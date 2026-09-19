@@ -500,6 +500,14 @@ function candidateDerivedFeatures(record, action) {
     };
   }
 
+  if (/^BuyDevelopment\b/.test(action)) {
+    return {
+      kind: "developmentCardPurchase",
+      spend,
+      informationSetDrawBelief: state.developmentDrawBelief ?? null,
+    };
+  }
+
   return { kind: "other", spend };
 }
 
@@ -839,7 +847,7 @@ function pass3Questions(options, record) {
             ["future_optionality", "How much useful future optionality does this candidate preserve?", "Penalize unnecessary commitment or dead-end spending."],
             ["opponent_pressure", "How well does this candidate handle or create relevant opponent pressure?", "Use supplied belief probabilities rather than assuming hidden cards."],
             ["block_resilience", "How resilient is this candidate to plausible opponent responses?", "Reward credible recovery paths."],
-            ["city_dev_balance", "How well does this candidate preserve city/development-card plans alongside expansion?", "Avoid evaluating one plan in isolation."],
+            ["city_dev_balance", "How well does this candidate preserve city/development-card plans alongside expansion?", "Avoid evaluating one plan in isolation. For BuyDevelopment, use informationSetDrawBelief as the authoritative actor-safe distribution over possible next-card types instead of treating the draw as unspecified or assuming an exact hidden deck."],
             ["tempo_compounding", "How well does this candidate compound tempo over the next several builds?", "Prefer actions whose follow-ups become easier or more productive."],
             ["long_horizon_value", "How strong is this candidate for long-horizon strategy?", "Integrate the supplied exact facts without redoing arithmetic."],
           ];

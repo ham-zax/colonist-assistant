@@ -5,13 +5,16 @@ use std::io::{BufWriter, Write};
 
 use colonist_catan_arena::belief_particles;
 use colonist_catan_core::{
-    Action, Building, CITY_COST, DEVELOPMENT_COST, GameState, NodeKind, Phase, Port, Resource,
-    ResourceHand, ROAD_COST, SETTLEMENT_COST, SplitMix64,
+    Action, Board, Building, CITY_COST, DEVELOPMENT_COST, DevCard, Edge, GameState, Hex, NodeKind,
+    Phase, PlayerState, Port, ROAD_COST, Resource, ResourceHand, SETTLEMENT_COST, SplitMix64,
+    Vertex,
 };
 use colonist_catan_search::{
     BeliefDepthConfig, BeliefParticle, StrategyPolicy, evaluate, expansion_option_value,
-    production_pips, search_weighted_belief_maxn_with_config,
+    expected_discard_loss, marginal_development_value, production_pips,
+    search_weighted_belief_maxn_with_config, strategic_utility,
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[derive(Clone, Debug)]
@@ -31,6 +34,7 @@ struct Config {
     force_action: Option<String>,
     replay_prefix: Option<String>,
     replay_game: u32,
+    state_spec: Option<String>,
 }
 
 impl Default for Config {
@@ -51,6 +55,7 @@ impl Default for Config {
             force_action: None,
             replay_prefix: None,
             replay_game: 0,
+            state_spec: None,
         }
     }
 }
@@ -98,6 +103,9 @@ fn parse_config() -> Config {
             "--replay-game" => {
                 config.replay_game = value.and_then(|v| v.parse().ok()).unwrap_or(0);
             }
+            "--state-spec" => {
+                config.state_spec = value.map(str::to_owned);
+            }
             "--player-trades" => {
                 config.player_trades_enabled = true;
                 i += 1;
@@ -114,7 +122,7 @@ fn parse_config() -> Config {
                      [--output PATH] [--max-turns N] [--depth N] [--ordinary-nodes N] \
                      [--chance-seed N] [--continuation-seed N] \
                      [--force-decision-index N (--force-settlement-vertex V|--force-action SPEC)] \
-                     [--replay-prefix JSONL --replay-game N] \
+                     [--replay-prefix JSONL --replay-game N] [--state-spec JSON] \
                      [--player-trades|--no-player-trades]"
                 );
                 std::process::exit(0);
@@ -128,8 +136,14 @@ fn parse_config() -> Config {
     }
     assert!((2..=4).contains(&config.players));
     assert!(config.games > 0);
-    let forced_spec_count =
-        usize::from(config.force_settlement_vertex.is_some()) + usize::from(config.force_action.is_some());
+    if config.state_spec.is_some() {
+        assert_eq!(
+            config.games, 1,
+            "--state-spec currently supports exactly one game"
+        );
+    }
+    let forced_spec_count = usize::from(config.force_settlement_vertex.is_some())
+        + usize::from(config.force_action.is_some());
     assert!(
         forced_spec_count <= 1,
         "use only one of --force-settlement-vertex or --force-action"
@@ -142,6 +156,70 @@ fn parse_config() -> Config {
     config
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StateSpec {
+    num_players: u8,
+    victory_target: u8,
+    setup_step: u8,
+    current_player: u8,
+    player_trades_enabled: bool,
+    domestic_trade_disabled_mask: u8,
+    bank: [u8; 5],
+    hexes: Vec<StateHexSpec>,
+    vertices: Vec<StateVertexSpec>,
+    edges: Vec<StateEdgeSpec>,
+    buildings: Vec<StateBuildingSpec>,
+    roads: Vec<StateRoadSpec>,
+    players: Vec<StatePlayerSpec>,
+}
+
+#[derive(Deserialize)]
+struct StateHexSpec {
+    resource: Option<String>,
+    number: u8,
+    coord: [i8; 2],
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StateVertexSpec {
+    adjacent_hexes: Vec<u8>,
+    adjacent_vertices: Vec<u8>,
+    adjacent_edges: Vec<u8>,
+    port: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StateEdgeSpec {
+    vertices: [u8; 2],
+    adjacent_hexes: Vec<u8>,
+}
+
+#[derive(Deserialize)]
+struct StateBuildingSpec {
+    vertex: u8,
+    player: u8,
+    kind: String,
+}
+
+#[derive(Deserialize)]
+struct StateRoadSpec {
+    edge: u8,
+    player: u8,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StatePlayerSpec {
+    resources: [u8; 5],
+    public_victory_points: u8,
+    roads_built: u8,
+    settlements_built: u8,
+    cities_built: u8,
+}
+
 fn parse_resource(value: &str) -> Resource {
     match value.to_ascii_lowercase().as_str() {
         "lumber" => Resource::Lumber,
@@ -151,6 +229,88 @@ fn parse_resource(value: &str) -> Resource {
         "ore" => Resource::Ore,
         other => panic!("unknown forced-action resource {other}"),
     }
+}
+
+fn parse_port(value: Option<&str>) -> Option<Port> {
+    match value {
+        None => None,
+        Some("generic") => Some(Port::Generic),
+        Some(value) => Some(Port::Resource(parse_resource(value))),
+    }
+}
+
+fn load_state_spec(path: &str) -> GameState {
+    let spec: StateSpec = serde_json::from_str(
+        &fs::read_to_string(path).unwrap_or_else(|error| panic!("failed to read {path}: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("failed to parse state spec {path}: {error}"));
+
+    let board = Board {
+        num_players: spec.num_players,
+        hexes: spec
+            .hexes
+            .iter()
+            .map(|hex| Hex {
+                resource: hex.resource.as_deref().map(parse_resource),
+                number: hex.number,
+                coord: (hex.coord[0], hex.coord[1]),
+            })
+            .collect(),
+        vertices: spec
+            .vertices
+            .iter()
+            .map(|vertex| Vertex {
+                adjacent_hexes: vertex.adjacent_hexes.clone(),
+                adjacent_vertices: vertex.adjacent_vertices.clone(),
+                adjacent_edges: vertex.adjacent_edges.clone(),
+                port: parse_port(vertex.port.as_deref()),
+            })
+            .collect(),
+        edges: spec
+            .edges
+            .iter()
+            .map(|edge| Edge {
+                vertices: edge.vertices,
+                adjacent_hexes: edge.adjacent_hexes.clone(),
+            })
+            .collect(),
+    };
+
+    let mut state = GameState::new(board, spec.victory_target);
+    state.setup_step = spec.setup_step;
+    state.current_player = spec.current_player;
+    state.phase = Phase::SetupSettlement;
+    state.player_trades_enabled = spec.player_trades_enabled;
+    state.domestic_trade_disabled = spec.domestic_trade_disabled_mask;
+    state.bank = spec.bank;
+    state.players = spec
+        .players
+        .iter()
+        .map(|player| {
+            let mut result = PlayerState::new();
+            result.resources = player.resources;
+            result.public_victory_points = player.public_victory_points;
+            result.roads_left = 15u8.saturating_sub(player.roads_built);
+            result.settlements_left = 5u8.saturating_sub(player.settlements_built);
+            result.cities_left = 4u8.saturating_sub(player.cities_built);
+            result
+        })
+        .collect();
+
+    for building in &spec.buildings {
+        state.buildings[building.vertex as usize] = Some(match building.kind.as_str() {
+            "settlement" => Building::Settlement(building.player),
+            "city" => Building::City(building.player),
+            other => panic!("unknown state-spec building kind {other}"),
+        });
+    }
+    for road in &spec.roads {
+        state.roads[road.edge as usize] = Some(road.player);
+    }
+    state
+        .validate()
+        .unwrap_or_else(|error| panic!("state spec {path} is invalid: {error}"));
+    state
 }
 
 fn parse_forced_action(spec: &str) -> Action {
@@ -167,24 +327,35 @@ fn parse_forced_action(spec: &str) -> Action {
     }
     if let Some(vertex) = spec.strip_prefix("settlement:") {
         return Action::BuildSettlement {
-            vertex: vertex.parse().expect("forced settlement vertex must be an integer"),
+            vertex: vertex
+                .parse()
+                .expect("forced settlement vertex must be an integer"),
         };
     }
     if let Some(vertex) = spec.strip_prefix("city:") {
         return Action::BuildCity {
-            vertex: vertex.parse().expect("forced city vertex must be an integer"),
+            vertex: vertex
+                .parse()
+                .expect("forced city vertex must be an integer"),
         };
     }
     if let Some(rest) = spec.strip_prefix("maritime:") {
         let mut parts = rest.split(':');
         let give = parse_resource(parts.next().expect("forced maritime give resource missing"));
-        let receive = parse_resource(parts.next().expect("forced maritime receive resource missing"));
+        let receive = parse_resource(
+            parts
+                .next()
+                .expect("forced maritime receive resource missing"),
+        );
         let ratio = parts
             .next()
             .expect("forced maritime ratio missing")
             .parse()
             .expect("forced maritime ratio must be an integer");
-        assert!(parts.next().is_none(), "forced maritime action has too many fields");
+        assert!(
+            parts.next().is_none(),
+            "forced maritime action has too many fields"
+        );
         return Action::MaritimeTrade {
             give,
             receive,
@@ -253,7 +424,10 @@ fn parse_recorded_action(value: &str) -> Action {
             .expect("recorded maritime ratio missing")
             .parse()
             .expect("recorded maritime ratio must be an integer");
-        assert!(fields.next().is_none(), "recorded maritime action has extra fields");
+        assert!(
+            fields.next().is_none(),
+            "recorded maritime action has extra fields"
+        );
         return Action::MaritimeTrade {
             give,
             receive,
@@ -290,9 +464,16 @@ fn parse_recorded_action(value: &str) -> Action {
     {
         let parsed = cards
             .split(", ")
-            .map(|card| card.parse::<u8>().expect("recorded discard card must be an integer"))
+            .map(|card| {
+                card.parse::<u8>()
+                    .expect("recorded discard card must be an integer")
+            })
             .collect::<Vec<_>>();
-        assert_eq!(parsed.len(), 5, "recorded discard must contain five resources");
+        assert_eq!(
+            parsed.len(),
+            5,
+            "recorded discard must contain five resources"
+        );
         return Action::Discard {
             cards: [parsed[0], parsed[1], parsed[2], parsed[3], parsed[4]],
         };
@@ -364,7 +545,9 @@ fn hand_json(hand: ResourceHand) -> Value {
 }
 
 fn can_pay(hand: &ResourceHand, cost: &ResourceHand) -> bool {
-    hand.iter().zip(cost.iter()).all(|(have, need)| have >= need)
+    hand.iter()
+        .zip(cost.iter())
+        .all(|(have, need)| have >= need)
 }
 
 fn add_costs(left: &ResourceHand, right: &ResourceHand) -> ResourceHand {
@@ -417,6 +600,38 @@ fn affordability_json(particles: &[BeliefParticle], player: u8) -> Value {
         "canAffordRoadAndSettlement": normalize(road_and_settlement),
         "canAffordTwoRoads": normalize(two_roads_mass),
         "canAffordSettlementAndDevelopmentCard": normalize(settlement_and_dev),
+    })
+}
+
+fn actor_development_draw_belief_json(state: &GameState, actor: u8) -> Value {
+    const STANDARD_TOTALS: [u8; 5] = [14, 5, 2, 2, 2];
+
+    let own = &state.players[actor as usize];
+    let possible = std::array::from_fn::<u8, 5, _>(|card| {
+        STANDARD_TOTALS[card]
+            .saturating_sub(state.played_development[card])
+            .saturating_sub(own.development[card])
+    });
+    let unseen_total = possible.iter().copied().sum::<u8>();
+    let probability = |card: DevCard| {
+        if unseen_total == 0 {
+            0.0
+        } else {
+            f32::from(possible[card.index()]) / f32::from(unseen_total)
+        }
+    };
+
+    json!({
+        "interpretation": "Information-set-safe exchangeable belief for the next development-card draw. Uses standard card totals, publicly played cards, the actor's own exact cards, and public deck size; never exact opponent-held or hidden-deck identities.",
+        "deckCardsRemaining": state.development_deck.iter().copied().sum::<u8>(),
+        "unseenPoolCards": unseen_total,
+        "probabilities": {
+            "knight": probability(DevCard::Knight),
+            "victoryPoint": probability(DevCard::VictoryPoint),
+            "roadBuilding": probability(DevCard::RoadBuilding),
+            "yearOfPlenty": probability(DevCard::YearOfPlenty),
+            "monopoly": probability(DevCard::Monopoly),
+        },
     })
 }
 
@@ -524,10 +739,79 @@ fn public_state_json(state: &GameState, actor: u8, particles: &[BeliefParticle])
         "longestRoadHolder": state.longest_road_holder,
         "largestArmyHolder": state.largest_army_holder,
         "bankIfPublic": if state.bank_is_public { hand_json(state.bank) } else { Value::Null },
+        "developmentDrawBelief": actor_development_draw_belief_json(state, actor),
         "players": players,
         "hexes": hexes,
         "vertices": vertices,
         "edges": edges,
+    })
+}
+
+fn immediate_action_diagnostics(state: &GameState, action: &Action, actor: u8) -> Value {
+    let before = strategic_utility(state, actor);
+    let mut next = state.clone();
+    if next.apply(action).is_err() {
+        return Value::Null;
+    }
+
+    let root_resources = next.players[actor as usize].resources;
+    let mut resource_only = state.clone();
+    resource_only.players[actor as usize].resources = root_resources;
+    let resource_only_utility = strategic_utility(&resource_only, actor);
+    let root_discard_loss = expected_discard_loss(&next, actor);
+    let root_marginal_development = marginal_development_value(&next, actor);
+    if next.node_kind() != NodeKind::Chance {
+        let after = strategic_utility(&next, actor);
+        return json!({
+            "strategicUtilityBefore": before,
+            "strategicUtilityAfterExpected": after,
+            "strategicUtilityDelta": after - before,
+            "resourcesAfterRoot": hand_json(root_resources),
+            "resourceOnlyStrategicUtility": resource_only_utility,
+            "resourceOnlyDelta": resource_only_utility - before,
+            "expectedDiscardLossAfterRoot": root_discard_loss,
+            "marginalDevelopmentValueAfterRoot": root_marginal_development,
+            "chanceOutcomes": [],
+        });
+    }
+
+    let chance_actions = next.legal_actions();
+    let total_development = next.development_deck.iter().copied().sum::<u8>().max(1) as f32;
+    let mut expected_after = 0.0;
+    let outcomes = chance_actions
+        .iter()
+        .filter_map(|chance| {
+            let weight = match chance {
+                Action::ResolveDevelopment { card } => {
+                    next.development_deck[card.index()] as f32 / total_development
+                }
+                _ => 1.0 / chance_actions.len().max(1) as f32,
+            };
+            let mut resolved = next.clone();
+            resolved.apply(chance).ok()?;
+            let utility = strategic_utility(&resolved, actor);
+            expected_after += utility * weight;
+            Some(json!({
+                "action": format!("{chance:?}"),
+                "weight": weight,
+                "strategicUtility": utility,
+                "deltaFromBefore": utility - before,
+                "resources": hand_json(resolved.players[actor as usize].resources),
+                "expectedDiscardLoss": expected_discard_loss(&resolved, actor),
+                "marginalDevelopmentValue": marginal_development_value(&resolved, actor),
+            }))
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "strategicUtilityBefore": before,
+        "strategicUtilityAfterExpected": expected_after,
+        "strategicUtilityDelta": expected_after - before,
+        "resourcesAfterRoot": hand_json(root_resources),
+        "resourceOnlyStrategicUtility": resource_only_utility,
+        "resourceOnlyDelta": resource_only_utility - before,
+        "expectedDiscardLossAfterRoot": root_discard_loss,
+        "marginalDevelopmentValueAfterRoot": root_marginal_development,
+        "chanceOutcomes": outcomes,
     })
 }
 
@@ -573,6 +857,7 @@ fn main() {
             "forceAction": config.force_action,
             "replayPrefix": config.replay_prefix,
             "replayGame": config.replay_game,
+            "stateSpec": config.state_spec,
             "playerTradesEnabled": config.player_trades_enabled,
             "search": {
                 "beliefParticles": 24,
@@ -597,7 +882,11 @@ fn main() {
             .chance_seed
             .map(|seed| seed.wrapping_add(u64::from(game) * 0x1000_0001))
             .unwrap_or(config.seed ^ 0x4348_414e_4345 ^ (u64::from(game) * 0x1000_0001));
-        let mut state = GameState::randomized_base_v1(board_seed, config.players);
+        let mut state = config
+            .state_spec
+            .as_deref()
+            .map(load_state_spec)
+            .unwrap_or_else(|| GameState::randomized_base_v1(board_seed, config.players));
         state.player_trades_enabled = config.player_trades_enabled;
         let mut chance_rng = SplitMix64::new(chance_seed);
         let continuation_seed = config
@@ -628,7 +917,9 @@ fn main() {
                     state.sample_chance(&mut chance_rng)
                 }
                 .expect("chance state must expose an outcome");
-                state.apply(&action).expect("sampled chance action must be legal");
+                state
+                    .apply(&action)
+                    .expect("sampled chance action must be legal");
                 actions += 1;
                 continue;
             }
@@ -789,6 +1080,10 @@ fn main() {
                         }),
                     },
                     "candidateActions": candidate_actions,
+                    "candidateImmediateDiagnostics": report.actions.iter().map(|candidate| json!({
+                        "action": format!("{:?}", candidate.action),
+                        "diagnostics": immediate_action_diagnostics(&state, &candidate.action, actor),
+                    })).collect::<Vec<_>>(),
                     "rootEvidence": root_evidence,
                     "rootSearchWork": report.provenance.root_search_work.iter().map(|work| json!({
                         "action": format!("{:?}", work.action),

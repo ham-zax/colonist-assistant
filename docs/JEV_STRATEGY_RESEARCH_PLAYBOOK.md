@@ -85,11 +85,14 @@ A strategic preference is not accepted because Jev sounds persuasive.
 When Jev identifies a material disagreement, run the engine from the same reconstructed state with:
 
 - the same board seed;
-- the same chance seed;
+- the same pre-root chance history;
 - the same stochastic model;
 - the same player count and rules;
 - one forced root action per branch;
-- otherwise identical continuation policy.
+- otherwise identical continuation policy;
+- matched post-root random streams partitioned by causal event family when branches can consume different random events.
+
+A single shared RNG seed is not sufficient when one branch consumes an event that the other does not. For example, BuyDevelopment consumes a development-card draw while EndTurn does not. If rolls, development draws, and steals all advance one shared generator, that extra draw shifts every later event and the branches stop being meaningful counterfactuals. Use independent common-random-number streams for logically separate event families, keyed from the same continuation seed.
 
 Compare terminal outcomes when practical. At intermediate horizons also compare actor VP, production, settlements, cities, roads, development cards, expansion options, and evaluator state.
 
@@ -120,6 +123,8 @@ For example, road candidates should expose facts such as:
 - frontier gain;
 - introduced fragility;
 - road-cut posterior.
+
+Development-card purchases should likewise expose an information-set-safe next-draw belief derived from public card totals, publicly played cards, the actor's own exact cards, and public deck size. Do not leak exact opponent-held cards or exact hidden deck composition, but do not force Jev to judge an "unknown card" without the probability distribution the player can legitimately infer.
 
 This distinction matters. An earlier D17 experiment withheld exact road-intent evidence and Jev preferred a locally attractive road. Once the mechanical facts were inspected, the Jev road was clearly weaker and the matched continuation confirmed it. Withholding authoritative mechanics can create false positives just as leaking engine scores can create confirmation bias.
 
@@ -295,17 +300,21 @@ At the matched intermediate horizon, the Jev line produced more development: mor
 
 Lesson: "better development" is not automatically "better win race." Counterfactual evaluation must include terminal conversion and opponent acceleration, not only the actor's local economy.
 
-### D31: preserve liquidity before buying development
+### D31: an apparent Jev win exposed research flaws
 
 The engine preferred BuyDevelopment with search value around 0.072 versus roughly 0.033 for EndTurn.
 
-The player had just spent four grain to import their only ore, while having zero native ore and zero lumber production. Buying the development card consumed the imported ore immediately.
+The player had just spent four grain to import their only ore, while having zero native ore and zero lumber production. Buying the development card consumed the imported ore immediately. Jev preferred EndTurn.
 
-The matched EndTurn branch eventually won while the BuyDevelopment control lost.
+An early forced-action replay appeared to validate Jev because the EndTurn branch eventually won while the BuyDevelopment control lost. That result was not admissible evidence: both branches consumed one shared future random stream, so BuyDevelopment's extra development-card draw shifted later rolls and steals.
 
-The current investigation is therefore not "development cards are overvalued" in general. The narrower hypothesis is that the engine underprices the opportunity cost of spending a rare, expensive, unproducible resource immediately after importing it.
+The corrected counterfactual harness uses separate common-random-number streams for rolls, development draws, and steals. Its first matched continuation seed reversed the result: BuyDevelopment won 10-7 while EndTurn lost 7-10. Multi-seed validation remains in progress, so no engine repair is admitted from D31 yet.
 
-Lesson: formulate the smallest causal hypothesis that explains the validated failure. Do not generalize from one winning branch to a global rule.
+A depth sweep also showed that BuyDevelopment already leads at depth 1, which rules out future-self continuation policy as the primary cause of the search preference. Immediate evaluator decomposition showed that four of five development-card outcomes are locally worse than EndTurn, while the Victory Point outcome contributes a large positive jump. That observation is useful diagnostic evidence, not proof that the evaluator is wrong; a development card really does carry expected VP value.
+
+The Jev prompt had another information defect: it exposed the purchase cost but not the actor-safe development draw distribution. The research harness now supplies that distribution without leaking hidden card identities.
+
+Lesson: validate the experimental design before interpreting a counterfactual winner. When a Jev disagreement survives only under poorly matched randomness or incomplete mechanical evidence, improve the research harness rather than changing production.
 
 ## Player trades ON and OFF
 
@@ -496,7 +505,7 @@ A change that fixes the example but breaks the false-positive corpus is not a su
 ## Practical heuristics
 
 1. **Ask code first.** If a number can be computed, compute it.
-2. **Use common random numbers.** Matched stochastic streams dramatically improve counterfactual signal.
+2. **Use common random numbers by causal event family.** Matched stochastic streams dramatically improve counterfactual signal, but branches that consume different event types must not shift one shared generator. Partition streams by logically independent sources such as rolls, hidden draws, steals, arrivals, or service outcomes.
 3. **Force only the root action.** Let normal policy resume afterward unless the experiment is explicitly about a multi-action forced plan.
 4. **Compare intermediate and terminal state.** Either alone can mislead.
 5. **Keep false positives.** They are training data for the research process.
