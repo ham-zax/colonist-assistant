@@ -3,7 +3,7 @@
 **Repository:** /home/hamza/repo/colonist-assistant  
 **Integration worktree:** /home/hamza/repo/colonist-opening-orchestration  
 **Source of truth:** docs/JEV_STRATEGY_RESEARCH_PLAYBOOK.md plus live hill6758/task9783 evidence  
-**Current wave:** 1  
+**Current wave:** 3
 **Coordination mode:** durable
 
 Session-loss recovery map: `docs/agent-work/opening-strategy-rebuild/SESSION_RECOVERY.md`
@@ -34,21 +34,17 @@ Rebuild the opening strategy evaluator around causally meaningful primitives ins
 ## Progress Snapshot
 
 Current frontier
-├─ Wave 1 / A1 / Agent A
-│  COMPLETE — R1 FOUND BLOCKERS
-│  Commit 15b2365 remains unintegrated.
+├─ Opening implementation / A1+A2
+│  COMPLETE + REVIEWED + INTEGRATED
+│  Reviewed semantics integrated as 70e1461 + 8496200.
 │
-├─ Wave 2 repair / A2 / Agent A
-│  COMPLETE
-│  Repair commit 034b01f; worktree clean.
+├─ Wave 3 deterministic validation / C1 / Agent C
+│  READY — NEW SESSION
+│  Recorded corpus, generated boards, both trade modes, matched terminal streams, hard-negative labels.
 │
-├─ Review / R2 / Agent R
-│  READY — REVIEW / SAME SESSION
-│  Narrow repair range 15b2365..034b01f; blocks integration.
-│
-├─ Wave 1 / B1 / Agent B
-│  COMPLETE + INTEGRATED
-│  Calibration framework integrated as e4b25ad; live numeric calibration waits for reviewed A1/A2 semantics and local credentials.
+├─ Jev calibration / B2 / Agent B
+│  BLOCKED -> local TYPESAFE_API_KEY
+│  Framework is integrated; credential is currently unset in the orchestration environment.
 │
 ├─ D31 / preserved WIP
 │  HOLD
@@ -56,37 +52,40 @@ Current frontier
 │
 └─ Main checkout
    CLEAN / HOLD
-   Previous road-intent edits were preserved on wip/road-intent-deadline @ 2592caf; main matches origin/main.
+   Merge waits for Wave 3 deterministic validation plus B2 held-out calibration.
 
-Planned effort: 45% A1 implementation | 20% B1 calibration research | 15% review/integration | 20% final validation
+Planned effort: 80% COMPLETE | 10% READY deterministic validation | 10% BLOCKED live/held-out calibration
 
 ## Session Ledger
 
 | Agent | Mission | Status | Role | Workspace | Disposition | Reusable |
 | --- | --- | --- | --- | --- | --- | --- |
-| A | A1 | COMPLETE — BLOCKED BY REVIEW | implement | /home/hamza/repo/colonist-opening-architecture | COMPLETE | yes |
-| A | A2 | COMPLETE | implement repair | /home/hamza/repo/colonist-opening-architecture | COMPLETE @ 034b01f | yes |
-| B | B1 | COMPLETE + INTEGRATED | investigate + research tooling | /home/hamza/repo/colonist-jev-calibration | COMPLETE; reuse as B2 after reviewed A1/A2 integration | yes |
-| R | R1 | COMPLETE — BLOCKING FINDINGS | independent review | read-only target a169b28..15b2365 | REUSE AS R2 NOW | yes |
-| R | R2 | READY — REVIEW | independent re-review | read-only repair range 15b2365..034b01f | SAME AGENT R SESSION NOW | yes |
+| A | A1 | COMPLETE + INTEGRATED | implement | /home/hamza/repo/colonist-opening-architecture | integrated as 70e1461 | yes |
+| A | A2 | COMPLETE + INTEGRATED | implement repair | /home/hamza/repo/colonist-opening-architecture | integrated as 8496200 | yes |
+| B | B1 | COMPLETE + INTEGRATED | investigate + research tooling | /home/hamza/repo/colonist-jev-calibration | COMPLETE; reuse as B2 when credential exists | yes |
+| C | C1 | READY — NEW SESSION | independent validation + research tooling | /home/hamza/repo/colonist-opening-validation | NEW SESSION now | no |
+| R | R1 | COMPLETE — BLOCKING FINDINGS | independent review | read-only target a169b28..15b2365 | COMPLETE | yes |
+| R | R2 | COMPLETE — PASS | independent re-review | read-only repair range 15b2365..034b01f | review blocker discharged | yes |
 | D31 lane | preserved | HOLD | diagnostics | research/d31-road-wip @ 300914b | resume after opening frontier | yes |
 
 ## Blocker Ledger
 
 | Blocked item | Blocker | Owner | Discharge condition | Status/evidence |
 | --- | --- | --- | --- | --- |
-| A1 integration | R2 re-review | R2 | R2 reports pass on 15b2365..034b01f | READY — A2 complete @ 034b01f; awaiting R2 |
-| Wave 3 final validation | reviewed A1/A2 integration + final calibration inputs | A2/R2/B2 | R2 passes repair, corrected feature semantics are integrated, generated/matched labels exist, and local Jev credentials are available for live collection | BLOCKED; B1 framework integrated as e4b25ad |
-| merge back to main | reviewed integration + final validation | planner | R2 passes A2 and Wave 3 passes | BLOCKED |
+| A1/A2 integration | R2 re-review | R2 | R2 reports pass | DISCHARGED — R2 passed; integrated as 70e1461 + 8496200 |
+| Wave 3 deterministic validation | reviewed A1/A2 integration | C1 | C1 returns recorded/generated/matched evidence with no unresolved production blocker | READY |
+| B2 live/held-out Jev calibration | local TypeSafe credential + C1 label handoff | B2/C1 | local TYPESAFE_API_KEY exists and C1 produces frozen labels/splits | BLOCKED — credential currently unset; C1 pending |
+| merge back to main | C1 + B2 final validation | planner | deterministic validation passes and held-out calibration is completed or explicitly waived by user | BLOCKED |
 | D31 continuation | opening rebuild integration preferred first | planner | opening Wave 2 stable | HOLD |
 
 ## Dependency map
 
 ```text
-A1 opening evaluator rebuild ─> R1 BLOCK ─> A2 repair ─> R2 re-review ─> integration ─> Wave 3 validation
-B1 calibration framework ────────────────────────────────────────────────────────┘          └─> B2 live/held-out calibration
+A1 ─> R1 BLOCK ─> A2 ─> R2 PASS ─> reviewed integration ─> C1 deterministic validation ─┐
+B1 calibration framework ────────────────────────────────────────> B2 live/held-out calibration ───────┤
+                                                                                                       └─> main merge
 
-D31 WIP remains separate and resumes after opening integration.
+D31 WIP remains separate and resumes after the opening validation frontier.
 ```
 
 ## Shared contracts
@@ -125,15 +124,14 @@ The user explicitly authorized experimentation, tests, simulations, regression f
 
 ## Execution lifetime
 
-A1 and A2 are complete. R2 reuses the same Agent R session now. B1 is complete; reuse the same Agent B session as B2 after reviewed A1/A2 integration and local Jev credentials are available.
+A1+A2 are complete, reviewed, and integrated. C1 is a fresh validation session. B1 is complete; reuse the same Agent B session as B2 after C1 provides frozen labels/splits and a local Jev credential is available.
 
 ## Future / blocked work
 
-- Wave 2 repair — A2 COMPLETE at `034b01f`.
-- R2 — READY now; paste the re-review into the existing Agent R session.
-- B2 — live Jev collection/final calibration — blocked by reviewed/integrated A1/A2 feature semantics and local `TYPESAFE_API_KEY`.
-- Wave 3 — recorded corpus, generated boards, matched terminal streams, both trade modes, held-out Jev calibration — blocked by reviewed A1/A2 integration plus B2 inputs.
-- D31 — resume resource-liquidity/dev-card investigation from `research/d31-road-wip` after opening architecture is stable.
+- C1 — deterministic Wave 3 validation is READY in a new session.
+- B2 — live Jev collection/final calibration is blocked by local `TYPESAFE_API_KEY` and the C1 label handoff.
+- Main merge — blocked by C1 plus B2/final calibration disposition.
+- D31 — resume resource-liquidity/dev-card investigation from `research/d31-road-wip` after the opening validation frontier is stable.
 
 ## Transition log
 
@@ -145,4 +143,7 @@ A1 and A2 are complete. R2 reuses the same Agent R session now. B1 is complete; 
 - 2026-09-19: the dirty main-checkout road-intent implementation was preserved separately as `wip/road-intent-deadline` @ `2592caf`; focused Rust regression and main-worktree TypeScript check passed. It remains unreviewed and is not integrated. Main was restored clean at `15cfc5e`, matching `origin/main`.
 - 2026-09-19: A1 completed at `15b2365` on `agent/a1-opening-architecture`; worktree clean. Review range is `a169b28..15b2365`.
 - 2026-09-19: R1 returned two major blocking findings: (F1) causal denial was computed from the completed board rather than the root placement's decision-time setup state, allowing temporally impossible denial credit; (F2) unfunded expansion applied the same road+settlement ETA discount twice.
-- 2026-09-19: A2 completed at `034b01f`, repairing placement-time denial and removing the duplicate ETA denominator; focused validation passed and the worktree is clean. R2 is now READY in the same Agent R session.
+- 2026-09-19: A2 completed at `034b01f`, repairing placement-time denial and removing the duplicate ETA denominator; focused validation passed and the worktree is clean.
+- 2026-09-19: R2 passed with no blocker or major findings. The review blocker is discharged.
+- 2026-09-19: planner integrated A1 and A2 onto `orchestration/opening-rebuild` as `70e1461` and `8496200`. The integrated A1/A2 code surfaces are content-identical to reviewed HEAD `034b01f`; `git diff --check 2a45254..8496200` passed.
+- 2026-09-19: `TYPESAFE_API_KEY` is unset in the orchestration environment, so B2 live Jev calibration remains blocked. Credential-free Wave 3 validation moves to C1.

@@ -22,12 +22,13 @@ Do not reconstruct missing work from main. The unfinished lanes were preserved o
 - Mission: `A1`
 - Mission file:
   `/home/hamza/repo/colonist-opening-architecture/docs/agent-work/opening-strategy-rebuild/A1-opening-evaluator-architecture.md`
-- Status at this checkpoint: A1 and A2 complete; R2 is ready.
-- A1 commit: `15b2365` — `Rebuild opening evaluator architecture`
-- A2 repair commit: `034b01f` — `Repair temporal opening evaluation`
-- Review base: `a169b28`
-- Worktree is clean.
-- Integration is blocked until R2 passes the narrow repair range `15b2365..034b01f`.
+- Status at this checkpoint: A1+A2 complete, independently reviewed, and integrated.
+- A1 source commit: `15b2365` — `Rebuild opening evaluator architecture`
+- A2 source repair commit: `034b01f` — `Repair temporal opening evaluation`
+- R2 status: pass; no blocker or major findings.
+- Integrated orchestration commits: `70e1461` + `8496200`.
+- Agent A worktree is clean.
+- Next opening-rebuild action is credential-free Wave 3 validation in C1.
 
 A1 owns:
 
@@ -46,8 +47,13 @@ R1 found two major blockers:
 A2 completed in the same Agent A session at `034b01f`. Its durable mission file is:
 `/home/hamza/repo/colonist-opening-orchestration/docs/agent-work/opening-strategy-rebuild/A2-opening-evaluator-review-repairs.md`
 
-R2 is READY in the same Agent R session. Its durable mission file is:
+R2 passed in the same Agent R session. Its durable mission file is:
 `/home/hamza/repo/colonist-opening-orchestration/docs/agent-work/opening-strategy-rebuild/R2-opening-evaluator-repair-review.md`
+
+Wave 3 deterministic validation is assigned to C1. Mission file:
+`/home/hamza/repo/colonist-opening-orchestration/docs/agent-work/opening-strategy-rebuild/C1-opening-wave3-validation.md`
+
+B2 live/held-out Jev calibration remains blocked because `TYPESAFE_API_KEY` is currently unset in the orchestration environment. Do not paste the key into chat; supply it only in the local environment when ready.
 
 ### Agent B — Jev calibration framework
 
@@ -58,7 +64,7 @@ R2 is READY in the same Agent R session. Its durable mission file is:
 - Status: B1 complete.
 - Integrated into orchestration branch as `e4b25ad`.
 
-B2 is a future continuation in the **same Agent B chat** after A1 passes review/integration and a local `TYPESAFE_API_KEY` is available. Never put the key in chat, source, docs, logs, or commits.
+B2 is a future continuation in the **same Agent B chat** after C1 provides frozen labels/splits and a local `TYPESAFE_API_KEY` is available. Never put the key in chat, source, docs, logs, or commits.
 
 ### Orchestration / source of truth
 
@@ -155,18 +161,19 @@ This branch is intentionally **not integrated** and **not independently reviewed
 
 ## Recommended resume order
 
-Do not mix the preserved D31/road lanes into the A1 review/repair loop.
+Do not mix the preserved D31/road lanes into the opening Wave 3 validation/calibration frontier.
 
 1. A1 is complete at `15b2365`.
-2. R1 is complete with two major blocking findings.
-3. A2 is complete at `034b01f`, repairing only temporal denial causality plus duplicated expansion ETA.
-4. Paste R2 into the existing Agent R session now.
-5. If R2 passes, planner-integrate the reviewed A1+A2 range into the orchestration branch, then proceed to B2/Wave 3.
-6. After the opening architecture reaches a stable reviewed integration point, resume the pre-opening strategy lane.
-7. When resuming the earlier lane, inspect `research/d31-road-wip@300914b` and `wip/road-intent-deadline@2592caf` together before choosing what to carry forward. They overlap in `depth.rs`, so do **not** blindly merge or cherry-pick both.
-8. Re-evaluate the D31/resource-liquidity owner against the now-correct opening/economy primitives. Keep the corrected multi-seed result: no dev-card nerf is justified by D31.
-9. Independently review the road-intent candidate before any integration; its focused regression passed, but the policy override still needs broader causal validation because earlier road disagreements have produced Jev false positives.
-10. Continue B2/final Jev calibration only after reviewed A1/A2 semantics are integrated and credentials are locally available.
+2. R1 found two major blocking findings.
+3. A2 is complete at `034b01f`, repairing temporal denial causality plus duplicated expansion ETA.
+4. R2 passed and discharged the review blocker.
+5. A1+A2 are integrated onto `orchestration/opening-rebuild` as `70e1461` + `8496200`.
+6. Run C1 deterministic Wave 3 validation from the integrated branch.
+7. After C1 produces frozen labels/splits and a local `TYPESAFE_API_KEY` exists, continue B2 in the same Agent B session.
+8. Merge back to main only after the final validation disposition.
+9. After the opening validation frontier is stable, inspect `research/d31-road-wip@300914b` and `wip/road-intent-deadline@2592caf` together before choosing what to carry forward. They overlap in `depth.rs`, so do **not** blindly merge or cherry-pick both.
+10. Re-evaluate the D31/resource-liquidity owner against the reviewed opening/economy primitives. Keep the corrected multi-seed result: no dev-card nerf is justified by D31.
+11. Independently review the road-intent candidate before any integration; its focused regression passed, but the policy override still needs broader causal validation because earlier road disagreements have produced Jev false positives.
 
 ## Copy-paste recovery prompt for a future ChatGPT session
 
@@ -209,7 +216,7 @@ Important preserved lanes:
 Do not assume preserved WIP branches are reviewed or integration-ready.
 Do not blindly merge research/d31-road-wip and wip/road-intent-deadline because they overlap in depth.rs.
 
-First report the verified current frontier. A1 is complete at 15b2365, R1 returned two major blockers, and A2 is complete at 034b01f; R2 in the existing Agent R session is the next action unless repository evidence shows a newer review state. After the opening architecture is re-reviewed and stable, resume the earlier D31/resource-liquidity and road-intent investigation from the preserved branches.
+First report the verified current frontier. A1+A2 are reviewed and integrated as 70e1461 + 8496200. C1 deterministic Wave 3 validation is the next action unless repository evidence shows a newer validation state. B2 remains blocked until C1 labels/splits exist and a local TYPESAFE_API_KEY is available. After the opening validation frontier is stable, resume the earlier D31/resource-liquidity and road-intent investigation from the preserved branches.
 ```
 
 ## Recovery rule
