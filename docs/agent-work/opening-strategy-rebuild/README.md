@@ -33,12 +33,12 @@ Rebuild the opening strategy evaluator around causally meaningful primitives ins
 
 Current frontier
 ├─ Wave 1 / A1 / Agent A
-│  READY — NEW SESSION
-│  Implement opening objective + causal denial + port/self-funding semantics.
+│  CONTINUE
+│  Worktree has uncommitted opening/economy/eval implementation in progress.
 │
 ├─ Wave 1 / B1 / Agent B
-│  READY — NEW SESSION
-│  Build calibration/evaluation methodology for corrected features; no production authority.
+│  COMPLETE + INTEGRATED
+│  Calibration framework integrated as e4b25ad; live numeric calibration waits for A1 semantics and local credentials.
 │
 ├─ D31 / preserved WIP
 │  HOLD
@@ -58,8 +58,8 @@ Planned effort: 45% A1 implementation | 20% B1 calibration research | 15% review
 
 | Agent | Mission | Status | Role | Workspace | Disposition | Reusable |
 | --- | --- | --- | --- | --- | --- | --- |
-| A | A1 | READY | implement | /home/hamza/repo/colonist-opening-architecture | NEW SESSION | yes |
-| B | B1 | READY | investigate + research tooling | /home/hamza/repo/colonist-jev-calibration | NEW SESSION | yes |
+| A | A1 | CONTINUE | implement | /home/hamza/repo/colonist-opening-architecture | CONTINUE | yes |
+| B | B1 | COMPLETE + INTEGRATED | investigate + research tooling | /home/hamza/repo/colonist-jev-calibration | COMPLETE; reuse as B2 after A1 | yes |
 | R | R1 | PLANNED | independent review | read-only target after A1 | NEW SESSION later | R2 |
 | D31 lane | preserved | HOLD | diagnostics | research/d31-road-wip @ 300914b | resume after opening frontier | yes |
 
@@ -68,16 +68,15 @@ Planned effort: 45% A1 implementation | 20% B1 calibration research | 15% review
 | Blocked item | Blocker | Owner | Discharge condition | Status/evidence |
 | --- | --- | --- | --- | --- |
 | A1 integration | independent review | R1 | R1 reports no blocking findings | PLANNED |
-| Wave 3 final validation | A1 + B1 integration | A1/B1/R1 | reviewed implementation and calibration artifacts integrated | BLOCKED |
+| Wave 3 final validation | reviewed A1 integration + final calibration inputs | A1/R1/B2 | R1 passes A1, corrected feature semantics are integrated, generated/matched labels exist, and local Jev credentials are available for live collection | BLOCKED; B1 framework integrated as e4b25ad |
 | merge back to main | active main writer + final validation | planner/user | writer reconciled and Wave 3 passes | BLOCKED |
 | D31 continuation | opening rebuild integration preferred first | planner | opening Wave 2 stable | HOLD |
 
 ## Dependency map
 
 ```text
-A1 opening evaluator rebuild ─┐
-                             ├─> R1 review ─> integration ─> Wave 3 validation
-B1 calibration research ─────┘                              └─> held-out/Jev calibration
+A1 opening evaluator rebuild ─> R1 review ─> integration ─> Wave 3 validation
+B1 calibration framework ────────────────────────┘          └─> B2 live/held-out calibration
 
 D31 WIP remains separate and resumes after opening integration.
 ```
@@ -118,12 +117,13 @@ The user explicitly authorized experimentation, tests, simulations, regression f
 
 ## Execution lifetime
 
-A1 and B1: `persistent-agent-loop`.
+A1: `persistent-agent-loop`. B1 is complete; reuse the same Agent B session as B2 after A1 publishes stable feature semantics.
 
 ## Future / blocked work
 
-- Wave 2 — independent review + integration — blocked by A1/B1 reports.
-- Wave 3 — recorded corpus, generated boards, matched terminal streams, both trade modes, held-out Jev calibration — blocked by reviewed integration.
+- Wave 2 — independent review + A1 integration — blocked by A1 completion.
+- B2 — live Jev collection/final calibration — blocked by stable A1 feature semantics and local `TYPESAFE_API_KEY`.
+- Wave 3 — recorded corpus, generated boards, matched terminal streams, both trade modes, held-out Jev calibration — blocked by reviewed A1 integration plus B2 inputs.
 - D31 — resume resource-liquidity/dev-card investigation from `research/d31-road-wip` after opening architecture is stable.
 
 ## Transition log
@@ -131,3 +131,4 @@ A1 and B1: `persistent-agent-loop`.
 - 2026-09-19: user approved all eight opening-evaluator rebuild items and Agent Work Planner orchestration.
 - 2026-09-19: D31/road dirty state preserved on `research/d31-road-wip` @ `300914b`.
 - 2026-09-19: main checkout observed receiving concurrent road-intent edits; opening work isolated to dedicated worktrees.
+- 2026-09-19: B1 completed offline calibration tooling at `8f25ccb`; planner integrated it into the orchestration branch as `e4b25ad`. Live Jev calibration remains blocked by stable A1 semantics and a locally supplied credential.
