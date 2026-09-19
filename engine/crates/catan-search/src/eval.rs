@@ -993,6 +993,116 @@ fn expected_build_tempo(state: &GameState, player: u8) -> f32 {
         .fold(0.0, f32::max)
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct StrategicUtilityBreakdown {
+    pub production: [f32; 5],
+    pub resource_weights: [f32; 5],
+    pub trade_ratios: [u8; 5],
+    pub victory: f32,
+    pub weighted_production: f32,
+    pub number_diversity: f32,
+    pub resource_diversity: f32,
+    pub hand: f32,
+    pub build_tempo: f32,
+    pub expansion_best: f32,
+    pub expansion_portfolio: f32,
+    pub longest_road: f32,
+    pub largest_army: f32,
+    pub development: f32,
+    pub port_flexibility: f32,
+    pub discard_penalty: f32,
+    pub speculative_road_penalty: f32,
+    pub closed_economy: f32,
+    pub total: f32,
+}
+
+/// Research-only decomposition of the production evaluator. This duplicates
+/// the live utility terms without participating in the production return path.
+pub fn strategic_utility_breakdown(state: &GameState, player: u8) -> StrategicUtilityBreakdown {
+    let route_maps = all_route_maps(state);
+    let player_state = &state.players[player as usize];
+    let victory_points = player_state.victory_points() as f32;
+    let production = production_pips(state, player);
+    let resource_weights = dynamic_resource_weights(state, player);
+    let weighted_production_raw = production
+        .iter()
+        .enumerate()
+        .map(|(index, pips)| *pips * resource_weights[index])
+        .sum::<f32>();
+    let distinct_numbers = state
+        .buildings
+        .iter()
+        .enumerate()
+        .filter(|(_, building)| building.is_some_and(|piece| piece.player() == player))
+        .flat_map(|(vertex, _)| state.board.vertices[vertex].adjacent_hexes.iter())
+        .map(|hex| state.board.hexes[*hex as usize].number)
+        .filter(|number| *number != 0)
+        .fold(0u16, |mask, number| mask | (1u16 << number))
+        .count_ones() as f32;
+    let resource_diversity_count = production.iter().filter(|pips| **pips > 0.0).count() as f32;
+    let build_targets = build_target_mask(state, player);
+    let hand_value =
+        hand_utility_with_weights(&player_state.resources, &resource_weights, &build_targets);
+    let expansion = expansion_option_value_with_routes_and_weights(
+        state,
+        player,
+        &route_maps,
+        &resource_weights,
+        Some(player),
+        true,
+        None,
+    );
+    let road = longest_road_outlook(state, player);
+    let army = largest_army_outlook(state, player);
+    let trade_ratios = state.trade_ratios(player);
+    let port_flexibility_raw = trade_ratios
+        .iter()
+        .map(|ratio| (4 - *ratio) as f32)
+        .sum::<f32>();
+    let points_to_win = state
+        .victory_target
+        .saturating_sub(player_state.victory_points()) as f32;
+    let race_urgency = 1.0 + (4.0 - points_to_win).max(0.0) * 0.18;
+
+    let mut breakdown = StrategicUtilityBreakdown {
+        production,
+        resource_weights,
+        trade_ratios,
+        victory: victory_points * 7.4,
+        weighted_production: weighted_production_raw * 0.17,
+        number_diversity: distinct_numbers * 0.06,
+        resource_diversity: resource_diversity_count * 0.09,
+        hand: hand_value * 0.48,
+        build_tempo: expected_build_tempo(state, player) * 1.15,
+        expansion_best: expansion.value * 0.32,
+        expansion_portfolio: expansion.portfolio_value * 0.22,
+        longest_road: (road.acquire * road.retain) * 3.2 * race_urgency,
+        largest_army: (army.acquire * army.retain) * 3.2 * race_urgency,
+        development: development_utility(state, player, expansion) * 0.72,
+        port_flexibility: port_flexibility_raw * 0.07,
+        discard_penalty: -expected_discard_loss(state, player) * 2.4,
+        speculative_road_penalty: -speculative_road_penalty(state, player, road),
+        closed_economy: closed_economy_value(state, player),
+        total: 0.0,
+    };
+    breakdown.total = breakdown.victory
+        + breakdown.weighted_production
+        + breakdown.number_diversity
+        + breakdown.resource_diversity
+        + breakdown.hand
+        + breakdown.build_tempo
+        + breakdown.expansion_best
+        + breakdown.expansion_portfolio
+        + breakdown.longest_road
+        + breakdown.largest_army
+        + breakdown.development
+        + breakdown.port_flexibility
+        + breakdown.discard_penalty
+        + breakdown.speculative_road_penalty
+        + breakdown.closed_economy;
+    breakdown
+}
+
 /// Race-to-win utility used by search and exact tactical endpoint comparison.
 /// It intentionally is not exposed as a calibrated win probability.
 fn strategic_utility_with_routes_and_knowledge(
@@ -1697,6 +1807,62 @@ mod tests {
         let queued = marginal_development_value(&empty, 0);
 
         assert!(first > queued);
+    }
+
+    #[test]
+    fn d1_h1_unchanged_production_probe() {
+        let production_term = |state: &GameState| {
+            let production = production_pips(state, 0);
+            let weights = dynamic_resource_weights(state, 0);
+            production
+                .iter()
+                .enumerate()
+                .map(|(index, pips)| *pips * weights[index])
+                .sum::<f32>()
+                * 0.17
+        };
+
+        for player_trades_enabled in [false, true] {
+            let mut state = after_setup(71, 3);
+            state.phase = Phase::Main;
+            state.current_player = 0;
+            state.player_trades_enabled = player_trades_enabled;
+            state.domestic_trade_disabled = if player_trades_enabled { 0 } else { 1 };
+            state.players[0].resources = [0, 1, 1, 1, 1];
+
+            let production = production_pips(&state, 0);
+            let before = production_term(&state);
+            state.players[0].resources = [0, 1, 0, 0, 0];
+            let after = production_term(&state);
+
+            println!(
+                "h1-positive trades={} production={production:?} before={before:.6} after={after:.6} delta={:.6}",
+                player_trades_enabled,
+                after - before
+            );
+            assert_eq!(production, production_pips(&state, 0));
+            assert!(after > before);
+        }
+
+        let mut counterexample = after_setup(71, 3);
+        counterexample.phase = Phase::Main;
+        counterexample.current_player = 0;
+        counterexample.player_trades_enabled = false;
+        counterexample.domestic_trade_disabled = 1;
+        counterexample.players[0].settlements_left = 0;
+        counterexample.players[0].cities_left = 0;
+        counterexample.development_deck = [0; 5];
+        counterexample.players[0].resources = [0, 1, 1, 0, 1];
+        let production = production_pips(&counterexample, 0);
+        let before = production_term(&counterexample);
+        counterexample.players[0].resources[Resource::Ore.index()] = 0;
+        let after = production_term(&counterexample);
+        println!(
+            "h1-counterexample production={production:?} before={before:.6} after={after:.6} delta={:.6}",
+            after - before
+        );
+        assert_eq!(production, production_pips(&counterexample, 0));
+        assert!((after - before).abs() < 1e-6);
     }
 
     #[test]

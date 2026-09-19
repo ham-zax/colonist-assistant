@@ -46,9 +46,10 @@ pub use deadline::CooperativeDeadline;
 #[cfg(feature = "benchmark-profile")]
 pub use eval::{EvaluateProfile, evaluate_profiled};
 pub use eval::{
-    ExpansionOption, RoadIntent, TrophyOutlook, evaluate, expansion_option_value,
-    expected_discard_loss, largest_army_outlook, longest_road_outlook, marginal_development_value,
-    production_pips, road_intent, strategic_utility,
+    ExpansionOption, RoadIntent, StrategicUtilityBreakdown, TrophyOutlook, evaluate,
+    expansion_option_value, expected_discard_loss, largest_army_outlook, longest_road_outlook,
+    marginal_development_value, production_pips, road_intent, strategic_utility,
+    strategic_utility_breakdown,
 };
 pub use exact::{
     DEVELOPMENT_EXACT_FAMILIES, ExactActionFamily, ExactActionValue, ExactDecisionResult,

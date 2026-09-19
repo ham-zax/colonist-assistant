@@ -16,7 +16,7 @@
 //! ground truth. See the design doc for the unresolved causal question and
 //! the live evidence needed to discriminate it.
 
-use colonist_catan_core::{Action, GameState, Phase, Resource};
+use colonist_catan_core::{Action, DEVELOPMENT_COST, GameState, Phase, Resource};
 
 use crate::BeliefParticle;
 use crate::depth::{
@@ -110,6 +110,80 @@ fn two_player_city_now_counterexample_matches_reference() {
     assert!(endturn_ranked_and_retained(&live));
 }
 
+#[test]
+fn d1_required_development_counterexamples_probe() {
+    fn run(label: &str, state: GameState, depth: u8, nodes: u32) -> BeliefDepthResult {
+        assert!(
+            state.legal_actions().contains(&Action::BuyDevelopment),
+            "{label}: buy dev"
+        );
+        assert!(
+            state.legal_actions().contains(&Action::EndTurn),
+            "{label}: end turn"
+        );
+        let report = search_weighted_belief_maxn_bounded(
+            &[BeliefParticle { state, weight: 1.0 }],
+            depth,
+            12,
+            nodes,
+        )
+        .unwrap();
+        let buy = report
+            .actions
+            .iter()
+            .find(|candidate| candidate.action == Action::BuyDevelopment)
+            .map(|candidate| candidate.value[0]);
+        let end = report
+            .actions
+            .iter()
+            .find(|candidate| candidate.action == Action::EndTurn)
+            .map(|candidate| candidate.value[0]);
+        println!(
+            "d1-counterexample {label}: chosen={:?} buy={buy:?} end={end:?} depth={} nodes={}",
+            report.chosen, report.depth, report.nodes
+        );
+        report
+    }
+
+    let mut closeout = main_phase_state(83, 2);
+    closeout.players[0].resources = DEVELOPMENT_COST;
+    closeout.players[0].public_victory_points = closeout.victory_target - 1;
+    closeout.development_deck = [0, 1, 0, 0, 0];
+    let closeout = run("vp-closeout", closeout, 3, 8_000);
+    assert_eq!(closeout.chosen, Some(Action::BuyDevelopment));
+
+    let mut army = main_phase_state(89, 2);
+    army.players[0].resources = DEVELOPMENT_COST;
+    army.players[0].played_knights = 2;
+    army.players[1].played_knights = 2;
+    army.development_deck = [1, 0, 0, 0, 0];
+    let army = run("largest-army-race", army, 5, 40_000);
+    assert_eq!(army.chosen, Some(Action::BuyDevelopment));
+
+    let mut excess = main_phase_state(97, 2);
+    excess.players[0].resources = [0, 5, 1, 1, 1];
+    excess.development_deck = [14, 5, 2, 2, 2];
+    let excess = run("excess-non-bottleneck", excess, 3, 12_000);
+    assert_eq!(excess.chosen, Some(Action::BuyDevelopment));
+
+    let mut transition = main_phase_state(101, 2);
+    transition.players[0].resources = DEVELOPMENT_COST;
+    transition.development_deck = [0, 0, 1, 0, 0];
+    let transition = run("road-building-transition", transition, 5, 40_000);
+    assert_eq!(transition.chosen, Some(Action::BuyDevelopment));
+
+    let mut no_conversion = main_phase_state(103, 2);
+    no_conversion.players[0].resources = DEVELOPMENT_COST;
+    no_conversion.players[0].roads_left = 0;
+    no_conversion.players[0].settlements_left = 0;
+    no_conversion.players[0].cities_left = 0;
+    // With every build piece exhausted, preserving the hand has no material
+    // conversion path. A known VP draw is the remaining productive spend,
+    // without relying on a near-win closeout state.
+    no_conversion.development_deck = [0, 1, 0, 0, 0];
+    let no_conversion = run("save-has-no-conversion-path", no_conversion, 4, 16_000);
+    assert_eq!(no_conversion.chosen, Some(Action::BuyDevelopment));
+}
 
 /// Builds the contested-settlement pair on one board. Returns
 /// (no_race, race, target). Both give us a one-bank-trade-away settlement

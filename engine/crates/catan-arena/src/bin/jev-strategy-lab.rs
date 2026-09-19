@@ -12,7 +12,7 @@ use colonist_catan_core::{
 use colonist_catan_search::{
     BeliefDepthConfig, BeliefParticle, StrategyPolicy, evaluate, expansion_option_value,
     expected_discard_loss, marginal_development_value, production_pips,
-    search_weighted_belief_maxn_with_config, strategic_utility,
+    search_weighted_belief_maxn_with_config, strategic_utility, strategic_utility_breakdown,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -747,8 +747,121 @@ fn public_state_json(state: &GameState, actor: u8, particles: &[BeliefParticle])
     })
 }
 
+fn build_fundable_at_rolls_diagnostic(
+    production: &[f32; 5],
+    hand: &ResourceHand,
+    ratios: &ResourceHand,
+    cost: &ResourceHand,
+    rolls: f32,
+) -> bool {
+    let mut missing = 0u32;
+    let mut capacity = 0u32;
+    for resource in 0..5 {
+        let produced = (production[resource].max(0.0) * rolls.max(0.0) / 36.0).floor() as u32;
+        let available = u32::from(hand[resource]) + produced;
+        let required = u32::from(cost[resource]);
+        let reserved = available.min(required);
+        missing += required - reserved;
+        capacity += (available - reserved) / u32::from(ratios[resource].max(1));
+    }
+    capacity >= missing
+}
+
+fn build_eta_rolls_diagnostic(
+    production: &[f32; 5],
+    hand: &ResourceHand,
+    ratios: &ResourceHand,
+    cost: &ResourceHand,
+) -> f32 {
+    if build_fundable_at_rolls_diagnostic(production, hand, ratios, cost, 0.0) {
+        return 0.0;
+    }
+    if production.iter().map(|value| value.max(0.0)).sum::<f32>() <= f32::EPSILON {
+        return f32::INFINITY;
+    }
+    let mut high = 18.0;
+    while high < 9216.0 && !build_fundable_at_rolls_diagnostic(production, hand, ratios, cost, high)
+    {
+        high *= 2.0;
+    }
+    if !build_fundable_at_rolls_diagnostic(production, hand, ratios, cost, high) {
+        return f32::INFINITY;
+    }
+    let mut low = 0.0;
+    for _ in 0..28 {
+        let mid = (low + high) * 0.5;
+        if build_fundable_at_rolls_diagnostic(production, hand, ratios, cost, mid) {
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+    high
+}
+
+fn strategic_breakdown_json(state: &GameState, player: u8) -> Value {
+    let value = strategic_utility_breakdown(state, player);
+    let hand = state.players[player as usize].resources;
+    let ratios = state.trade_ratios(player);
+    json!({
+        "production": value.production,
+        "resourceWeights": value.resource_weights,
+        "tradeRatios": value.trade_ratios,
+        "buildEtaRolls": {
+            "road": build_eta_rolls_diagnostic(&value.production, &hand, &ratios, &ROAD_COST),
+            "settlement": build_eta_rolls_diagnostic(&value.production, &hand, &ratios, &SETTLEMENT_COST),
+            "city": build_eta_rolls_diagnostic(&value.production, &hand, &ratios, &CITY_COST),
+            "development": build_eta_rolls_diagnostic(&value.production, &hand, &ratios, &DEVELOPMENT_COST),
+        },
+        "victory": value.victory,
+        "weightedProduction": value.weighted_production,
+        "numberDiversity": value.number_diversity,
+        "resourceDiversity": value.resource_diversity,
+        "hand": value.hand,
+        "buildTempo": value.build_tempo,
+        "expansionBest": value.expansion_best,
+        "expansionPortfolio": value.expansion_portfolio,
+        "longestRoad": value.longest_road,
+        "largestArmy": value.largest_army,
+        "development": value.development,
+        "portFlexibility": value.port_flexibility,
+        "discardPenalty": value.discard_penalty,
+        "speculativeRoadPenalty": value.speculative_road_penalty,
+        "closedEconomy": value.closed_economy,
+        "total": value.total,
+    })
+}
+
+fn single_card_spend_diagnostics(state: &GameState, actor: u8) -> Vec<Value> {
+    let before = strategic_utility(state, actor);
+    [
+        Resource::Lumber,
+        Resource::Brick,
+        Resource::Wool,
+        Resource::Grain,
+        Resource::Ore,
+    ]
+    .into_iter()
+    .filter_map(|resource| {
+        let index = resource.index();
+        if state.players[actor as usize].resources[index] == 0 {
+            return None;
+        }
+        let mut after = state.clone();
+        after.players[actor as usize].resources[index] -= 1;
+        let utility = strategic_utility(&after, actor);
+        Some(json!({
+            "resource": format!("{resource:?}"),
+            "strategicUtilityDelta": utility - before,
+            "breakdown": strategic_breakdown_json(&after, actor),
+        }))
+    })
+    .collect()
+}
+
 fn immediate_action_diagnostics(state: &GameState, action: &Action, actor: u8) -> Value {
     let before = strategic_utility(state, actor);
+    let before_breakdown = strategic_breakdown_json(state, actor);
     let mut next = state.clone();
     if next.apply(action).is_err() {
         return Value::Null;
@@ -764,11 +877,14 @@ fn immediate_action_diagnostics(state: &GameState, action: &Action, actor: u8) -
         let after = strategic_utility(&next, actor);
         return json!({
             "strategicUtilityBefore": before,
+            "strategicUtilityBeforeBreakdown": before_breakdown,
             "strategicUtilityAfterExpected": after,
+            "strategicUtilityAfterBreakdown": strategic_breakdown_json(&next, actor),
             "strategicUtilityDelta": after - before,
             "resourcesAfterRoot": hand_json(root_resources),
             "resourceOnlyStrategicUtility": resource_only_utility,
             "resourceOnlyDelta": resource_only_utility - before,
+            "resourceOnlyBreakdown": strategic_breakdown_json(&resource_only, actor),
             "expectedDiscardLossAfterRoot": root_discard_loss,
             "marginalDevelopmentValueAfterRoot": root_marginal_development,
             "chanceOutcomes": [],
@@ -796,6 +912,7 @@ fn immediate_action_diagnostics(state: &GameState, action: &Action, actor: u8) -
                 "weight": weight,
                 "strategicUtility": utility,
                 "deltaFromBefore": utility - before,
+                "breakdown": strategic_breakdown_json(&resolved, actor),
                 "resources": hand_json(resolved.players[actor as usize].resources),
                 "expectedDiscardLoss": expected_discard_loss(&resolved, actor),
                 "marginalDevelopmentValue": marginal_development_value(&resolved, actor),
@@ -804,11 +921,13 @@ fn immediate_action_diagnostics(state: &GameState, action: &Action, actor: u8) -
         .collect::<Vec<_>>();
     json!({
         "strategicUtilityBefore": before,
+        "strategicUtilityBeforeBreakdown": before_breakdown,
         "strategicUtilityAfterExpected": expected_after,
         "strategicUtilityDelta": expected_after - before,
         "resourcesAfterRoot": hand_json(root_resources),
         "resourceOnlyStrategicUtility": resource_only_utility,
         "resourceOnlyDelta": resource_only_utility - before,
+        "resourceOnlyBreakdown": strategic_breakdown_json(&resource_only, actor),
         "expectedDiscardLossAfterRoot": root_discard_loss,
         "marginalDevelopmentValueAfterRoot": root_marginal_development,
         "chanceOutcomes": outcomes,
@@ -1084,6 +1203,7 @@ fn main() {
                         "action": format!("{:?}", candidate.action),
                         "diagnostics": immediate_action_diagnostics(&state, &candidate.action, actor),
                     })).collect::<Vec<_>>(),
+                    "singleCardSpendDiagnostics": single_card_spend_diagnostics(&state, actor),
                     "rootEvidence": root_evidence,
                     "rootSearchWork": report.provenance.root_search_work.iter().map(|work| json!({
                         "action": format!("{:?}", work.action),
