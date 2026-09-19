@@ -6,6 +6,8 @@
 **Current wave:** 1  
 **Coordination mode:** durable
 
+Session-loss recovery map: `docs/agent-work/opening-strategy-rebuild/SESSION_RECOVERY.md`
+
 ## Objective
 
 Rebuild the opening strategy evaluator around causally meaningful primitives instead of patching static weights. Complete all eight approved items:
