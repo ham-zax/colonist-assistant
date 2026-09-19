@@ -53,6 +53,13 @@ R2 passed in the same Agent R session. Its durable mission file is:
 Wave 3 deterministic validation is assigned to C1. Mission file:
 `/home/hamza/repo/colonist-opening-orchestration/docs/agent-work/opening-strategy-rebuild/C1-opening-wave3-validation.md`
 
+The user reports Agent C is working.
+
+D31 resource-liquidity diagnosis may now run in parallel as D1. Mission file:
+`/home/hamza/repo/colonist-opening-orchestration/docs/agent-work/opening-strategy-rebuild/D1-d31-resource-liquidity-diagnosis.md`
+
+D1 must start from reviewed A1+A2 semantics. Treat `research/d31-road-wip@300914b` as an evidence donor only, and keep `wip/road-intent-deadline@2592caf` separate.
+
 B2 live/held-out Jev calibration remains blocked because `TYPESAFE_API_KEY` is currently unset in the orchestration environment. Do not paste the key into chat; supply it only in the local environment when ready.
 
 ### Agent B — Jev calibration framework
@@ -170,10 +177,12 @@ Do not mix the preserved D31/road lanes into the opening Wave 3 validation/calib
 5. A1+A2 are integrated onto `orchestration/opening-rebuild` as `70e1461` + `8496200`.
 6. Run C1 deterministic Wave 3 validation from the integrated branch.
 7. After C1 produces frozen labels/splits and a local `TYPESAFE_API_KEY` exists, continue B2 in the same Agent B session.
-8. Merge back to main only after the final validation disposition.
-9. After the opening validation frontier is stable, inspect `research/d31-road-wip@300914b` and `wip/road-intent-deadline@2592caf` together before choosing what to carry forward. They overlap in `depth.rs`, so do **not** blindly merge or cherry-pick both.
-10. Re-evaluate the D31/resource-liquidity owner against the reviewed opening/economy primitives. Keep the corrected multi-seed result: no dev-card nerf is justified by D31.
-11. Independently review the road-intent candidate before any integration; its focused regression passed, but the policy override still needs broader causal validation because earlier road disagreements have produced Jev false positives.
+8. In parallel with C1, run D1 from the reviewed opening base. Preserve the corrected D31 result: BuyDevelopment wins the actor branch in 3/4 properly matched continuation streams and EndTurn in 1/4; no dev-card nerf is justified.
+9. Treat `research/d31-road-wip@300914b` as a diagnostic/evidence donor, not an integration candidate. Do not cherry-pick it wholesale.
+10. Keep `wip/road-intent-deadline@2592caf` separate from D1; it overlaps `depth.rs` and remains unreviewed.
+11. Merge back to main only after the opening final-validation disposition.
+12. If D1 proves a general production invariant, create a bounded D2 implementation mission and require independent review before integrating it.
+13. Independently review the road-intent candidate before any eventual integration; its focused regression passed, but the policy override still needs broader causal validation because earlier road disagreements produced Jev false positives.
 
 ## Copy-paste recovery prompt for a future ChatGPT session
 
@@ -216,7 +225,7 @@ Important preserved lanes:
 Do not assume preserved WIP branches are reviewed or integration-ready.
 Do not blindly merge research/d31-road-wip and wip/road-intent-deadline because they overlap in depth.rs.
 
-First report the verified current frontier. A1+A2 are reviewed and integrated as 70e1461 + 8496200. C1 deterministic Wave 3 validation is the next action unless repository evidence shows a newer validation state. B2 remains blocked until C1 labels/splits exist and a local TYPESAFE_API_KEY is available. After the opening validation frontier is stable, resume the earlier D31/resource-liquidity and road-intent investigation from the preserved branches.
+First report the verified current frontier. A1+A2 are reviewed and integrated as 70e1461 + 8496200. C1 may be active on opening Wave 3 validation. D1 resource-liquidity diagnosis may run concurrently from a separate worktree using research/d31-road-wip@300914b only as an evidence donor. Keep wip/road-intent-deadline@2592caf separate. B2 remains blocked until C1 labels/splits exist and a local TYPESAFE_API_KEY is available.
 ```
 
 ## Recovery rule

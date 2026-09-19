@@ -39,20 +39,23 @@ Current frontier
 │  Reviewed semantics integrated as 70e1461 + 8496200.
 │
 ├─ Wave 3 deterministic validation / C1 / Agent C
+│  CONTINUE
+│  User reports Agent C is working in /home/hamza/repo/colonist-opening-validation.
+│
+├─ D31 resource-liquidity diagnosis / D1 / Agent D
 │  READY — NEW SESSION
-│  Recorded corpus, generated boards, both trade modes, matched terminal streams, hard-negative labels.
+│  Rebase the old D31 question onto reviewed semantics; no production repair in D1.
 │
 ├─ Jev calibration / B2 / Agent B
-│  BLOCKED -> local TYPESAFE_API_KEY
-│  Framework is integrated; credential is currently unset in the orchestration environment.
+│  BLOCKED -> C1 labels/splits + local TYPESAFE_API_KEY
 │
-├─ D31 / preserved WIP
+├─ Road-intent candidate
 │  HOLD
-│  research/d31-road-wip @ 300914b preserves current midgame/road diagnostics.
+│  wip/road-intent-deadline @ 2592caf remains separate and unreviewed.
 │
 └─ Main checkout
    CLEAN / HOLD
-   Merge waits for Wave 3 deterministic validation plus B2 held-out calibration.
+   Merge waits for opening Wave 3/final calibration disposition.
 
 Planned effort: 80% COMPLETE | 10% READY deterministic validation | 10% BLOCKED live/held-out calibration
 
@@ -63,10 +66,11 @@ Planned effort: 80% COMPLETE | 10% READY deterministic validation | 10% BLOCKED 
 | A | A1 | COMPLETE + INTEGRATED | implement | /home/hamza/repo/colonist-opening-architecture | integrated as 70e1461 | yes |
 | A | A2 | COMPLETE + INTEGRATED | implement repair | /home/hamza/repo/colonist-opening-architecture | integrated as 8496200 | yes |
 | B | B1 | COMPLETE + INTEGRATED | investigate + research tooling | /home/hamza/repo/colonist-jev-calibration | COMPLETE; reuse as B2 when credential exists | yes |
-| C | C1 | READY — NEW SESSION | independent validation + research tooling | /home/hamza/repo/colonist-opening-validation | NEW SESSION now | no |
+| C | C1 | CONTINUE | independent validation + research tooling | /home/hamza/repo/colonist-opening-validation | user reports working | no |
+| D | D1 | READY — NEW SESSION | investigation + research tooling | /home/hamza/repo/colonist-d31-liquidity | NEW SESSION now | no |
 | R | R1 | COMPLETE — BLOCKING FINDINGS | independent review | read-only target a169b28..15b2365 | COMPLETE | yes |
 | R | R2 | COMPLETE — PASS | independent re-review | read-only repair range 15b2365..034b01f | review blocker discharged | yes |
-| D31 lane | preserved | HOLD | diagnostics | research/d31-road-wip @ 300914b | resume after opening frontier | yes |
+| D31 preserved branch | evidence donor | PRESERVED | historical diagnostics | research/d31-road-wip @ 300914b | do not cherry-pick wholesale | yes |
 
 ## Blocker Ledger
 
@@ -76,7 +80,8 @@ Planned effort: 80% COMPLETE | 10% READY deterministic validation | 10% BLOCKED 
 | Wave 3 deterministic validation | reviewed A1/A2 integration | C1 | C1 returns recorded/generated/matched evidence with no unresolved production blocker | READY |
 | B2 live/held-out Jev calibration | local TypeSafe credential + C1 label handoff | B2/C1 | local TYPESAFE_API_KEY exists and C1 produces frozen labels/splits | BLOCKED — credential currently unset; C1 pending |
 | merge back to main | C1 + B2 final validation | planner | deterministic validation passes and held-out calibration is completed or explicitly waived by user | BLOCKED |
-| D31 continuation | opening rebuild integration preferred first | planner | opening Wave 2 stable | HOLD |
+| D1 diagnosis | reviewed opening/economy base | D1 | reviewed A1+A2 integrated | READY — independent diagnostic lane may run in parallel with C1 |
+| road-intent continuation | broader causal evidence + separate review | planner | D27 matched evidence establishes admission case | HOLD |
 
 ## Dependency map
 
@@ -85,7 +90,7 @@ A1 ─> R1 BLOCK ─> A2 ─> R2 PASS ─> reviewed integration ─> C1 determin
 B1 calibration framework ────────────────────────────────────────> B2 live/held-out calibration ───────┤
                                                                                                        └─> main merge
 
-D31 WIP remains separate and resumes after the opening validation frontier.
+D1 may run in parallel with C1 because it is isolated to a separate midgame diagnostic worktree. The road-intent WIP remains separate and held.
 ```
 
 ## Shared contracts
@@ -131,7 +136,8 @@ A1+A2 are complete, reviewed, and integrated. C1 is a fresh validation session. 
 - C1 — deterministic Wave 3 validation is READY in a new session.
 - B2 — live Jev collection/final calibration is blocked by local `TYPESAFE_API_KEY` and the C1 label handoff.
 - Main merge — blocked by C1 plus B2/final calibration disposition.
-- D31 — resume resource-liquidity/dev-card investigation from `research/d31-road-wip` after the opening validation frontier is stable.
+- D1 — resource-liquidity/dev-card diagnosis is READY now on a fresh worktree based on reviewed opening semantics. `research/d31-road-wip@300914b` is an evidence donor only.
+- Road-intent — remains HOLD on `wip/road-intent-deadline@2592caf`; do not combine it with D1.
 
 ## Transition log
 
@@ -147,3 +153,4 @@ A1+A2 are complete, reviewed, and integrated. C1 is a fresh validation session. 
 - 2026-09-19: R2 passed with no blocker or major findings. The review blocker is discharged.
 - 2026-09-19: planner integrated A1 and A2 onto `orchestration/opening-rebuild` as `70e1461` and `8496200`. The integrated A1/A2 code surfaces are content-identical to reviewed HEAD `034b01f`; `git diff --check 2a45254..8496200` passed.
 - 2026-09-19: `TYPESAFE_API_KEY` is unset in the orchestration environment, so B2 live Jev calibration remains blocked. Credential-free Wave 3 validation moves to C1.
+- 2026-09-19: D31 may resume in parallel as D1 because reviewed A1+A2 semantics are integrated and C1 owns a separate worktree. D1 must use the corrected four-stream CRN result (BuyDevelopment actor win 3/4, EndTurn 1/4), treat `300914b` as an evidence donor rather than an integration candidate, and keep `2592caf` road-intent work separate.
