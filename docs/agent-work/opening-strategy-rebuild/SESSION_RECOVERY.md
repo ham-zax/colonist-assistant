@@ -22,11 +22,11 @@ Do not reconstruct missing work from main. The unfinished lanes were preserved o
 - Mission: `A1`
 - Mission file:
   `/home/hamza/repo/colonist-opening-architecture/docs/agent-work/opening-strategy-rebuild/A1-opening-evaluator-architecture.md`
-- Status at this checkpoint: A1 complete and committed.
+- Status at this checkpoint: A1 complete and committed; R1 returned blocking findings.
 - A1 commit: `15b2365` — `Rebuild opening evaluator architecture`
 - Review base: `a169b28`
-- Worktree is clean.
-- Integration is blocked by independent R1 review of `a169b28..15b2365`.
+- Worktree was clean after A1 and remains the repair workspace.
+- Integration is blocked until A2 repairs both R1 findings and R2 passes.
 
 A1 owns:
 
@@ -38,7 +38,14 @@ A1 owns:
 - focused regressions and matched validation in both trade modes;
 - final branch commit and completion report.
 
-Integration remains blocked until independent Agent R review passes. If R1 finds blockers, return repairs to the same Agent A session as A2, then re-review in the same Agent R session as R2.
+R1 found two major blockers:
+1. causal denial used the completed board rather than the placement-time setup state, allowing temporally impossible denial credit;
+2. unfunded expansion effectively applied the road+settlement ETA discount twice.
+
+A2 is READY in the same Agent A session. Its durable mission file is:
+`/home/hamza/repo/colonist-opening-orchestration/docs/agent-work/opening-strategy-rebuild/A2-opening-evaluator-review-repairs.md`
+
+After A2 commits, re-review only the repair in the same Agent R session as R2.
 
 ### Agent B — Jev calibration framework
 
@@ -149,14 +156,15 @@ This branch is intentionally **not integrated** and **not independently reviewed
 Do not mix the preserved D31/road lanes into the A1 review/repair loop.
 
 1. A1 is complete at `15b2365`.
-2. Run independent Agent R review of `a169b28..15b2365` now.
-3. If R1 finds blockers, send the repair back to the same Agent A session as A2, then re-review as R2.
-4. If R1 passes, planner-integrate A1 into the orchestration branch, then proceed to B2/Wave 3.
-5. After the opening architecture reaches a stable reviewed integration point, resume the pre-opening strategy lane.
-6. When resuming the earlier lane, inspect `research/d31-road-wip@300914b` and `wip/road-intent-deadline@2592caf` together before choosing what to carry forward. They overlap in `depth.rs`, so do **not** blindly merge or cherry-pick both.
-7. Re-evaluate the D31/resource-liquidity owner against the now-correct opening/economy primitives. Keep the corrected multi-seed result: no dev-card nerf is justified by D31.
-8. Independently review the road-intent candidate before any integration; its focused regression passed, but the policy override still needs broader causal validation because earlier road disagreements have produced Jev false positives.
-9. Continue B2/final Jev calibration only after reviewed A1 semantics are integrated and credentials are locally available.
+2. R1 is complete with two major blocking findings.
+3. Paste A2 into the existing Agent A session and repair only temporal denial causality plus duplicated expansion ETA.
+4. After A2 commits, paste R2 into the existing Agent R session.
+5. If R2 passes, planner-integrate the reviewed A1+A2 range into the orchestration branch, then proceed to B2/Wave 3.
+6. After the opening architecture reaches a stable reviewed integration point, resume the pre-opening strategy lane.
+7. When resuming the earlier lane, inspect `research/d31-road-wip@300914b` and `wip/road-intent-deadline@2592caf` together before choosing what to carry forward. They overlap in `depth.rs`, so do **not** blindly merge or cherry-pick both.
+8. Re-evaluate the D31/resource-liquidity owner against the now-correct opening/economy primitives. Keep the corrected multi-seed result: no dev-card nerf is justified by D31.
+9. Independently review the road-intent candidate before any integration; its focused regression passed, but the policy override still needs broader causal validation because earlier road disagreements have produced Jev false positives.
+10. Continue B2/final Jev calibration only after reviewed A1/A2 semantics are integrated and credentials are locally available.
 
 ## Copy-paste recovery prompt for a future ChatGPT session
 
@@ -199,7 +207,7 @@ Important preserved lanes:
 Do not assume preserved WIP branches are reviewed or integration-ready.
 Do not blindly merge research/d31-road-wip and wip/road-intent-deadline because they overlap in depth.rs.
 
-First report the verified current frontier. A1 is complete at 15b2365; move to the independent R1 review gate unless repository evidence shows a newer reviewed state. After the opening architecture is reviewed/stable, resume the earlier D31/resource-liquidity and road-intent investigation from the preserved branches.
+First report the verified current frontier. A1 is complete at 15b2365 and R1 returned two major blockers; A2 is the next action unless repository evidence shows a newer repair/review state. After the opening architecture is repaired, re-reviewed, and stable, resume the earlier D31/resource-liquidity and road-intent investigation from the preserved branches.
 ```
 
 ## Recovery rule
