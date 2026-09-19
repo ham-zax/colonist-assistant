@@ -1663,3 +1663,183 @@ fn two_player_portfolio_cutoffs_preserve_legal_complete_result_authority() {
         }
     }
 }
+
+#[test]
+#[ignore = "research fixture export; set OPENING_VALIDATION_EXPORT_DIR and run explicitly"]
+fn export_wave3_opening_state_specs() {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use serde_json::{Value, json};
+
+    fn resource_name(resource: Resource) -> &'static str {
+        match resource {
+            Resource::Lumber => "lumber",
+            Resource::Brick => "brick",
+            Resource::Wool => "wool",
+            Resource::Grain => "grain",
+            Resource::Ore => "ore",
+        }
+    }
+
+    fn port_json(port: Option<Port>) -> Value {
+        match port {
+            None => Value::Null,
+            Some(Port::Generic) => json!("generic"),
+            Some(Port::Resource(resource)) => json!(resource_name(resource)),
+        }
+    }
+
+    fn state_spec(state: &GameState, root: u8, case_key: &str) -> Value {
+        let hexes = state
+            .board
+            .hexes
+            .iter()
+            .map(|hex| {
+                json!({
+                    "id": format!("h:{},{}", hex.coord.0, hex.coord.1),
+                    "resource": hex.resource.map(resource_name),
+                    "number": hex.number,
+                    "coord": [hex.coord.0, hex.coord.1],
+                })
+            })
+            .collect::<Vec<_>>();
+        let vertices = state
+            .board
+            .vertices
+            .iter()
+            .enumerate()
+            .map(|(index, vertex)| {
+                json!({
+                    "id": VERTEX_LABELS[index],
+                    "adjacentHexes": vertex.adjacent_hexes,
+                    "adjacentVertices": vertex.adjacent_vertices,
+                    "adjacentEdges": vertex.adjacent_edges,
+                    "port": port_json(vertex.port),
+                })
+            })
+            .collect::<Vec<_>>();
+        let edges = state
+            .board
+            .edges
+            .iter()
+            .enumerate()
+            .map(|(index, edge)| {
+                json!({
+                    "id": EDGE_LABELS[index],
+                    "vertices": edge.vertices,
+                    "adjacentHexes": edge.adjacent_hexes,
+                })
+            })
+            .collect::<Vec<_>>();
+        let buildings = state
+            .buildings
+            .iter()
+            .enumerate()
+            .filter_map(|(vertex, building)| {
+                building.map(|building| {
+                    json!({
+                        "vertex": vertex,
+                        "player": building.player(),
+                        "kind": match building {
+                            Building::Settlement(_) => "settlement",
+                            Building::City(_) => "city",
+                        },
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        let roads = state
+            .roads
+            .iter()
+            .enumerate()
+            .filter_map(|(edge, player)| {
+                player.map(|player| json!({"edge": edge, "player": player}))
+            })
+            .collect::<Vec<_>>();
+        let players = state
+            .players
+            .iter()
+            .map(|player| {
+                json!({
+                    "resources": player.resources,
+                    "publicVictoryPoints": player.public_victory_points,
+                    "roadsBuilt": 15u8.saturating_sub(player.roads_left),
+                    "settlementsBuilt": 5u8.saturating_sub(player.settlements_left),
+                    "citiesBuilt": 4u8.saturating_sub(player.cities_left),
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "schemaVersion": 1,
+            "kind": "opening-validation-state-spec",
+            "caseKey": case_key,
+            "rootPlayer": root,
+            "numPlayers": state.board.num_players,
+            "victoryTarget": state.victory_target,
+            "setupStep": state.setup_step,
+            "currentPlayer": state.current_player,
+            "playerTradesEnabled": state.player_trades_enabled,
+            "domesticTradeDisabledMask": state.domestic_trade_disabled,
+            "bank": state.bank,
+            "hexes": hexes,
+            "vertices": vertices,
+            "edges": edges,
+            "buildings": buildings,
+            "roads": roads,
+            "players": players,
+        })
+    }
+
+    let output = PathBuf::from(
+        std::env::var("OPENING_VALIDATION_EXPORT_DIR")
+            .expect("OPENING_VALIDATION_EXPORT_DIR must name an ignored artifact directory"),
+    );
+    fs::create_dir_all(&output).expect("create fixture export directory");
+    let cases = [
+        ("hill6758", hill6758_d5(), 3u8),
+        ("task9783", task9783_d3(), 1u8),
+        ("hand2325-attractive-bad-port", hand2325_d1(), 1u8),
+    ];
+    let mut index = Vec::new();
+    for (case_key, initial, root) in cases {
+        for trades_enabled in [false, true] {
+            let mut state = initial.clone();
+            state.player_trades_enabled = trades_enabled;
+            state.domestic_trade_disabled = if trades_enabled {
+                0
+            } else {
+                (1u8 << state.board.num_players) - 1
+            };
+            state.validate().expect("exported state must validate");
+            let suffix = if trades_enabled { "on" } else { "off" };
+            let file_name = format!("{case_key}-trades-{suffix}.json");
+            let document = state_spec(&state, root, case_key);
+            fs::write(
+                output.join(&file_name),
+                serde_json::to_string_pretty(&document).expect("serialize state spec") + "\n",
+            )
+            .expect("write state spec");
+            index.push(json!({
+                "caseKey": case_key,
+                "playerTradesEnabled": trades_enabled,
+                "rootPlayer": root,
+                "stateHash": format!("{:016x}", state.observation_hash(root)),
+                "file": file_name,
+            }));
+        }
+    }
+    fs::write(
+        output.join("recorded-state-index.json"),
+        serde_json::to_string_pretty(&json!({
+            "schemaVersion": 1,
+            "kind": "opening-validation-recorded-state-index",
+            "sourceCommit": "0eda726cf0fbd1eba46e3e351fde8c278ed20bb0",
+            "featureSemanticsCommit": "8496200",
+            "states": index,
+        }))
+        .expect("serialize state index")
+            + "\n",
+    )
+    .expect("write state index");
+}
