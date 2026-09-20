@@ -8,8 +8,8 @@ Use normal Codex/local-shell operation. Do not use ChatGPT Web Harness instructi
 
 ## Role
 
-Role: independent search-diagnostics / research tooling  
-Production mutation authority: none  
+Role: independent search-diagnostics / research tooling
+Production mutation authority: none
 Review independence: not a production review
 
 This mission starts after Agent M completed:

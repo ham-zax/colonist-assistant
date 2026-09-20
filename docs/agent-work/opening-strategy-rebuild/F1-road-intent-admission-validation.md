@@ -2,8 +2,8 @@
 
 ## Role
 
-Role: independent causal validation / research tooling  
-Session: NEW web session  
+Role: independent causal validation / research tooling
+Session: NEW web session
 Production mutation authority: none in F1
 
 F1 decides whether the preserved deadline-limited road-intent override has enough causal evidence to deserve production hardening and review. It does **not** integrate or tune the override.

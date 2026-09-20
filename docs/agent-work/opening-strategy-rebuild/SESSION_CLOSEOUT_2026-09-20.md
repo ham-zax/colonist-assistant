@@ -30,7 +30,7 @@ The orchestration-only commits that had remained off main were synchronized into
 - `1944ae6` — advance midgame research to planner admission
 - `1e88bf4` — pivot to search bottleneck attribution
 
-The corresponding orchestration files are now content-identical between local `main` and `orchestration/opening-rebuild`.
+`orchestration/opening-rebuild` is now an ancestor of local `main`, so no orchestration commit is missing from main. Main has additional closeout edits and experiment reports beyond that branch.
 
 ## Experiment ledger
 

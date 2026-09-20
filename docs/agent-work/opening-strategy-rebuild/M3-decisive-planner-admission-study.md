@@ -2,8 +2,8 @@
 
 ## Role
 
-Role: causal diagnosis / research tooling  
-Session: continue in the existing Agent M Codex session  
+Role: causal diagnosis / research tooling
+Session: continue in the existing Agent M Codex session
 Production mutation authority: none
 
 M3 is a new research mission after:
@@ -187,7 +187,7 @@ If the original replacement only appears at a smaller bounded budget, freeze and
 
 For each primary replacement state compare exactly two roots:
 
-A. ordinary search winner before planner replacement  
+A. ordinary search winner before planner replacement
 B. planner replacement root
 
 Use:
