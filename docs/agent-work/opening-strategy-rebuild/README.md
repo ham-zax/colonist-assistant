@@ -3,8 +3,10 @@
 **Repository:** /home/hamza/repo/colonist-assistant  
 **Integration worktree:** /home/hamza/repo/colonist-opening-orchestration  
 **Source of truth:** docs/JEV_STRATEGY_RESEARCH_PLAYBOOK.md plus live hill6758/task9783 evidence  
-**Current wave:** 3
+**Current frontier:** S1 search-bottleneck attribution
 **Coordination mode:** durable
+
+Final 2026-09-20 closeout: `docs/agent-work/opening-strategy-rebuild/SESSION_CLOSEOUT_2026-09-20.md`
 
 Session-loss recovery map: `docs/agent-work/opening-strategy-rebuild/SESSION_RECOVERY.md`
 

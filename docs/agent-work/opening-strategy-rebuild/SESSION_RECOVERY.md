@@ -8,10 +8,12 @@ Repository: `/home/hamza/repo/colonist-assistant`
 
 - Main checkout: `/home/hamza/repo/colonist-assistant`
 - Branch: `main`
-- Stable commit at this checkpoint: `15cfc5e` (`chore(jev): strengthen critic evidence controls`)
-- At the checkpoint recorded here, `main` matched `origin/main` and was clean.
+- Production semantics are integrated through `9aee018`.
+- The 2026-09-20 closeout then synchronized the remaining orchestration documentation onto local `main` and preserved the final M1/M2/M3 reports there.
+- `origin/main` was still `9aee018` when closeout began; no push is implied. Verify refs before any remote update.
+- One unrelated working-tree modification remains intentionally untouched: `src/generated/wasm/colonist_search_bg.wasm`.
 
-Do not reconstruct missing work from main. The unfinished lanes were preserved on dedicated branches before main was cleaned.
+Read `SESSION_CLOSEOUT_2026-09-20.md` first for the final experiment ledger and tomorrow's S1 handoff. Main now contains the complete orchestration documentation; dedicated research branches remain evidence/tooling donors where explicitly noted.
 
 ## Current opening-rebuild effort
 
