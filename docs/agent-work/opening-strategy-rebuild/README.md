@@ -62,11 +62,22 @@ Current frontier
 │  Exact D27 gate did not reproduce; 4-stream matched continuation was mixed.
 │  F2 is not authorized. Old wip/road-intent-deadline @ 2592caf remains provenance only.
 │
+├─ Midgame transition research / M1+M2 / Agent M
+│  COMPLETE — NO GENERAL DEFECT
+│  M1 @ ea25476: no general save/spend transition defect.
+│  M2 @ 9214f5e: no general same-turn action-order defect.
+│  Research harness remains isolated on agent/m1-midgame-transition-study.
+│
+├─ Decisive planner admission / M3 / Agent M
+│  READY — SAME CODEX SESSION
+│  Test whether broad settlement/city "decisive" classification causes planner overrides
+│  to replace materially stronger ordinary search roots. State A + task9783 are mandatory controls.
+│
 └─ Main checkout
    COMPLETE — LOCAL MAIN INTEGRATED
    Current local main and origin/main both point to 9aee018.
 
-Planned effort: 95% COMPLETE/INTEGRATED | 5% OPTIONAL/DEFERRED B2
+Planned effort: 90% COMPLETE/INTEGRATED | 5% M3 PLANNER ADMISSION | 5% OPTIONAL/DEFERRED B2
 
 ## Session Ledger
 
@@ -83,6 +94,9 @@ Planned effort: 95% COMPLETE/INTEGRATED | 5% OPTIONAL/DEFERRED B2
 | R | R2 | COMPLETE — PASS | independent re-review | read-only repair range 15b2365..034b01f | review blocker discharged | yes |
 | R | R3 | COMPLETE — PASS | independent review | read-only target 1b2a0c2..e068c5d | review blocker discharged | yes |
 | F | F1 | COMPLETE — REJECT/HOLD | causal validation + research tooling | /home/hamza/repo/colonist-road-intent-validation | final report 0b3f1ba; F2 not authorized | no |
+| M | M1 | COMPLETE — NO GENERAL DEFECT | causal midgame research | /home/hamza/repo/colonist-midgame-transition-study | ea25476 | yes |
+| M | M2 | COMPLETE — NO GENERAL DEFECT | action-order equivalence research | /home/hamza/repo/colonist-midgame-transition-study | 9214f5e | yes |
+| M | M3 | READY — SAME CODEX SESSION | decisive planner admission study | /home/hamza/repo/colonist-midgame-transition-study | reuse Agent M; no production mutation | yes |
 | D31 preserved branch | evidence donor | PRESERVED | historical diagnostics | research/d31-road-wip @ 300914b | do not cherry-pick wholesale | yes |
 
 ## Blocker Ledger
@@ -97,6 +111,7 @@ Planned effort: 95% COMPLETE/INTEGRATED | 5% OPTIONAL/DEFERRED B2
 | D1+D2 integration | independent review | R3 | Agent R reports no blocking findings on 1b2a0c2..e068c5d | DISCHARGED — R3 passed; integrated as a4bb9e6 + 35815e3 |
 | road-intent admission | exact D27 reconstruction + matched terminal evidence | F1 | exact gate reproduced, negative controls hold, and matched continuation establishes a coherent advantage | CLOSED — F1 REJECT/HOLD; gate reproduction failed and matched continuation was mixed |
 | road-intent integration | F1 admission + F2 hardening + independent review | F2/Agent R | F1 admits, F2 rebuilds/synchronizes current-base package, Agent R reports no blockers | CANCELLED — F2 not authorized |
+| M3 decisive planner admission | reproducible replacement states + matched causal evidence | M3 | at least two unrelated non-closeout replacements reproduce a common planner-classification defect while closeout control remains valid | READY — State A suggests a sharper planner/search arbitration question |
 
 ## Dependency map
 
@@ -109,6 +124,10 @@ B1 calibration framework ─> B2 DEFERRED
 
 road-intent 2592caf provenance ─> current-main carry 2d29125 ─> F1 REJECT/HOLD
                                                          └─ stop; no F2, no R4, no main integration
+
+M1 NO GENERAL DEFECT ─> M2 NO GENERAL ACTION-ORDER DEFECT ─> M3 decisive-planner admission
+                                                                  ├─ no repeated mechanism -> stop
+                                                                  └─ repeated mechanism -> narrow M4 repair + independent review
 
 Under the user's 15-arm cap, final deterministic validation is complete: recorded corpus 27/0/1, generated cohort 36 cases, terminal campaign 15/15 with zero cutoffs, all four terminal comparisons inconclusive, and zero admitted B2 labels. Static opening evidence remains valid after D2; terminal outcomes are explicitly pre-D2 continuation evidence. No production defect was found, so inconclusive terminal ranking evidence is not treated as a production blocker.
 ```
@@ -168,6 +187,9 @@ A1+A2 and D1+D2 are complete, reviewed, and integrated. C1+E1 are complete and i
 - Road-intent F1 — COMPLETE at `0b3f1ba`; admission decision is REJECT/HOLD. Exact D27 trigger did not reproduce on current main and the four matched continuation pairs were mixed.
 - Old road-intent branch — `wip/road-intent-deadline@2592caf` remains provenance only; do not integrate it directly.
 - F2 — NOT AUTHORIZED. No road-intent hardening, WASM/frontend rebuild, R4 review, or main integration follows from F1.
+- M1 — COMPLETE at `ea25476`; no general build-transition/save-spend defect established. State A retained as a planner/search arbitration reproducer.
+- M2 — COMPLETE at `9214f5e`; all four action-order pairs were mechanically equivalent post-sequence, but no repeated representation defect or common owner was established. No production repair.
+- M3 — READY in the same Agent M Codex session. Test decisive planner replacement admission, focusing on the current classification that any settlement/city may count as materially decisive. Mandatory controls: M1 State A and task9783 closeout.
 
 ## Transition log
 
@@ -195,3 +217,6 @@ A1+A2 and D1+D2 are complete, reviewed, and integrated. C1+E1 are complete and i
 - 2026-09-20: local `main` was fast-forwarded through the reviewed opening/D31/C1 integration and later reached `9aee018`; current `origin/main` also points to `9aee018`.
 - 2026-09-20: planner reopened the held road-intent lane as F1. A fresh validation worktree `/home/hamza/repo/colonist-road-intent-validation` on `agent/f1-road-intent-validation` was created from current local main `9aee018`, and preserved candidate `2592caf` was cleanly cherry-picked as `2d29125`. F1 is diagnostic/admission-only: exact hill6758 D27 reconstruction, deterministic gate reproduction, 4-stream event-family CRN forced-root comparison, deeper-search diagnostic, and D17-style negative controls.
 - 2026-09-20: F1 completed at `0b3f1ba` with **REJECT/HOLD**. Corrected D27 state hash `af247102fe7f32c6` uses the first 24 pre-root Balanced-Dice rolls. The 4,740-node deterministic replay chose Knight and edge 71 had a worse LCB than edge 53, so the exact gate did not reproduce. Four matched forced-root streams split one candidate-only win, one baseline-only win, one both-win, and one both-loss; deeper 160k search chose edge 69, not edge 71. Negative controls passed. F2 is not authorized.
+- 2026-09-20: M1 completed at `ea25476` with **NO GENERAL DEFECT ESTABLISHED**. Four frozen midgame states and 36 matched terminal arms rejected a generic save/spend heuristic; State A isolated a local planner-versus-search arbitration anomaly.
+- 2026-09-20: M2 completed at `9214f5e` with **NO GENERAL ACTION-ORDER DEFECT ESTABLISHED**. Four exact commutative pairs produced identical post-sequence GameStates and identical deterministic continuation results. Only State C showed one-sided follow-up exposure, and no second state shared that mechanism.
+- 2026-09-20: planner advanced the Agent M lane to M3 instead of continuing the M2 null result. M3 tests whether `materially_decisive_transition` is too broad because any settlement/city can authorize a current-turn planner replacement. State A is the ordinary-midgame candidate and task9783 is the positive closeout control.

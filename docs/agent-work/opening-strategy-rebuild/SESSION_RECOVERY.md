@@ -219,6 +219,10 @@ Do not mix the preserved D31/road lanes into the opening Wave 3 validation/calib
 18. F1 completed at `0b3f1ba` with **REJECT/HOLD**. The corrected D27 reconstruction uses the first 24 pre-root gameplay rolls and state hash `af247102fe7f32c6`.
 19. Exact gate reproduction failed: the deterministic 4,740-node replay chose Knight, and edge 71's current-main LCB is below edge 53's. Four forced-root CRN continuation pairs were mixed rather than causally dominant; the 160k deeper search chose edge 69, not edge 71. Negative controls passed.
 20. F2 is not authorized. Do not tune, harden, rebuild WASM/frontend packaging for, review, or integrate the rejected road-intent candidate. Reopening this question requires a new bounded validation mission with new evidence.
+21. Agent M / M1 completed at `ea25476` with **NO GENERAL DEFECT ESTABLISHED** for generic save/spend build-transition behavior. Preserve M1 State A as a local planner-versus-search arbitration reproducer.
+22. Agent M / M2 completed at `9214f5e` with **NO GENERAL ACTION-ORDER DEFECT ESTABLISHED**. Four exact commutative pairs reached identical post-sequence GameStates and identical deterministic continuations; no common representation owner repeated.
+23. M3 is READY in the same Agent M Codex session. Mission file: `docs/agent-work/opening-strategy-rebuild/M3-decisive-planner-admission-study.md`.
+24. M3 tests whether `materially_decisive_transition` is too broad because any settlement/city can authorize `decisive_current_turn_plan_replacement`. Mandatory controls are M1 State A and the task9783 closeout case. M3 is research-only; no production planner mutation is authorized.
 
 ## Copy-paste recovery prompt for a future ChatGPT session
 
@@ -261,7 +265,7 @@ Important preserved lanes:
 Do not assume preserved WIP branches are reviewed or integration-ready.
 Do not blindly merge research/d31-road-wip and wip/road-intent-deadline because they overlap in depth.rs.
 
-First report the verified current frontier. A1+A2 and D1+D2 are reviewed and integrated. C1+E1 are complete and integrated; under the 15-arm user cap all terminal comparisons are inconclusive and admittedLabels is empty, so no post-D2 C2 rerun is required for the current conclusion. B2 is deferred research until conclusive labels and a local TYPESAFE_API_KEY exist. Local main and origin/main both point to 9aee018. F1 completed at 0b3f1ba with REJECT/HOLD: the exact D27 gate did not reproduce and four matched continuation pairs were mixed, so F2 is not authorized and wip/road-intent-deadline@2592caf remains provenance only.
+First report the verified current frontier. A1+A2 and D1+D2 are reviewed and integrated. C1+E1 are complete and integrated; under the 15-arm user cap all terminal comparisons are inconclusive and admittedLabels is empty, so no post-D2 C2 rerun is required for the current conclusion. B2 is deferred research until conclusive labels and a local TYPESAFE_API_KEY exist. Local main and origin/main both point to 9aee018. F1 completed at 0b3f1ba with REJECT/HOLD, so F2 is not authorized. Agent M completed M1 at ea25476 with no general save/spend defect and M2 at 9214f5e with no general action-order defect. M3 is READY in the same Agent M Codex session to test decisive planner replacement admission, using M1 State A plus task9783 as mandatory controls.
 ```
 
 ## Recovery rule
