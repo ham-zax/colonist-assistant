@@ -221,8 +221,10 @@ Do not mix the preserved D31/road lanes into the opening Wave 3 validation/calib
 20. F2 is not authorized. Do not tune, harden, rebuild WASM/frontend packaging for, review, or integrate the rejected road-intent candidate. Reopening this question requires a new bounded validation mission with new evidence.
 21. Agent M / M1 completed at `ea25476` with **NO GENERAL DEFECT ESTABLISHED** for generic save/spend build-transition behavior. Preserve M1 State A as a local planner-versus-search arbitration reproducer.
 22. Agent M / M2 completed at `9214f5e` with **NO GENERAL ACTION-ORDER DEFECT ESTABLISHED**. Four exact commutative pairs reached identical post-sequence GameStates and identical deterministic continuations; no common representation owner repeated.
-23. M3 is READY in the same Agent M Codex session. Mission file: `docs/agent-work/opening-strategy-rebuild/M3-decisive-planner-admission-study.md`.
-24. M3 tests whether `materially_decisive_transition` is too broad because any settlement/city can authorize `decisive_current_turn_plan_replacement`. Mandatory controls are M1 State A and the task9783 closeout case. M3 is research-only; no production planner mutation is authorized.
+23. Agent M / M3 completed at `fa5b937` with **NO GENERAL DECISIVE-PLANNER DEFECT ESTABLISHED**. The broad settlement/city admission mechanism reproduced in two unrelated non-closeout states, but matched outcomes were not directionally consistent; the `986...` disagreement converged under stronger search; State A was actually Longest-Road-triggered; and task9783 could not be reconstructed observation-safely.
+24. No M4 production repair is authorized from M3. Preserve the M3 research branch/report as evidence only.
+25. S1 is READY as a fresh Agent S Codex mission. Mission file: `docs/agent-work/opening-strategy-rebuild/S1-search-bottleneck-attribution.md`.
+26. S1 pivots to the higher-leverage question: whether the dominant remaining strength limiter is root coverage, completed depth/node budget, within-root node allocation, or belief-particle coverage. S1 is research-only; no production search mutation is authorized.
 
 ## Copy-paste recovery prompt for a future ChatGPT session
 
@@ -265,7 +267,7 @@ Important preserved lanes:
 Do not assume preserved WIP branches are reviewed or integration-ready.
 Do not blindly merge research/d31-road-wip and wip/road-intent-deadline because they overlap in depth.rs.
 
-First report the verified current frontier. A1+A2 and D1+D2 are reviewed and integrated. C1+E1 are complete and integrated; under the 15-arm user cap all terminal comparisons are inconclusive and admittedLabels is empty, so no post-D2 C2 rerun is required for the current conclusion. B2 is deferred research until conclusive labels and a local TYPESAFE_API_KEY exist. Local main and origin/main both point to 9aee018. F1 completed at 0b3f1ba with REJECT/HOLD, so F2 is not authorized. Agent M completed M1 at ea25476 with no general save/spend defect and M2 at 9214f5e with no general action-order defect. M3 is READY in the same Agent M Codex session to test decisive planner replacement admission, using M1 State A plus task9783 as mandatory controls.
+First report the verified current frontier. A1+A2 and D1+D2 are reviewed and integrated. C1+E1 are complete and integrated; under the 15-arm user cap all terminal comparisons are inconclusive and admittedLabels is empty, so no post-D2 C2 rerun is required for the current conclusion. B2 is deferred research until conclusive labels and a local TYPESAFE_API_KEY exist. Local main and origin/main both point to 9aee018. F1 completed at 0b3f1ba with REJECT/HOLD, so F2 is not authorized. Agent M completed M1 at ea25476 with no general save/spend defect, M2 at 9214f5e with no general action-order defect, and M3 at fa5b937 with no general decisive-planner defect; no M4 production repair is authorized. S1 is READY as a fresh Agent S Codex mission to attribute the dominant remaining bounded-search bottleneck.
 ```
 
 ## Recovery rule
