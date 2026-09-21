@@ -359,6 +359,121 @@ enum Algorithm {
     Paranoid { root: u8 },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum TranspositionAlgorithmKey {
+    MaxN,
+    HostilityStress { root: u8, hostility_bits: u32 },
+    Paranoid { root: u8 },
+}
+
+impl From<Algorithm> for TranspositionAlgorithmKey {
+    fn from(value: Algorithm) -> Self {
+        match value {
+            Algorithm::MaxN => Self::MaxN,
+            Algorithm::HostilityStress { root, hostility } => Self::HostilityStress {
+                root,
+                hostility_bits: hostility.to_bits(),
+            },
+            Algorithm::Paranoid { root } => Self::Paranoid { root },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum TranspositionNodeKindKey {
+    Decision,
+    Chance,
+    Terminal,
+}
+
+impl From<NodeKind> for TranspositionNodeKindKey {
+    fn from(value: NodeKind) -> Self {
+        match value {
+            NodeKind::Decision { .. } => Self::Decision,
+            NodeKind::Chance => Self::Chance,
+            NodeKind::Terminal => Self::Terminal,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct TranspositionIdentity {
+    state_hash: u64,
+    depth: u8,
+    actions_in_turn: u8,
+    actor: u8,
+    node_kind: TranspositionNodeKindKey,
+    algorithm: TranspositionAlgorithmKey,
+    observation_safe_recursive: bool,
+    controlled_player: Option<u8>,
+    remaining_subtree_allowance: u32,
+    alpha_bits: u32,
+    beta_bits: u32,
+    maximum_depth: u8,
+    branch_cap: usize,
+}
+
+fn transposition_identity(
+    state: &GameState,
+    algorithm: Algorithm,
+    depth: u8,
+    actions_in_turn: u8,
+    alpha: f32,
+    beta: f32,
+    remaining_subtree_allowance: u32,
+    maximum_depth: u8,
+    branch_cap: usize,
+    observation_safe_recursive: bool,
+    controlled_player: Option<u8>,
+) -> TranspositionIdentity {
+    TranspositionIdentity {
+        state_hash: state.state_hash(),
+        depth,
+        actions_in_turn,
+        actor: state.actor(),
+        node_kind: state.node_kind().into(),
+        algorithm: algorithm.into(),
+        observation_safe_recursive,
+        controlled_player,
+        remaining_subtree_allowance,
+        alpha_bits: alpha.to_bits(),
+        beta_bits: beta.to_bits(),
+        maximum_depth,
+        branch_cap,
+    }
+}
+
+struct TranspositionEntry {
+    state: GameState,
+    value: [f32; 4],
+}
+
+#[derive(Default)]
+struct TranspositionTable {
+    entries: HashMap<TranspositionIdentity, TranspositionEntry>,
+}
+
+impl TranspositionTable {
+    fn lookup(&self, key: TranspositionIdentity, state: &GameState) -> Option<[f32; 4]> {
+        let entry = self.entries.get(&key)?;
+        (entry.state == *state).then_some(entry.value)
+    }
+
+    fn insert(&mut self, key: TranspositionIdentity, state: &GameState, value: [f32; 4]) {
+        const MAX_WAVE_ENTRIES: usize = 32_768;
+        if self.entries.len() >= MAX_WAVE_ENTRIES || self.entries.contains_key(&key) {
+            return;
+        }
+        self.entries.insert(
+            key,
+            TranspositionEntry {
+                state: state.clone(),
+                value,
+            },
+        );
+    }
+}
+
 fn apply_action_friction(value: &mut [f32; 4], state: &GameState, action: &Action, actor: u8) {
     let (base, give, receive) = match action {
         Action::OfferTrade { give, receive, .. } => {
@@ -518,6 +633,7 @@ struct Searcher {
     terminal_reached: bool,
     cutoff_depth_counts: Vec<u32>,
     evaluation_cache: Rc<RefCell<HashMap<u64, [f32; 4]>>>,
+    transposition_table: Option<Rc<RefCell<TranspositionTable>>>,
 }
 
 struct DecisionVisitContext {
@@ -759,6 +875,53 @@ fn normalize_belief_root_priors(
 }
 
 impl Searcher {
+    fn transposition_key(
+        &self,
+        state: &GameState,
+        depth: u8,
+        actions_in_turn: u8,
+        alpha: f32,
+        beta: f32,
+        remaining_subtree_allowance: u32,
+    ) -> Option<TranspositionIdentity> {
+        self.transposition_table.as_ref()?;
+        Some(transposition_identity(
+            state,
+            self.algorithm,
+            depth,
+            actions_in_turn,
+            alpha,
+            beta,
+            remaining_subtree_allowance,
+            self.maximum_depth,
+            self.branch_cap,
+            self.observation_safe_recursive,
+            self.controlled_player,
+        ))
+    }
+
+    fn lookup_transposition(
+        &self,
+        key: TranspositionIdentity,
+        state: &GameState,
+    ) -> Option<[f32; 4]> {
+        self.transposition_table
+            .as_ref()?
+            .borrow()
+            .lookup(key, state)
+    }
+
+    fn insert_transposition(
+        &self,
+        key: TranspositionIdentity,
+        state: &GameState,
+        value: [f32; 4],
+    ) {
+        if let Some(table) = self.transposition_table.as_ref() {
+            table.borrow_mut().insert(key, state, value);
+        }
+    }
+
     fn mark_cutoff(&mut self, depth: u8) {
         let index = depth as usize;
         if self.cutoff_depth_counts.len() <= index {
@@ -900,6 +1063,7 @@ impl Searcher {
         subtree_limit: u32,
     ) -> [f32; 4] {
         let subtree_limit = subtree_limit.min(self.node_limit).min(self.maximum_nodes);
+        let remaining_subtree_allowance = subtree_limit.saturating_sub(self.nodes);
         if self.nodes >= subtree_limit {
             self.mark_cutoff(depth);
             return self.evaluate_cached(state);
@@ -930,7 +1094,21 @@ impl Searcher {
         if exact_actions.is_empty() {
             return self.evaluate_cached(state);
         }
-        match node_kind {
+        let transposition_key = self.transposition_key(
+            state,
+            depth,
+            actions_in_turn,
+            alpha,
+            beta,
+            remaining_subtree_allowance,
+        );
+        if let Some(key) = transposition_key
+            && let Some(value) = self.lookup_transposition(key, state)
+        {
+            return value;
+        }
+
+        let value = match node_kind {
             NodeKind::Terminal => {
                 self.terminal_reached = true;
                 self.evaluate_cached(state)
@@ -1037,27 +1215,25 @@ impl Searcher {
                 // continuation action. Full contingent belief optimization is a
                 // separate, later search problem.
                 if observation_safe && self.controlled_player == Some(actor) {
-                    return self
-                        .visit_ranked_decision(
-                            state,
-                            actor,
-                            ranked,
-                            DecisionVisitContext {
-                                depth,
-                                actions_in_turn,
-                                alpha,
-                                beta,
-                                subtree_limit,
-                            },
-                        )
-                        .0;
-                }
-                // Observation-safe opponents evaluate a prior-weighted mixture
-                // over the top observation-ranked actions. The mixture depends
-                // only on the actor's observation, so indistinguishable worlds
-                // share one strategy while still covering more than a single
-                // greedy prior line.
-                if observation_safe {
+                    self.visit_ranked_decision(
+                        state,
+                        actor,
+                        ranked,
+                        DecisionVisitContext {
+                            depth,
+                            actions_in_turn,
+                            alpha,
+                            beta,
+                            subtree_limit,
+                        },
+                    )
+                    .0
+                } else if observation_safe {
+                    // Observation-safe opponents evaluate a prior-weighted mixture
+                    // over the top observation-ranked actions. The mixture depends
+                    // only on the actor's observation, so indistinguishable worlds
+                    // share one strategy while still covering more than a single
+                    // greedy prior line.
                     let budgets = allocate_root_node_budgets(ranked.len(), remaining);
                     let mut carry = 0_u32;
                     let mut expected = [0.0_f32; 4];
@@ -1103,23 +1279,30 @@ impl Searcher {
                             expected[player] += child[player] * *weight;
                         }
                     }
-                    return expected;
+                    expected
+                } else {
+                    self.visit_ranked_decision(
+                        state,
+                        actor,
+                        ranked,
+                        DecisionVisitContext {
+                            depth,
+                            actions_in_turn,
+                            alpha,
+                            beta,
+                            subtree_limit,
+                        },
+                    )
+                    .0
                 }
-                self.visit_ranked_decision(
-                    state,
-                    actor,
-                    ranked,
-                    DecisionVisitContext {
-                        depth,
-                        actions_in_turn,
-                        alpha,
-                        beta,
-                        subtree_limit,
-                    },
-                )
-                .0
             }
+        };
+        if let Some(key) = transposition_key
+            && !self.deadline_reached
+        {
+            self.insert_transposition(key, state, value);
         }
+        value
     }
 
     fn root(&mut self, state: &GameState) -> DepthSearchResult {
@@ -2305,6 +2488,24 @@ fn belief_search_backend(
         let mut wave_root_future_self_mass = vec![0.0f32; root_actions.len()];
         let mut wave_root_terminal_mass = vec![0.0f32; root_actions.len()];
         let mut wave_root_cutoff_depth_counts = vec![Vec::<u32>::new(); root_actions.len()];
+        let wave_transposition_table = Rc::new(RefCell::new(TranspositionTable::default()));
+        let mut wave_root_target_depths = vec![wave_target_depth; root_actions.len()];
+        if wave_target_depth > 1 && wave_target_depth < maximum_depth {
+            for canonical_index in root_allocation_priority
+                .iter()
+                .copied()
+                .take(root_actions.len().min(4))
+            {
+                wave_root_target_depths[canonical_index] = wave_target_depth.saturating_add(1);
+            }
+            attempted_depth = attempted_depth.max(
+                wave_root_target_depths
+                    .iter()
+                    .copied()
+                    .max()
+                    .unwrap_or(wave_target_depth),
+            );
+        }
 
         'particles: for (particle_index, particle) in particles.iter().enumerate() {
             let weight = particle.weight.max(0.0) / total_weight;
@@ -2353,7 +2554,7 @@ fn belief_search_backend(
                     } else {
                         Algorithm::MaxN
                     },
-                    maximum_depth: wave_target_depth,
+                    maximum_depth: wave_root_target_depths[action_index],
                     maximum_nodes: nodes_for_action,
                     node_limit: nodes_for_action,
                     branch_cap: branch_cap.max(1),
@@ -2371,6 +2572,7 @@ fn belief_search_backend(
                     terminal_reached: false,
                     cutoff_depth_counts: Vec::new(),
                     evaluation_cache: Rc::clone(&evaluation_cache),
+                    transposition_table: Some(Rc::clone(&wave_transposition_table)),
                 };
                 let mut candidate_value = backend.visit(
                     &mut searcher,
@@ -2438,7 +2640,7 @@ fn belief_search_backend(
             .map(|(action_index, action)| RootSearchWorkDiagnostic {
                 action: action.clone(),
                 nodes: wave_root_nodes[action_index],
-                completed_wave_depth: wave_target_depth,
+                completed_wave_depth: wave_root_target_depths[action_index],
                 cutoff_depth_counts: wave_root_cutoff_depth_counts[action_index].clone(),
                 posterior_mass_reaching_controlled_next_decision: wave_root_future_self_mass
                     [action_index]
@@ -2836,6 +3038,7 @@ pub fn search_maxn_hostility_stress_bounded(
         terminal_reached: false,
         cutoff_depth_counts: Vec::new(),
         evaluation_cache: Rc::new(RefCell::new(HashMap::new())),
+        transposition_table: None,
     }
     .root(state))
 }
@@ -2877,6 +3080,7 @@ pub fn search_maxn_bounded_timed(
         terminal_reached: false,
         cutoff_depth_counts: Vec::new(),
         evaluation_cache: Rc::new(RefCell::new(HashMap::new())),
+        transposition_table: None,
     }
     .root(state)
 }
@@ -2938,6 +3142,7 @@ pub fn search_paranoid_bounded_timed(
         terminal_reached: false,
         cutoff_depth_counts: Vec::new(),
         evaluation_cache: Rc::new(RefCell::new(HashMap::new())),
+        transposition_table: None,
     }
     .root(state)
 }
@@ -6403,6 +6608,7 @@ mod tests {
             evaluation_cache: std::rc::Rc::new(std::cell::RefCell::new(
                 std::collections::HashMap::new(),
             )),
+            transposition_table: None,
         };
         let context = || super::DecisionVisitContext {
             depth: 0,
