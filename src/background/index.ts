@@ -24,10 +24,10 @@ import {
 
 const nativeGpu = new NativeGpuClient();
 
-// Temporary validation lane: keep the native companion built and available,
-// but force production decisions through CPU/WASM so strategy changes can be
-// evaluated without CUDA backend differences.
-const NATIVE_GPU_ENABLED = false;
+// Production deep-search prefers the native exact-CUDA backend when the
+// companion advertises deadline/cancellation support and the same stochastic
+// model. CPU/WASM remains the transport-failure and unsupported-state fallback.
+const NATIVE_GPU_ENABLED = true;
 
 interface ActiveDecision {
   nativeId: number;
