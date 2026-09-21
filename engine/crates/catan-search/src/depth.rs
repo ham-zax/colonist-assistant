@@ -1287,6 +1287,102 @@ fn realized_root_evidence_strengthened(
             .any(|(baseline, rerun)| rerun > baseline)
 }
 
+fn allocate_particle_node_budgets(
+    particles: &[BeliefParticle],
+    total_nodes: u32,
+    minimum_nodes_per_positive_particle: u32,
+) -> Vec<u32> {
+    let mut budgets = vec![0u32; particles.len()];
+    let positive = particles
+        .iter()
+        .enumerate()
+        .filter(|(_, particle)| particle.weight > 0.0)
+        .collect::<Vec<_>>();
+    if positive.is_empty() {
+        return budgets;
+    }
+
+    let minimum_total =
+        minimum_nodes_per_positive_particle.saturating_mul(positive.len() as u32);
+    if total_nodes < minimum_total {
+        return budgets;
+    }
+    for (index, _) in &positive {
+        budgets[*index] = minimum_nodes_per_positive_particle;
+    }
+
+    let distributable = total_nodes - minimum_total;
+    if distributable == 0 {
+        return budgets;
+    }
+    let total_weight = positive
+        .iter()
+        .map(|(_, particle)| particle.weight as f64)
+        .sum::<f64>();
+    let mut assigned = 0u32;
+    let mut remainders = Vec::with_capacity(positive.len());
+    for (index, particle) in positive {
+        let exact = distributable as f64 * particle.weight as f64 / total_weight;
+        let whole = exact.floor() as u32;
+        budgets[index] = budgets[index].saturating_add(whole);
+        assigned = assigned.saturating_add(whole);
+        remainders.push((index, exact - whole as f64));
+    }
+    debug_assert!(assigned <= distributable);
+
+    remainders.sort_by(|(left_index, left_remainder), (right_index, right_remainder)| {
+        right_remainder
+            .total_cmp(left_remainder)
+            .then_with(|| {
+                particles[*left_index]
+                    .state
+                    .state_hash()
+                    .cmp(&particles[*right_index].state.state_hash())
+            })
+            .then_with(|| {
+                format!("{:?}", particles[*left_index].state)
+                    .cmp(&format!("{:?}", particles[*right_index].state))
+            })
+    });
+    let leftover = distributable.saturating_sub(assigned) as usize;
+    for (index, _) in remainders.into_iter().take(leftover) {
+        budgets[index] = budgets[index].saturating_add(1);
+    }
+
+    budgets
+}
+
+fn allocate_root_node_budgets_by_priority(
+    action_count: usize,
+    total_nodes: u32,
+    priority: &[usize],
+) -> Vec<u32> {
+    if action_count == 0 {
+        return Vec::new();
+    }
+    debug_assert_eq!(priority.len(), action_count);
+    let ranked_budgets = allocate_root_node_budgets(action_count, total_nodes);
+    let mut canonical_budgets = vec![0u32; action_count];
+    for (priority_rank, canonical_index) in priority.iter().copied().enumerate() {
+        debug_assert!(canonical_index < action_count);
+        canonical_budgets[canonical_index] = ranked_budgets[priority_rank];
+    }
+    canonical_budgets
+}
+
+fn root_allocation_priority_from_evidence(evidence: &[(f32, f32)]) -> Vec<usize> {
+    let mut priority = (0..evidence.len()).collect::<Vec<_>>();
+    priority.sort_by(|left, right| {
+        let (left_lower, left_value) = evidence[*left];
+        let (right_lower, right_value) = evidence[*right];
+        right_lower
+            .total_cmp(&left_lower)
+            .then_with(|| right_value.total_cmp(&left_value))
+            .then_with(|| left.cmp(right))
+    });
+    priority
+}
+
 fn evaluate_after_forced_chance(state: &GameState, depth: u8) -> [f32; 4] {
     if depth >= 5 || state.node_kind() != NodeKind::Chance {
         return evaluate(state);
@@ -1993,31 +2089,48 @@ fn belief_search_backend(
         }
         root_actions = safe_root_actions;
     }
-    // Concentrate nodes on the leading root actions instead of giving every
-    // particle/action pair the same tiny equal slice. Uniform fairness left
-    // live search with ~7 nodes/action at 32 particles × 16 actions.
-    let action_budgets = allocate_root_node_budgets(
-        root_actions.len(),
-        maximum_nodes / particles.len().max(1) as u32,
-    );
+    // Concentrate nodes on the leading root actions, but preserve a complete
+    // root table in every positive posterior world before spending
+    // discretionary work according to posterior mass.
     let positive_particle_count = particles
         .iter()
         .filter(|particle| particle.weight > 0.0)
         .count()
         .max(1) as u32;
+    let canonical_root_priority = (0..root_actions.len()).collect::<Vec<_>>();
+    let initial_particle_budgets =
+        allocate_particle_node_budgets(particles, maximum_nodes, root_actions.len() as u32);
+    let mut initial_root_allocated_nodes = vec![0u32; root_actions.len()];
+    for (particle, particle_budget) in particles.iter().zip(&initial_particle_budgets) {
+        if particle.weight <= 0.0 || *particle_budget == 0 {
+            continue;
+        }
+        let root_budgets = allocate_root_node_budgets_by_priority(
+            root_actions.len(),
+            *particle_budget,
+            &canonical_root_priority,
+        );
+        for (allocated, budget) in initial_root_allocated_nodes.iter_mut().zip(root_budgets) {
+            *allocated = allocated.saturating_add(budget);
+        }
+    }
     let retained_roots = root_actions
         .iter()
-        .zip(action_budgets.iter().copied())
-        .map(|((action, prior), node_budget_per_particle)| {
+        .enumerate()
+        .map(|(action_index, (action, prior))| {
             let diagnostic = ranked_diagnostics
                 .iter()
                 .find(|candidate| candidate.action == *action);
+            let allocated_nodes = initial_root_allocated_nodes[action_index];
             RetainedRootDiagnostic {
                 action: action.clone(),
                 pre_truncation_rank: diagnostic.map(|candidate| candidate.rank),
                 prior: *prior,
-                node_budget_per_particle,
-                allocated_nodes: node_budget_per_particle.saturating_mul(positive_particle_count),
+                // Particle budgets are no longer uniform. Keep the existing
+                // scalar diagnostic as the floor average while allocated_nodes
+                // records the exact first-wave root envelope.
+                node_budget_per_particle: allocated_nodes / positive_particle_count,
+                allocated_nodes,
                 planner_value: diagnostic.and_then(|candidate| candidate.planner_value),
                 planner_completion_mass: diagnostic
                     .and_then(|candidate| candidate.planner_completion_mass),
@@ -2140,6 +2253,10 @@ fn belief_search_backend(
     let mut evidence_escalation_nodes = 0u32;
     let mut evidence_escalation_elapsed_ms = 0u32;
     let mut target_depth = 1u8;
+    // Root actions stay in their canonical production order for values,
+    // provenance and diagnostics. Only this permutation changes between
+    // completed waves to steer the existing root budget profile.
+    let mut root_allocation_priority = canonical_root_priority;
 
     while target_depth <= maximum_depth {
         backend.check_cancelled()?;
@@ -2170,9 +2287,14 @@ fn belief_search_backend(
             target_depth
         };
         attempted_depth = attempted_depth.max(wave_target_depth);
-        let wave_action_budgets = allocate_root_node_budgets(
-            root_actions.len(),
-            wave_node_budget / positive_particle_count,
+        let wave_particle_budgets = allocate_particle_node_budgets(
+            particles,
+            wave_node_budget,
+            root_actions.len() as u32,
+        );
+        debug_assert!(
+            particles.iter().all(|particle| particle.weight <= 0.0)
+                || wave_particle_budgets.iter().sum::<u32>() == wave_node_budget
         );
         let mut wave = Vec::<Aggregate>::new();
         let mut wave_particles = 0usize;
@@ -2184,12 +2306,21 @@ fn belief_search_backend(
         let mut wave_root_terminal_mass = vec![0.0f32; root_actions.len()];
         let mut wave_root_cutoff_depth_counts = vec![Vec::<u32>::new(); root_actions.len()];
 
-        'particles: for particle in particles {
+        'particles: for (particle_index, particle) in particles.iter().enumerate() {
             let weight = particle.weight.max(0.0) / total_weight;
             if weight <= 0.0 {
                 continue;
             }
             wave_particles += 1;
+            let wave_action_budgets = allocate_root_node_budgets_by_priority(
+                root_actions.len(),
+                wave_particle_budgets[particle_index],
+                &root_allocation_priority,
+            );
+            debug_assert_eq!(
+                wave_action_budgets.iter().sum::<u32>(),
+                wave_particle_budgets[particle_index]
+            );
             for (action_index, action) in root_actions.iter().enumerate() {
                 if active_deadline.has_elapsed() {
                     deadline_reached = true;
@@ -2287,6 +2418,9 @@ fn belief_search_backend(
             }
         }
 
+        wave_complete &= wave_particles == positive_particle_count as usize
+            && wave.len() == root_actions.len();
+
         if !wave_complete {
             if evidence_escalation_pending {
                 evidence_escalation_nodes = nodes.saturating_sub(evidence_escalation_start_nodes);
@@ -2313,6 +2447,22 @@ fn belief_search_backend(
                     .clamp(0.0, 1.0),
             })
             .collect::<Vec<_>>();
+        let allocation_evidence = root_actions
+            .iter()
+            .map(|action| {
+                wave.iter()
+                    .find(|candidate| candidate.action == *action)
+                    .map(|candidate| {
+                        (
+                            candidate.lower_bound[actor],
+                            candidate.value[actor]
+                                / candidate.covered_weight.max(f32::EPSILON),
+                        )
+                    })
+            })
+            .collect::<Option<Vec<_>>>()
+            .expect("completed wave must cover every retained root");
+        root_allocation_priority = root_allocation_priority_from_evidence(&allocation_evidence);
 
         if evidence_escalation_pending {
             evidence_escalation_completed = true;
