@@ -1108,7 +1108,7 @@ describe("deep-search state adapter", () => {
     expect(retried.actions.some(matchesRejectedOffer)).toBe(false);
   }, 10_000);
 
-  it("keeps four-player work on the frozen reference until budget evidence promotes it", () => {
+  it("uses the deadline-safe four-player production search profile", () => {
     const fourPlayerState = structuredClone(state);
     const fourPlayerBoard = structuredClone(board);
     for (const [name, color] of [
@@ -1140,11 +1140,11 @@ describe("deep-search state adapter", () => {
     expect(built.players).toHaveLength(4);
     expect(built.request.depth).toBe(5);
     expect(built.request.branchCap).toBe(10);
-    expect(built.request.timeBudgetMs).toBe(2_000);
-    expect(built.request.maxNodes).toBe(8_000);
-    expect(built.request.effort?.decisionTimeMs).toBe(2_000);
+    expect(built.request.timeBudgetMs).toBe(10_000);
+    expect(built.request.maxNodes).toBe(48_000);
+    expect(built.request.effort?.decisionTimeMs).toBe(10_000);
     expect(built.request.effort?.cpu.rootCap).toBe(10);
-    expect(built.request.effort?.cpu.nodesPerDepthWave).toBe(8_000);
+    expect(built.request.effort?.cpu.nodesPerDepthWave).toBe(48_000);
     expect(built.request.effort?.cpu.evidenceEscalationMs).toBe(2_500);
     expect(built.request.effort?.gpu.rolloutBudget).toBe(320);
   });

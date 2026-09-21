@@ -55,6 +55,8 @@ const DEVELOPMENT_TOTAL = [14, 5, 2, 2, 2] as const;
 const MAX_PARTICLES = 96;
 const MAX_INTERACTIVE_PARTICLES = 24;
 const LIVE_WASM_DECISION_TIME_MS = 2_000;
+const LIVE_WASM_FOUR_PLAYER_DECISION_TIME_MS = 10_000;
+const LIVE_WASM_FOUR_PLAYER_NODES_PER_DEPTH_WAVE = 48_000;
 const LIVE_WASM_EVIDENCE_ESCALATION_MS = 2_500;
 const LIVE_WASM_TRADE_DECISION_TIME_MS = 1_500;
 const LIVE_WASM_OPENING_DECISION_TIME_MS = 2_500;
@@ -1148,6 +1150,13 @@ export const buildDeepSearchRequest = (
   if (players.length < 2 || players.length > 4) {
     throw new Error("Deep Search supports standard 2–4 player games");
   }
+  const fourPlayer = players.length === 4;
+  const liveDecisionTimeMs = fourPlayer
+    ? LIVE_WASM_FOUR_PLAYER_DECISION_TIME_MS
+    : LIVE_WASM_DECISION_TIME_MS;
+  const liveNodesPerDepthWave = fourPlayer
+    ? LIVE_WASM_FOUR_PLAYER_NODES_PER_DEPTH_WAVE
+    : 8_000;
   if (stochastic?.model === MREF_COLONIST_LINKED_2024_V1) {
     const mapping = stochastic.playerMapping;
     if (
@@ -1649,18 +1658,18 @@ export const buildDeepSearchRequest = (
       // iterative search while keeping a bounded live-decision window.
       // Native CUDA receives its own larger deadline floor in the background.
       iterations: players.length >= 3 ? 320 : 384,
-      maxNodes: 8_000,
+      maxNodes: liveNodesPerDepthWave,
       rolloutActions: players.length >= 3 ? 96 : 108,
       tacticalDepth: 14,
       tacticalNodes: 900,
-      timeBudgetMs: LIVE_WASM_DECISION_TIME_MS,
+      timeBudgetMs: liveDecisionTimeMs,
       effort: {
-        decisionTimeMs: LIVE_WASM_DECISION_TIME_MS,
+        decisionTimeMs: liveDecisionTimeMs,
         tactical: { maxDepth: 14, nodeBudget: 900 },
         cpu: {
           maxDepth: 5,
           rootCap: 10,
-          nodesPerDepthWave: 8_000,
+          nodesPerDepthWave: liveNodesPerDepthWave,
           evidenceEscalationMs: LIVE_WASM_EVIDENCE_ESCALATION_MS,
         },
         gpu: {

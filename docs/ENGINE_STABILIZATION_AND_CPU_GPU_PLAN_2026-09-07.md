@@ -52,7 +52,7 @@ These are facts about the original investigated checkout, not the stabilized can
 | M1 automatically identifies evidence-backed valuation/horizon failures | False as a causal claim. The implementation assigns labels from retention, winner and budget/depth status. |
 | Existing replay tools already provide faithful live/budget comparisons | False in their current form; concrete contract drift is described below. |
 | M2 is promoted in the mainstream extension | False. It remains opt-in and its documented pilot supplies no strength evidence. |
-| `23f7dff` already changed `main` production budgets | False. It exists on `budget/4p-production` in a separate worktree and is not integrated into this HEAD. |
+| `23f7dff` already changed `main` production budgets | False historically. The old commit remains unmerged; current main carries a later deadline-safe reimplementation of its 4p CPU budget intent on top of the shared end-to-end decision allowance. |
 
 The [M0/M1 screen document](MILESTONE_0_1_EMPIRICAL_SCREEN_2026-09-06.md) records 9/36 versus 17/36 wins. It explicitly describes the current binary as a dirty `c21e4ae` working tree containing M1, not a reproducibly pinned clean `06b14f8` build. Those results were not rerun here. The [M2 design](ADAPTIVE_STRATEGY_LAYER_DESIGN_2026-09-06.md) records 3,463 decisions, three admission decisions, four admitted challengers and zero challenger search wins. This is documented pilot evidence, not independently reproduced evidence.
 
@@ -109,11 +109,11 @@ In [depth.rs](../engine/crates/catan-search/src/depth.rs), `deepest_depth` is a 
 
 Add per-root evidence: nodes used, completed wave, distribution of cutoff depths, and weighted mass reaching the controlled player's next decision. Keep terminal branches separate. Use this to test horizon starvation instead of inferring it from mean maximum depth.
 
-### S5 — The proposed 10-second profile conflicts with the client deadline
+### S5 — Resolved: the 4p profile now obeys the client-owned decision allowance
 
-`23f7dff` raises ordinary 4p CPU search to 10,000 ms while retaining 2,500 ms of possible evidence escalation. `belief_search` constructs the hard deadline as their sum. [DecisionWorkerClient](../src/content/decision-worker.ts) fails a decision after 12,000 ms, including request/service overhead. An escalating search can therefore still be working when the client cancels it.
+The historical `23f7dff` commit requested 10,000 ms of ordinary 4p CPU search while retaining 2,500 ms of possible evidence escalation. At that revision, Rust could therefore remain active longer than the browser client's 12,000 ms safety transaction.
 
-Do not merge this commit unchanged. Use a shared end-to-end deadline with explicit allowance for preparation, transport, finalization and escalation. This is an independently supported reason to revisit the budget change, beyond the invalid GPU strength justification. A nominal 768-rollout total also does not promise 64 samples for each root under racing and deadline constraints.
+Current main does not cherry-pick that old commit. `DecisionWorkerClient` owns a 12,000 ms end-to-end allowance and reserves transport/finalization time before sending `decisionBudget.remainingEngineMs`. The background and worker layers subtract only their own local preparation time, and `analyzeDeepSearch()` clamps the requested base search and evidence escalation to the remaining engine allowance. The 4p production profile can therefore request 10,000 ms / 48,000 nodes while escalation consumes only the remaining client-owned reserve. The separate client cancellation/stale-result boundary remains authoritative.
 
 ### S6 — Previously reviewed milestone correctness issues remain prerequisites
 
@@ -185,7 +185,7 @@ Stabilization means the product's behavior and failures are reproducible, not th
 * Failure diagnostics state observed facts and uncertainty accurately.
 * Strength and latency claims come from the appropriate held-out/product evidence, with failures and cutoffs included.
 
-Do not merge the 10-second profile unchanged, promote M2, tune new evaluator bonuses, or announce another GPU win-rate improvement before the relevant preceding gates are met. M4's transition-aware economics remains a reasonable hypothesis to test; M5's contingent future-self optimization is a separate algorithm project. Neither should absorb parser, replay, routing or execution bugs.
+Do not cherry-pick the historical 10-second profile unchanged, promote M2, tune new evaluator bonuses, or announce another GPU win-rate improvement before the relevant preceding gates are met. The current 4p profile is valid only because its requested 10-second base search is subordinated to the client-owned remaining decision allowance. M4's transition-aware economics remains a reasonable hypothesis to test; M5's contingent future-self optimization is a separate algorithm project. Neither should absorb parser, replay, routing or execution bugs.
 
 ## Verification and limits of this investigation
 
@@ -240,7 +240,7 @@ This appendix is retained as the implementation checklist. Steps 1–7 are imple
 
 **Files:** `src/content/decision-worker.ts`, `src/background/index.ts`, `src/worker/deep-search.ts`, Rust effort/deadline handling and focused cancellation tests.
 
-1. Keep `23f7dff` unmerged while reconciling the complete deadline path.
+1. Keep the historical `23f7dff` commit unmerged. Its 4p CPU budget intent is reimplemented only after the complete client-owned deadline path is in place.
 2. Define one end-to-end decision allowance and explicitly budget preparation, search, evidence escalation, finalization and transport. CPU escalation consumes a reserved portion of that allowance; it must not extend execution beyond the client safety deadline.
 3. Pass remaining allowances across process boundaries using durations or the existing local clock abstraction. Do not compare unrelated JavaScript/Rust monotonic clock origins.
 4. Make native profile floors respect the overall limit. Report requested work, completed work, elapsed time, cutoff and cancellation separately.
