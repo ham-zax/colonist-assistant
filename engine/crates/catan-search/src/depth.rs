@@ -46,6 +46,13 @@ const DEFAULT_DEPTH_NODE_BUDGET: u32 = 8_000;
 const DOMESTIC_OFFER_FRICTION: f32 = 0.006;
 const COUNTEROFFER_FRICTION: f32 = 0.004;
 const MAX_ROOT_PROVENANCE: usize = 256;
+// Scale-free ambiguity gate for future-self policy alternatives. A challenger
+// must retain at least 85% of the leading observation-safe prior, so widening
+// is reserved for genuinely close policy choices rather than broad K=2.
+const FUTURE_SELF_WIDENING_MIN_PRIOR_RATIO: f32 = 0.85;
+// Each policy variant must be able to expand at least one recursive child.
+// Smaller cells keep the full existing K=1 allowance.
+const FUTURE_SELF_WIDENING_MIN_NODES_PER_VARIANT: u32 = 2;
 
 #[derive(Clone, Debug)]
 pub struct DepthActionValue {
@@ -396,7 +403,7 @@ impl From<NodeKind> for TranspositionNodeKindKey {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct TranspositionIdentity {
     state_hash: u64,
     depth: u8,
@@ -406,6 +413,7 @@ struct TranspositionIdentity {
     algorithm: TranspositionAlgorithmKey,
     observation_safe_recursive: bool,
     controlled_player: Option<u8>,
+    controlled_policy_override: Option<ControlledWideningTarget>,
     remaining_subtree_allowance: u32,
     alpha_bits: u32,
     beta_bits: u32,
@@ -425,6 +433,7 @@ fn transposition_identity(
     branch_cap: usize,
     observation_safe_recursive: bool,
     controlled_player: Option<u8>,
+    controlled_policy_override: Option<ControlledWideningTarget>,
 ) -> TranspositionIdentity {
     TranspositionIdentity {
         state_hash: state.state_hash(),
@@ -435,6 +444,7 @@ fn transposition_identity(
         algorithm: algorithm.into(),
         observation_safe_recursive,
         controlled_player,
+        controlled_policy_override,
         remaining_subtree_allowance,
         alpha_bits: alpha.to_bits(),
         beta_bits: beta.to_bits(),
@@ -456,8 +466,8 @@ struct TranspositionTable {
 }
 
 impl TranspositionTable {
-    fn lookup(&self, key: TranspositionIdentity, state: &GameState) -> Option<[f32; 4]> {
-        let entry = self.entries.get(&key)?;
+    fn lookup(&self, key: &TranspositionIdentity, state: &GameState) -> Option<[f32; 4]> {
+        let entry = self.entries.get(key)?;
         (entry.state == *state).then_some(entry.value)
     }
 
@@ -591,7 +601,7 @@ fn recursive_observation_policy(
     ranked
 }
 
-fn recursive_observation_best_policy_action(
+fn recursive_observation_ranked_policy_actions(
     state: &GameState,
     actions: &[Action],
     actor: u8,
@@ -606,11 +616,153 @@ fn recursive_observation_best_policy_action(
             .collect();
     }
     canonicalize_equal_prior_siblings(&mut ranked);
+    ranked
+}
+
+#[cfg(test)]
+fn recursive_observation_best_policy_action(
+    state: &GameState,
+    actions: &[Action],
+    actor: u8,
+) -> Vec<(Action, f32)> {
+    let mut ranked = recursive_observation_ranked_policy_actions(state, actions, actor);
     ranked.truncate(1);
     if let Some((_, prior)) = ranked.first_mut() {
         *prior = 1.0;
     }
     ranked
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct ControlledInformationSetKey {
+    actor: u8,
+    observation_hash: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ControlledWideningTarget {
+    key: ControlledInformationSetKey,
+    baseline_action: Action,
+    challenger_action: Action,
+}
+
+#[derive(Clone, Debug)]
+struct ControlledAmbiguityHit {
+    target: ControlledWideningTarget,
+    ambiguity_ratio: f32,
+}
+
+#[derive(Clone, Debug)]
+struct ControlledAmbiguityEvidence {
+    target: ControlledWideningTarget,
+    ambiguity_ratio: f32,
+    action_consistent: bool,
+}
+
+fn accumulate_controlled_ambiguity_evidence(
+    evidence: &mut Vec<ControlledAmbiguityEvidence>,
+    hits: &[ControlledAmbiguityHit],
+) {
+    for hit in hits {
+        if let Some(existing) = evidence
+            .iter_mut()
+            .find(|candidate| candidate.target.key == hit.target.key)
+        {
+            existing.action_consistent &= existing.target.baseline_action == hit.target.baseline_action
+                && existing.target.challenger_action == hit.target.challenger_action;
+            existing.ambiguity_ratio = existing.ambiguity_ratio.max(hit.ambiguity_ratio);
+        } else {
+            evidence.push(ControlledAmbiguityEvidence {
+                target: hit.target.clone(),
+                ambiguity_ratio: hit.ambiguity_ratio,
+                action_consistent: true,
+            });
+        }
+    }
+}
+
+fn controlled_widening_budgets(total_nodes: u32) -> Option<[u32; 2]> {
+    let budgets = allocate_root_node_budgets(2, total_nodes);
+    (budgets.len() == 2
+        && budgets
+            .iter()
+            .all(|budget| *budget >= FUTURE_SELF_WIDENING_MIN_NODES_PER_VARIANT))
+    .then(|| [budgets[0], budgets[1]])
+}
+
+fn select_controlled_widening_target(
+    evidence: &[ControlledAmbiguityEvidence],
+) -> Option<ControlledWideningTarget> {
+    evidence
+        .iter()
+        .filter(|candidate| candidate.action_consistent)
+        .max_by(|left, right| {
+            left.ambiguity_ratio
+                .total_cmp(&right.ambiguity_ratio)
+                .then_with(|| right.target.key.cmp(&left.target.key))
+        })
+        .map(|candidate| candidate.target.clone())
+}
+
+fn controlled_widening_ambiguity_ratio(
+    baseline_prior: f32,
+    challenger_prior: f32,
+) -> Option<f32> {
+    let baseline_prior = baseline_prior.max(0.0);
+    if baseline_prior <= f32::EPSILON {
+        return None;
+    }
+    let ambiguity_ratio = (challenger_prior.max(0.0) / baseline_prior).clamp(0.0, 1.0);
+    (ambiguity_ratio + f32::EPSILON >= FUTURE_SELF_WIDENING_MIN_PRIOR_RATIO)
+        .then_some(ambiguity_ratio)
+}
+
+fn controlled_ambiguity_hit_from_observation(
+    state: &GameState,
+    actions: &[Action],
+    actor: u8,
+) -> Option<ControlledAmbiguityHit> {
+    let ranked = recursive_observation_ranked_policy_actions(state, actions, actor);
+    let (baseline_action, baseline_prior) = ranked.first()?;
+    let (challenger_action, challenger_prior) = ranked.get(1)?;
+    let ambiguity_ratio =
+        controlled_widening_ambiguity_ratio(*baseline_prior, *challenger_prior)?;
+    Some(ControlledAmbiguityHit {
+        target: ControlledWideningTarget {
+            key: ControlledInformationSetKey {
+                actor,
+                observation_hash: state.observation_hash(actor),
+            },
+            baseline_action: baseline_action.clone(),
+            challenger_action: challenger_action.clone(),
+        },
+        ambiguity_ratio,
+    })
+}
+
+fn controlled_policy_action(
+    state: &GameState,
+    actions: &[Action],
+    actor: u8,
+    policy_override: Option<&ControlledWideningTarget>,
+) -> Vec<(Action, f32)> {
+    let mut ranked = recursive_observation_ranked_policy_actions(state, actions, actor);
+    if ranked.is_empty() {
+        return ranked;
+    }
+    let key = ControlledInformationSetKey {
+        actor,
+        observation_hash: state.observation_hash(actor),
+    };
+    let challenger = policy_override.is_some_and(|target| {
+        target.key == key
+            && ranked.first().is_some_and(|entry| entry.0 == target.baseline_action)
+            && ranked.get(1).is_some_and(|entry| entry.0 == target.challenger_action)
+    });
+    let index = usize::from(challenger && ranked.len() > 1);
+    let mut selected = ranked.swap_remove(index);
+    selected.1 = 1.0;
+    vec![selected]
 }
 
 struct Searcher {
@@ -632,6 +784,11 @@ struct Searcher {
     /// the observation-safe stochastic policy; this player uses one deliberate
     /// observation-safe continuation action instead of an opponent-style mix.
     controlled_player: Option<u8>,
+    /// Optional information-set-level policy variant. When present, only this
+    /// observation uses the stored challenger; every other controlled decision
+    /// remains the ordinary rank-0 K=1 policy.
+    controlled_policy_override: Option<ControlledWideningTarget>,
+    controlled_ambiguity_hits: Vec<ControlledAmbiguityHit>,
     controlled_next_decision_reached: bool,
     terminal_reached: bool,
     cutoff_depth_counts: Vec<u32>,
@@ -900,12 +1057,13 @@ impl Searcher {
             self.branch_cap,
             self.observation_safe_recursive,
             self.controlled_player,
+            self.controlled_policy_override.clone(),
         ))
     }
 
     fn lookup_transposition(
         &self,
-        key: TranspositionIdentity,
+        key: &TranspositionIdentity,
         state: &GameState,
     ) -> Option<[f32; 4]> {
         self.transposition_table
@@ -931,6 +1089,33 @@ impl Searcher {
             self.cutoff_depth_counts.resize(index + 1, 0);
         }
         self.cutoff_depth_counts[index] = self.cutoff_depth_counts[index].saturating_add(1);
+    }
+
+    fn record_controlled_ambiguity(&mut self, state: &GameState, actor: u8, depth: u8) {
+        if !self.observation_safe_recursive
+            || self.controlled_player != Some(actor)
+            || depth == 0
+        {
+            return;
+        }
+        let actions = actor_proposal_actions(state);
+        if let Some(hit) = controlled_ambiguity_hit_from_observation(state, &actions, actor) {
+            self.controlled_ambiguity_hits.push(hit);
+        }
+    }
+
+    fn controlled_policy_action(
+        &self,
+        state: &GameState,
+        actions: &[Action],
+        actor: u8,
+    ) -> Vec<(Action, f32)> {
+        controlled_policy_action(
+            state,
+            actions,
+            actor,
+            self.controlled_policy_override.as_ref(),
+        )
     }
 
     fn evaluate_cached(&self, state: &GameState) -> [f32; 4] {
@@ -1088,6 +1273,7 @@ impl Searcher {
             && depth > 0
         {
             self.controlled_next_decision_reached = true;
+            self.record_controlled_ambiguity(state, actor, depth);
         }
         if depth >= self.maximum_depth || actions_in_turn >= 18 {
             self.mark_cutoff(depth);
@@ -1105,7 +1291,7 @@ impl Searcher {
             beta,
             remaining_subtree_allowance,
         );
-        if let Some(key) = transposition_key
+        if let Some(key) = transposition_key.as_ref()
             && let Some(value) = self.lookup_transposition(key, state)
         {
             return value;
@@ -1194,7 +1380,7 @@ impl Searcher {
                     return self.evaluate_cached(state);
                 }
                 let mut ranked = if observation_safe && self.controlled_player == Some(actor) {
-                    recursive_observation_best_policy_action(state, actions, actor)
+                    self.controlled_policy_action(state, actions, actor)
                 } else if observation_safe {
                     recursive_observation_policy(state, actions, actor, self.branch_cap)
                 } else {
@@ -1211,12 +1397,12 @@ impl Searcher {
                     ranked
                 };
                 ranked.truncate(ranked.len().min(remaining as usize));
-                // The controlled player is not an opponent policy. Use the top
-                // observation-ranked action as a bounded deliberate continuation.
-                // Because ranking is derived from observed_state(actor), hidden
-                // worlds that are indistinguishable to the player choose the same
-                // continuation action. Full contingent belief optimization is a
-                // separate, later search problem.
+                // The controlled player is not an opponent policy. Each search
+                // profile therefore uses one deliberate observation-valid action:
+                // rank 0 normally, or rank 1 only at one previously selected
+                // ambiguous information set. The profile winner is chosen outside
+                // this exact-particle Searcher after belief aggregation, so hidden
+                // worlds cannot independently choose their future-self action.
                 if observation_safe && self.controlled_player == Some(actor) {
                     self.visit_ranked_decision(
                         state,
@@ -1677,6 +1863,7 @@ impl BeliefBackend<'_> {
             };
             let mut deferred = CudaDeferredSearcher {
                 tree: &mut tree,
+                algorithm: searcher.algorithm,
                 maximum_depth: searcher.maximum_depth,
                 maximum_nodes: searcher.maximum_nodes,
                 node_limit: searcher.node_limit,
@@ -1684,6 +1871,8 @@ impl BeliefBackend<'_> {
                 controlled_player: searcher
                     .controlled_player
                     .expect("belief controlled player"),
+                controlled_policy_override: searcher.controlled_policy_override.clone(),
+                controlled_ambiguity_hits: Vec::new(),
                 nodes: 0,
                 deepest_depth: 0,
                 controlled_next_decision_reached: false,
@@ -1700,6 +1889,8 @@ impl BeliefBackend<'_> {
             searcher.nodes = deferred.nodes;
             searcher.deepest_depth = deferred.deepest_depth;
             searcher.controlled_next_decision_reached = deferred.controlled_next_decision_reached;
+            searcher.controlled_ambiguity_hits =
+                std::mem::take(&mut deferred.controlled_ambiguity_hits);
             searcher.terminal_reached = deferred.terminal_reached;
             searcher.cutoff_depth_counts = std::mem::take(&mut deferred.cutoff_depth_counts);
             let pending_transpositions = std::mem::take(&mut deferred.pending_transpositions);
@@ -1911,6 +2102,7 @@ fn belief_search_backend(
     };
     let particle_preparation_ms = elapsed_stage_ms(&deadline, particle_preparation_started);
     let root_scoring_started = deadline.elapsed_ms();
+    #[derive(Clone)]
     struct Aggregate {
         action: Action,
         value: [f32; 4],
@@ -1918,6 +2110,7 @@ fn belief_search_backend(
         legal_weight: f32,
         lower_bound: [f32; 4],
     }
+    #[derive(Clone)]
     struct RowEntry {
         action: Action,
         value: [f32; 4],
@@ -2481,6 +2674,9 @@ fn belief_search_backend(
     // provenance and diagnostics. Only this permutation changes between
     // completed waves to steer the existing root budget profile.
     let mut root_allocation_priority = canonical_root_priority;
+    // Targets come only from the last authoritative completed wave. Each root
+    // may widen at most one future controlled information set in the next wave.
+    let mut future_self_widening_targets = vec![None; root_actions.len()];
 
     while target_depth <= maximum_depth {
         backend.check_cancelled()?;
@@ -2520,14 +2716,21 @@ fn belief_search_backend(
             particles.iter().all(|particle| particle.weight <= 0.0)
                 || wave_particle_budgets.iter().sum::<u32>() == wave_node_budget
         );
-        let mut wave = Vec::<Aggregate>::new();
+        let mut baseline_wave = Vec::<Aggregate>::new();
+        let mut challenger_wave = Vec::<Aggregate>::new();
         let mut wave_particles = 0usize;
         let mut wave_depth = 0u8;
         let mut wave_complete = true;
         let wave_start_nodes = nodes;
         let mut wave_root_nodes = vec![0u32; root_actions.len()];
-        let mut wave_root_future_self_mass = vec![0.0f32; root_actions.len()];
-        let mut wave_root_terminal_mass = vec![0.0f32; root_actions.len()];
+        let mut baseline_root_future_self_mass = vec![0.0f32; root_actions.len()];
+        let mut challenger_root_future_self_mass = vec![0.0f32; root_actions.len()];
+        let mut baseline_root_terminal_mass = vec![0.0f32; root_actions.len()];
+        let mut challenger_root_terminal_mass = vec![0.0f32; root_actions.len()];
+        let mut baseline_ambiguity_evidence =
+            vec![Vec::<ControlledAmbiguityEvidence>::new(); root_actions.len()];
+        let mut challenger_ambiguity_evidence =
+            vec![Vec::<ControlledAmbiguityEvidence>::new(); root_actions.len()];
         let mut wave_root_cutoff_depth_counts = vec![Vec::<u32>::new(); root_actions.len()];
         let wave_transposition_table = Rc::new(RefCell::new(TranspositionTable::default()));
         let mut wave_root_target_depths = vec![wave_target_depth; root_actions.len()];
@@ -2548,118 +2751,255 @@ fn belief_search_backend(
             );
         }
 
+        let wave_action_budgets_by_particle = particles
+            .iter()
+            .enumerate()
+            .map(|(particle_index, particle)| {
+                if particle.weight <= 0.0 {
+                    return vec![0; root_actions.len()];
+                }
+                let budgets = allocate_root_node_budgets_by_priority(
+                    root_actions.len(),
+                    wave_particle_budgets[particle_index],
+                    &root_allocation_priority,
+                );
+                debug_assert_eq!(
+                    budgets.iter().sum::<u32>(),
+                    wave_particle_budgets[particle_index]
+                );
+                budgets
+            })
+            .collect::<Vec<_>>();
+        let root_widening_enabled = root_actions
+            .iter()
+            .enumerate()
+            .map(|(action_index, _)| {
+                !evidence_escalation_pending
+                    && future_self_widening_targets[action_index].is_some()
+                    && particles.iter().enumerate().all(|(particle_index, particle)| {
+                        if particle.weight <= 0.0 {
+                            return true;
+                        }
+                        controlled_widening_budgets(
+                            wave_action_budgets_by_particle[particle_index][action_index],
+                        )
+                        .is_some()
+                    })
+            })
+            .collect::<Vec<_>>();
+
         'particles: for (particle_index, particle) in particles.iter().enumerate() {
             let weight = particle.weight.max(0.0) / total_weight;
             if weight <= 0.0 {
                 continue;
             }
             wave_particles += 1;
-            let wave_action_budgets = allocate_root_node_budgets_by_priority(
-                root_actions.len(),
-                wave_particle_budgets[particle_index],
-                &root_allocation_priority,
-            );
-            debug_assert_eq!(
-                wave_action_budgets.iter().sum::<u32>(),
-                wave_particle_budgets[particle_index]
-            );
+            let wave_action_budgets = &wave_action_budgets_by_particle[particle_index];
             for (action_index, action) in root_actions.iter().enumerate() {
                 if active_deadline.has_elapsed() {
                     deadline_reached = true;
                     wave_complete = false;
                     break 'particles;
                 }
+                let nodes_for_action = wave_action_budgets[action_index].max(1);
+                let variant_budgets = if root_widening_enabled[action_index] {
+                    let budgets = controlled_widening_budgets(nodes_for_action)
+                        .expect("widening-enabled root must fund both policy variants");
+                    vec![budgets[0], budgets[1]]
+                } else {
+                    vec![nodes_for_action]
+                };
+                debug_assert_eq!(variant_budgets.iter().sum::<u32>(), nodes_for_action);
+
                 let mut next = particle.state.clone();
                 if next.apply(action).is_err() {
-                    accumulate(
-                        &mut wave,
-                        RowEntry {
-                            action: action.clone(),
-                            value: evaluate(&particle.state),
-                            legal: false,
-                        },
-                        weight,
-                    );
+                    let entry = RowEntry {
+                        action: action.clone(),
+                        value: evaluate(&particle.state),
+                        legal: false,
+                    };
+                    accumulate(&mut baseline_wave, entry.clone(), weight);
+                    if root_widening_enabled[action_index] {
+                        accumulate(&mut challenger_wave, entry, weight);
+                    }
                     continue;
                 }
                 let completed_turn = next.turn != particle.state.turn
                     || next.current_player != particle.state.current_player;
-                let nodes_for_action = wave_action_budgets
-                    .get(action_index)
-                    .copied()
-                    .unwrap_or(1)
-                    .max(1);
-                let mut searcher = Searcher {
-                    algorithm: if paranoid {
-                        Algorithm::Paranoid { root: observer }
+
+                for (variant_index, allowance) in variant_budgets.into_iter().enumerate() {
+                    if active_deadline.has_elapsed() {
+                        deadline_reached = true;
+                        wave_complete = false;
+                        break 'particles;
+                    }
+                    let policy_override = (variant_index == 1)
+                        .then(|| future_self_widening_targets[action_index].clone())
+                        .flatten();
+                    let mut searcher = Searcher {
+                        algorithm: if paranoid {
+                            Algorithm::Paranoid { root: observer }
+                        } else {
+                            Algorithm::MaxN
+                        },
+                        maximum_depth: wave_root_target_depths[action_index],
+                        maximum_nodes: allowance,
+                        node_limit: allowance,
+                        branch_cap: branch_cap.max(1),
+                        nodes: 0,
+                        cutoffs: 0,
+                        deepest_depth: 0,
+                        // Variant allowances partition the original cell quota.
+                        // Only the existing shared deadline can abort the wave.
+                        deadline: active_deadline.clone(),
+                        deadline_reached: false,
+                        observation_safe_recursive: true,
+                        controlled_player: Some(observer),
+                        controlled_policy_override: policy_override,
+                        controlled_ambiguity_hits: Vec::new(),
+                        controlled_next_decision_reached: false,
+                        terminal_reached: false,
+                        cutoff_depth_counts: Vec::new(),
+                        evaluation_cache: Rc::clone(&evaluation_cache),
+                        transposition_table: Some(Rc::clone(&wave_transposition_table)),
+                    };
+                    let mut candidate_value = backend.visit(
+                        &mut searcher,
+                        &next,
+                        u8::from(completed_turn),
+                        if completed_turn { 0 } else { 1 },
+                    )?;
+                    apply_action_friction(
+                        &mut candidate_value,
+                        &particle.state,
+                        action,
+                        observer,
+                    );
+
+                    wave_root_nodes[action_index] =
+                        wave_root_nodes[action_index].saturating_add(searcher.nodes);
+                    let is_challenger = variant_index == 1;
+                    if searcher.controlled_next_decision_reached {
+                        if is_challenger {
+                            challenger_root_future_self_mass[action_index] += weight;
+                        } else {
+                            baseline_root_future_self_mass[action_index] += weight;
+                        }
+                    }
+                    if searcher.terminal_reached || next.is_terminal() {
+                        if is_challenger {
+                            challenger_root_terminal_mass[action_index] += weight;
+                        } else {
+                            baseline_root_terminal_mass[action_index] += weight;
+                        }
+                    }
+                    let ambiguity_evidence = if is_challenger {
+                        &mut challenger_ambiguity_evidence[action_index]
                     } else {
-                        Algorithm::MaxN
-                    },
-                    maximum_depth: wave_root_target_depths[action_index],
-                    maximum_nodes: nodes_for_action,
-                    node_limit: nodes_for_action,
-                    branch_cap: branch_cap.max(1),
-                    nodes: 0,
-                    cutoffs: 0,
-                    deepest_depth: 0,
-                    // Node quotas bound each cell's work. Only the shared
-                    // deadline can abort the wave: a slow cell must not turn
-                    // its private time slice into an early parent cutoff.
-                    deadline: active_deadline.clone(),
-                    deadline_reached: false,
-                    observation_safe_recursive: true,
-                    controlled_player: Some(observer),
-                    controlled_next_decision_reached: false,
-                    terminal_reached: false,
-                    cutoff_depth_counts: Vec::new(),
-                    evaluation_cache: Rc::clone(&evaluation_cache),
-                    transposition_table: Some(Rc::clone(&wave_transposition_table)),
-                };
-                let mut candidate_value = backend.visit(
-                    &mut searcher,
-                    &next,
-                    u8::from(completed_turn),
-                    if completed_turn { 0 } else { 1 },
-                )?;
-                apply_action_friction(&mut candidate_value, &particle.state, action, observer);
-                wave_root_nodes[action_index] =
-                    wave_root_nodes[action_index].saturating_add(searcher.nodes);
-                if searcher.controlled_next_decision_reached {
-                    wave_root_future_self_mass[action_index] += weight;
+                        &mut baseline_ambiguity_evidence[action_index]
+                    };
+                    accumulate_controlled_ambiguity_evidence(
+                        ambiguity_evidence,
+                        &searcher.controlled_ambiguity_hits,
+                    );
+                    if wave_root_cutoff_depth_counts[action_index].len()
+                        < searcher.cutoff_depth_counts.len()
+                    {
+                        wave_root_cutoff_depth_counts[action_index]
+                            .resize(searcher.cutoff_depth_counts.len(), 0);
+                    }
+                    for (cutoff_depth, count) in searcher.cutoff_depth_counts.iter().enumerate() {
+                        wave_root_cutoff_depth_counts[action_index][cutoff_depth] =
+                            wave_root_cutoff_depth_counts[action_index][cutoff_depth]
+                                .saturating_add(*count);
+                    }
+                    nodes += searcher.nodes;
+                    cutoffs += searcher.cutoffs;
+                    wave_depth = wave_depth.max(searcher.deepest_depth);
+                    if searcher.deadline_reached || active_deadline.has_elapsed() {
+                        deadline_reached |=
+                            searcher.deadline_reached || active_deadline.has_elapsed();
+                        wave_complete = false;
+                        break 'particles;
+                    }
+                    let target_wave = if is_challenger {
+                        &mut challenger_wave
+                    } else {
+                        &mut baseline_wave
+                    };
+                    accumulate(
+                        target_wave,
+                        RowEntry {
+                            action: action.clone(),
+                            value: candidate_value,
+                            legal: true,
+                        },
+                        weight,
+                    );
                 }
-                if searcher.terminal_reached || next.is_terminal() {
-                    wave_root_terminal_mass[action_index] += weight;
-                }
-                if wave_root_cutoff_depth_counts[action_index].len()
-                    < searcher.cutoff_depth_counts.len()
-                {
-                    wave_root_cutoff_depth_counts[action_index]
-                        .resize(searcher.cutoff_depth_counts.len(), 0);
-                }
-                for (cutoff_depth, count) in searcher.cutoff_depth_counts.iter().enumerate() {
-                    wave_root_cutoff_depth_counts[action_index][cutoff_depth] =
-                        wave_root_cutoff_depth_counts[action_index][cutoff_depth]
-                            .saturating_add(*count);
-                }
-                nodes += searcher.nodes;
-                cutoffs += searcher.cutoffs;
-                wave_depth = wave_depth.max(searcher.deepest_depth);
-                if searcher.deadline_reached || active_deadline.has_elapsed() {
-                    deadline_reached |= searcher.deadline_reached || active_deadline.has_elapsed();
-                    wave_complete = false;
-                    break 'particles;
-                }
-                accumulate(
-                    &mut wave,
-                    RowEntry {
-                        action: action.clone(),
-                        value: candidate_value,
-                        legal: true,
-                    },
-                    weight,
-                );
             }
         }
+
+        let mut wave = Vec::<Aggregate>::with_capacity(root_actions.len());
+        let mut selected_challenger_by_root = vec![false; root_actions.len()];
+        for (action_index, action) in root_actions.iter().enumerate() {
+            let Some(baseline) = baseline_wave
+                .iter()
+                .find(|candidate| candidate.action == *action)
+            else {
+                continue;
+            };
+            if root_widening_enabled[action_index]
+                && let Some(challenger) = challenger_wave
+                    .iter()
+                    .find(|candidate| candidate.action == *action)
+            {
+                let baseline_scalar =
+                    baseline.value[actor] / baseline.covered_weight.max(f32::EPSILON);
+                let challenger_scalar =
+                    challenger.value[actor] / challenger.covered_weight.max(f32::EPSILON);
+                if challenger_scalar > baseline_scalar {
+                    selected_challenger_by_root[action_index] = true;
+                    wave.push(challenger.clone());
+                    continue;
+                }
+            }
+            wave.push(baseline.clone());
+        }
+        let wave_root_future_self_mass = root_actions
+            .iter()
+            .enumerate()
+            .map(|(action_index, _)| {
+                if selected_challenger_by_root[action_index] {
+                    challenger_root_future_self_mass[action_index]
+                } else {
+                    baseline_root_future_self_mass[action_index]
+                }
+            })
+            .collect::<Vec<_>>();
+        let wave_root_terminal_mass = root_actions
+            .iter()
+            .enumerate()
+            .map(|(action_index, _)| {
+                if selected_challenger_by_root[action_index] {
+                    challenger_root_terminal_mass[action_index]
+                } else {
+                    baseline_root_terminal_mass[action_index]
+                }
+            })
+            .collect::<Vec<_>>();
+        let wave_next_widening_targets = root_actions
+            .iter()
+            .enumerate()
+            .map(|(action_index, _)| {
+                let evidence = if selected_challenger_by_root[action_index] {
+                    &challenger_ambiguity_evidence[action_index]
+                } else {
+                    &baseline_ambiguity_evidence[action_index]
+                };
+                select_controlled_widening_target(evidence)
+            })
+            .collect::<Vec<_>>();
 
         wave_complete &= wave_particles == positive_particle_count as usize
             && wave.len() == root_actions.len();
@@ -2732,6 +3072,7 @@ fn belief_search_backend(
         particles_searched = wave_particles;
         depth = wave_depth;
         completed_root_work = wave_root_work;
+        future_self_widening_targets = wave_next_widening_targets;
         if target_depth == 1
             && should_escalate_binary_root_evidence(
                 node_budget_mode,
@@ -3075,6 +3416,8 @@ pub fn search_maxn_hostility_stress_bounded(
         deadline_reached: false,
         observation_safe_recursive: false,
         controlled_player: None,
+        controlled_policy_override: None,
+        controlled_ambiguity_hits: Vec::new(),
         controlled_next_decision_reached: false,
         terminal_reached: false,
         cutoff_depth_counts: Vec::new(),
@@ -3117,6 +3460,8 @@ pub fn search_maxn_bounded_timed(
         deadline_reached: false,
         observation_safe_recursive: false,
         controlled_player: None,
+        controlled_policy_override: None,
+        controlled_ambiguity_hits: Vec::new(),
         controlled_next_decision_reached: false,
         terminal_reached: false,
         cutoff_depth_counts: Vec::new(),
@@ -3179,6 +3524,8 @@ pub fn search_paranoid_bounded_timed(
         deadline_reached: false,
         observation_safe_recursive: false,
         controlled_player: None,
+        controlled_policy_override: None,
+        controlled_ambiguity_hits: Vec::new(),
         controlled_next_decision_reached: false,
         terminal_reached: false,
         cutoff_depth_counts: Vec::new(),
@@ -3702,11 +4049,14 @@ struct CudaDeferredPendingTransposition {
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
 struct CudaDeferredSearcher<'a> {
     tree: &'a mut CudaDeferredTree,
+    algorithm: Algorithm,
     maximum_depth: u8,
     maximum_nodes: u32,
     node_limit: u32,
     branch_cap: usize,
     controlled_player: u8,
+    controlled_policy_override: Option<ControlledWideningTarget>,
+    controlled_ambiguity_hits: Vec<ControlledAmbiguityHit>,
     nodes: u32,
     deepest_depth: u8,
     controlled_next_decision_reached: bool,
@@ -3729,7 +4079,7 @@ impl CudaDeferredSearcher<'_> {
         self.transposition_table.as_ref()?;
         Some(transposition_identity(
             state,
-            Algorithm::MaxN,
+            self.algorithm,
             depth,
             actions_in_turn,
             0.0,
@@ -3739,12 +4089,13 @@ impl CudaDeferredSearcher<'_> {
             self.branch_cap,
             true,
             Some(self.controlled_player),
+            self.controlled_policy_override.clone(),
         ))
     }
 
     fn lookup_transposition(
         &mut self,
-        key: TranspositionIdentity,
+        key: &TranspositionIdentity,
         state: &GameState,
     ) -> Option<usize> {
         if let Some(value) = self
@@ -3786,7 +4137,7 @@ impl CudaDeferredSearcher<'_> {
             return;
         }
         self.local_transpositions
-            .insert(key, (state.clone(), node));
+            .insert(key.clone(), (state.clone(), node));
         self.pending_transpositions.push(CudaDeferredPendingTransposition {
             key,
             state: state.clone(),
@@ -3799,6 +4150,31 @@ impl CudaDeferredSearcher<'_> {
             .resize(self.cutoff_depth_counts.len().max(depth as usize + 1), 0);
         self.cutoff_depth_counts[depth as usize] += 1;
     }
+
+    fn record_controlled_ambiguity(&mut self, state: &GameState, actor: u8, depth: u8) {
+        if actor != self.controlled_player || depth == 0 {
+            return;
+        }
+        let actions = actor_proposal_actions(state);
+        if let Some(hit) = controlled_ambiguity_hit_from_observation(state, &actions, actor) {
+            self.controlled_ambiguity_hits.push(hit);
+        }
+    }
+
+    fn controlled_policy_action(
+        &self,
+        state: &GameState,
+        actions: &[Action],
+        actor: u8,
+    ) -> Vec<(Action, f32)> {
+        controlled_policy_action(
+            state,
+            actions,
+            actor,
+            self.controlled_policy_override.as_ref(),
+        )
+    }
+
     fn visit(
         &mut self,
         state: &GameState,
@@ -3822,10 +4198,13 @@ impl CudaDeferredSearcher<'_> {
             self.terminal_reached = true;
             return Ok(self.tree.leaf(state));
         }
-        if matches!(state.node_kind(), NodeKind::Decision { actor } if actor == self.controlled_player)
+        let node_kind = state.node_kind();
+        if let NodeKind::Decision { actor } = node_kind
+            && actor == self.controlled_player
             && depth > 0
         {
             self.controlled_next_decision_reached = true;
+            self.record_controlled_ambiguity(state, actor, depth);
         }
         if depth >= self.maximum_depth || actions_in_turn >= 18 {
             self.mark_cutoff(depth);
@@ -3837,13 +4216,13 @@ impl CudaDeferredSearcher<'_> {
         }
         let transposition_key =
             self.transposition_key(state, depth, actions_in_turn, remaining_subtree_allowance);
-        if let Some(key) = transposition_key
+        if let Some(key) = transposition_key.as_ref()
             && let Some(node) = self.lookup_transposition(key, state)
         {
             return Ok(node);
         }
 
-        let node = match state.node_kind() {
+        let node = match node_kind {
             NodeKind::Terminal => Ok(self.tree.leaf(state)),
             NodeKind::Chance => {
                 let total = actions
@@ -3909,7 +4288,7 @@ impl CudaDeferredSearcher<'_> {
                     return Ok(self.tree.leaf(state));
                 }
                 let mut ranked = if actor == self.controlled_player {
-                    recursive_observation_best_policy_action(state, &proposal_actions, actor)
+                    self.controlled_policy_action(state, &proposal_actions, actor)
                 } else {
                     recursive_observation_policy(state, &proposal_actions, actor, self.branch_cap)
                 };
@@ -4650,6 +5029,297 @@ mod tests {
     }
 
     #[test]
+    fn selective_future_self_ambiguity_gate_defaults_to_k1() {
+        assert_eq!(
+            super::controlled_widening_ambiguity_ratio(1.0, 0.84),
+            None
+        );
+        let threshold = super::controlled_widening_ambiguity_ratio(1.0, 0.85)
+            .expect("a challenger at the private threshold is eligible");
+        assert!((threshold - 0.85).abs() <= f32::EPSILON);
+        assert_eq!(
+            super::select_controlled_widening_target(&[]),
+            None,
+            "without completed-wave ambiguity evidence production stays K=1"
+        );
+    }
+
+    #[test]
+    fn selective_future_self_widening_budget_stays_inside_one_cell() {
+        assert_eq!(super::controlled_widening_budgets(0), None);
+        assert_eq!(super::controlled_widening_budgets(3), None);
+        assert_eq!(super::controlled_widening_budgets(4), None);
+        for total in [5_u32, 17, 400] {
+            let budgets = super::controlled_widening_budgets(total)
+                .expect("sufficient allowance must fund both policy variants");
+            assert_eq!(budgets[0] + budgets[1], total);
+            assert!(budgets.iter().all(|budget| {
+                *budget >= super::FUTURE_SELF_WIDENING_MIN_NODES_PER_VARIANT
+            }));
+        }
+    }
+
+    #[test]
+    fn selective_future_self_policy_is_identical_across_hidden_swaps() {
+        let (left, right) = observation_swap_control(0);
+        assert_eq!(left.observation_hash(0), right.observation_hash(0));
+        let left_actions = crate::policy::actor_proposal_actions(&left);
+        let right_actions = crate::policy::actor_proposal_actions(&right);
+        let left_ranked =
+            super::recursive_observation_ranked_policy_actions(&left, &left_actions, 0);
+        let right_ranked =
+            super::recursive_observation_ranked_policy_actions(&right, &right_actions, 0);
+        assert_eq!(left_ranked, right_ranked);
+        assert!(left_ranked.len() >= 2, "fixture must expose a challenger");
+
+        let target = super::ControlledWideningTarget {
+            key: super::ControlledInformationSetKey {
+                actor: 0,
+                observation_hash: left.observation_hash(0),
+            },
+            baseline_action: left_ranked[0].0.clone(),
+            challenger_action: left_ranked[1].0.clone(),
+        };
+        let make_searcher = |controlled_policy_override| super::Searcher {
+            algorithm: super::Algorithm::MaxN,
+            maximum_depth: 3,
+            maximum_nodes: 64,
+            node_limit: 64,
+            branch_cap: 8,
+            nodes: 0,
+            cutoffs: 0,
+            deepest_depth: 0,
+            deadline: crate::deadline::CooperativeDeadline::start(0),
+            deadline_reached: false,
+            observation_safe_recursive: true,
+            controlled_player: Some(0),
+            controlled_policy_override,
+            controlled_ambiguity_hits: Vec::new(),
+            controlled_next_decision_reached: false,
+            terminal_reached: false,
+            cutoff_depth_counts: Vec::new(),
+            evaluation_cache: std::rc::Rc::new(std::cell::RefCell::new(
+                std::collections::HashMap::new(),
+            )),
+            transposition_table: None,
+        };
+
+        let baseline_left =
+            make_searcher(None).controlled_policy_action(&left, &left_actions, 0);
+        let baseline_right =
+            make_searcher(None).controlled_policy_action(&right, &right_actions, 0);
+        assert_eq!(baseline_left, baseline_right);
+        assert_eq!(baseline_left, vec![(target.baseline_action.clone(), 1.0)]);
+
+        let challenger_left = make_searcher(Some(target.clone()))
+            .controlled_policy_action(&left, &left_actions, 0);
+        let challenger_right = make_searcher(Some(target.clone()))
+            .controlled_policy_action(&right, &right_actions, 0);
+        assert_eq!(challenger_left, challenger_right);
+        assert_eq!(
+            challenger_left,
+            vec![(target.challenger_action.clone(), 1.0)]
+        );
+    }
+
+    #[test]
+    fn selective_future_self_target_selection_ignores_evidence_order() {
+        let evidence = |observation_hash| super::ControlledAmbiguityEvidence {
+            target: super::ControlledWideningTarget {
+                key: super::ControlledInformationSetKey {
+                    actor: 0,
+                    observation_hash,
+                },
+                baseline_action: Action::Roll,
+                challenger_action: Action::EndTurn,
+            },
+            ambiguity_ratio: 0.9,
+            action_consistent: true,
+        };
+        let forward = vec![evidence(9), evidence(2)];
+        let reverse = vec![evidence(2), evidence(9)];
+        assert_eq!(
+            super::select_controlled_widening_target(&forward),
+            super::select_controlled_widening_target(&reverse)
+        );
+    }
+
+    #[test]
+    fn selective_future_self_transposition_identity_separates_policy_variants() {
+        let state = binary_preroll_fixture(739);
+        let actions = crate::policy::actor_proposal_actions(&state);
+        let ranked = super::recursive_observation_ranked_policy_actions(&state, &actions, 0);
+        assert!(ranked.len() >= 2, "fixture must expose a challenger");
+        let target = super::ControlledWideningTarget {
+            key: super::ControlledInformationSetKey {
+                actor: 0,
+                observation_hash: state.observation_hash(0),
+            },
+            baseline_action: ranked[0].0.clone(),
+            challenger_action: ranked[1].0.clone(),
+        };
+        let base = super::transposition_identity(
+            &state,
+            super::Algorithm::MaxN,
+            1,
+            0,
+            0.0,
+            1.0,
+            32,
+            3,
+            8,
+            true,
+            Some(0),
+            None,
+        );
+        let widened = super::transposition_identity(
+            &state,
+            super::Algorithm::MaxN,
+            1,
+            0,
+            0.0,
+            1.0,
+            32,
+            3,
+            8,
+            true,
+            Some(0),
+            Some(target),
+        );
+        assert_ne!(base, widened);
+    }
+
+    #[test]
+    #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+    fn selective_future_self_cuda_deferred_profile_matches_cpu_across_hidden_swaps() {
+        let (left, right) = observation_swap_control(0);
+        assert_eq!(left.observation_hash(0), right.observation_hash(0));
+        let left_actions = crate::policy::actor_proposal_actions(&left);
+        let right_actions = crate::policy::actor_proposal_actions(&right);
+        let left_ranked =
+            super::recursive_observation_ranked_policy_actions(&left, &left_actions, 0);
+        let right_ranked =
+            super::recursive_observation_ranked_policy_actions(&right, &right_actions, 0);
+        assert_eq!(left_ranked, right_ranked);
+        assert!(left_ranked.len() >= 2, "fixture must expose a challenger");
+
+        let target = super::ControlledWideningTarget {
+            key: super::ControlledInformationSetKey {
+                actor: 0,
+                observation_hash: left.observation_hash(0),
+            },
+            baseline_action: left_ranked[0].0.clone(),
+            challenger_action: left_ranked[1].0.clone(),
+        };
+        assert_eq!(
+            target.key.observation_hash,
+            right.observation_hash(0),
+            "hidden swap must preserve the controlled information-set identity"
+        );
+        assert_eq!(target.baseline_action, right_ranked[0].0);
+        assert_eq!(target.challenger_action, right_ranked[1].0);
+
+        let make_cpu = |controlled_policy_override| super::Searcher {
+            algorithm: super::Algorithm::MaxN,
+            maximum_depth: 3,
+            maximum_nodes: 64,
+            node_limit: 64,
+            branch_cap: 8,
+            nodes: 0,
+            cutoffs: 0,
+            deepest_depth: 0,
+            deadline: crate::deadline::CooperativeDeadline::start(0),
+            deadline_reached: false,
+            observation_safe_recursive: true,
+            controlled_player: Some(0),
+            controlled_policy_override,
+            controlled_ambiguity_hits: Vec::new(),
+            controlled_next_decision_reached: false,
+            terminal_reached: false,
+            cutoff_depth_counts: Vec::new(),
+            evaluation_cache: std::rc::Rc::new(std::cell::RefCell::new(
+                std::collections::HashMap::new(),
+            )),
+            transposition_table: None,
+        };
+
+        let cpu_baseline_left =
+            make_cpu(None).controlled_policy_action(&left, &left_actions, 0);
+        let cpu_baseline_right =
+            make_cpu(None).controlled_policy_action(&right, &right_actions, 0);
+        let cpu_challenger_left = make_cpu(Some(target.clone()))
+            .controlled_policy_action(&left, &left_actions, 0);
+        let cpu_challenger_right = make_cpu(Some(target.clone()))
+            .controlled_policy_action(&right, &right_actions, 0);
+
+        let mut baseline_tree = super::CudaDeferredTree::new();
+        let cuda_baseline = super::CudaDeferredSearcher {
+            tree: &mut baseline_tree,
+            algorithm: super::Algorithm::MaxN,
+            maximum_depth: 3,
+            maximum_nodes: 64,
+            node_limit: 64,
+            branch_cap: 8,
+            controlled_player: 0,
+            controlled_policy_override: None,
+            controlled_ambiguity_hits: Vec::new(),
+            nodes: 0,
+            deepest_depth: 0,
+            controlled_next_decision_reached: false,
+            terminal_reached: false,
+            cutoff_depth_counts: Vec::new(),
+            transposition_table: None,
+            local_transpositions: std::collections::HashMap::new(),
+            pending_transpositions: Vec::new(),
+        };
+        assert_eq!(
+            cuda_baseline.controlled_policy_action(&left, &left_actions, 0),
+            cpu_baseline_left
+        );
+        assert_eq!(
+            cuda_baseline.controlled_policy_action(&right, &right_actions, 0),
+            cpu_baseline_right
+        );
+
+        let mut challenger_tree = super::CudaDeferredTree::new();
+        let cuda_challenger = super::CudaDeferredSearcher {
+            tree: &mut challenger_tree,
+            algorithm: super::Algorithm::MaxN,
+            maximum_depth: 3,
+            maximum_nodes: 64,
+            node_limit: 64,
+            branch_cap: 8,
+            controlled_player: 0,
+            controlled_policy_override: Some(target.clone()),
+            controlled_ambiguity_hits: Vec::new(),
+            nodes: 0,
+            deepest_depth: 0,
+            controlled_next_decision_reached: false,
+            terminal_reached: false,
+            cutoff_depth_counts: Vec::new(),
+            transposition_table: None,
+            local_transpositions: std::collections::HashMap::new(),
+            pending_transpositions: Vec::new(),
+        };
+        assert_eq!(
+            cuda_challenger.controlled_policy_action(&left, &left_actions, 0),
+            cpu_challenger_left
+        );
+        assert_eq!(
+            cuda_challenger.controlled_policy_action(&right, &right_actions, 0),
+            cpu_challenger_right
+        );
+        assert_eq!(
+            cpu_baseline_left,
+            vec![(target.baseline_action.clone(), 1.0)]
+        );
+        assert_eq!(
+            cpu_challenger_left,
+            vec![(target.challenger_action.clone(), 1.0)]
+        );
+    }
+
+    #[test]
     fn opponent_observation_policy_keeps_weighted_quota_mixture() {
         let state = controlled_city_settlement_fixture();
         let actions = state.legal_actions();
@@ -5272,6 +5942,8 @@ mod tests {
             deadline_reached: false,
             observation_safe_recursive: false,
             controlled_player: None,
+            controlled_policy_override: None,
+            controlled_ambiguity_hits: Vec::new(),
             controlled_next_decision_reached: false,
             terminal_reached: false,
             cutoff_depth_counts: Vec::new(),
