@@ -11,7 +11,7 @@ use colonist_catan_core::{
     Port, PublicRollObservation, Resource, StochasticBelief, StochasticState, TradeOffer, Vertex,
 };
 use colonist_catan_search::{
-    ActionStats, BeliefDepthResult, BeliefParticle, BeliefSearchProvenance,
+    ActionStats, BeliefDepthResult, BeliefParticle, BeliefSearchProvenance, DepthBeliefError,
     BeliefSearchStageTimings, CooperativeDeadline, DecisionFailureClass, DomesticTradeThreat,
     ENGINE_REVISION, ExactActionFamily, ExactActionValue, ExactDecisionResult, HARD_VETO_POSTERIOR,
     IntroducedRoadFragility, Mcts, ReachabilityDiagnostic, RoadCutContinuationAssessment,
@@ -33,8 +33,9 @@ mod native_gpu;
 #[cfg(all(feature = "native-gpu", not(target_arch = "wasm32")))]
 pub use native_gpu::{
     NATIVE_GPU_EXACT_ALGORITHM, NATIVE_GPU_PROTOCOL_VERSION, NATIVE_GPU_ROLLOUT_ALGORITHM,
-    NATIVE_GPU_STATE_SCHEMA_VERSION, NATIVE_GPU_STOCHASTIC_MODELS, NativeGpuCapabilities,
-    NativeGpuDeviceIdentity, NativeGpuExactCapability, NativeGpuSearchEngine,
+    NATIVE_GPU_STATE_SCHEMA_VERSION, NATIVE_GPU_STOCHASTIC_MODELS, NativeGpuAnalyzeError,
+    NativeGpuAnalyzeErrorKind, NativeGpuCapabilities, NativeGpuDeviceIdentity,
+    NativeGpuExactCapability, NativeGpuSearchEngine,
 };
 
 thread_local! {
@@ -2281,6 +2282,35 @@ fn root_exclusion_actions(
         .collect()
 }
 
+#[derive(Debug)]
+enum MaxnRequestError {
+    Semantic(String),
+    Cancelled(String),
+    BackendUnavailable(String),
+}
+
+impl std::fmt::Display for MaxnRequestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Semantic(message)
+            | Self::Cancelled(message)
+            | Self::BackendUnavailable(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl From<String> for MaxnRequestError {
+    fn from(message: String) -> Self {
+        Self::Semantic(message)
+    }
+}
+
+impl From<&str> for MaxnRequestError {
+    fn from(message: &str) -> Self {
+        Self::Semantic(message.to_string())
+    }
+}
+
 enum MaxnBackend<'a> {
     Cpu,
     #[cfg(all(feature = "native-gpu", not(target_arch = "wasm32")))]
@@ -2303,9 +2333,9 @@ impl MaxnBackend<'_> {
         escalation_ms: u32,
         exclusions: &[Action],
         cancel: &dyn Fn() -> bool,
-    ) -> Result<BeliefDepthResult, String> {
+    ) -> Result<BeliefDepthResult, MaxnRequestError> {
         if cancel() {
-            return Err("MaxN cancelled".into());
+            return Err(MaxnRequestError::Cancelled("MaxN cancelled".into()));
         }
         #[cfg(all(feature = "native-gpu", not(target_arch = "wasm32")))]
         if let Self::Cuda(evaluator) = self {
@@ -2317,7 +2347,17 @@ impl MaxnBackend<'_> {
                 exclusions,
                 cancel,
             )
-            .map_err(|error| format!("MaxN {error:?}"));
+            .map_err(|error| match error {
+                DepthBeliefError::CudaSearchCancelled => {
+                    MaxnRequestError::Cancelled("MaxN CudaSearchCancelled".into())
+                }
+                DepthBeliefError::CudaEvaluationFailed
+                | DepthBeliefError::CudaBatchLengthMismatch
+                | DepthBeliefError::CudaEvaluatorLockPoisoned => {
+                    MaxnRequestError::BackendUnavailable(format!("MaxN {error:?}"))
+                }
+                other => MaxnRequestError::Semantic(format!("MaxN {other:?}")),
+            });
         }
         search_weighted_belief_maxn_iterative_timed_excluding_with_strategy_policy(
             particles,
@@ -2325,7 +2365,7 @@ impl MaxnBackend<'_> {
             escalation_ms,
             exclusions,
         )
-        .map_err(|error| format!("MaxN {error:?}"))
+        .map_err(|error| MaxnRequestError::Semantic(format!("MaxN {error:?}")))
     }
 }
 
@@ -2334,7 +2374,7 @@ fn analyze_maxn_request(
     mut backend: MaxnBackend<'_>,
     algorithm: &'static str,
     should_cancel: &dyn Fn() -> bool,
-) -> Result<Response, String> {
+) -> Result<Response, MaxnRequestError> {
     if !matches!(request.mode.as_deref(), None | Some("maxn") | Some("deep")) {
         return Err("MaxN backend supports only the MaxN reference policy".into());
     }
@@ -2356,7 +2396,7 @@ fn analyze_maxn_request(
     let hard_clock =
         DecisionClock::start(effort.decision_time_ms.saturating_add(evidence_reserve_ms));
     if should_cancel() {
-        return Err("MaxN cancelled".into());
+        return Err(MaxnRequestError::Cancelled("MaxN cancelled".into()));
     }
 
     let stochastic = resolve_stochastic(&request)?;
@@ -2397,7 +2437,9 @@ fn analyze_maxn_request(
                 ));
             }
             Ok(None) => {}
-            Err(()) if should_cancel() => return Err("MaxN cancelled".into()),
+            Err(()) if should_cancel() => {
+                return Err(MaxnRequestError::Cancelled("MaxN cancelled".into()));
+            }
             Err(()) => {
                 return Err("MaxN deadline expired during exact arbitration".into());
             }
@@ -2419,7 +2461,7 @@ fn analyze_maxn_request(
         tactical_budget_ms,
     );
     if should_cancel() {
-        return Err("MaxN cancelled".into());
+        return Err(MaxnRequestError::Cancelled("MaxN cancelled".into()));
     }
     if tactical.proven {
         let total_weight = particles
@@ -2494,9 +2536,13 @@ fn analyze_maxn_request(
         depth_report,
         should_cancel,
     )
-    .ok_or_else(|| "MaxN cancelled during final arbitration".to_string())?;
+    .ok_or_else(|| {
+        MaxnRequestError::Cancelled("MaxN cancelled during final arbitration".into())
+    })?;
     if should_cancel() {
-        return Err("MaxN cancelled during final arbitration".into());
+        return Err(MaxnRequestError::Cancelled(
+            "MaxN cancelled during final arbitration".into(),
+        ));
     }
     report.statistics.deadline_reached |= hard_clock.remaining_ms() == 0;
     Ok(response(
@@ -2516,7 +2562,7 @@ pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
     let mode = RequestedMode::parse(request.mode.as_deref())?;
     if mode == RequestedMode::Maxn {
         let report = analyze_maxn_request(request, MaxnBackend::Cpu, "maxn", &|| false)
-            .map_err(|error| JsValue::from_str(&error))?;
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
         return serde_wasm_bindgen::to_value(&report)
             .map_err(|error| JsValue::from_str(&error.to_string()));
     }

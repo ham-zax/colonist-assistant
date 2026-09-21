@@ -9,7 +9,7 @@ use std::thread;
 
 use colonist_catan_wasm::{
     NATIVE_GPU_PROTOCOL_VERSION, NATIVE_GPU_STATE_SCHEMA_VERSION, NATIVE_GPU_STOCHASTIC_MODELS,
-    NativeGpuSearchEngine, engine_version,
+    NativeGpuAnalyzeError, NativeGpuSearchEngine, engine_version,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -148,6 +148,7 @@ fn main() -> io::Result<()> {
                 {
                     json!({
                         "id": id,
+                        "errorKind": "compatibility",
                         "error": format!(
                             "GPU companion protocol mismatch: extension protocol/state {:?}/{:?}, host {}/{}",
                             protocol_version,
@@ -169,7 +170,11 @@ fn main() -> io::Result<()> {
                             "build": native_build_identity(),
                             "device": engine.device_identity(),
                         }),
-                        Err(error) => json!({ "id": id, "error": error }),
+                        Err(error) => json!({
+                            "id": id,
+                            "errorKind": "backend-unavailable",
+                            "error": error,
+                        }),
                     }
                 }
             }
@@ -199,14 +204,20 @@ fn main() -> io::Result<()> {
                         }
                         cancelled.lock().map_or(true, |ids| ids.contains(&id))
                     }),
-                    Err(error) => Err(error.clone()),
+                    Err(error) => {
+                        Err(NativeGpuAnalyzeError::backend_unavailable(error.clone()))
+                    }
                 };
                 if let Ok(mut ids) = cancelled.lock() {
                     ids.remove(&id);
                 }
                 match result {
                     Ok(response) => json!({ "id": id, "response": response }),
-                    Err(error) => json!({ "id": id, "error": error }),
+                    Err(error) => json!({
+                        "id": id,
+                        "errorKind": error.kind().wire_label(),
+                        "error": error.to_string(),
+                    }),
                 }
             }
             Inbound::Request(HostRequest::Cancel { .. }) => {

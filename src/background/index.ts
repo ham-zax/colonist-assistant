@@ -4,6 +4,7 @@ import {
 import { warmDeepSearchEngine } from "../worker/deep-search";
 import {
   NativeGpuClient,
+  isNativeGpuUnavailableError,
   nativeGpuSupportsProductionExactMaxn,
   nativeGpuSupportsStochasticModel,
 } from "./native-gpu";
@@ -96,21 +97,15 @@ const errorDetail = (error: unknown, fallback: string): string => {
   return fallback;
 };
 
-const isNativeGpuTransportFailure = (error: unknown): boolean =>
-  /(?:native host has exited|native messaging host|gpu companion (?:is )?disconnected|gpu companion handshake timed out|gpu companion message could not be sent|disconnected port)/iu.test(
-    errorDetail(error, ""),
-  );
-
-// This fallback is intentionally transport-only. If the native companion dies
-// or its port disconnects, preserve the user's selected deep-search algorithm
-// and stochastic model on CPU/WASM for this decision. Semantic/search errors are
-// not permission to silently substitute another model or policy.
-const analyzeAfterNativeGpuTransportFailure = async (
+// Availability failures are safe to recover on CPU/WASM because the router
+// preserves the exact requested Deep MaxN algorithm and stochastic model.
+// Cancellation and semantic/request failures remain terminal.
+const analyzeAfterNativeGpuUnavailable = async (
   message: DecisionMessage,
   error: unknown,
   localStartedAt: number,
 ) => {
-  const detail = errorDetail(error, "Native GPU transport failed");
+  const detail = errorDetail(error, "Native GPU unavailable");
   nativeGpu.release();
   const analysis = await analyzeDecisionRequest(
     withRemainingDecisionBudget(message, localStartedAt),
@@ -122,8 +117,8 @@ const analyzeAfterNativeGpuTransportFailure = async (
     runtime: "background-wasm" as const,
     runtimeReason:
       requestedStochasticModel === MREF_COLONIST_LINKED_2024_V1
-        ? `Native GPU transport failed (${detail}); Mref preserved on CPU/WASM Deep MaxN for this decision`
-        : `Native GPU transport failed (${detail}); ${requestedStochasticModel} preserved on CPU/WASM Deep MaxN for this decision`,
+        ? `Native GPU unavailable (${detail}); Mref preserved on CPU/WASM Deep MaxN for this decision`
+        : `Native GPU unavailable (${detail}); ${requestedStochasticModel} preserved on CPU/WASM Deep MaxN for this decision`,
   };
 };
 
@@ -168,7 +163,7 @@ chrome.runtime.onMessage.addListener(
           try {
             gpu = await nativeGpu.status();
           } catch (error) {
-            if (!isNativeGpuTransportFailure(error)) throw error;
+            if (!isNativeGpuUnavailableError(error)) throw error;
           }
           if (gpu && nativeGpuSupportsProductionExactMaxn(gpu)) {
             const response: DecisionStatusMessageResponse = {
@@ -230,8 +225,8 @@ chrome.runtime.onMessage.addListener(
           signal.throwIfAborted();
         } catch (error) {
           signal.throwIfAborted();
-          if (!isNativeGpuTransportFailure(error)) throw error;
-          return analyzeAfterNativeGpuTransportFailure(
+          if (!isNativeGpuUnavailableError(error)) throw error;
+          return analyzeAfterNativeGpuUnavailable(
             message,
             error,
             backgroundStartedAt,
@@ -258,8 +253,8 @@ chrome.runtime.onMessage.addListener(
             };
           } catch (error) {
             signal.throwIfAborted();
-            if (!isNativeGpuTransportFailure(error)) throw error;
-            return analyzeAfterNativeGpuTransportFailure(
+            if (!isNativeGpuUnavailableError(error)) throw error;
+            return analyzeAfterNativeGpuUnavailable(
               message,
               error,
               backgroundStartedAt,

@@ -29,6 +29,65 @@ use super::{
 
 pub const NATIVE_GPU_ROLLOUT_ALGORITHM: &str = "gpu-root-rollout";
 pub const NATIVE_GPU_EXACT_ALGORITHM: &str = "deep-maxn-cuda-exact-fixed-work-v1";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeGpuAnalyzeErrorKind {
+    Request,
+    Cancelled,
+    BackendUnavailable,
+}
+
+impl NativeGpuAnalyzeErrorKind {
+    pub const fn wire_label(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::Cancelled => "cancelled",
+            Self::BackendUnavailable => "backend-unavailable",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeGpuAnalyzeError {
+    kind: NativeGpuAnalyzeErrorKind,
+    message: String,
+}
+
+impl NativeGpuAnalyzeError {
+    fn request(message: impl Into<String>) -> Self {
+        Self {
+            kind: NativeGpuAnalyzeErrorKind::Request,
+            message: message.into(),
+        }
+    }
+
+    fn cancelled(message: impl Into<String>) -> Self {
+        Self {
+            kind: NativeGpuAnalyzeErrorKind::Cancelled,
+            message: message.into(),
+        }
+    }
+
+    pub fn backend_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            kind: NativeGpuAnalyzeErrorKind::BackendUnavailable,
+            message: message.into(),
+        }
+    }
+
+    pub const fn kind(&self) -> NativeGpuAnalyzeErrorKind {
+        self.kind
+    }
+}
+
+impl std::fmt::Display for NativeGpuAnalyzeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for NativeGpuAnalyzeError {}
+
 const GPU_ALGORITHM: &str = NATIVE_GPU_ROLLOUT_ALGORITHM;
 const HORIZON_ESCALATION_MIN_UNRESOLVED_CUT_MASS: f32 = 0.20;
 const HORIZON_ESCALATION_MIN_STEPS: usize = 192;
@@ -61,6 +120,7 @@ pub struct NativeGpuExactCapability {
     pub supports_deadline: bool,
     pub supports_cancellation: bool,
     pub supports_opening: bool,
+    pub supports_typed_errors: bool,
     pub fixed_work_parity_only: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unavailable_reason: Option<String>,
@@ -633,6 +693,7 @@ impl NativeGpuSearchEngine {
                 supports_deadline: exact_available,
                 supports_cancellation: exact_available,
                 supports_opening: false,
+                supports_typed_errors: true,
                 fixed_work_parity_only: false,
                 unavailable_reason: self.exact_unavailable_reason.clone(),
             },
@@ -651,29 +712,43 @@ impl NativeGpuSearchEngine {
 
     pub fn analyze_exact_json(&mut self, value: Value) -> Result<Value, String> {
         self.analyze_exact_json_controlled(value, || false)
+            .map_err(|error| error.to_string())
     }
 
     pub fn analyze_exact_json_controlled<F>(
         &mut self,
         value: Value,
         should_cancel: F,
-    ) -> Result<Value, String>
+    ) -> Result<Value, NativeGpuAnalyzeError>
     where
         F: Fn() -> bool,
     {
-        let request: Request = serde_json::from_value(value).map_err(|error| error.to_string())?;
+        let request: Request = serde_json::from_value(value)
+            .map_err(|error| NativeGpuAnalyzeError::request(error.to_string()))?;
         let evaluator = self.exact.as_mut().ok_or_else(|| {
-            self.exact_unavailable_reason
-                .clone()
-                .unwrap_or_else(|| "GPU exact MaxN evaluator is unavailable".into())
+            NativeGpuAnalyzeError::backend_unavailable(
+                self.exact_unavailable_reason
+                    .clone()
+                    .unwrap_or_else(|| "GPU exact MaxN evaluator is unavailable".into()),
+            )
         })?;
         let report = super::analyze_maxn_request(
             request,
             super::MaxnBackend::Cuda(evaluator),
             NATIVE_GPU_EXACT_ALGORITHM,
             &should_cancel,
-        )?;
-        serde_json::to_value(report).map_err(|error| error.to_string())
+        )
+        .map_err(|error| match error {
+            super::MaxnRequestError::Semantic(message) => NativeGpuAnalyzeError::request(message),
+            super::MaxnRequestError::Cancelled(message) => {
+                NativeGpuAnalyzeError::cancelled(message)
+            }
+            super::MaxnRequestError::BackendUnavailable(message) => {
+                NativeGpuAnalyzeError::backend_unavailable(message)
+            }
+        })?;
+        serde_json::to_value(report)
+            .map_err(|error| NativeGpuAnalyzeError::backend_unavailable(error.to_string()))
     }
 
     pub fn analyze_json(&mut self, value: Value) -> Result<Value, String> {

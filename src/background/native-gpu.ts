@@ -29,6 +29,7 @@ export interface NativeGpuExactCapability {
   supportsDeadline: boolean;
   supportsCancellation: boolean;
   supportsOpening: boolean;
+  supportsTypedErrors?: boolean;
   fixedWorkParityOnly: boolean;
   unavailableReason?: string;
 }
@@ -52,6 +53,12 @@ export interface NativeGpuStatus {
   };
 }
 
+type NativeGpuErrorKind =
+  | "compatibility"
+  | "backend-unavailable"
+  | "request"
+  | "cancelled";
+
 interface NativeGpuResponse {
   id: number;
   runtime?: "gpu-native";
@@ -63,6 +70,7 @@ interface NativeGpuResponse {
   build?: NativeGpuBuildIdentity;
   device?: NativeGpuStatus["device"];
   response?: WasmSearchResponse;
+  errorKind?: NativeGpuErrorKind;
   error?: string;
 }
 
@@ -71,7 +79,37 @@ interface PendingNativeRequest {
   reject: (error: Error) => void;
 }
 
-class NativeGpuCompatibilityError extends Error {}
+export class NativeGpuUnavailableError extends Error {
+  constructor(
+    message: string,
+    readonly reason: "transport" | "compatibility" | "backend-unavailable",
+  ) {
+    super(message);
+    this.name = "NativeGpuUnavailableError";
+  }
+}
+
+class NativeGpuCompatibilityError extends NativeGpuUnavailableError {
+  constructor(message: string) {
+    super(message, "compatibility");
+    this.name = "NativeGpuCompatibilityError";
+  }
+}
+
+const nativeGpuResponseError = (response: NativeGpuResponse): Error => {
+  const message = response.error ?? "Native GPU request failed";
+  if (response.errorKind === "compatibility") {
+    return new NativeGpuUnavailableError(message, "compatibility");
+  }
+  if (response.errorKind === "backend-unavailable") {
+    return new NativeGpuUnavailableError(message, "backend-unavailable");
+  }
+  return new Error(message);
+};
+
+export const isNativeGpuUnavailableError = (
+  error: unknown,
+): error is NativeGpuUnavailableError => error instanceof NativeGpuUnavailableError;
 
 const isNativeGpuCapabilities = (
   value: NativeGpuCapabilities | undefined,
@@ -86,6 +124,8 @@ const isNativeGpuCapabilities = (
       typeof value.exactMaxn.supportsDeadline === "boolean" &&
       typeof value.exactMaxn.supportsCancellation === "boolean" &&
       typeof value.exactMaxn.supportsOpening === "boolean" &&
+      (value.exactMaxn.supportsTypedErrors === undefined ||
+        typeof value.exactMaxn.supportsTypedErrors === "boolean") &&
       typeof value.exactMaxn.fixedWorkParityOnly === "boolean" &&
       (value.exactMaxn.unavailableReason === undefined ||
         typeof value.exactMaxn.unavailableReason === "string"),
@@ -104,6 +144,7 @@ export const nativeGpuSupportsProductionExactMaxn = (
   nativeGpuSupportsExactMaxn(status) &&
   status.capabilities.exactMaxn.supportsDeadline &&
   status.capabilities.exactMaxn.supportsCancellation &&
+  status.capabilities.exactMaxn.supportsTypedErrors === true &&
   !status.capabilities.exactMaxn.fixedWorkParityOnly;
 
 const isNativeGpuBuildIdentity = (
@@ -244,9 +285,12 @@ export class NativeGpuClient {
     signal?.addEventListener("abort", abort, { once: true });
     try {
       const result = await response;
-      if (result.error) throw new Error(result.error);
+      if (result.error) throw nativeGpuResponseError(result);
       if (!result.response) {
-        throw new Error("GPU companion returned no search response");
+        throw new NativeGpuUnavailableError(
+          "GPU companion returned no search response",
+          "backend-unavailable",
+        );
       }
       if (result.response.algorithm !== expectedAlgorithm) {
         throw new NativeGpuCompatibilityError(
@@ -295,13 +339,19 @@ export class NativeGpuClient {
         stateSchemaVersion: NATIVE_GPU_STATE_SCHEMA_VERSION,
       }, NATIVE_GPU_HANDSHAKE_TIMEOUT_MS).response;
       if (generation !== this.connectionGeneration || this.port !== port) {
-        throw new Error("GPU companion disconnected during initialization");
+        throw new NativeGpuUnavailableError(
+          "GPU companion disconnected during initialization",
+          "transport",
+        );
       }
       if (hello.error) {
-        if (hello.error.startsWith("GPU companion protocol mismatch:")) {
-          throw new NativeGpuCompatibilityError(hello.error);
+        if (hello.errorKind === "backend-unavailable") {
+          throw nativeGpuResponseError(hello);
         }
-        throw new Error(hello.error);
+        // Handshake errors cannot be request-semantic failures. Older
+        // companions predate errorKind, so an untyped hello error is safely
+        // treated as compatibility/unavailability and falls back to CPU/WASM.
+        throw new NativeGpuCompatibilityError(hello.error);
       }
       if (
         hello.runtime !== "gpu-native" ||
@@ -350,12 +400,16 @@ export class NativeGpuClient {
       this.closePort();
       const detail =
         error instanceof Error ? error.message : "GPU companion connection failed";
-      if (error instanceof NativeGpuCompatibilityError) {
+      if (error instanceof NativeGpuUnavailableError) {
+        if (error.reason === "transport" && !this.everReady) {
+          this.unavailable = true;
+          return undefined;
+        }
         this.fatalError = error;
         throw error;
       }
       if (this.everReady) {
-        this.fatalError = new Error(detail);
+        this.fatalError = new NativeGpuUnavailableError(detail, "transport");
         throw this.fatalError;
       }
       this.unavailable = true;
@@ -371,13 +425,17 @@ export class NativeGpuClient {
     if (!this.port) {
       return {
         id,
-        response: Promise.reject(new Error("GPU companion is disconnected")),
+        response: Promise.reject(
+          new NativeGpuUnavailableError("GPU companion is disconnected", "transport"),
+        ),
       };
     }
     const response = new Promise<NativeGpuResponse>((resolve, reject) => {
       const timer = timeoutMs === undefined ? undefined : globalThis.setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error("GPU companion handshake timed out"));
+        reject(
+          new NativeGpuUnavailableError("GPU companion handshake timed out", "transport"),
+        );
       }, timeoutMs);
       const clearTimer = () => {
         if (timer !== undefined) globalThis.clearTimeout(timer);
@@ -392,9 +450,12 @@ export class NativeGpuClient {
       } catch (error) {
         this.pending.delete(id);
         pending.reject(
-          error instanceof Error
-            ? error
-            : new Error("GPU companion message could not be sent"),
+          new NativeGpuUnavailableError(
+            error instanceof Error
+              ? error.message
+              : "GPU companion message could not be sent",
+            "transport",
+          ),
         );
       }
     });
@@ -438,7 +499,7 @@ export class NativeGpuClient {
     this.statusValue = undefined;
     this.activeAnalyzeId = undefined;
     this.activeDecisionId = undefined;
-    const error = new Error(detail);
+    const error = new NativeGpuUnavailableError(detail, "transport");
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
     if (this.everReady) this.fatalError = error;

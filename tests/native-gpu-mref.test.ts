@@ -4,6 +4,7 @@ import {
   NATIVE_GPU_HANDSHAKE_TIMEOUT_MS,
   NATIVE_GPU_ROLLOUT_ALGORITHM,
   NativeGpuClient,
+  NativeGpuUnavailableError,
   nativeGpuSupportsExactMaxn,
   nativeGpuSupportsProductionExactMaxn,
 } from "../src/background/native-gpu";
@@ -23,6 +24,9 @@ interface CompanionOptions {
   exactAvailable?: boolean;
   exactFixedWorkOnly?: boolean;
   includeCapabilities?: boolean;
+  exactErrorKind?: "backend-unavailable" | "request" | "cancelled";
+  exactError?: string;
+  helloError?: string;
 }
 
 const companion = ({
@@ -30,8 +34,11 @@ const companion = ({
   models = [M0, MREF],
   responseModel = M0,
   exactAvailable = true,
-      exactFixedWorkOnly = false,
+  exactFixedWorkOnly = false,
   includeCapabilities = true,
+  exactErrorKind,
+  exactError = "native exact search failed",
+  helloError,
 }: CompanionOptions = {}) => {
   let receive: (message: unknown) => void = () => undefined;
   let disconnectHost: () => void = () => undefined;
@@ -47,6 +54,7 @@ const companion = ({
       supportsDeadline: exactAvailable,
       supportsCancellation: exactAvailable,
       supportsOpening: false,
+      supportsTypedErrors: true,
       fixedWorkParityOnly: exactFixedWorkOnly,
       ...(!exactAvailable ? { unavailableReason: "exact evaluator unavailable" } : {}),
     },
@@ -54,32 +62,43 @@ const companion = ({
   const postMessage = vi.fn((request: { id: number; type: string }) => {
     const reply =
       request.type === "hello"
-        ? {
-            id: request.id,
-            runtime: "gpu-native",
-            protocolVersion,
-            stateSchemaVersion: 3,
-            engineRevision: "deep-maxn-v14",
-            stochasticModels: models,
-            ...(includeCapabilities ? { capabilities } : {}),
-            device: {
-              backend: "cuda-resident-sim",
-              ordinal: 0,
-              name: "parity-fixture",
-              computeCapability: [8, 6],
-            },
-          }
-        : {
-            id: request.id,
-            response: {
+        ? helloError
+          ? {
+              id: request.id,
+              error: helloError,
+            }
+          : {
+              id: request.id,
+              runtime: "gpu-native",
+              protocolVersion,
+              stateSchemaVersion: 3,
               engineRevision: "deep-maxn-v14",
-              algorithm:
-                request.type === "analyze-exact"
-                  ? NATIVE_GPU_EXACT_ALGORITHM
-                  : NATIVE_GPU_ROLLOUT_ALGORITHM,
-              stochasticModel: responseModel,
-            },
-          };
+              stochasticModels: models,
+              ...(includeCapabilities ? { capabilities } : {}),
+              device: {
+                backend: "cuda-resident-sim",
+                ordinal: 0,
+                name: "parity-fixture",
+                computeCapability: [8, 6],
+              },
+            }
+        : request.type === "analyze-exact" && exactErrorKind
+          ? {
+              id: request.id,
+              errorKind: exactErrorKind,
+              error: exactError,
+            }
+          : {
+              id: request.id,
+              response: {
+                engineRevision: "deep-maxn-v14",
+                algorithm:
+                  request.type === "analyze-exact"
+                    ? NATIVE_GPU_EXACT_ALGORITHM
+                    : NATIVE_GPU_ROLLOUT_ALGORITHM,
+                stochasticModel: responseModel,
+              },
+            };
     queueMicrotask(() => receive(reply));
   });
   vi.stubGlobal("chrome", {
@@ -176,6 +195,16 @@ describe("native Mref capability and returned authority", () => {
     await expect(client.status()).rejects.toThrow(/incompatible/u);
   });
 
+  it("classifies an untyped old-companion hello error as fallback-eligible", async () => {
+    const { client } = companion({
+      helloError: "GPU companion protocol mismatch: legacy host",
+    });
+    await expect(client.status()).rejects.toMatchObject({
+      name: "NativeGpuCompatibilityError",
+      reason: "compatibility",
+    });
+  });
+
   it("requires protocol-7 algorithm capability evidence", async () => {
     const { client } = companion({ includeCapabilities: false });
     await expect(client.status()).rejects.toThrow(/algorithm capabilities/u);
@@ -195,6 +224,19 @@ describe("native Mref capability and returned authority", () => {
     expect(status).toBeDefined();
     expect(nativeGpuSupportsExactMaxn(status!)).toBe(true);
     expect(nativeGpuSupportsProductionExactMaxn(status!)).toBe(false);
+  });
+
+  it("maps native backend-unavailable errors to the typed fallback boundary", async () => {
+    const { client } = companion({
+      exactErrorKind: "backend-unavailable",
+      exactError: "MaxN CudaEvaluationFailed",
+    });
+    await expect(client.analyzeExact({})).rejects.toMatchObject({
+      name: "NativeGpuUnavailableError",
+      reason: "backend-unavailable",
+      message: "MaxN CudaEvaluationFailed",
+    });
+    await expect(client.analyzeExact({})).rejects.toBeInstanceOf(NativeGpuUnavailableError);
   });
 
   it("executes Mref on exact MaxN only when it is advertised and returned as Mref", async () => {
