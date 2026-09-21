@@ -89,7 +89,7 @@ function readOptions(argv) {
         break;
       case "--help":
       case "-h":
-        console.log(`Usage: npm run benchmark:colonist -- [options]
+        console.log(`Usage: bun run benchmark:colonist -- [options]
 
   --difficulties Easy,Medium,Hard  Colonist bot levels
   --games N                       Games per difficulty
@@ -1433,7 +1433,7 @@ const manifest = JSON.parse(
 );
 if (manifest.name !== "Colonist Ally") {
   throw new Error(
-    "dist/ is missing or stale. Run npm run build before the live benchmark.",
+    "dist/ is missing or stale. Run bun run build before the live benchmark.",
   );
 }
 const tasks = options.difficulties.flatMap((difficulty) =>

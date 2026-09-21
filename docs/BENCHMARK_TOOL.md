@@ -20,6 +20,41 @@ throughput, behavioral metrics, and a matched-block bootstrap interval.
 Optional `--trajectory-output` writes per-turn JSONL samples so early-game
 infrastructure and late tactical conversion can be compared across seats.
 
+### 1v1 MaxN versus AlphaBeta
+
+For the direct two-player comparison, use 50 matched blocks. Each block runs
+both seat rotations, so the result contains 100 games and gives each policy
+the first-player seat equally often:
+
+```bash
+cd engine
+cargo run --release -p colonist-catan-arena -- \
+  --players 2 --blocks 50 --threads 4 --validate --quiet --json \
+  --candidate maxn --baseline alphabeta \
+  --iterations 300 --belief-particles 24 --seed 20260801
+```
+
+The candidate is the arena name for the packaged default algorithm: weighted-
+belief Deep MaxN. AlphaBeta uses the same legal action generator and hidden-
+information belief source, but backs up each branch with paranoid opponent
+values rather than the vector-valued MaxN objective.
+
+| Decision layer | Deep MaxN (current default) | AlphaBeta comparator |
+| --- | --- | --- |
+| Mandatory actions | Exact legal enumeration | Exact legal enumeration |
+| Hidden cards | Observer-consistent weighted particles | Same particles |
+| Opponent objective | Each player maximizes its own race value | Opponents form one hostile coalition |
+| Tree backup | Vector-valued MaxN | Scalar paranoid min backup |
+| Action ordering | Structured priors and tactical ordering | Same legal family, AlphaBeta ordering |
+| Setup | Joint snake-order opening solver | Bounded paranoid search |
+| Randomness | Seeded chance plus particle sampling | Seeded chance plus particle sampling |
+| Safety | State validation after every transition | State validation after every transition |
+
+Report terminal games, cutoffs, seat samples, win share, mean rank, mean VP,
+decision latency, and the 95% matched-block interval together. A result from a
+short-lived or older binary with a different search budget is a smoke test,
+not a directly comparable strength result.
+
 The packaged live authority is branded Strategist and uses weighted-belief Deep
 MaxN. In the arena, `maxn` (also accepted as `deep`) is the closest comparison
 to that search core. `puct` selects the experimental belief-PUCT policy, with
@@ -28,7 +63,7 @@ does not make arena PUCT the live engine, and its results must remain
 explicitly experimental.
 
 ```bash
-npm run benchmark:local -- \
+bun run benchmark:local -- \
   --candidate maxn \
   --players 3,4 \
   --baselines weighted,alphabeta,uct,puct \
@@ -74,7 +109,7 @@ in the arena's win rate.
 Read a checkpoint during a run or after an interruption with:
 
 ```bash
-npm run benchmark:checkpoint -- benchmark-results/four-engine.jsonl
+bun run benchmark:checkpoint -- benchmark-results/four-engine.jsonl
 ```
 
 The reader ignores an incomplete trailing line and prints the latest valid
@@ -102,8 +137,8 @@ Colonist score table. The internal live WASM request is `maxn`; the
 legacy `deep` alias.
 
 ```bash
-npm run build
-npm run benchmark:colonist -- \
+bun run build
+bun run benchmark:colonist -- \
   --difficulties Easy,Medium,Hard \
   --games 3 \
   --jobs 2 \
@@ -122,7 +157,7 @@ For release screenshots, run exactly one headed game and provide a temporary
 capture directory:
 
 ```bash
-npm run benchmark:colonist -- \
+bun run benchmark:colonist -- \
   --difficulties Easy --games 1 --jobs 1 \
   --store-screenshots /tmp/colonist-assistant-store-screenshots \
   --output /tmp/colonist-assistant-store-smoke

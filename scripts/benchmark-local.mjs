@@ -146,7 +146,7 @@ function readOptions(argv) {
         break;
       case "--help":
       case "-h":
-        console.log(`Usage: npm run benchmark:local -- [options]
+        console.log(`Usage: bun run benchmark:local -- [options]
 
   --candidate ENGINE       Engine under test (default: maxn)
   --baselines A,B,C        Opponent engines

@@ -47,12 +47,12 @@ results as live Colonist win rates.
 ## Development commands
 
 ```bash
-npm ci
-npm run check
-npm test
-npm run verify:rust
-npm run build
-npm run verify
+bun install --frozen-lockfile
+bun run check
+bun run test
+bun run verify:rust
+bun run build
+bun run verify
 ```
 
 The release build is `dist/`. Reload the unpacked extension and refresh every
@@ -110,8 +110,8 @@ fonts and other bundled assets.
 
 ## Cursor Cloud specific instructions
 
-There is no `npm run dev` server. The runnable artifact is the unpacked
-extension in `dist/` after `npm run build` (or `npm run verify`).
+There is no `bun run dev` server. The runnable artifact is the unpacked
+extension in `dist/` after `bun run build` (or `bun run verify`).
 
 ### Toolchain (one-time per VM image)
 
@@ -124,8 +124,8 @@ extension in `dist/` after `npm run build` (or `npm run verify`).
 
 ### Build and test
 
-Use the standard commands from this file: `npm ci`, `npm run check`, `npm
-test`, `npm run verify:rust`, `npm run build`, `npm run verify`. The release
+Use the standard commands from this file: `bun install --frozen-lockfile`, `bun run check`, `bun run
+test`, `bun run verify:rust`, `bun run build`, `bun run verify`. The release
 extension lands in `dist/`.
 
 Quick native smoke (no browser): after a release build, `engine/target/release/colonist-arena`
@@ -149,8 +149,8 @@ Without the WebGL flags, colonist.io shows a blocking “WebGL Inactive” modal
 After each rebuild, reload the extension on `chrome://extensions` and refresh
 open colonist.io tabs.
 
-Automated live play: `CHROMIUM_PATH=/usr/bin/google-chrome-stable npm run
+Automated live play: `CHROMIUM_PATH=/usr/bin/google-chrome-stable bun run
 benchmark:colonist -- --difficulties Easy --games 1 --jobs 1`. On Chrome 148,
 CDP may list the MV3 worker as `background.html` instead of `background.js`, so
 the harness can fail at launch even when the extension is loaded; unit tests and
-`npm run verify` remain the reliable gate in this environment.
+`bun run verify` remain the reliable gate in this environment.
