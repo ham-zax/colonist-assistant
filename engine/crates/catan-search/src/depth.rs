@@ -448,6 +448,8 @@ struct TranspositionEntry {
     value: [f32; 4],
 }
 
+const TRANSPOSITION_MAX_WAVE_ENTRIES: usize = 32_768;
+
 #[derive(Default)]
 struct TranspositionTable {
     entries: HashMap<TranspositionIdentity, TranspositionEntry>,
@@ -460,8 +462,9 @@ impl TranspositionTable {
     }
 
     fn insert(&mut self, key: TranspositionIdentity, state: &GameState, value: [f32; 4]) {
-        const MAX_WAVE_ENTRIES: usize = 32_768;
-        if self.entries.len() >= MAX_WAVE_ENTRIES || self.entries.contains_key(&key) {
+        if self.entries.len() >= TRANSPOSITION_MAX_WAVE_ENTRIES
+            || self.entries.contains_key(&key)
+        {
             return;
         }
         self.entries.insert(
@@ -1685,13 +1688,21 @@ impl BeliefBackend<'_> {
                 controlled_next_decision_reached: false,
                 terminal_reached: false,
                 cutoff_depth_counts: Vec::new(),
+                transposition_table: searcher
+                    .transposition_table
+                    .as_ref()
+                    .map(Rc::clone),
+                local_transpositions: HashMap::new(),
+                pending_transpositions: Vec::new(),
             };
             let node = deferred.visit(state, depth, actions_in_turn, searcher.node_limit, &stop);
             searcher.nodes = deferred.nodes;
             searcher.deepest_depth = deferred.deepest_depth;
             searcher.controlled_next_decision_reached = deferred.controlled_next_decision_reached;
             searcher.terminal_reached = deferred.terminal_reached;
-            searcher.cutoff_depth_counts = deferred.cutoff_depth_counts;
+            searcher.cutoff_depth_counts = std::mem::take(&mut deferred.cutoff_depth_counts);
+            let pending_transpositions = std::mem::take(&mut deferred.pending_transpositions);
+            drop(deferred);
             let node = match node {
                 Ok(node) => node,
                 Err(DepthBeliefError::CudaDeadlineExceeded) => {
@@ -1711,7 +1722,20 @@ impl BeliefBackend<'_> {
                 return Err(DepthBeliefError::CudaSearchCancelled);
             }
             searcher.deadline_reached = deadline.has_elapsed();
-            return Ok(tree.backup(node, &values));
+            let node_values = tree.backup_all(&values);
+            if !searcher.deadline_reached
+                && let Some(table) = searcher.transposition_table.as_ref()
+            {
+                let mut table = table.borrow_mut();
+                for pending in pending_transpositions {
+                    table.insert(
+                        pending.key,
+                        &pending.state,
+                        node_values[pending.node],
+                    );
+                }
+            }
+            return Ok(node_values[node]);
         }
         Ok(searcher.visit(state, depth, actions_in_turn, 0.0, 1.0, searcher.node_limit))
     }
@@ -3551,6 +3575,7 @@ struct CudaDeferredChild {
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
 enum CudaDeferredNode {
     Leaf(usize),
+    Constant([f32; 4]),
     Weighted(Vec<CudaDeferredChild>),
 }
 
@@ -3588,15 +3613,48 @@ impl CudaDeferredTree {
         node
     }
 
+    fn constant(&mut self, value: [f32; 4]) -> usize {
+        let node = self.nodes.len();
+        self.nodes.push(CudaDeferredNode::Constant(value));
+        node
+    }
+
     fn weighted(&mut self, children: Vec<CudaDeferredChild>) -> usize {
         let node = self.nodes.len();
         self.nodes.push(CudaDeferredNode::Weighted(children));
         node
     }
 
+    fn backup_all(&self, leaf_values: &[[f32; 4]]) -> Vec<[f32; 4]> {
+        let mut values: Vec<[f32; 4]> = Vec::with_capacity(self.nodes.len());
+        for node in &self.nodes {
+            let value = match node {
+                CudaDeferredNode::Leaf(leaf) => leaf_values[*leaf],
+                CudaDeferredNode::Constant(value) => *value,
+                CudaDeferredNode::Weighted(children) => {
+                    let mut expected = [0.0; 4];
+                    for child in children {
+                        let mut value = values[child.node];
+                        if let Some((actor, friction)) = child.friction {
+                            value[actor as usize] =
+                                (value[actor as usize] - friction).max(0.0);
+                        }
+                        for player in 0..4 {
+                            expected[player] += value[player] * child.weight;
+                        }
+                    }
+                    expected
+                }
+            };
+            values.push(value);
+        }
+        values
+    }
+
     fn backup(&self, node: usize, leaf_values: &[[f32; 4]]) -> [f32; 4] {
         match &self.nodes[node] {
             CudaDeferredNode::Leaf(leaf) => leaf_values[*leaf],
+            CudaDeferredNode::Constant(value) => *value,
             CudaDeferredNode::Weighted(children) => {
                 let mut expected = [0.0; 4];
                 for child in children {
@@ -3990,6 +4048,13 @@ struct CudaLinearRootRow {
 }
 
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+struct CudaDeferredPendingTransposition {
+    key: TranspositionIdentity,
+    state: GameState,
+    node: usize,
+}
+
+#[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
 struct CudaDeferredSearcher<'a> {
     tree: &'a mut CudaDeferredTree,
     maximum_depth: u8,
@@ -4002,10 +4067,88 @@ struct CudaDeferredSearcher<'a> {
     controlled_next_decision_reached: bool,
     terminal_reached: bool,
     cutoff_depth_counts: Vec<u32>,
+    transposition_table: Option<Rc<RefCell<TranspositionTable>>>,
+    local_transpositions: HashMap<TranspositionIdentity, (GameState, usize)>,
+    pending_transpositions: Vec<CudaDeferredPendingTransposition>,
 }
 
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
 impl CudaDeferredSearcher<'_> {
+    fn transposition_key(
+        &self,
+        state: &GameState,
+        depth: u8,
+        actions_in_turn: u8,
+        remaining_subtree_allowance: u32,
+    ) -> Option<TranspositionIdentity> {
+        self.transposition_table.as_ref()?;
+        Some(transposition_identity(
+            state,
+            Algorithm::MaxN,
+            depth,
+            actions_in_turn,
+            0.0,
+            1.0,
+            remaining_subtree_allowance,
+            self.maximum_depth,
+            self.branch_cap,
+            true,
+            Some(self.controlled_player),
+        ))
+    }
+
+    fn lookup_transposition(
+        &mut self,
+        key: TranspositionIdentity,
+        state: &GameState,
+    ) -> Option<usize> {
+        if let Some(value) = self
+            .transposition_table
+            .as_ref()
+            .and_then(|table| table.borrow().lookup(key, state))
+        {
+            return Some(self.tree.constant(value));
+        }
+        let node = self
+            .local_transpositions
+            .get(&key)
+            .and_then(|(cached_state, node)| (cached_state == state).then_some(*node));
+        node
+    }
+
+    fn record_transposition(
+        &mut self,
+        key: TranspositionIdentity,
+        state: &GameState,
+        node: usize,
+    ) {
+        let Some(table) = self.transposition_table.as_ref() else {
+            return;
+        };
+        {
+            let table = table.borrow();
+            if table.entries.contains_key(&key)
+                || table
+                    .entries
+                    .len()
+                    .saturating_add(self.local_transpositions.len())
+                    >= TRANSPOSITION_MAX_WAVE_ENTRIES
+            {
+                return;
+            }
+        }
+        if self.local_transpositions.contains_key(&key) {
+            return;
+        }
+        self.local_transpositions
+            .insert(key, (state.clone(), node));
+        self.pending_transpositions.push(CudaDeferredPendingTransposition {
+            key,
+            state: state.clone(),
+            node,
+        });
+    }
+
     fn mark_cutoff(&mut self, depth: u8) {
         self.cutoff_depth_counts
             .resize(self.cutoff_depth_counts.len().max(depth as usize + 1), 0);
@@ -4023,6 +4166,7 @@ impl CudaDeferredSearcher<'_> {
             return Err(reason);
         }
         let subtree_limit = subtree_limit.min(self.node_limit).min(self.maximum_nodes);
+        let remaining_subtree_allowance = subtree_limit.saturating_sub(self.nodes);
         if self.nodes >= subtree_limit {
             self.mark_cutoff(depth);
             return Ok(self.tree.leaf(state));
@@ -4046,7 +4190,15 @@ impl CudaDeferredSearcher<'_> {
         if actions.is_empty() {
             return Ok(self.tree.leaf(state));
         }
-        match state.node_kind() {
+        let transposition_key =
+            self.transposition_key(state, depth, actions_in_turn, remaining_subtree_allowance);
+        if let Some(key) = transposition_key
+            && let Some(node) = self.lookup_transposition(key, state)
+        {
+            return Ok(node);
+        }
+
+        let node = match state.node_kind() {
             NodeKind::Terminal => Ok(self.tree.leaf(state)),
             NodeKind::Chance => {
                 let total = actions
@@ -4161,7 +4313,11 @@ impl CudaDeferredSearcher<'_> {
                 }
                 Ok(self.tree.weighted(children))
             }
+        }?;
+        if let Some(key) = transposition_key {
+            self.record_transposition(key, state, node);
         }
+        Ok(node)
     }
 }
 
@@ -5006,6 +5162,9 @@ fn cuda_belief_search_with_batch(
                 controlled_next_decision_reached: false,
                 terminal_reached: false,
                 cutoff_depth_counts: Vec::new(),
+                transposition_table: None,
+                local_transpositions: HashMap::new(),
+                pending_transpositions: Vec::new(),
             };
             let node_limit = searcher.node_limit;
             let node = searcher.visit(
