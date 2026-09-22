@@ -79,9 +79,6 @@ export const shouldUseNativeGpu = (message: DecisionMessage): boolean =>
   NATIVE_GPU_ENABLED &&
   nativeGpuSupportsStochasticModel(message.stochastic?.model) &&
   message.engine === "deep-search" &&
-  // Explicit strategy policies remain on their declared CPU/WASM owner until
-  // that policy has its own production acceptance lane.
-  !message.strategyPolicy &&
   !message.board.initialPlacement &&
   (Boolean(message.board.isMyTurn) || hasPendingIncomingTrade(message));
 
@@ -275,23 +272,21 @@ chrome.runtime.onMessage.addListener(
       const runtimeReason =
         analysis.runtimeReason ??
         (runtime === "background-wasm"
-          ? message.strategyPolicy
-            ? `Strategy policy ${message.strategyPolicy} remains on its CPU/WASM owner`
-            : message.engine === "deep-search" && message.board.initialPlacement
-              ? "Dedicated opening solver runs on WASM/CPU"
-              : !NATIVE_GPU_ENABLED && message.engine === "deep-search"
-                ? "Native GPU disabled for CPU/WASM validation; using WASM Deep MaxN"
-                : gpuBusy
-                  ? "Native GPU busy with another decision; using WASM Deep MaxN"
-                  : nativeGpuEligible
-                    ? "Native GPU unavailable; using WASM Deep MaxN"
-                    : message.engine === "deep-search"
-                      ? requestedStochasticModel === MREF_COLONIST_LINKED_2024_V1
-                        ? "Native exact CUDA MaxN is preferred when its protocol-7 capability is available; Mref remains authoritative and gpu-root-rollout remains experimental"
-                        : "Native exact CUDA MaxN is preferred when its protocol-7 capability is available; weighted-belief MaxN remains the CPU/WASM fallback and gpu-root-rollout remains experimental"
-                      : message.engine === "weighted"
-                        ? "Weighted mode runs on WASM"
-                        : undefined
+          ? message.engine === "deep-search" && message.board.initialPlacement
+            ? "Dedicated opening solver runs on WASM/CPU"
+            : !NATIVE_GPU_ENABLED && message.engine === "deep-search"
+              ? "Native GPU disabled for CPU/WASM validation; using WASM Deep MaxN"
+              : gpuBusy
+                ? "Native GPU busy with another decision; using WASM Deep MaxN"
+                : nativeGpuEligible
+                  ? "Native GPU unavailable; using WASM Deep MaxN"
+                  : message.engine === "deep-search"
+                    ? requestedStochasticModel === MREF_COLONIST_LINKED_2024_V1
+                      ? "Native exact CUDA MaxN is preferred when its protocol-7 capability is available; Mref remains authoritative and gpu-root-rollout remains experimental"
+                      : "Native exact CUDA MaxN is preferred when its protocol-7 capability is available; weighted-belief MaxN remains the CPU/WASM fallback and gpu-root-rollout remains experimental"
+                    : message.engine === "weighted"
+                      ? "Weighted mode runs on WASM"
+                      : undefined
           : undefined);
       return {
         ...analysis,

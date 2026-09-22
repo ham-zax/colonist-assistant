@@ -206,17 +206,17 @@ describe("background Mref dispatch", () => {
     expect(analyze.mock.calls[0]?.[0]).toMatchObject({ stochastic: { model: MREF } });
   });
 
-  it("routes explicit strategy admission to CPU/WASM even when native GPU is available", async () => {
+  it("routes explicit strategy admission to production exact CUDA", async () => {
     vi.resetModules();
     let receive: (message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => unknown;
     vi.stubGlobal("chrome", { runtime: { onMessage: { addListener: (listener: typeof receive) => { receive = listener; } } } });
     const { NativeGpuClient } = await import("../src/background/native-gpu");
     const status = vi.spyOn(NativeGpuClient.prototype, "status").mockResolvedValue({
       runtime: "gpu-native", engineRevision: "deep-maxn-v14", stochasticModels: [M0, MREF],
-      capabilities: fixedWorkExactCapabilities,
+      capabilities: productionExactCapabilities,
       device: { backend: "cuda-resident-sim", ordinal: 0, name: "routing-fixture", computeCapability: [8, 6] },
     });
-    const native = vi.spyOn(NativeGpuClient.prototype, "analyzeExact");
+    const native = vi.spyOn(NativeGpuClient.prototype, "analyzeExact").mockResolvedValue({ stochasticModel: M0 } as never);
     await import("../src/background/index");
     const message = {
       type: DECISION_MESSAGE_TYPE, id: 45, state: {}, rootPlayer: "P0", engine: "deep-search",
@@ -226,11 +226,11 @@ describe("background Mref dispatch", () => {
     };
     const response = await new Promise<unknown>((resolve) => receive(message, {}, resolve));
     expect(response).toMatchObject({ analysis: {
-      runtime: "background-wasm",
-      runtimeReason: expect.stringMatching(/Strategy policy adaptive-candidate-admission-v1 remains on its CPU\/WASM owner/u),
+      runtime: "background-gpu",
+      runtimeReason: "Exact CUDA MaxN on routing-fixture",
     } });
-    expect(status).not.toHaveBeenCalled();
-    expect(native).not.toHaveBeenCalled();
+    expect(status).toHaveBeenCalledOnce();
+    expect(native).toHaveBeenCalledOnce();
     expect(analyze).toHaveBeenCalledOnce();
     expect(analyze.mock.calls[0]?.[0]).toMatchObject({
       strategyPolicy: "adaptive-candidate-admission-v1",
