@@ -534,15 +534,33 @@ export const OVERLAY_STYLES = `
     grid-template-columns: 24px minmax(0, 1fr) auto;
     align-items: center;
     gap: 8px;
+    width: 100%;
     min-height: 49px;
     padding: 7px 8px;
     border: 1px solid var(--ca-line);
     border-radius: 8px;
+    color: inherit;
     background: var(--ca-bg);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .alternative-choice:hover {
+    border-color: rgba(241, 200, 75, .45);
+    background: rgba(241, 200, 75, .04);
+  }
+  .alternative-choice:focus-visible {
+    outline: 2px solid var(--ca-accent);
+    outline-offset: 2px;
   }
   .alternative-choice.selected {
     border-color: rgba(241, 200, 75, .36);
     background: rgba(241, 200, 75, .06);
+  }
+  .alternative-choice.previewing {
+    border-color: rgba(101, 217, 255, .78);
+    background: rgba(101, 217, 255, .08);
+    box-shadow: inset 0 0 0 1px rgba(101, 217, 255, .12);
   }
   .alternative-rank {
     color: var(--ca-quiet);
@@ -551,6 +569,7 @@ export const OVERLAY_STYLES = `
     font-weight: 700;
   }
   .alternative-choice.selected .alternative-rank { color: var(--ca-accent); }
+  .alternative-choice.previewing .alternative-rank { color: #65d9ff; }
   .alternative-copy {
     display: grid;
     min-width: 0;
@@ -582,6 +601,7 @@ export const OVERLAY_STYLES = `
     font-weight: 700;
   }
   .alternative-choice.selected .alternative-score b { color: var(--ca-accent); }
+  .alternative-choice.previewing .alternative-score b { color: #65d9ff; }
   .alternative-score small {
     color: var(--ca-quiet);
     font-size: 10px;
@@ -693,6 +713,17 @@ export const OVERLAY_STYLES = `
     height: 13px;
     object-fit: contain;
   }
+  .board-marker.alternative-preview i {
+    border-color: #65d9ff;
+    background: rgba(13, 24, 33, .72);
+    box-shadow: 0 0 0 5px rgba(101, 217, 255, .12);
+  }
+  .board-marker.alternative-preview b,
+  .board-marker.alternative-preview span {
+    color: #0d1821;
+    background: #65d9ff;
+  }
+  .board-marker.alternative-preview span em { color: #0d1821; }
   .board-marker.near-left span { left: 0; transform: none; }
   .board-marker.near-right span { right: 0; left: auto; transform: none; }
   .board-marker.near-bottom span { top: auto; bottom: 46px; }

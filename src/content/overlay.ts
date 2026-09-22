@@ -410,6 +410,11 @@ export class AssistantOverlay {
   };
   private pendingPlacementTimer?: number;
   private activeSpatial?: ReturnType<AssistantOverlay["spatialRecommendation"]>;
+  private alternativePreview?: {
+    decisionKey: string;
+    actionKey: string;
+    rank: number;
+  };
   private tradeRenderFrame?: number;
   private readonly decisionWorker = new DecisionWorkerClient();
   private readonly renderGate = new InteractionRenderGate();
@@ -1024,6 +1029,7 @@ export class AssistantOverlay {
       this.winPredictions.reset();
     }
     this.settings = settings;
+    if (!settings.showAlternatives) this.alternativePreview = undefined;
     if (investigationChanged) investigationRecorder.setEnabled(settings.investigationLog);
     this.applyInterfaceScale();
     if (engineChanged) this.warmDecisionEngine();
@@ -1169,6 +1175,15 @@ export class AssistantOverlay {
       }
       if (action === "retry-engine") {
         this.retryDecisionEngine();
+        return;
+      }
+      if (action === "preview-alternative") {
+        const actionKey = target.dataset.alternativeKey;
+        const rank = Number(target.dataset.alternativeRank);
+        if (actionKey && Number.isInteger(rank) && rank >= 1) {
+          this.selectAlternativePreview(actionKey, rank);
+          this.render();
+        }
         return;
       }
       this.render();
@@ -1788,6 +1803,7 @@ export class AssistantOverlay {
       : next && this.unavailableTradeControls.has(next.signature)
       ? '<p class="why" role="status">Automatic trade paused: the required Colonist control was not found. You can complete this step manually.</p>'
       : "";
+    const previewMarker = this.renderAlternativePreviewMarker();
     const advice =
       executionNotice +
       this.renderAdvice(state, spatial, report, next) +
@@ -1802,6 +1818,7 @@ export class AssistantOverlay {
         </div>`;
     mount.innerHTML = `
       ${marker}
+      ${previewMarker}
       <section class="assistant ${this.collapsed ? "collapsed" : ""}" aria-label="Colonist Ally">
         <header class="topbar">
           <span class="brand-mark">${assistantMark()}</span>
@@ -4908,6 +4925,86 @@ export class AssistantOverlay {
     );
   }
 
+  private selectAlternativePreview(actionKey: string, rank: number): void {
+    const search = this.decisionAnalysis?.deepSearch;
+    if (!this.settings.showAlternatives || !search?.chosen) return;
+    const chosenKey = deepActionUiKey(search.chosen);
+    const valid = search.actions.some(
+      (candidate) => deepActionUiKey(candidate.action) === actionKey,
+    );
+    if (!valid) return;
+    if (
+      actionKey === chosenKey ||
+      (
+        this.alternativePreview?.decisionKey === this.decisionKey &&
+        this.alternativePreview.actionKey === actionKey
+      )
+    ) {
+      this.alternativePreview = undefined;
+    } else {
+      this.alternativePreview = {
+        decisionKey: this.decisionKey,
+        actionKey,
+        rank,
+      };
+    }
+  }
+
+  private renderAlternativePreviewMarker(): string {
+    const preview = this.alternativePreview;
+    const search = this.decisionAnalysis?.deepSearch;
+    const board = this.board;
+    if (
+      !preview ||
+      preview.decisionKey !== this.decisionKey ||
+      !search ||
+      !board
+    ) {
+      return "";
+    }
+    const candidate = search.actions.find(
+      (item) => deepActionUiKey(item.action) === preview.actionKey,
+    );
+    if (!candidate?.action.targetId) return "";
+    const action = candidate.action;
+    const boardAction =
+      action.kind === "build-road" || action.kind === "place-road"
+        ? "road"
+        : action.kind === "build-settlement" || action.kind === "place-settlement"
+          ? "settlement"
+          : action.kind === "build-city"
+            ? "city"
+            : action.kind === "move-robber"
+              ? "robber"
+              : undefined;
+    if (!boardAction) return "";
+    const source =
+      boardAction === "road"
+        ? board.edges.find((edge) => edge.id === action.targetId)
+        : boardAction === "robber"
+          ? board.hexes.find((hex) => hex.id === action.targetId)
+          : board.vertices.find((vertex) => vertex.id === action.targetId);
+    if (!source?.screen) return "";
+    const panel = this.host.getBoundingClientRect();
+    const panelOverlap =
+      panel.width > 0 &&
+      source.screen.x >= panel.left - 56 &&
+      source.screen.x <= panel.right + 56 &&
+      source.screen.y >= panel.top - 56 &&
+      source.screen.y <= panel.bottom + 56;
+    const edgeClasses = [
+      source.screen.x < 90 ? "near-left" : "",
+      source.screen.x > window.innerWidth - 90 ? "near-right" : "",
+      source.screen.y > window.innerHeight - 90 ? "near-bottom" : "",
+      panelOverlap ? "panel-overlap" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    return `<div class="board-marker alternative-preview ${edgeClasses}" style="left:${source.screen.x}px;top:${source.screen.y}px" aria-hidden="true">
+      <i></i><b>${preview.rank}</b><span><em>${this.pieceArt(boardAction)}</em>PREVIEW #${preview.rank}</span>
+    </div>`;
+  }
+
   private deepActionDisplayLabel(action: DeepSearchAction): string {
     const raw = describeDeepSearchAction(action);
     const targetId = action.targetId;
@@ -4949,11 +5046,17 @@ export class AssistantOverlay {
     if (!alternatives.length) return "";
 
     const rationale = this.currentDecisionRationale();
+    const activePreview =
+      this.alternativePreview?.decisionKey === this.decisionKey
+        ? this.alternativePreview.actionKey
+        : undefined;
     const rows = [chosenStats, ...alternatives]
       .map((candidate, index) => {
         const candidateScore = score(candidate);
         const delta = candidateScore - chosenScore;
         const isSelected = index === 0;
+        const actionKey = deepActionUiKey(candidate.action);
+        const isPreviewing = !isSelected && activePreview === actionKey;
         const spatialReason = candidate.action.targetId
           ? [spatial?.recommendation, ...(spatial?.alternatives ?? [])]
               .find((item) => item?.id === candidate.action.targetId)
@@ -4975,21 +5078,22 @@ export class AssistantOverlay {
           : delta <= 0
             ? `${Math.abs(delta).toFixed(3)} behind #1`
             : `${delta.toFixed(3)} raw-value lead`;
-        return `<div class="alternative-choice${isSelected ? " selected" : ""}">
+        const encodedKey = escapeHtml(actionKey);
+        return `<button type="button" class="alternative-choice${isSelected ? " selected" : ""}${isPreviewing ? " previewing" : ""}" data-action="preview-alternative" data-alternative-key="${encodedKey}" data-alternative-rank="${index + 1}" aria-pressed="${isPreviewing}" title="${isSelected ? "Return to the engine's selected move" : `Preview move #${index + 1} on the board`}">
           <b class="alternative-rank">#${index + 1}</b>
           <span class="alternative-copy">
             <strong>${escapeHtml(this.deepActionDisplayLabel(candidate.action))}</strong>
             <small>${escapeHtml(reason)}</small>
           </span>
-          <span class="alternative-score"><b>${escapeHtml(gap)}</b><small>value ${candidateScore.toFixed(3)}</small></span>
-        </div>`;
+          <span class="alternative-score"><b>${escapeHtml(isPreviewing ? `PREVIEWING · ${gap}` : gap)}</b><small>value ${candidateScore.toFixed(3)}</small></span>
+        </button>`;
       })
       .join("");
 
     return `<section class="alternatives-panel" aria-label="Alternative moves">
-      <header><span>TOP MOVES</span><small>Same completed search · no extra engine work</small></header>
+      <header><span>TOP MOVES</span><small>Click a move to preview its board target</small></header>
       <div class="alternatives-list">${rows}</div>
-      <p>Score gaps compare the engine's searched root value. A raw-value lead can still rank below #1 when exact or safety arbitration overrides the raw search.</p>
+      <p>Previewing never changes the engine's #1 or autopilot. Score gaps compare searched root value; exact or safety arbitration can still override a raw-value lead.</p>
     </section>`;
   }
 

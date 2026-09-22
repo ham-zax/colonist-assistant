@@ -1624,24 +1624,31 @@ describe("overlay settings interaction", () => {
     const internals = overlay as unknown as {
       board: {
         hexes: Array<{ id: string; label?: string }>;
-        vertices: Array<{ id: string; label?: string }>;
+        vertices: Array<{
+          id: string;
+          label?: string;
+          screen?: { x: number; y: number };
+        }>;
         edges: Array<{ id: string; label?: string }>;
       };
       decisionAnalysis: unknown;
+      decisionKey: string;
       currentDecisionRationale: () => {
         summary: string;
         reasons: string[];
         evidence: string[];
       };
       renderAlternativesPanel: () => string;
+      renderAlternativePreviewMarker: () => string;
+      selectAlternativePreview: (actionKey: string, rank: number) => void;
       settings: typeof DEFAULT_SETTINGS;
     };
     internals.board = {
       hexes: [],
       vertices: [
-        { id: "v:one", label: "10 brick / 8 ore / 4 sheep" },
-        { id: "v:two", label: "5 wood / 6 grain / 11 brick" },
-        { id: "v:three", label: "3 brick / 9 ore / 6 grain" },
+        { id: "v:one", label: "10 brick / 8 ore / 4 sheep", screen: { x: 510, y: 220 } },
+        { id: "v:two", label: "5 wood / 6 grain / 11 brick", screen: { x: 630, y: 310 } },
+        { id: "v:three", label: "3 brick / 9 ore / 6 grain", screen: { x: 710, y: 420 } },
       ],
       edges: [],
     };
@@ -1664,6 +1671,7 @@ describe("overlay settings interaction", () => {
       value: [value, 0],
       lowerConfidenceValue: [value, 0],
     });
+    internals.decisionKey = "alternatives-fixture";
     internals.decisionAnalysis = {
       deepSearch: {
         chosen: action("v:one"),
@@ -1689,6 +1697,26 @@ describe("overlay settings interaction", () => {
     expect(html).toContain("0.100 behind #1");
     expect(html).toContain("0.250 behind #1");
     expect(html).not.toContain("v:four");
+    expect(html).toContain('data-action="preview-alternative"');
+
+    const fixture = document.createElement("div");
+    fixture.innerHTML = html;
+    const second = fixture.querySelector<HTMLElement>(
+      '[data-alternative-rank="2"]',
+    );
+    const first = fixture.querySelector<HTMLElement>(
+      '[data-alternative-rank="1"]',
+    );
+    expect(second?.dataset.alternativeKey).toBeTruthy();
+    expect(first?.dataset.alternativeKey).toBeTruthy();
+
+    internals.selectAlternativePreview(second!.dataset.alternativeKey!, 2);
+    expect(internals.renderAlternativePreviewMarker()).toContain("PREVIEW #2");
+    expect(internals.renderAlternativePreviewMarker()).toContain("left:630px");
+    expect(internals.renderAlternativesPanel()).toContain("PREVIEWING");
+
+    internals.selectAlternativePreview(first!.dataset.alternativeKey!, 1);
+    expect(internals.renderAlternativePreviewMarker()).toBe("");
 
     internals.settings = { ...DEFAULT_SETTINGS, showAlternatives: false };
     expect(internals.renderAlternativesPanel()).toBe("");
