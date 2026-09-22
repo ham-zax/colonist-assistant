@@ -502,6 +502,96 @@ export const OVERLAY_STYLES = `
   .alternative > span { display: grid; }
   .alternative strong { font-size: 12.5px; }
   .alternative small { margin-top: 2px; color: var(--ca-quiet); font-size: 11px; }
+  .alternatives-panel {
+    padding: 10px 12px 12px;
+    border-bottom: 1px solid var(--ca-line);
+    background: var(--ca-chrome);
+  }
+  .alternatives-panel > header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 7px;
+  }
+  .alternatives-panel > header > span {
+    color: var(--ca-accent);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .05em;
+  }
+  .alternatives-panel > header > small {
+    color: var(--ca-quiet);
+    font-size: 10.5px;
+    text-align: right;
+  }
+  .alternatives-list {
+    display: grid;
+    gap: 6px;
+  }
+  .alternative-choice {
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    min-height: 49px;
+    padding: 7px 8px;
+    border: 1px solid var(--ca-line);
+    border-radius: 8px;
+    background: var(--ca-bg);
+  }
+  .alternative-choice.selected {
+    border-color: rgba(241, 200, 75, .36);
+    background: rgba(241, 200, 75, .06);
+  }
+  .alternative-rank {
+    color: var(--ca-quiet);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .alternative-choice.selected .alternative-rank { color: var(--ca-accent); }
+  .alternative-copy {
+    display: grid;
+    min-width: 0;
+    gap: 2px;
+  }
+  .alternative-copy strong {
+    overflow: hidden;
+    color: var(--ca-ink);
+    font-size: 12.5px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .alternative-copy small {
+    color: var(--ca-quiet);
+    font-size: 10.75px;
+    line-height: 1.25;
+  }
+  .alternative-score {
+    display: grid;
+    justify-items: end;
+    gap: 2px;
+    min-width: 78px;
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+  .alternative-score b {
+    color: var(--ca-copy);
+    font-size: 10.5px;
+    font-weight: 700;
+  }
+  .alternative-choice.selected .alternative-score b { color: var(--ca-accent); }
+  .alternative-score small {
+    color: var(--ca-quiet);
+    font-size: 10px;
+  }
+  .alternatives-panel > p {
+    margin: 8px 0 0;
+    color: var(--ca-quiet);
+    font-size: 10.5px;
+    line-height: 1.3;
+  }
   .board-confirm {
     display: flex;
     align-items: center;

@@ -91,11 +91,14 @@ import type {
   DecisionAuthority,
   DecisionRationale,
   DecisionRuntime,
+  DeepSearchAction,
+  DeepSearchActionStatistics,
   DecisionSearchConstraints,
   DomesticTradeState,
   RootTradeActionExclusion,
 } from "../core/engine";
 import {
+  describeDeepSearchAction,
   explainDeepSearchDecision,
   isSearchDecisionRuntime,
   isWasmDecisionEngine,
@@ -142,6 +145,22 @@ type ViewName = "advice" | "settings" | "details";
 
 const STRATEGIST_LABEL = "Strategist ★";
 const WEIGHTED_LABEL = "Weighted";
+
+const deepActionUiKey = (action: DeepSearchAction): string =>
+  JSON.stringify([
+    action.kind,
+    action.tradeId ?? null,
+    action.targetId ?? null,
+    action.secondTargetId ?? null,
+    action.player ?? null,
+    action.resource ?? null,
+    action.otherResource ?? null,
+    action.ratio ?? null,
+    action.cards ?? null,
+    action.receiveCards ?? null,
+    action.recipients ?? null,
+    action.accept ?? null,
+  ]);
 
 const resourceSupplyForPlayerCount = (playerCount: number): number =>
   playerCount > 6 ? 29 : playerCount > 4 ? 24 : 19;
@@ -1167,6 +1186,7 @@ export class AssistantOverlay {
       ) {
         const key = target.dataset.setting as
           | "highlightNextAction"
+          | "showAlternatives"
           | "disablePlayerTrades"
           | "recordGame"
           | "investigationLog"
@@ -1768,7 +1788,10 @@ export class AssistantOverlay {
       : next && this.unavailableTradeControls.has(next.signature)
       ? '<p class="why" role="status">Automatic trade paused: the required Colonist control was not found. You can complete this step manually.</p>'
       : "";
-    const advice = executionNotice + this.renderAdvice(state, spatial, report, next);
+    const advice =
+      executionNotice +
+      this.renderAdvice(state, spatial, report, next) +
+      this.renderAlternativesPanel(spatial);
     const panel = this.activeView === "settings"
       ? this.renderSettings()
       : this.activeView === "details"
@@ -3960,12 +3983,43 @@ export class AssistantOverlay {
             ],
       };
     }
+    const rankedAlternatives = authoritativeDeep && this.decisionAnalysis?.deepSearch
+      ? [...this.decisionAnalysis.deepSearch.actions]
+          .sort(
+            (left, right) =>
+              (right.value[this.decisionAnalysis!.deepSearch!.rootIndex] ?? Number.NEGATIVE_INFINITY) -
+              (left.value[this.decisionAnalysis!.deepSearch!.rootIndex] ?? Number.NEGATIVE_INFINITY),
+          )
+          .filter((candidate) => {
+            const kind = candidate.action.kind;
+            const candidateAction =
+              kind === "build-road" || kind === "place-road"
+                ? "road"
+                : kind === "build-settlement" || kind === "place-settlement"
+                  ? "settlement"
+                  : kind === "build-city"
+                    ? "city"
+                    : kind === "move-robber"
+                      ? "robber"
+                      : undefined;
+            return (
+              candidateAction === action &&
+              candidate.action.targetId &&
+              candidate.action.targetId !== recommendation.id
+            );
+          })
+          .map((candidate) =>
+            recommendations.find((item) => item.id === candidate.action.targetId),
+          )
+          .filter((candidate): candidate is PlacementRecommendation => Boolean(candidate))
+          .slice(0, 2)
+      : recommendations
+          .filter((candidate) => candidate.id !== recommendation.id)
+          .slice(0, 2);
     return {
       action,
       recommendation,
-      alternatives: recommendations
-        .filter((candidate) => candidate.id !== recommendation.id)
-        .slice(0, 2),
+      alternatives: rankedAlternatives,
       proactive: Boolean(proactiveAction),
       ...(report ? { report } : {}),
     };
@@ -4854,6 +4908,91 @@ export class AssistantOverlay {
     );
   }
 
+  private deepActionDisplayLabel(action: DeepSearchAction): string {
+    const raw = describeDeepSearchAction(action);
+    const targetId = action.targetId;
+    if (!targetId || !this.board) return raw;
+    const boardLabel =
+      this.board.vertices.find((candidate) => candidate.id === targetId)?.label ??
+      this.board.edges.find((candidate) => candidate.id === targetId)?.label;
+    return boardLabel && boardLabel !== targetId
+      ? raw.replace(targetId, boardLabel)
+      : raw;
+  }
+
+  private renderAlternativesPanel(
+    spatial?: ReturnType<AssistantOverlay["spatialRecommendation"]>,
+  ): string {
+    if (!this.settings.showAlternatives) return "";
+    const search = this.decisionAnalysis?.deepSearch;
+    const chosen = search?.chosen;
+    if (!search || !chosen || search.actions.length < 2) return "";
+
+    const chosenKey = deepActionUiKey(chosen);
+    const chosenStats = search.actions.find(
+      (candidate) => deepActionUiKey(candidate.action) === chosenKey,
+    );
+    if (!chosenStats) return "";
+    const score = (candidate: DeepSearchActionStatistics): number =>
+      candidate.value[search.rootIndex] ?? Number.NEGATIVE_INFINITY;
+    const chosenScore = score(chosenStats);
+    if (!Number.isFinite(chosenScore)) return "";
+
+    const alternatives = [...search.actions]
+      .filter(
+        (candidate) =>
+          deepActionUiKey(candidate.action) !== chosenKey &&
+          Number.isFinite(score(candidate)),
+      )
+      .sort((left, right) => score(right) - score(left))
+      .slice(0, 2);
+    if (!alternatives.length) return "";
+
+    const rationale = this.currentDecisionRationale();
+    const rows = [chosenStats, ...alternatives]
+      .map((candidate, index) => {
+        const candidateScore = score(candidate);
+        const delta = candidateScore - chosenScore;
+        const isSelected = index === 0;
+        const spatialReason = candidate.action.targetId
+          ? [spatial?.recommendation, ...(spatial?.alternatives ?? [])]
+              .find((item) => item?.id === candidate.action.targetId)
+              ?.reasons[0]
+          : undefined;
+        const causal = search.rootProvenance.rootEvidence?.find(
+          (item) => deepActionUiKey(item.action) === deepActionUiKey(candidate.action),
+        );
+        const reason = isSelected
+          ? rationale?.reasons[0] ?? rationale?.summary ?? "Final search authority selected this move"
+          : spatialReason ??
+            (causal?.roadIntent?.targetVertexId
+              ? `Preserves a route toward ${causal.roadIntent.targetVertexId}`
+              : causal?.promotionReason
+                ? causal.promotionReason.replaceAll("-", " ")
+                : `Legal across ${Math.round(candidate.legalWeight * 100)}% of searched belief mass`);
+        const gap = isSelected
+          ? "SELECTED"
+          : delta <= 0
+            ? `${Math.abs(delta).toFixed(3)} behind #1`
+            : `${delta.toFixed(3)} raw-value lead`;
+        return `<div class="alternative-choice${isSelected ? " selected" : ""}">
+          <b class="alternative-rank">#${index + 1}</b>
+          <span class="alternative-copy">
+            <strong>${escapeHtml(this.deepActionDisplayLabel(candidate.action))}</strong>
+            <small>${escapeHtml(reason)}</small>
+          </span>
+          <span class="alternative-score"><b>${escapeHtml(gap)}</b><small>value ${candidateScore.toFixed(3)}</small></span>
+        </div>`;
+      })
+      .join("");
+
+    return `<section class="alternatives-panel" aria-label="Alternative moves">
+      <header><span>TOP MOVES</span><small>Same completed search · no extra engine work</small></header>
+      <div class="alternatives-list">${rows}</div>
+      <p>Score gaps compare the engine's searched root value. A raw-value lead can still rank below #1 when exact or safety arbitration overrides the raw search.</p>
+    </section>`;
+  }
+
   private currentDecisionRationale(): DecisionRationale | undefined {
     const search = this.decisionAnalysis?.deepSearch;
     return search ? explainDeepSearchDecision(search) : undefined;
@@ -5623,6 +5762,11 @@ export class AssistantOverlay {
       <label class="settings-field">
         <span><b>Highlight next click</b><small>Circle the exact board location or Colonist control.</small></span>
         <input type="checkbox" data-setting="highlightNextAction"${this.settings.highlightNextAction ? " checked" : ""}>
+        <i aria-hidden="true"></i>
+      </label>
+      <label class="settings-field">
+        <span><b>Show alternatives</b><small>Compare the top three searched moves, their score gap, and why each remains viable.</small></span>
+        <input type="checkbox" data-setting="showAlternatives"${this.settings.showAlternatives ? " checked" : ""}>
         <i aria-hidden="true"></i>
       </label>
       <label class="settings-field">

@@ -32,6 +32,7 @@ export interface AssistantSettings {
   startCollapsed: boolean;
   engine: DecisionEngine;
   highlightNextAction: boolean;
+  showAlternatives: boolean;
   disablePlayerTrades: boolean;
   recordGame: boolean;
   investigationLog: boolean;
@@ -51,6 +52,7 @@ export const DEFAULT_SETTINGS: AssistantSettings = {
   startCollapsed: false,
   engine: "deep-search",
   highlightNextAction: true,
+  showAlternatives: false,
   disablePlayerTrades: false,
   recordGame: false,
   investigationLog: false,
