@@ -581,7 +581,6 @@ const reconcileLiveRollCountAuthority = (
   const unsupported = state.rolls.filter(
     (roll) => roll.logIndex === undefined && !/^board-roll:\d+:/u.test(roll.eventId),
   );
-  if (unsupported.length) return undefined;
 
   const byOrdinal = new Map<number, PublicDiceRoll>();
   for (const { ordinal, roll } of boardRolls) {
@@ -662,23 +661,31 @@ const reconcileLiveRollCountAuthority = (
     byOrdinal.size === expectedRollCount &&
     Array.from({ length: expectedRollCount }, (_, ordinal) => byOrdinal.has(ordinal)).every(Boolean)
   ) {
-    let searchFrom = 0;
-    for (const indexed of indexedRolls) {
-      let matchedOrdinal = -1;
-      for (let ordinal = searchFrom; ordinal < expectedRollCount; ordinal += 1) {
-        const board = byOrdinal.get(ordinal)!;
-        if (sameSemanticRoll(board, indexed)) {
-          matchedOrdinal = ordinal;
-          break;
-        }
-      }
-      if (matchedOrdinal < 0) return undefined;
-      searchFrom = matchedOrdinal + 1;
-    }
     const completeRolls = Array.from(
       { length: expectedRollCount },
       (_, ordinal) => byOrdinal.get(ordinal)!,
     );
+    const compatibleSubsequence = (observed: readonly PublicDiceRoll[]): boolean => {
+      let searchFrom = 0;
+      for (const roll of observed) {
+        let matchedOrdinal = -1;
+        for (let ordinal = searchFrom; ordinal < expectedRollCount; ordinal += 1) {
+          if (sameSemanticRoll(completeRolls[ordinal]!, roll)) {
+            matchedOrdinal = ordinal;
+            break;
+          }
+        }
+        if (matchedOrdinal < 0) return false;
+        searchFrom = matchedOrdinal + 1;
+      }
+      return true;
+    };
+    if (
+      !compatibleSubsequence(indexedRolls) ||
+      !compatibleSubsequence(unsupported)
+    ) {
+      return undefined;
+    }
     if (bounds) {
       for (let index = 0; index < indexedRolls.length; index += 1) {
         if (bounds.earliest[index] !== bounds.latest[index]) continue;
@@ -697,6 +704,11 @@ const reconcileLiveRollCountAuthority = (
     delete complete.hasUnreconciledSources;
     return complete;
   }
+
+  // Unindexed DOM roll rows do not carry enough positional authority to repair
+  // a partial board sequence. Keep the old fail-closed behavior unless the
+  // complete board sequence above independently anchors every gameplay ordinal.
+  if (unsupported.length) return undefined;
 
   if (
     state.ambiguousLogIndices.length > 0 ||
