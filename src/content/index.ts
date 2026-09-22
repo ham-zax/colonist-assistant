@@ -48,7 +48,6 @@ const boot = async (): Promise<void> => {
     reset: clearCurrentSession,
   });
   overlay.setSettings(settings);
-  overlay.updateBoard(currentBoard);
   // Board ingestion can synchronously mutate the session (notably dice history),
   // which calls onUpdate before updateBoard() has published the matching board
   // snapshot. Without this tiny publication barrier the overlay can observe a
@@ -64,7 +63,7 @@ const boot = async (): Promise<void> => {
     }
     overlay.update(updated);
   };
-  const removeBoardBridge = installPublicBoardBridge((snapshot) => {
+  const handleBoardSnapshot = (snapshot?: typeof currentBoard): void => {
     boardPublicationActive = true;
     try {
       currentBoard = snapshot ?? readPublicBoardSnapshot();
@@ -95,7 +94,7 @@ const boot = async (): Promise<void> => {
       pendingSessionUpdate = undefined;
       if (pending) overlay.update(pending);
     }
-  });
+  };
 
   const attach = async (): Promise<void> => {
     const hasLiveGameSurface = Boolean(
@@ -150,14 +149,30 @@ const boot = async (): Promise<void> => {
     );
     session = next;
     next.setInitialPlacement(currentInitialPlacement, currentGameKey);
-    await next.start();
-    next.setMyPlayer(currentMyPlayer);
-    if (currentBoard?.gameplayRollCount !== undefined) {
-      next.observeBoardDiceSnapshot(currentBoard);
+    try {
+      await next.start();
+      next.setMyPlayer(currentMyPlayer);
+      if (currentBoard?.gameplayRollCount !== undefined) {
+        next.observeBoardDiceSnapshot(currentBoard);
+      }
+    } catch (error) {
+      next.stop();
+      if (session === next) session = undefined;
+      if (currentRoot === root) currentRoot = undefined;
+      overlay.update(undefined);
+      investigationRecorder.record("system", {
+        phase: "session-start-failed",
+        detail: error instanceof Error ? error.message : String(error),
+      });
     }
   };
 
+  // Establish a GameSession before publishing an actionable midgame board.
+  // Otherwise Balanced-Dice games can emit a false "game log still attaching"
+  // failure during extension reload even though the session attaches moments later.
   await attach();
+  overlay.updateBoard(currentBoard);
+  const removeBoardBridge = installPublicBoardBridge(handleBoardSnapshot);
   const poll = window.setInterval(() => void attach(), 900);
 
   chrome.storage.onChanged.addListener((changes, area) => {

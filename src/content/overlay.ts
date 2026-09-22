@@ -3318,7 +3318,7 @@ export class AssistantOverlay {
       const isWait = this.decisionEvidenceWait !== undefined;
       const reportFailure = isWait ? console.warn : console.error;
       const failureDiagnostic = {
-        key,
+        decisionDigest: traceKey,
         engine: this.settings.engine,
         detail: displayedDetail,
         policy: "selected-engine-only",
