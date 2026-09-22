@@ -45,7 +45,73 @@ const stored = (): StoredDiceHistoryState => ({
   ],
 });
 
+const completeBoardWithUnindexedDuplicates = (): StoredDiceHistoryState => {
+  const count = 52;
+  const totals = Array.from({ length: count }, (_, index) => TOTALS[index % TOTALS.length]!);
+  const boardRolls = totals.map((total, ordinal) => ({
+    actor: PLAYERS[ordinal % PLAYERS.length]!,
+    eventId: `board-roll:${ordinal}:${PLAYERS[ordinal % PLAYERS.length]}`,
+    total,
+  }));
+  const unindexedDuplicates = totals.slice(0, 45).map((total, ordinal) => ({
+    actor: PLAYERS[ordinal % PLAYERS.length]!,
+    eventId: `message:virtualized-duplicate:${ordinal}`,
+    total,
+  }));
+  return {
+    integrityVersion: 1,
+    provenance: "gapped",
+    coverage: { ranges: [[0, 20]] },
+    ambiguousLogIndices: [],
+    hasUnlocatedRollAmbiguity: false,
+    missingPrefixRolls: 0,
+    gaps: [],
+    hasUnknownRollGap: true,
+    rolls: [...boardRolls, ...unindexedDuplicates],
+  };
+};
+
 describe("live duplicate-source dice history (grid7603)", () => {
+  it("reconciles 97 observed source rows to 52 authoritative gameplay rolls", () => {
+    const state = restoreDiceHistoryState(completeBoardWithUnindexedDuplicates());
+    expect(state.rolls).toHaveLength(97);
+
+    const input = buildLiveDecisionStochasticInput("balanced", state, PLAYERS, 52);
+
+    expect(input.model).toBe("mref-colonist-linked-2024-v1");
+    expect(input.rolls).toHaveLength(52);
+    expect(input.rolls?.map((roll) => roll.ordinal)).toEqual(
+      Array.from({ length: 52 }, (_, ordinal) => ordinal),
+    );
+  });
+
+  it("rejects an unindexed duplicate stream that contradicts the complete board sequence", () => {
+    const corrupted = completeBoardWithUnindexedDuplicates();
+    const duplicate = corrupted.rolls.at(-1)!;
+    duplicate.total = duplicate.total === 12 ? 2 : 12;
+    const state = restoreDiceHistoryState(corrupted);
+
+    expect(() =>
+      buildLiveDecisionStochasticInput("balanced", state, PLAYERS, 52),
+    ).toThrow(
+      "Balanced Dice public roll sequence does not reconcile with public turn progress",
+    );
+  });
+
+  it("keeps unindexed duplicate rows fail-closed when the board sequence is incomplete", () => {
+    const incomplete = completeBoardWithUnindexedDuplicates();
+    incomplete.rolls = incomplete.rolls.filter(
+      (roll) => !roll.eventId.startsWith("board-roll:51:"),
+    );
+    const state = restoreDiceHistoryState(incomplete);
+
+    expect(() =>
+      buildLiveDecisionStochasticInput("balanced", state, PLAYERS, 52),
+    ).toThrow(
+      "Balanced Dice public roll sequence does not reconcile with public turn progress",
+    );
+  });
+
   it("keeps both sources unmerged under gapped coverage", () => {
     const state = restoreDiceHistoryState(stored());
     expect(state.rolls).toHaveLength(16);

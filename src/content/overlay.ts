@@ -3042,7 +3042,15 @@ export class AssistantOverlay {
     }
     const ranges = history.coverage.ranges.slice(0, 4).map(([start, end]) => `${start}-${end}`).join(",") || "none";
     const ambiguous = history.ambiguousLogIndices.slice(0, 8).join(",") || "none";
-    return `Dice evidence: ${history.provenance}; ${history.rolls.length} observed roll${history.rolls.length === 1 ? "" : "s"}; board gameplay-roll count ${this.board?.gameplayRollCount ?? "not established"}; log coverage ${ranges}; ambiguous indexes ${ambiguous}; unlocated ambiguity ${history.hasUnlocatedRollAmbiguity ? "yes" : "no"}; missing prefix rolls ${history.missingPrefixRolls ?? "not established"}. Analysis resumes when usable evidence arrives. Export the record if this persists; resetting midgame cannot recover missing rolls`;
+    const boardSourceRolls = history.rolls.filter((roll) =>
+      /^board-roll:\d+:/u.test(roll.eventId),
+    ).length;
+    const indexedLogRolls = history.rolls.filter(
+      (roll) => roll.logIndex !== undefined,
+    ).length;
+    const unindexedLogRolls =
+      history.rolls.length - boardSourceRolls - indexedLogRolls;
+    return `Dice evidence: ${history.provenance}; ${history.rolls.length} stored source observation${history.rolls.length === 1 ? "" : "s"} (${boardSourceRolls} board, ${indexedLogRolls} indexed log, ${unindexedLogRolls} unindexed log); board gameplay-roll count ${this.board?.gameplayRollCount ?? "not established"}; log coverage ${ranges}; ambiguous indexes ${ambiguous}; unlocated ambiguity ${history.hasUnlocatedRollAmbiguity ? "yes" : "no"}; missing prefix rolls ${history.missingPrefixRolls ?? "not established"}. Analysis resumes when usable evidence arrives. Export the record if this persists; resetting midgame cannot recover missing rolls`;
   }
 
   private currentLogRollPrecedesBoardSnapshot(board: BoardSnapshot): boolean {
