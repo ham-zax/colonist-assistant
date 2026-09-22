@@ -1615,4 +1615,83 @@ describe("overlay settings interaction", () => {
     });
     overlay.destroy();
   });
+
+  it("shows the top three searched moves with score gaps only when enabled", () => {
+    const overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS, showAlternatives: true },
+      { reset: vi.fn() },
+    );
+    const internals = overlay as unknown as {
+      board: {
+        hexes: Array<{ id: string; label?: string }>;
+        vertices: Array<{ id: string; label?: string }>;
+        edges: Array<{ id: string; label?: string }>;
+      };
+      decisionAnalysis: unknown;
+      currentDecisionRationale: () => {
+        summary: string;
+        reasons: string[];
+        evidence: string[];
+      };
+      renderAlternativesPanel: () => string;
+      settings: typeof DEFAULT_SETTINGS;
+    };
+    internals.board = {
+      hexes: [],
+      vertices: [
+        { id: "v:one", label: "10 brick / 8 ore / 4 sheep" },
+        { id: "v:two", label: "5 wood / 6 grain / 11 brick" },
+        { id: "v:three", label: "3 brick / 9 ore / 6 grain" },
+      ],
+      edges: [],
+    };
+    internals.currentDecisionRationale = () => ({
+      summary: "Strategist chose the first settlement",
+      reasons: ["Best completed root value"],
+      evidence: [],
+    });
+    const action = (targetId: string) => ({
+      kind: "place-settlement",
+      targetId,
+    });
+    const stats = (targetId: string, value: number) => ({
+      action: action(targetId),
+      visits: 10,
+      availability: 1,
+      availabilityWeight: 1,
+      legalWeight: 1,
+      prior: 0,
+      value: [value, 0],
+      lowerConfidenceValue: [value, 0],
+    });
+    internals.decisionAnalysis = {
+      deepSearch: {
+        chosen: action("v:one"),
+        rootIndex: 0,
+        actions: [
+          stats("v:three", 2.75),
+          stats("v:one", 3),
+          stats("v:two", 2.9),
+          stats("v:four", 1.2),
+        ],
+        rootProvenance: { rootEvidence: [] },
+      },
+    };
+
+    const html = internals.renderAlternativesPanel();
+    expect(html).toContain("TOP MOVES");
+    expect(html).toContain("#1");
+    expect(html).toContain("#2");
+    expect(html).toContain("#3");
+    expect(html).toContain("10 brick / 8 ore / 4 sheep");
+    expect(html).toContain("5 wood / 6 grain / 11 brick");
+    expect(html).toContain("3 brick / 9 ore / 6 grain");
+    expect(html).toContain("0.100 behind #1");
+    expect(html).toContain("0.250 behind #1");
+    expect(html).not.toContain("v:four");
+
+    internals.settings = { ...DEFAULT_SETTINGS, showAlternatives: false };
+    expect(internals.renderAlternativesPanel()).toBe("");
+    overlay.destroy();
+  });
 });
