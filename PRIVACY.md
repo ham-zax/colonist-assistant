@@ -36,6 +36,12 @@ The extension uses the data only for these features.
 Game work runs in your browser. The extension has no server, ads, tracking,
 or usage reports. It does not sell or share game data.
 
+The optional native GPU companion is a separate program you install on the
+same computer. When it is installed and connected, decision requests are sent
+to that local process through native messaging (`io.colonist_assistant.gpu`)
+and never over the network. Without the companion, the packaged CPU/WebAssembly
+engine handles decisions locally.
+
 The extension may load card and piece images from Colonist or its image host.
 Those image links contain no game or player data.
 
@@ -54,17 +60,27 @@ The extension stores:
 - a short game summary; and
 - a bounded set of current-game decision diagnostics, including board
   snapshots, search candidates, and timing data, used to replay and diagnose
-  advice or automation failures.
+  advice or automation failures;
+- the compact game record kept while **Record game** is on; and
+- the investigation log kept while the investigation log setting is on.
 
-It keeps current-game events, card states, the game summary, and decision
-diagnostics in your local Chrome profile. Starting a different game replaces
+Game record export and investigation log export save a `.txt` file only when
+you click the export button. Until then, both stay in your local Chrome
+profile (`chrome.storage.local`).
+
+It keeps current-game events, card states, the game summary, decision
+diagnostics, the game record, and the investigation log in your local Chrome
+profile. Starting a different game replaces
 the prior game's local records. It may keep settings in Chrome Sync.
 
 ## Permissions
 
 The extension asks for:
 
-- `storage`, to save settings and current game data; and
+- `storage`, to save settings and current game data;
+- `nativeMessaging`, to reach the optional local GPU companion host
+  `io.colonist_assistant.gpu` only when you have installed that separate
+  program on the same computer; and
 - `https://colonist.io/*`, to read shown game data and add the assistant to
   Colonist pages.
 
@@ -74,7 +90,7 @@ requests, or access to all sites.
 ## Delete your data
 
 Use **Reset session** to clear the current game's events, card states, summary,
-and decision diagnostics. Remove the extension to delete all of its local
+game record, investigation log, and decision diagnostics. Remove the extension to delete all of its local
 data. You can clear synced settings through Chrome.
 
 ## Chrome Web Store data rules
