@@ -3,16 +3,6 @@ import {
 } from "../worker/analyze";
 import { warmDeepSearchEngine } from "../worker/deep-search";
 import {
-  NativeGpuClient,
-  isNativeGpuUnavailableError,
-  nativeGpuSupportsProductionExactMaxn,
-  nativeGpuSupportsStochasticModel,
-} from "./native-gpu";
-import {
-  M0_FAIR_IID_2D6_V1,
-  MREF_COLONIST_LINKED_2024_V1,
-} from "../core/dice-history";
-import {
   DECISION_CANCEL_MESSAGE_TYPE,
   DECISION_MESSAGE_TYPE,
   DECISION_STATUS_MESSAGE_TYPE,
@@ -23,28 +13,17 @@ import {
   type DecisionStatusMessageResponse,
 } from "../worker/protocol";
 
-const nativeGpu = new NativeGpuClient();
-
-// Production deep-search prefers the native exact-CUDA backend when the
-// companion advertises deadline/cancellation support and the same stochastic
-// model. CPU/WASM remains the transport-failure and unsupported-state fallback.
-const NATIVE_GPU_ENABLED = true;
-
 interface ActiveDecision {
-  nativeId: number;
   controller: AbortController;
 }
 
 const activeDecisions = new Map<string, ActiveDecision>();
-let nextNativeDecisionId = 1;
-let gpuOwner: ActiveDecision | undefined;
 
 const decisionKey = (sender: chrome.runtime.MessageSender, id: number): string =>
   JSON.stringify([sender.tab?.id, sender.documentId, sender.frameId, id]);
 
 const cancelDecision = (decision: ActiveDecision): void => {
   decision.controller.abort(new Error("Decision cancelled as stale"));
-  nativeGpu.cancelDecision(decision.nativeId);
 };
 
 export const withRemainingDecisionBudget = (
@@ -65,23 +44,6 @@ export const withRemainingDecisionBudget = (
   };
 };
 
-const hasPendingIncomingTrade = (message: DecisionMessage): boolean =>
-  Boolean(
-    message.board.activeTrades?.some(
-      (trade) =>
-        trade.incoming &&
-        !trade.responsesComplete &&
-        (trade.myResponse === undefined || trade.myResponse === "pending"),
-    ),
-  );
-
-export const shouldUseNativeGpu = (message: DecisionMessage): boolean =>
-  NATIVE_GPU_ENABLED &&
-  nativeGpuSupportsStochasticModel(message.stochastic?.model) &&
-  message.engine === "deep-search" &&
-  !message.board.initialPlacement &&
-  (Boolean(message.board.isMyTurn) || hasPendingIncomingTrade(message));
-
 const errorDetail = (error: unknown, fallback: string): string => {
   if (error instanceof Error) return error.message;
   if (typeof error === "string" && error.trim()) return error;
@@ -92,31 +54,6 @@ const errorDetail = (error: unknown, fallback: string): string => {
     // Fall through to a stable message when the thrown value is cyclic.
   }
   return fallback;
-};
-
-// Availability failures are safe to recover on CPU/WASM because the router
-// preserves the exact requested Deep MaxN algorithm and stochastic model.
-// Cancellation and semantic/request failures remain terminal.
-const analyzeAfterNativeGpuUnavailable = async (
-  message: DecisionMessage,
-  error: unknown,
-  localStartedAt: number,
-) => {
-  const detail = errorDetail(error, "Native GPU unavailable");
-  nativeGpu.release();
-  const analysis = await analyzeDecisionRequest(
-    withRemainingDecisionBudget(message, localStartedAt),
-  );
-  const requestedStochasticModel =
-    message.stochastic?.model ?? M0_FAIR_IID_2D6_V1;
-  return {
-    ...analysis,
-    runtime: "background-wasm" as const,
-    runtimeReason:
-      requestedStochasticModel === MREF_COLONIST_LINKED_2024_V1
-        ? `Native GPU unavailable (${detail}); Mref preserved on CPU/WASM Deep MaxN for this decision`
-        : `Native GPU unavailable (${detail}); ${requestedStochasticModel} preserved on CPU/WASM Deep MaxN for this decision`,
-  };
 };
 
 const isDecisionMessage = (value: unknown): value is DecisionMessage => {
@@ -153,29 +90,7 @@ chrome.runtime.onMessage.addListener(
       typeof (message as Partial<DecisionStatusMessage>).id === "number"
     ) {
       const status = message as DecisionStatusMessage;
-      const startedAt = performance.now();
       void (async () => {
-        if (status.engine === "deep-search" && NATIVE_GPU_ENABLED) {
-          let gpu;
-          try {
-            gpu = await nativeGpu.status();
-          } catch (error) {
-            if (!isNativeGpuUnavailableError(error)) throw error;
-          }
-          if (gpu && nativeGpuSupportsProductionExactMaxn(gpu)) {
-            const response: DecisionStatusMessageResponse = {
-              id: status.id,
-              runtime: "background-gpu",
-              engineRevision: gpu.engineRevision,
-              ...(gpu.build ? { nativeGpuBuild: gpu.build } : {}),
-              deviceName: gpu.device.name,
-              initializationMs: performance.now() - startedAt,
-            };
-            sendResponse(response);
-            return;
-          }
-        }
-        if (status.engine === "weighted" && !gpuOwner) nativeGpu.release();
         const wasm = await warmDeepSearchEngine();
         const response: DecisionStatusMessageResponse = {
           id: status.id,
@@ -198,95 +113,32 @@ chrome.runtime.onMessage.addListener(
     const previous = activeDecisions.get(key);
     if (previous) cancelDecision(previous);
     const decision: ActiveDecision = {
-      nativeId: nextNativeDecisionId++,
       controller: new AbortController(),
     };
     activeDecisions.set(key, decision);
     const { signal } = decision.controller;
     const finish = () => {
       if (activeDecisions.get(key) === decision) activeDecisions.delete(key);
-      if (gpuOwner === decision) gpuOwner = undefined;
     };
     void (async () => {
       const backgroundStartedAt = performance.now();
-      const nativeGpuEligible = shouldUseNativeGpu(message);
-      // One native search owns the companion at a time. Concurrent documents
-      // use the same MaxN/stochastic policy on WASM rather than canceling the
-      // owner's work or waiting away their live decision allowance.
-      const gpuBusy = nativeGpuEligible && gpuOwner !== undefined;
-      if (nativeGpuEligible && !gpuBusy) {
-        gpuOwner = decision;
-        let gpu;
-        try {
-          gpu = await nativeGpu.status();
-          signal.throwIfAborted();
-        } catch (error) {
-          signal.throwIfAborted();
-          if (!isNativeGpuUnavailableError(error)) throw error;
-          return analyzeAfterNativeGpuUnavailable(
-            message,
-            error,
-            backgroundStartedAt,
-          );
-        }
-        if (
-          gpu &&
-          nativeGpuSupportsProductionExactMaxn(gpu) &&
-          nativeGpuSupportsStochasticModel(
-            message.stochastic?.model,
-            gpu.stochasticModels,
-          )
-        ) {
-          try {
-            const analysis = await analyzeDecisionRequest(
-              withRemainingDecisionBudget(message, backgroundStartedAt),
-              (request) => nativeGpu.analyzeExact(request, decision.nativeId, signal),
-            );
-            return {
-              ...analysis,
-              runtime: "background-gpu" as const,
-              runtimeReason: `Exact CUDA MaxN on ${gpu.device.name}`,
-              ...(gpu.build ? { nativeGpuBuild: gpu.build } : {}),
-            };
-          } catch (error) {
-            signal.throwIfAborted();
-            if (!isNativeGpuUnavailableError(error)) throw error;
-            return analyzeAfterNativeGpuUnavailable(
-              message,
-              error,
-              backgroundStartedAt,
-            );
-          }
-        }
-      }
       signal.throwIfAborted();
-      if (message.engine === "weighted" && !gpuOwner) nativeGpu.release();
       const analysis = await analyzeDecisionRequest(
         withRemainingDecisionBudget(message, backgroundStartedAt),
       );
       const runtime = analysis.deepSearch
         ? ("background-wasm" as const)
         : ("background-rollout" as const);
-      const requestedStochasticModel =
-        message.stochastic?.model ?? M0_FAIR_IID_2D6_V1;
       const runtimeReason =
         analysis.runtimeReason ??
         (runtime === "background-wasm"
           ? message.engine === "deep-search" && message.board.initialPlacement
             ? "Dedicated opening solver runs on WASM/CPU"
-            : !NATIVE_GPU_ENABLED && message.engine === "deep-search"
-              ? "Native GPU disabled for CPU/WASM validation; using WASM Deep MaxN"
-              : gpuBusy
-                ? "Native GPU busy with another decision; using WASM Deep MaxN"
-                : nativeGpuEligible
-                  ? "Native GPU unavailable; using WASM Deep MaxN"
-                  : message.engine === "deep-search"
-                    ? requestedStochasticModel === MREF_COLONIST_LINKED_2024_V1
-                      ? "Native exact CUDA MaxN is preferred when its protocol-7 capability is available; Mref remains authoritative and gpu-root-rollout remains experimental"
-                      : "Native exact CUDA MaxN is preferred when its protocol-7 capability is available; weighted-belief MaxN remains the CPU/WASM fallback and gpu-root-rollout remains experimental"
-                    : message.engine === "weighted"
-                      ? "Weighted mode runs on WASM"
-                      : undefined
+            : message.engine === "deep-search"
+              ? "Deep MaxN runs on WASM"
+              : message.engine === "weighted"
+                ? "Weighted mode runs on WASM"
+                : undefined
           : undefined);
       return {
         ...analysis,

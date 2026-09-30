@@ -1014,7 +1014,7 @@ describe("overlay settings interaction", () => {
     overlay.destroy();
   });
 
-  it("does not start CPU/GPU search for an incoming trade disabled by local policy", async () => {
+  it("does not start search for an incoming trade disabled by local policy", async () => {
     const tracker = reduceTracker(createTrackerState(), {
       type: "discover",
       player: "rodrgds",

@@ -2,7 +2,6 @@ import type {
   DecisionAnalysis,
   DecisionEngine,
   DecisionRuntime,
-  NativeGpuBuildIdentity,
 } from "../core/engine";
 import type { DecisionRequest } from "./analyze";
 
@@ -36,10 +35,8 @@ export interface DecisionStatusMessage {
 
 export interface DecisionStatusMessageResponse {
   id: number;
-  runtime?: Extract<DecisionRuntime, "background-gpu" | "background-wasm">;
+  runtime?: Extract<DecisionRuntime, "background-wasm">;
   engineRevision?: string;
-  nativeGpuBuild?: NativeGpuBuildIdentity;
-  deviceName?: string;
   initializationMs?: number;
   error?: string;
 }

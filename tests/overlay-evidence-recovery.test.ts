@@ -170,7 +170,7 @@ describe("live stochastic evidence recovery", () => {
       runtime: {
         getURL: (path: string) => `chrome-extension://fixture/${path}`,
         getManifest: () => ({ version: "0.9.1" }),
-        sendMessage: async (message: { id: number }) => ({ id: message.id, runtime: "background-gpu", engineRevision: "deep-maxn-v12", initializationMs: 1 }),
+        sendMessage: async (message: { id: number }) => ({ id: message.id, runtime: "background-wasm", engineRevision: "deep-maxn-v12", initializationMs: 1 }),
       },
       storage: { local: { get: async () => ({}), set: async () => {}, remove: async () => {} }, sync: { set: async () => {} } },
     });
@@ -207,8 +207,8 @@ describe("live stochastic evidence recovery", () => {
   it("uses public gameplay-roll count to keep sparse log indexes from pausing Balanced Dice", async () => {
     const sendMessage = vi.fn(async (message: { id: number; stochastic?: unknown }) =>
       message.stochastic
-        ? { id: message.id, analysis: { engine: "deep-search", runtime: "background-gpu", players: [] } }
-        : { id: message.id, runtime: "background-gpu", engineRevision: "deep-maxn-v12", initializationMs: 1 });
+        ? { id: message.id, analysis: { engine: "deep-search", runtime: "background-wasm", players: [] } }
+        : { id: message.id, runtime: "background-wasm", engineRevision: "deep-maxn-v12", initializationMs: 1 });
     vi.stubGlobal("chrome", {
       runtime: { getURL: (path: string) => `chrome-extension://fixture/${path}`, getManifest: () => ({ version: "0.9.1" }), sendMessage },
       storage: { local: { get: async () => ({}), set: async () => {}, remove: async () => {} }, sync: { set: async () => {} } },
@@ -260,8 +260,8 @@ describe("live stochastic evidence recovery", () => {
   it("waits for the board snapshot when the current log roll arrives one update first", async () => {
     const sendMessage = vi.fn(async (message: { id: number; stochastic?: unknown }) =>
       message.stochastic
-        ? { id: message.id, analysis: { engine: "deep-search", runtime: "background-gpu", players: [] } }
-        : { id: message.id, runtime: "background-gpu", engineRevision: "deep-maxn-v12", initializationMs: 1 });
+        ? { id: message.id, analysis: { engine: "deep-search", runtime: "background-wasm", players: [] } }
+        : { id: message.id, runtime: "background-wasm", engineRevision: "deep-maxn-v12", initializationMs: 1 });
     vi.stubGlobal("chrome", {
       runtime: { getURL: (path: string) => `chrome-extension://fixture/${path}`, getManifest: () => ({ version: "0.9.1" }), sendMessage },
       storage: { local: { get: async () => ({}), set: async () => {}, remove: async () => {} }, sync: { set: async () => {} } },
@@ -322,8 +322,8 @@ describe("live stochastic evidence recovery", () => {
   it("waits for board catch-up when board and sparse DOM evidence both contain prior rolls", async () => {
     const sendMessage = vi.fn(async (message: { id: number; stochastic?: unknown }) =>
       message.stochastic
-        ? { id: message.id, analysis: { engine: "deep-search", runtime: "background-gpu", players: [] } }
-        : { id: message.id, runtime: "background-gpu", engineRevision: "deep-maxn-v12", initializationMs: 1 });
+        ? { id: message.id, analysis: { engine: "deep-search", runtime: "background-wasm", players: [] } }
+        : { id: message.id, runtime: "background-wasm", engineRevision: "deep-maxn-v12", initializationMs: 1 });
     vi.stubGlobal("chrome", {
       runtime: { getURL: (path: string) => `chrome-extension://fixture/${path}`, getManifest: () => ({ version: "0.9.1" }), sendMessage },
       storage: { local: { get: async () => ({}), set: async () => {}, remove: async () => {} }, sync: { set: async () => {} } },
@@ -412,8 +412,8 @@ describe("live stochastic evidence recovery", () => {
   it("resumes when missing startup evidence arrives without retrying unchanged evidence", async () => {
     const sendMessage = vi.fn(async (message: { id: number; stochastic?: unknown }) =>
       message.stochastic
-        ? { id: message.id, analysis: { engine: "deep-search", runtime: "background-gpu", players: [] } }
-        : { id: message.id, runtime: "background-gpu", engineRevision: "deep-maxn-v12", initializationMs: 1 });
+        ? { id: message.id, analysis: { engine: "deep-search", runtime: "background-wasm", players: [] } }
+        : { id: message.id, runtime: "background-wasm", engineRevision: "deep-maxn-v12", initializationMs: 1 });
     vi.stubGlobal("chrome", {
       runtime: { getURL: (path: string) => `chrome-extension://fixture/${path}`, getManifest: () => ({ version: "0.9.1" }), sendMessage },
       storage: { local: { get: async () => ({}), set: async () => {}, remove: async () => {} }, sync: { set: async () => {} } },

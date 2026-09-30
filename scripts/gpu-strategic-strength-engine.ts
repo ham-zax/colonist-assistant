@@ -203,9 +203,9 @@ const hydrateTracker = (fixture: D68Fixture): TrackerState => {
 };
 
 const readNativeVersions = (repoRoot: string): NativeVersions => {
-  const source = readFileSync(resolve(repoRoot, "src/background/native-gpu.ts"), "utf8");
-  const protocol = source.match(/const NATIVE_GPU_PROTOCOL_VERSION = (\d+);/);
-  const state = source.match(/const NATIVE_GPU_STATE_SCHEMA_VERSION = (\d+);/);
+  const source = readFileSync(resolve(repoRoot, "engine/crates/catan-wasm/src/native_gpu.rs"), "utf8");
+  const protocol = source.match(/const NATIVE_GPU_PROTOCOL_VERSION: u32 = (\d+);/);
+  const state = source.match(/const NATIVE_GPU_STATE_SCHEMA_VERSION: u32 = (\d+);/);
   assertCondition(protocol && state, "could not read native GPU protocol/state versions");
   return {
     protocolVersion: Number(protocol[1]),

@@ -499,10 +499,7 @@ export class AssistantOverlay {
         this.decisionKey !== decisionKey &&
         status.detail !== EXTENSION_CONTEXT_RELOAD_MESSAGE
       ) return;
-      if (
-        status.runtime === "background-gpu" ||
-        status.runtime === "background-wasm"
-      ) {
+      if (status.runtime === "background-wasm") {
         this.decisionRuntime = status.runtime;
         if (!this.decisionRuntimeError) {
           this.decisionRuntimeDetail =
@@ -2653,8 +2650,8 @@ export class AssistantOverlay {
     }
     if (this.decisionRuntimeError) {
       return {
-        // Validation and native failures also reach this path; never label
-        // missing evidence or a GPU failure as a WebAssembly crash.
+        // Validation failures also reach this path; never label missing
+        // evidence as a WebAssembly crash.
         label: this.decisionEvidenceWait !== undefined ? "Dice history" : "Strategist error",
         detail: `${this.decisionRuntimeError} No other stochastic model or algorithm was substituted.`,
         state: "error",
@@ -2673,8 +2670,7 @@ export class AssistantOverlay {
     if (this.decisionPendingKey) {
       if (this.decisionSlowKey === this.decisionPendingKey) {
         return {
-          label:
-            observedRuntime === "background-gpu" ? "GPU · 1s+" : "WASM · 1s+",
+          label: "WASM · 1s+",
           detail:
             `${this.decisionEngineLabel()} is still evaluating this position. No fallback policy is allowed to replace it.`,
           state: "slow",
@@ -2682,17 +2678,13 @@ export class AssistantOverlay {
       }
       return {
         label:
-          observedRuntime === "background-gpu"
-            ? "GPU searching"
-            : observedRuntime === "background-wasm"
-              ? "WASM searching"
-              : "Connecting",
+          observedRuntime === "background-wasm"
+            ? "WASM searching"
+            : "Connecting",
         detail:
-          observedRuntime === "background-gpu"
-            ? "The native CUDA companion is evaluating this position with exact Deep MaxN."
-            : observedRuntime === "background-wasm"
-              ? "The background engine is evaluating this position with a bounded node budget."
-              : "Waking Strategist before evaluating this position.",
+          observedRuntime === "background-wasm"
+            ? "The background engine is evaluating this position with a bounded node budget."
+            : "Waking Strategist before evaluating this position.",
         state: isSearchDecisionRuntime(observedRuntime) ? "searching" : "connecting",
       };
     }
@@ -2701,16 +2693,6 @@ export class AssistantOverlay {
         label: "Background rollout",
         detail:
           "The service worker is ready; lightweight win odds run while deep search waits for your turn.",
-        state: "healthy",
-      };
-    }
-    if (observedRuntime === "background-gpu") {
-      const search = this.decisionAnalysis?.deepSearch;
-      return {
-        label: "Native CUDA GPU",
-        detail: search
-          ? `Last GPU search completed in ${Math.max(1, Math.round(search.elapsedMs)).toLocaleString()} ms across ${(search.nodes || search.rollouts).toLocaleString()} bounded nodes.`
-          : this.decisionRuntimeDetail,
         state: "healthy",
       };
     }
@@ -2904,7 +2886,7 @@ export class AssistantOverlay {
     // Search identity must follow the reconciled Mref position, not Colonist's
     // DOM bookkeeping. Hashing raw coverage/source-reconciliation state used to
     // change the decision key while a valid search was running, so delayed log
-    // hydration cancelled useful GPU/CPU work even though the canonical roll
+    // hydration cancelled useful search work even though the canonical roll
     // sequence had not changed.
     const history = this.usableSessionDiceHistory(board);
     const expected = board.gameplayRollCount;
@@ -3174,7 +3156,7 @@ export class AssistantOverlay {
     const decisionBoard = decisionBoardBase;
     if (this.settings.disablePlayerTrades && hasPendingIncomingTrade) {
       // This policy makes the only executable local response deterministic.
-      // Do not spend CPU/GPU budget searching a trade that nextClick() must
+      // Do not spend search budget searching a trade that nextClick() must
       // decline regardless of strategic value.
       this.decisionAnalysis = undefined;
       this.decisionKey = "";

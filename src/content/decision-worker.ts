@@ -2,7 +2,6 @@ import type {
   DecisionAnalysis,
   DecisionEngine,
   DecisionSearchConstraints,
-  NativeGpuBuildIdentity,
 } from "../core/engine";
 import type { BoardSnapshot } from "../core/placement";
 import type { TrackerState } from "../core/types";
@@ -35,9 +34,8 @@ const HARD_DECISION_ERROR =
   "Strategist did not return before the 12-second safety limit";
 
 export interface DecisionServiceStatus {
-  runtime: "background-gpu" | "background-wasm" | "engine-error";
+  runtime: "background-wasm" | "engine-error";
   detail: string;
-  nativeGpuBuild?: NativeGpuBuildIdentity;
   initializationMs?: number;
 }
 
@@ -108,13 +106,7 @@ export class DecisionWorkerClient {
         }
         callback({
           runtime: response.runtime,
-          detail:
-            response.runtime === "background-gpu"
-              ? `${response.engineRevision} · ${response.deviceName ?? "CUDA GPU"} ready`
-              : `${response.engineRevision} ready`,
-          ...(response.nativeGpuBuild
-            ? { nativeGpuBuild: response.nativeGpuBuild }
-            : {}),
+          detail: `${response.engineRevision} ready`,
           ...(response.initializationMs !== undefined
             ? { initializationMs: response.initializationMs }
             : {}),

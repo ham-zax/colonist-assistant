@@ -13,8 +13,8 @@ const live = [[16, 2, 4], [20, 2, 3], [24, 6, 3], [28, 3, 6], [34, 4, 1], [39, 5
 const sessions: GameSession[] = [];
 let overlay: AssistantOverlay | undefined;
 const sendMessage = vi.fn(async (message: { id: number; stochastic?: PublicStochasticInput }) => message.stochastic
-  ? { id: message.id, analysis: { engine: "deep-search", runtime: "background-gpu", players: [] } }
-  : { id: message.id, runtime: "background-gpu", engineRevision: "deep-maxn-v12", initializationMs: 1 });
+  ? { id: message.id, analysis: { engine: "deep-search", runtime: "background-wasm", players: [] } }
+  : { id: message.id, runtime: "background-wasm", engineRevision: "deep-maxn-v12", initializationMs: 1 });
 
 beforeEach(() => {
   sendMessage.mockClear();
