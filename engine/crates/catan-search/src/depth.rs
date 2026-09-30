@@ -563,8 +563,11 @@ fn canonicalize_equal_prior_siblings(ranked: &mut [(Action, f32)]) {
         while end < ranked.len() && (ranked[end].1 - prior).abs() <= 1e-9 {
             end += 1;
         }
-        ranked[start..end]
-            .sort_by(|left, right| format!("{:?}", left.0).cmp(&format!("{:?}", right.0)));
+        // Render each label once (stable, same order as comparing fresh
+        // Debug strings); singleton groups need no work.
+        if end - start > 1 {
+            ranked[start..end].sort_by_cached_key(|entry| format!("{:?}", entry.0));
+        }
         start = end;
     }
 }

@@ -587,10 +587,10 @@ fn expansion_site_survival(
     player: u8,
     vertex: usize,
     route_maps: &[Vec<u8>],
-    arrival_scores: &[Vec<f32>],
+    arrival_scores: &ArrivalScores<'_>,
 ) -> f32 {
     let own_distance = route_maps[player as usize][vertex];
-    let own_arrival = arrival_scores[player as usize][own_distance as usize];
+    let own_arrival = arrival_scores.get(player, own_distance);
     let opponent_arrival = (0..state.board.num_players)
         .filter(|candidate| *candidate != player)
         .filter_map(|candidate| {
@@ -598,7 +598,7 @@ fn expansion_site_survival(
             (distance != u8::MAX
                 && distance <= state.players[candidate as usize].roads_left
                 && state.players[candidate as usize].settlements_left > 0)
-                .then(|| arrival_scores[candidate as usize][distance as usize])
+                .then(|| arrival_scores.get(candidate, distance))
         })
         .fold(f32::INFINITY, f32::min);
     if !opponent_arrival.is_finite() {
@@ -614,27 +614,56 @@ fn expansion_site_survival(
     sigmoid((opponent_arrival - own_arrival) * 1.35 - 0.10).clamp(0.01, 0.995)
 }
 
+/// Lazily computed per-player arrival estimates, indexed by roads required.
+///
+/// Only the (player, distance) pairs that open reachable sites ask for are
+/// ever computed. Each entry uses the same `expansion_arrival_score` inputs
+/// as the former eager table, so values are unchanged.
+pub(crate) struct ArrivalScores<'a> {
+    state: &'a GameState,
+    observer: Option<u8>,
+    exact_rival_hands: bool,
+    production: std::cell::RefCell<Vec<Option<[f32; 5]>>>,
+    entries: std::cell::RefCell<Vec<Vec<Option<f32>>>>,
+}
+
+impl<'a> ArrivalScores<'a> {
+    fn get(&self, player: u8, roads: u8) -> f32 {
+        let index = player as usize;
+        if let Some(value) = self.entries.borrow()[index][roads as usize] {
+            return value;
+        }
+        let production = *self.production.borrow_mut()[index]
+            .get_or_insert_with(|| production_pips(self.state, player));
+        let value = expansion_arrival_score(
+            self.state,
+            player,
+            roads,
+            self.exact_rival_hands || self.observer == Some(player),
+            &production,
+        );
+        self.entries.borrow_mut()[index][roads as usize] = Some(value);
+        value
+    }
+}
+
 fn expansion_arrival_scores(
     state: &GameState,
     observer: Option<u8>,
     exact_rival_hands: bool,
-) -> Vec<Vec<f32>> {
-    (0..state.board.num_players)
-        .map(|player| {
-            let production = production_pips(state, player);
-            (0..=state.players[player as usize].roads_left)
-                .map(|roads| {
-                    expansion_arrival_score(
-                        state,
-                        player,
-                        roads,
-                        exact_rival_hands || observer == Some(player),
-                        &production,
-                    )
-                })
-                .collect()
-        })
-        .collect()
+) -> ArrivalScores<'_> {
+    let players = state.board.num_players as usize;
+    ArrivalScores {
+        state,
+        observer,
+        exact_rival_hands,
+        production: std::cell::RefCell::new(vec![None; players]),
+        entries: std::cell::RefCell::new(
+            (0..players)
+                .map(|player| vec![None; state.players[player].roads_left as usize + 1])
+                .collect(),
+        ),
+    }
 }
 
 fn expansion_option_value_with_routes(
@@ -661,7 +690,7 @@ fn expansion_option_value_with_routes_and_weights(
     resource_weights: &[f32; 5],
     observer: Option<u8>,
     exact_rival_hands: bool,
-    prepared_arrivals: Option<&[Vec<f32>]>,
+    prepared_arrivals: Option<&ArrivalScores<'_>>,
 ) -> ExpansionOption {
     if state.players[player as usize].settlements_left == 0 {
         return ExpansionOption::default();
@@ -704,8 +733,7 @@ fn expansion_option_value_with_routes_and_weights(
         );
         let road_cost = distance as f32 * 1.45;
         let immediate_window = turns_until_action(state, player) + distance as f32 * 0.08;
-        let economic_delay =
-            (arrival_scores[player as usize][distance as usize] - immediate_window).max(0.0);
+        let economic_delay = (arrival_scores.get(player, distance) - immediate_window).max(0.0);
         let access_scale = 18.0 / state.board.num_players.max(1) as f32;
         let accessibility = if economic_delay.is_finite() {
             1.0 / (1.0 + economic_delay / access_scale.max(1.0))
@@ -1110,7 +1138,7 @@ fn strategic_utility_with_routes_and_knowledge(
     player: u8,
     route_maps: &[Vec<u8>],
     exact_rival_hands: bool,
-    prepared_arrivals: Option<&[Vec<f32>]>,
+    prepared_arrivals: Option<&ArrivalScores<'_>>,
 ) -> f32 {
     let player_state = &state.players[player as usize];
     let victory = player_state.victory_points() as f32;
@@ -1267,7 +1295,7 @@ fn public_strategic_utility_with_routes(
 fn evaluate_with_precomputed_routes(
     state: &GameState,
     route_maps: &[Vec<u8>],
-    arrival_scores: &[Vec<f32>],
+    arrival_scores: &ArrivalScores<'_>,
 ) -> [f32; 4] {
     let count = state.board.num_players as usize;
     let mut result = [0.0; 4];

@@ -1354,56 +1354,61 @@ impl GameState {
         // safety, and bundle efficiency before applying the cap. Search adds
         // opponent acceptance and race value; this rules-layer ordering only
         // guarantees that useful mixed bundles survive candidate generation.
-        actions.sort_by(|left, right| {
-            let score = |action: &Action| {
-                let Action::OfferTrade { give, receive, .. } = action else {
-                    return f32::NEG_INFINITY;
-                };
-                let mut after = player.resources;
-                for resource in 0..5 {
-                    after[resource] = after[resource]
-                        .saturating_sub(give[resource])
-                        .saturating_add(receive[resource]);
-                }
-                let completed = [
-                    (ROAD_COST, 1.2_f32),
-                    (SETTLEMENT_COST, 7.5),
-                    (CITY_COST, 7.0),
-                    (DEVELOPMENT_COST, 3.4),
-                    ([2, 2, 1, 1, 0], 8.8),
-                    ([3, 3, 1, 1, 0], 9.4),
-                ]
-                .iter()
-                .filter(|(cost, _)| contains(&after, cost))
-                .map(|(_, value)| *value)
-                .fold(0.0_f32, f32::max);
-                let nearest = [ROAD_COST, SETTLEMENT_COST, CITY_COST, DEVELOPMENT_COST]
-                    .iter()
-                    .map(|cost| {
-                        cost.iter()
-                            .enumerate()
-                            .map(|(resource, required)| {
-                                required.saturating_sub(after[resource]) as f32
-                            })
-                            .sum::<f32>()
-                    })
-                    .fold(f32::INFINITY, f32::min);
-                let give_total = give.iter().copied().sum::<u8>() as f32;
-                let receive_total = receive.iter().copied().sum::<u8>() as f32;
-                let safety = if player.resource_total() > self.card_discard_limit {
-                    (give_total - receive_total).max(0.0) * 0.8
-                } else {
-                    0.0
-                };
-                completed + 1.5 / (1.0 + nearest) + receive_total * 0.32 - give_total * 0.18
-                    + safety
+        let score = |action: &Action| {
+            let Action::OfferTrade { give, receive, .. } = action else {
+                return f32::NEG_INFINITY;
             };
-            score(right)
-                .total_cmp(&score(left))
-                .then_with(|| format!("{left:?}").cmp(&format!("{right:?}")))
+            let mut after = player.resources;
+            for resource in 0..5 {
+                after[resource] = after[resource]
+                    .saturating_sub(give[resource])
+                    .saturating_add(receive[resource]);
+            }
+            let completed = [
+                (ROAD_COST, 1.2_f32),
+                (SETTLEMENT_COST, 7.5),
+                (CITY_COST, 7.0),
+                (DEVELOPMENT_COST, 3.4),
+                ([2, 2, 1, 1, 0], 8.8),
+                ([3, 3, 1, 1, 0], 9.4),
+            ]
+            .iter()
+            .filter(|(cost, _)| contains(&after, cost))
+            .map(|(_, value)| *value)
+            .fold(0.0_f32, f32::max);
+            let nearest = [ROAD_COST, SETTLEMENT_COST, CITY_COST, DEVELOPMENT_COST]
+                .iter()
+                .map(|cost| {
+                    cost.iter()
+                        .enumerate()
+                        .map(|(resource, required)| required.saturating_sub(after[resource]) as f32)
+                        .sum::<f32>()
+                })
+                .fold(f32::INFINITY, f32::min);
+            let give_total = give.iter().copied().sum::<u8>() as f32;
+            let receive_total = receive.iter().copied().sum::<u8>() as f32;
+            let safety = if player.resource_total() > self.card_discard_limit {
+                (give_total - receive_total).max(0.0) * 0.8
+            } else {
+                0.0
+            };
+            completed + 1.5 / (1.0 + nearest) + receive_total * 0.32 - give_total * 0.18 + safety
+        };
+        // Score each offer once and tie-break on a byte key that orders exactly
+        // like the offers' Debug strings. Formatting Debug strings inside the
+        // comparator dominated whole-search profiles.
+        let mut keyed = actions
+            .into_iter()
+            .map(|action| (score(&action), offer_debug_order_key(&action), action))
+            .collect::<Vec<_>>();
+        keyed.sort_by(|left, right| {
+            right
+                .0
+                .total_cmp(&left.0)
+                .then_with(|| left.1.as_slice().cmp(right.1.as_slice()))
         });
-        actions.truncate(96);
-        actions
+        keyed.truncate(96);
+        keyed.into_iter().map(|(_, _, action)| action).collect()
     }
 
     fn playable_development_actions(&self) -> Vec<Action> {
@@ -1700,11 +1705,13 @@ impl GameState {
 
     pub fn trade_ratios(&self, player: u8) -> ResourceHand {
         let mut ratios = [4; 5];
+        // Most vertices have no port; test that before the building owner.
         for (vertex, building) in self.buildings.iter().enumerate() {
-            if building.map(Building::player) != Some(player) {
+            let port = self.board.vertices[vertex].port;
+            if port.is_none() || building.map(Building::player) != Some(player) {
                 continue;
             }
-            match self.board.vertices[vertex].port {
+            match port {
                 Some(Port::Generic) => {
                     for ratio in &mut ratios {
                         *ratio = (*ratio).min(3);
@@ -2231,6 +2238,98 @@ fn add(hand: &mut ResourceHand, cards: &ResourceHand) {
 fn subtract(hand: &mut ResourceHand, cards: &ResourceHand) {
     for index in 0..5 {
         hand[index] -= cards[index];
+    }
+}
+
+/// Byte key that sorts `Action::OfferTrade` values sharing one `recipients`
+/// mask exactly like their derived `Debug` strings, without allocating.
+/// Other actions get an empty key.
+#[derive(Clone, Copy)]
+struct OfferOrderKey {
+    bytes: [u8; 72],
+    len: usize,
+}
+
+impl OfferOrderKey {
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+
+    fn push(&mut self, text: &[u8]) {
+        self.bytes[self.len..self.len + text.len()].copy_from_slice(text);
+        self.len += text.len();
+    }
+
+    fn push_number(&mut self, value: u8) {
+        if value >= 100 {
+            self.push(&[b'0' + value / 100]);
+        }
+        if value >= 10 {
+            self.push(&[b'0' + value / 10 % 10]);
+        }
+        self.push(&[b'0' + value % 10]);
+    }
+
+    fn push_hand(&mut self, hand: &ResourceHand) {
+        for (index, value) in hand.iter().enumerate() {
+            if index > 0 {
+                self.push(b", ");
+            }
+            self.push_number(*value);
+        }
+    }
+}
+
+fn offer_debug_order_key(action: &Action) -> OfferOrderKey {
+    let mut key = OfferOrderKey {
+        bytes: [0; 72],
+        len: 0,
+    };
+    if let Action::OfferTrade { give, receive, .. } = action {
+        // Mirrors `OfferTrade { recipients: R, give: [..], receive: [..] }`
+        // after the prefix shared by every offer in one candidate list.
+        key.push_hand(give);
+        key.push(b"], receive: [");
+        key.push_hand(receive);
+        key.push(b"] }");
+    }
+    key
+}
+
+#[cfg(test)]
+mod offer_order_key_tests {
+    use super::{Action, offer_debug_order_key};
+
+    #[test]
+    fn offer_order_key_matches_debug_string_order() {
+        let mut rng = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = |limit: u8| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            (rng % u64::from(limit)) as u8
+        };
+        let offers = (0..600)
+            .map(|index| {
+                let limit = if index % 3 == 0 { 120 } else { 21 };
+                Action::OfferTrade {
+                    recipients: 0b1110,
+                    give: std::array::from_fn(|_| next(limit)),
+                    receive: std::array::from_fn(|_| next(limit)),
+                }
+            })
+            .collect::<Vec<_>>();
+        for left in &offers {
+            for right in &offers {
+                assert_eq!(
+                    offer_debug_order_key(left)
+                        .as_slice()
+                        .cmp(offer_debug_order_key(right).as_slice()),
+                    format!("{left:?}").cmp(&format!("{right:?}")),
+                    "{left:?} vs {right:?}",
+                );
+            }
+        }
     }
 }
 

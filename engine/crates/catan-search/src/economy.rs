@@ -24,7 +24,40 @@ pub(crate) fn build_fundable_at_rolls(
     capacity >= missing
 }
 
+type EtaKey = ([u32; 5], ResourceHand, ResourceHand, ResourceHand);
+
+const ETA_CACHE_LIMIT: usize = 1 << 16;
+
+thread_local! {
+    /// Memo for the pure bisection below. Search revisits the same production
+    /// and hand combinations across many leaves, and each miss costs dozens of
+    /// fundability probes.
+    static ETA_CACHE: std::cell::RefCell<std::collections::HashMap<EtaKey, f32>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 pub(crate) fn build_eta_rolls(
+    production: &[f32; 5],
+    hand: &ResourceHand,
+    ratios: &ResourceHand,
+    cost: &ResourceHand,
+) -> f32 {
+    let key = (production.map(f32::to_bits), *hand, *ratios, *cost);
+    if let Some(value) = ETA_CACHE.with(|cache| cache.borrow().get(&key).copied()) {
+        return value;
+    }
+    let value = build_eta_rolls_uncached(production, hand, ratios, cost);
+    ETA_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= ETA_CACHE_LIMIT {
+            cache.clear();
+        }
+        cache.insert(key, value);
+    });
+    value
+}
+
+fn build_eta_rolls_uncached(
     production: &[f32; 5],
     hand: &ResourceHand,
     ratios: &ResourceHand,
