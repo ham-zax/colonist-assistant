@@ -5,18 +5,18 @@ games where all players agree to its use. It reads game data shown to the
 player, tracks known cards, keeps honest ranges for unknown cards, and marks
 one legal next step in the Colonist page.
 
-The decision engine runs locally in a native CUDA companion or as Rust and
-WebAssembly in the browser. Strategist ★ is the single user-facing decision
-authority. Eligible midgame decisions prefer the compatible native companion;
-CPU/WASM owns opening, opponent-turn pondering, and unavailable-backend fallback.
-Both backends preserve the requested stochastic model, including the named
-Balanced-Dice reference model when public evidence supports it. See the
+The extension runs the decision engine locally in WebAssembly (Rust compiled
+to WASM) inside the browser. Strategist ★ is the single user-facing decision
+authority. The engine preserves the requested stochastic model, including the
+named Balanced-Dice reference model when public evidence supports it. See the
 [CPU/GPU Mref contract and verification gates](docs/CPU_GPU_MREF_CONTRACT.md).
+A native CUDA companion host remains in the repository as an unsupported
+developer tool; it is not part of the extension.
 Native strategic roots use a common completed-turn horizon. Unfinished
 rollouts retain terminal uncertainty instead of counting as neutral outcomes;
 overlapping terminal evidence defers to strategic leaf value. This repair is
 not a measured live win-rate improvement.
-The engine combines exact local solvers, bounded setup search, CUDA strategic
+The engine combines exact local solvers, bounded setup search, strategic
 rollouts, and observation-safe weighted-belief Deep MaxN. Experimental belief
 PUCT, UCT, and AlphaBeta remain diagnostic
 comparison policies in the native arena; replay tooling also exposes selected
@@ -86,17 +86,8 @@ your own shown resource cards, and bank counts when the room shows them.
 It does not read game chat, cookies, account tokens, network messages,
 opponents’ hidden cards, or hidden development cards. It does not use a
 server, ads, tracking, or usage reports. Game computation stays on your computer.
-The optional native GPU companion exposes two explicitly different capabilities:
-`gpu-root-rollout` for experimental diagnostics and
-`deep-maxn-cuda-exact-fixed-work-v1` as a same-policy acceleration engine.
-Production `deep-search` decisions route to exact CUDA for eligible midgame decisions
-when a compatible companion is connected, while CPU/WASM remains the packaged default
-and owner for openings, pondering, and fallback. Companion availability never substitutes
-rollout search for the production MaxN policy.
-Native initialization has a two-second handshake limit. A silent or disconnected
-companion falls back to CPU/WASM with the requested stochastic model preserved.
-GPU ownership and cancellation are scoped to the requesting tab and document;
-concurrent decisions use the same MaxN policy on WASM while the GPU is occupied.
+Decision ownership and cancellation are scoped to the requesting tab and
+document.
 Engine readiness has its own 12-second safety limit and cannot clear a newer
 decision's evidence error.
 Chrome may sync settings through the user’s Google account when Chrome Sync is

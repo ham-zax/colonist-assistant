@@ -68,10 +68,7 @@ Optional Disable player trades limits suggestions and automation to bank and
 port trades.
 
 Game work runs in your browser. The extension has no server, ads, tracking, or
-usage reports. It does not send game data to the developer. The optional
-native GPU companion is a separate program you install on the same computer;
-when it is connected, decision requests go to that local process through
-native messaging (`io.colonist_assistant.gpu`), never over the network.
+usage reports. It does not send game data to the developer.
 
 Game record export and investigation log export save a `.txt` file only when
 you click the export button. Until then, both stay in your local Chrome
@@ -133,16 +130,6 @@ the local Chrome profile and is replaced when a different game starts. Record
 and investigation exports save a file only when the user clicks export, and
 Reset session clears them. Chrome
 may sync settings when Chrome Sync is on.
-```
-
-### Native messaging reason
-
-```text
-The nativeMessaging permission reaches the optional local GPU companion host
-(io.colonist_assistant.gpu) only when the user has installed that separate
-program on the same computer. Decision requests go to that local process,
-never over the network; without it, the packaged CPU/WebAssembly engine
-handles decisions locally.
 ```
 
 ### Host access reason
