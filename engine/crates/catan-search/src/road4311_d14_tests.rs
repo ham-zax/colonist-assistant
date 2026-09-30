@@ -32,155 +32,717 @@ fn road4311_board() -> Board {
     Board {
         num_players: 4,
         hexes: vec![
-            Hex { resource: Some(Resource::Brick), number: 9, coord: (0, -2) }, // h:0,-2
-            Hex { resource: Some(Resource::Lumber), number: 12, coord: (-1, -1) }, // h:-1,-1
-            Hex { resource: Some(Resource::Brick), number: 11, coord: (-2, 0) }, // h:-2,0
-            Hex { resource: Some(Resource::Wool), number: 4, coord: (-2, 1) }, // h:-2,1
-            Hex { resource: None, number: 0, coord: (-2, 2) }, // h:-2,2
-            Hex { resource: Some(Resource::Ore), number: 8, coord: (-1, 2) }, // h:-1,2
-            Hex { resource: Some(Resource::Grain), number: 5, coord: (0, 2) }, // h:0,2
-            Hex { resource: Some(Resource::Grain), number: 2, coord: (1, 1) }, // h:1,1
-            Hex { resource: Some(Resource::Brick), number: 6, coord: (2, 0) }, // h:2,0
-            Hex { resource: Some(Resource::Wool), number: 3, coord: (2, -1) }, // h:2,-1
-            Hex { resource: Some(Resource::Lumber), number: 8, coord: (2, -2) }, // h:2,-2
-            Hex { resource: Some(Resource::Grain), number: 10, coord: (1, -2) }, // h:1,-2
-            Hex { resource: Some(Resource::Grain), number: 5, coord: (0, -1) }, // h:0,-1
-            Hex { resource: Some(Resource::Ore), number: 6, coord: (-1, 0) }, // h:-1,0
-            Hex { resource: Some(Resource::Lumber), number: 3, coord: (-1, 1) }, // h:-1,1
-            Hex { resource: Some(Resource::Lumber), number: 10, coord: (0, 1) }, // h:0,1
-            Hex { resource: Some(Resource::Wool), number: 9, coord: (1, 0) }, // h:1,0
-            Hex { resource: Some(Resource::Ore), number: 4, coord: (1, -1) }, // h:1,-1
-            Hex { resource: Some(Resource::Wool), number: 11, coord: (0, 0) }, // h:0,0
+            Hex {
+                resource: Some(Resource::Brick),
+                number: 9,
+                coord: (0, -2),
+            }, // h:0,-2
+            Hex {
+                resource: Some(Resource::Lumber),
+                number: 12,
+                coord: (-1, -1),
+            }, // h:-1,-1
+            Hex {
+                resource: Some(Resource::Brick),
+                number: 11,
+                coord: (-2, 0),
+            }, // h:-2,0
+            Hex {
+                resource: Some(Resource::Wool),
+                number: 4,
+                coord: (-2, 1),
+            }, // h:-2,1
+            Hex {
+                resource: None,
+                number: 0,
+                coord: (-2, 2),
+            }, // h:-2,2
+            Hex {
+                resource: Some(Resource::Ore),
+                number: 8,
+                coord: (-1, 2),
+            }, // h:-1,2
+            Hex {
+                resource: Some(Resource::Grain),
+                number: 5,
+                coord: (0, 2),
+            }, // h:0,2
+            Hex {
+                resource: Some(Resource::Grain),
+                number: 2,
+                coord: (1, 1),
+            }, // h:1,1
+            Hex {
+                resource: Some(Resource::Brick),
+                number: 6,
+                coord: (2, 0),
+            }, // h:2,0
+            Hex {
+                resource: Some(Resource::Wool),
+                number: 3,
+                coord: (2, -1),
+            }, // h:2,-1
+            Hex {
+                resource: Some(Resource::Lumber),
+                number: 8,
+                coord: (2, -2),
+            }, // h:2,-2
+            Hex {
+                resource: Some(Resource::Grain),
+                number: 10,
+                coord: (1, -2),
+            }, // h:1,-2
+            Hex {
+                resource: Some(Resource::Grain),
+                number: 5,
+                coord: (0, -1),
+            }, // h:0,-1
+            Hex {
+                resource: Some(Resource::Ore),
+                number: 6,
+                coord: (-1, 0),
+            }, // h:-1,0
+            Hex {
+                resource: Some(Resource::Lumber),
+                number: 3,
+                coord: (-1, 1),
+            }, // h:-1,1
+            Hex {
+                resource: Some(Resource::Lumber),
+                number: 10,
+                coord: (0, 1),
+            }, // h:0,1
+            Hex {
+                resource: Some(Resource::Wool),
+                number: 9,
+                coord: (1, 0),
+            }, // h:1,0
+            Hex {
+                resource: Some(Resource::Ore),
+                number: 4,
+                coord: (1, -1),
+            }, // h:1,-1
+            Hex {
+                resource: Some(Resource::Wool),
+                number: 11,
+                coord: (0, 0),
+            }, // h:0,0
         ],
         vertices: vec![
-            Vertex { adjacent_hexes: vec![0], adjacent_vertices: vec![1, 5], adjacent_edges: vec![0, 5], port: Some(Port::Generic) }, // v:0,-2,0
-            Vertex { adjacent_hexes: vec![0, 11], adjacent_vertices: vec![46, 2, 0], adjacent_edges: vec![0, 1, 59], port: None }, // v:1,-3,1
-            Vertex { adjacent_hexes: vec![0, 11, 12], adjacent_vertices: vec![1, 47, 3], adjacent_edges: vec![1, 2, 58], port: None }, // v:0,-1,0
-            Vertex { adjacent_hexes: vec![0, 1, 12], adjacent_vertices: vec![2, 6, 4], adjacent_edges: vec![2, 3, 6], port: None }, // v:0,-2,1
-            Vertex { adjacent_hexes: vec![0, 1], adjacent_vertices: vec![5, 3, 9], adjacent_edges: vec![3, 4, 10], port: None }, // v:-1,-1,0
-            Vertex { adjacent_hexes: vec![0], adjacent_vertices: vec![0, 4], adjacent_edges: vec![4, 5], port: Some(Port::Generic) }, // v:0,-3,1
-            Vertex { adjacent_hexes: vec![1, 12, 13], adjacent_vertices: vec![3, 49, 7], adjacent_edges: vec![6, 7, 62], port: None }, // v:-1,0,0
-            Vertex { adjacent_hexes: vec![1, 2, 13], adjacent_vertices: vec![6, 10, 8], adjacent_edges: vec![7, 8, 11], port: None }, // v:-1,-1,1
-            Vertex { adjacent_hexes: vec![1, 2], adjacent_vertices: vec![9, 7, 13], adjacent_edges: vec![8, 9, 15], port: Some(Port::Resource(Resource::Lumber)) }, // v:-2,0,0
-            Vertex { adjacent_hexes: vec![1], adjacent_vertices: vec![4, 8], adjacent_edges: vec![9, 10], port: Some(Port::Resource(Resource::Lumber)) }, // v:-1,-2,1
-            Vertex { adjacent_hexes: vec![2, 3, 13], adjacent_vertices: vec![7, 14, 11], adjacent_edges: vec![11, 12, 16], port: None }, // v:-2,1,0
-            Vertex { adjacent_hexes: vec![2, 3], adjacent_vertices: vec![10, 17, 12], adjacent_edges: vec![12, 13, 20], port: Some(Port::Generic) }, // v:-2,0,1
-            Vertex { adjacent_hexes: vec![2], adjacent_vertices: vec![13, 11], adjacent_edges: vec![13, 14], port: None }, // v:-3,1,0
-            Vertex { adjacent_hexes: vec![2], adjacent_vertices: vec![8, 12], adjacent_edges: vec![14, 15], port: None }, // v:-2,-1,1
-            Vertex { adjacent_hexes: vec![3, 13, 14], adjacent_vertices: vec![50, 15, 10], adjacent_edges: vec![16, 17, 64], port: None }, // v:-1,0,1
-            Vertex { adjacent_hexes: vec![3, 4, 14], adjacent_vertices: vec![14, 18, 16], adjacent_edges: vec![17, 18, 21], port: None }, // v:-2,2,0
-            Vertex { adjacent_hexes: vec![3, 4], adjacent_vertices: vec![15, 21, 17], adjacent_edges: vec![18, 19, 25], port: None }, // v:-2,1,1
-            Vertex { adjacent_hexes: vec![3], adjacent_vertices: vec![11, 16], adjacent_edges: vec![19, 20], port: Some(Port::Generic) }, // v:-3,2,0
-            Vertex { adjacent_hexes: vec![4, 5, 14], adjacent_vertices: vec![22, 19, 15], adjacent_edges: vec![21, 22, 30], port: None }, // v:-1,1,1
-            Vertex { adjacent_hexes: vec![4, 5], adjacent_vertices: vec![18, 25, 20], adjacent_edges: vec![22, 23, 29], port: None }, // v:-2,3,0
-            Vertex { adjacent_hexes: vec![4], adjacent_vertices: vec![19, 21], adjacent_edges: vec![23, 24], port: Some(Port::Resource(Resource::Ore)) }, // v:-2,2,1
-            Vertex { adjacent_hexes: vec![4], adjacent_vertices: vec![16, 20], adjacent_edges: vec![24, 25], port: Some(Port::Resource(Resource::Ore)) }, // v:-3,3,0
-            Vertex { adjacent_hexes: vec![5, 14, 15], adjacent_vertices: vec![51, 23, 18], adjacent_edges: vec![26, 30, 66], port: None }, // v:-1,2,0
-            Vertex { adjacent_hexes: vec![5, 6, 15], adjacent_vertices: vec![26, 24, 22], adjacent_edges: vec![26, 27, 35], port: None }, // v:0,1,1
-            Vertex { adjacent_hexes: vec![5, 6], adjacent_vertices: vec![23, 29, 25], adjacent_edges: vec![27, 28, 34], port: Some(Port::Resource(Resource::Brick)) }, // v:-1,3,0
-            Vertex { adjacent_hexes: vec![5], adjacent_vertices: vec![24, 19], adjacent_edges: vec![28, 29], port: Some(Port::Resource(Resource::Brick)) }, // v:-1,2,1
-            Vertex { adjacent_hexes: vec![6, 7, 15], adjacent_vertices: vec![33, 27, 23], adjacent_edges: vec![31, 35, 39], port: None }, // v:0,2,0
-            Vertex { adjacent_hexes: vec![6, 7], adjacent_vertices: vec![32, 28, 26], adjacent_edges: vec![31, 32, 38], port: Some(Port::Generic) }, // v:1,1,1
-            Vertex { adjacent_hexes: vec![6], adjacent_vertices: vec![27, 29], adjacent_edges: vec![32, 33], port: None }, // v:0,3,0
-            Vertex { adjacent_hexes: vec![6], adjacent_vertices: vec![28, 24], adjacent_edges: vec![33, 34], port: None }, // v:0,2,1
-            Vertex { adjacent_hexes: vec![7, 8, 16], adjacent_vertices: vec![37, 31, 33], adjacent_edges: vec![36, 40, 44], port: None }, // v:1,1,0
-            Vertex { adjacent_hexes: vec![7, 8], adjacent_vertices: vec![36, 32, 30], adjacent_edges: vec![36, 37, 43], port: None }, // v:2,0,1
-            Vertex { adjacent_hexes: vec![7], adjacent_vertices: vec![31, 27], adjacent_edges: vec![37, 38], port: Some(Port::Generic) }, // v:1,2,0
-            Vertex { adjacent_hexes: vec![7, 15, 16], adjacent_vertices: vec![30, 26, 52], adjacent_edges: vec![39, 40, 67], port: None }, // v:1,0,1
-            Vertex { adjacent_hexes: vec![8, 9], adjacent_vertices: vec![39, 35, 37], adjacent_edges: vec![41, 45, 47], port: None }, // v:2,0,0
-            Vertex { adjacent_hexes: vec![8], adjacent_vertices: vec![36, 34], adjacent_edges: vec![41, 42], port: Some(Port::Resource(Resource::Wool)) }, // v:3,-1,1
-            Vertex { adjacent_hexes: vec![8], adjacent_vertices: vec![35, 31], adjacent_edges: vec![42, 43], port: Some(Port::Resource(Resource::Wool)) }, // v:2,1,0
-            Vertex { adjacent_hexes: vec![8, 9, 16], adjacent_vertices: vec![34, 30, 40], adjacent_edges: vec![44, 45, 48], port: None }, // v:2,-1,1
-            Vertex { adjacent_hexes: vec![9, 10], adjacent_vertices: vec![43, 39, 41], adjacent_edges: vec![46, 50, 52], port: Some(Port::Generic) }, // v:2,-1,0
-            Vertex { adjacent_hexes: vec![9], adjacent_vertices: vec![34, 38], adjacent_edges: vec![46, 47], port: Some(Port::Generic) }, // v:3,-2,1
-            Vertex { adjacent_hexes: vec![9, 16, 17], adjacent_vertices: vec![41, 37, 53], adjacent_edges: vec![48, 49, 70], port: None }, // v:1,0,0
-            Vertex { adjacent_hexes: vec![9, 10, 17], adjacent_vertices: vec![38, 40, 44], adjacent_edges: vec![49, 50, 53], port: None }, // v:2,-2,1
-            Vertex { adjacent_hexes: vec![10], adjacent_vertices: vec![43, 45], adjacent_edges: vec![51, 55], port: None }, // v:2,-2,0
-            Vertex { adjacent_hexes: vec![10], adjacent_vertices: vec![38, 42], adjacent_edges: vec![51, 52], port: None }, // v:3,-3,1
-            Vertex { adjacent_hexes: vec![10, 11, 17], adjacent_vertices: vec![45, 41, 47], adjacent_edges: vec![53, 54, 57], port: None }, // v:1,-1,0
-            Vertex { adjacent_hexes: vec![10, 11], adjacent_vertices: vec![42, 44, 46], adjacent_edges: vec![54, 55, 56], port: Some(Port::Resource(Resource::Grain)) }, // v:2,-3,1
-            Vertex { adjacent_hexes: vec![11], adjacent_vertices: vec![45, 1], adjacent_edges: vec![56, 59], port: Some(Port::Resource(Resource::Grain)) }, // v:1,-2,0
-            Vertex { adjacent_hexes: vec![11, 12, 17], adjacent_vertices: vec![44, 48, 2], adjacent_edges: vec![57, 58, 60], port: None }, // v:1,-2,1
-            Vertex { adjacent_hexes: vec![12, 17, 18], adjacent_vertices: vec![47, 53, 49], adjacent_edges: vec![60, 61, 71], port: None }, // v:0,0,0
-            Vertex { adjacent_hexes: vec![12, 13, 18], adjacent_vertices: vec![48, 50, 6], adjacent_edges: vec![61, 62, 63], port: None }, // v:0,-1,1
-            Vertex { adjacent_hexes: vec![13, 14, 18], adjacent_vertices: vec![49, 51, 14], adjacent_edges: vec![63, 64, 65], port: None }, // v:-1,1,0
-            Vertex { adjacent_hexes: vec![14, 15, 18], adjacent_vertices: vec![52, 22, 50], adjacent_edges: vec![65, 66, 68], port: None }, // v:0,0,1
-            Vertex { adjacent_hexes: vec![15, 16, 18], adjacent_vertices: vec![53, 33, 51], adjacent_edges: vec![67, 68, 69], port: None }, // v:0,1,0
-            Vertex { adjacent_hexes: vec![16, 17, 18], adjacent_vertices: vec![40, 52, 48], adjacent_edges: vec![69, 70, 71], port: None }, // v:1,-1,1
+            Vertex {
+                adjacent_hexes: vec![0],
+                adjacent_vertices: vec![1, 5],
+                adjacent_edges: vec![0, 5],
+                port: Some(Port::Generic),
+            }, // v:0,-2,0
+            Vertex {
+                adjacent_hexes: vec![0, 11],
+                adjacent_vertices: vec![46, 2, 0],
+                adjacent_edges: vec![0, 1, 59],
+                port: None,
+            }, // v:1,-3,1
+            Vertex {
+                adjacent_hexes: vec![0, 11, 12],
+                adjacent_vertices: vec![1, 47, 3],
+                adjacent_edges: vec![1, 2, 58],
+                port: None,
+            }, // v:0,-1,0
+            Vertex {
+                adjacent_hexes: vec![0, 1, 12],
+                adjacent_vertices: vec![2, 6, 4],
+                adjacent_edges: vec![2, 3, 6],
+                port: None,
+            }, // v:0,-2,1
+            Vertex {
+                adjacent_hexes: vec![0, 1],
+                adjacent_vertices: vec![5, 3, 9],
+                adjacent_edges: vec![3, 4, 10],
+                port: None,
+            }, // v:-1,-1,0
+            Vertex {
+                adjacent_hexes: vec![0],
+                adjacent_vertices: vec![0, 4],
+                adjacent_edges: vec![4, 5],
+                port: Some(Port::Generic),
+            }, // v:0,-3,1
+            Vertex {
+                adjacent_hexes: vec![1, 12, 13],
+                adjacent_vertices: vec![3, 49, 7],
+                adjacent_edges: vec![6, 7, 62],
+                port: None,
+            }, // v:-1,0,0
+            Vertex {
+                adjacent_hexes: vec![1, 2, 13],
+                adjacent_vertices: vec![6, 10, 8],
+                adjacent_edges: vec![7, 8, 11],
+                port: None,
+            }, // v:-1,-1,1
+            Vertex {
+                adjacent_hexes: vec![1, 2],
+                adjacent_vertices: vec![9, 7, 13],
+                adjacent_edges: vec![8, 9, 15],
+                port: Some(Port::Resource(Resource::Lumber)),
+            }, // v:-2,0,0
+            Vertex {
+                adjacent_hexes: vec![1],
+                adjacent_vertices: vec![4, 8],
+                adjacent_edges: vec![9, 10],
+                port: Some(Port::Resource(Resource::Lumber)),
+            }, // v:-1,-2,1
+            Vertex {
+                adjacent_hexes: vec![2, 3, 13],
+                adjacent_vertices: vec![7, 14, 11],
+                adjacent_edges: vec![11, 12, 16],
+                port: None,
+            }, // v:-2,1,0
+            Vertex {
+                adjacent_hexes: vec![2, 3],
+                adjacent_vertices: vec![10, 17, 12],
+                adjacent_edges: vec![12, 13, 20],
+                port: Some(Port::Generic),
+            }, // v:-2,0,1
+            Vertex {
+                adjacent_hexes: vec![2],
+                adjacent_vertices: vec![13, 11],
+                adjacent_edges: vec![13, 14],
+                port: None,
+            }, // v:-3,1,0
+            Vertex {
+                adjacent_hexes: vec![2],
+                adjacent_vertices: vec![8, 12],
+                adjacent_edges: vec![14, 15],
+                port: None,
+            }, // v:-2,-1,1
+            Vertex {
+                adjacent_hexes: vec![3, 13, 14],
+                adjacent_vertices: vec![50, 15, 10],
+                adjacent_edges: vec![16, 17, 64],
+                port: None,
+            }, // v:-1,0,1
+            Vertex {
+                adjacent_hexes: vec![3, 4, 14],
+                adjacent_vertices: vec![14, 18, 16],
+                adjacent_edges: vec![17, 18, 21],
+                port: None,
+            }, // v:-2,2,0
+            Vertex {
+                adjacent_hexes: vec![3, 4],
+                adjacent_vertices: vec![15, 21, 17],
+                adjacent_edges: vec![18, 19, 25],
+                port: None,
+            }, // v:-2,1,1
+            Vertex {
+                adjacent_hexes: vec![3],
+                adjacent_vertices: vec![11, 16],
+                adjacent_edges: vec![19, 20],
+                port: Some(Port::Generic),
+            }, // v:-3,2,0
+            Vertex {
+                adjacent_hexes: vec![4, 5, 14],
+                adjacent_vertices: vec![22, 19, 15],
+                adjacent_edges: vec![21, 22, 30],
+                port: None,
+            }, // v:-1,1,1
+            Vertex {
+                adjacent_hexes: vec![4, 5],
+                adjacent_vertices: vec![18, 25, 20],
+                adjacent_edges: vec![22, 23, 29],
+                port: None,
+            }, // v:-2,3,0
+            Vertex {
+                adjacent_hexes: vec![4],
+                adjacent_vertices: vec![19, 21],
+                adjacent_edges: vec![23, 24],
+                port: Some(Port::Resource(Resource::Ore)),
+            }, // v:-2,2,1
+            Vertex {
+                adjacent_hexes: vec![4],
+                adjacent_vertices: vec![16, 20],
+                adjacent_edges: vec![24, 25],
+                port: Some(Port::Resource(Resource::Ore)),
+            }, // v:-3,3,0
+            Vertex {
+                adjacent_hexes: vec![5, 14, 15],
+                adjacent_vertices: vec![51, 23, 18],
+                adjacent_edges: vec![26, 30, 66],
+                port: None,
+            }, // v:-1,2,0
+            Vertex {
+                adjacent_hexes: vec![5, 6, 15],
+                adjacent_vertices: vec![26, 24, 22],
+                adjacent_edges: vec![26, 27, 35],
+                port: None,
+            }, // v:0,1,1
+            Vertex {
+                adjacent_hexes: vec![5, 6],
+                adjacent_vertices: vec![23, 29, 25],
+                adjacent_edges: vec![27, 28, 34],
+                port: Some(Port::Resource(Resource::Brick)),
+            }, // v:-1,3,0
+            Vertex {
+                adjacent_hexes: vec![5],
+                adjacent_vertices: vec![24, 19],
+                adjacent_edges: vec![28, 29],
+                port: Some(Port::Resource(Resource::Brick)),
+            }, // v:-1,2,1
+            Vertex {
+                adjacent_hexes: vec![6, 7, 15],
+                adjacent_vertices: vec![33, 27, 23],
+                adjacent_edges: vec![31, 35, 39],
+                port: None,
+            }, // v:0,2,0
+            Vertex {
+                adjacent_hexes: vec![6, 7],
+                adjacent_vertices: vec![32, 28, 26],
+                adjacent_edges: vec![31, 32, 38],
+                port: Some(Port::Generic),
+            }, // v:1,1,1
+            Vertex {
+                adjacent_hexes: vec![6],
+                adjacent_vertices: vec![27, 29],
+                adjacent_edges: vec![32, 33],
+                port: None,
+            }, // v:0,3,0
+            Vertex {
+                adjacent_hexes: vec![6],
+                adjacent_vertices: vec![28, 24],
+                adjacent_edges: vec![33, 34],
+                port: None,
+            }, // v:0,2,1
+            Vertex {
+                adjacent_hexes: vec![7, 8, 16],
+                adjacent_vertices: vec![37, 31, 33],
+                adjacent_edges: vec![36, 40, 44],
+                port: None,
+            }, // v:1,1,0
+            Vertex {
+                adjacent_hexes: vec![7, 8],
+                adjacent_vertices: vec![36, 32, 30],
+                adjacent_edges: vec![36, 37, 43],
+                port: None,
+            }, // v:2,0,1
+            Vertex {
+                adjacent_hexes: vec![7],
+                adjacent_vertices: vec![31, 27],
+                adjacent_edges: vec![37, 38],
+                port: Some(Port::Generic),
+            }, // v:1,2,0
+            Vertex {
+                adjacent_hexes: vec![7, 15, 16],
+                adjacent_vertices: vec![30, 26, 52],
+                adjacent_edges: vec![39, 40, 67],
+                port: None,
+            }, // v:1,0,1
+            Vertex {
+                adjacent_hexes: vec![8, 9],
+                adjacent_vertices: vec![39, 35, 37],
+                adjacent_edges: vec![41, 45, 47],
+                port: None,
+            }, // v:2,0,0
+            Vertex {
+                adjacent_hexes: vec![8],
+                adjacent_vertices: vec![36, 34],
+                adjacent_edges: vec![41, 42],
+                port: Some(Port::Resource(Resource::Wool)),
+            }, // v:3,-1,1
+            Vertex {
+                adjacent_hexes: vec![8],
+                adjacent_vertices: vec![35, 31],
+                adjacent_edges: vec![42, 43],
+                port: Some(Port::Resource(Resource::Wool)),
+            }, // v:2,1,0
+            Vertex {
+                adjacent_hexes: vec![8, 9, 16],
+                adjacent_vertices: vec![34, 30, 40],
+                adjacent_edges: vec![44, 45, 48],
+                port: None,
+            }, // v:2,-1,1
+            Vertex {
+                adjacent_hexes: vec![9, 10],
+                adjacent_vertices: vec![43, 39, 41],
+                adjacent_edges: vec![46, 50, 52],
+                port: Some(Port::Generic),
+            }, // v:2,-1,0
+            Vertex {
+                adjacent_hexes: vec![9],
+                adjacent_vertices: vec![34, 38],
+                adjacent_edges: vec![46, 47],
+                port: Some(Port::Generic),
+            }, // v:3,-2,1
+            Vertex {
+                adjacent_hexes: vec![9, 16, 17],
+                adjacent_vertices: vec![41, 37, 53],
+                adjacent_edges: vec![48, 49, 70],
+                port: None,
+            }, // v:1,0,0
+            Vertex {
+                adjacent_hexes: vec![9, 10, 17],
+                adjacent_vertices: vec![38, 40, 44],
+                adjacent_edges: vec![49, 50, 53],
+                port: None,
+            }, // v:2,-2,1
+            Vertex {
+                adjacent_hexes: vec![10],
+                adjacent_vertices: vec![43, 45],
+                adjacent_edges: vec![51, 55],
+                port: None,
+            }, // v:2,-2,0
+            Vertex {
+                adjacent_hexes: vec![10],
+                adjacent_vertices: vec![38, 42],
+                adjacent_edges: vec![51, 52],
+                port: None,
+            }, // v:3,-3,1
+            Vertex {
+                adjacent_hexes: vec![10, 11, 17],
+                adjacent_vertices: vec![45, 41, 47],
+                adjacent_edges: vec![53, 54, 57],
+                port: None,
+            }, // v:1,-1,0
+            Vertex {
+                adjacent_hexes: vec![10, 11],
+                adjacent_vertices: vec![42, 44, 46],
+                adjacent_edges: vec![54, 55, 56],
+                port: Some(Port::Resource(Resource::Grain)),
+            }, // v:2,-3,1
+            Vertex {
+                adjacent_hexes: vec![11],
+                adjacent_vertices: vec![45, 1],
+                adjacent_edges: vec![56, 59],
+                port: Some(Port::Resource(Resource::Grain)),
+            }, // v:1,-2,0
+            Vertex {
+                adjacent_hexes: vec![11, 12, 17],
+                adjacent_vertices: vec![44, 48, 2],
+                adjacent_edges: vec![57, 58, 60],
+                port: None,
+            }, // v:1,-2,1
+            Vertex {
+                adjacent_hexes: vec![12, 17, 18],
+                adjacent_vertices: vec![47, 53, 49],
+                adjacent_edges: vec![60, 61, 71],
+                port: None,
+            }, // v:0,0,0
+            Vertex {
+                adjacent_hexes: vec![12, 13, 18],
+                adjacent_vertices: vec![48, 50, 6],
+                adjacent_edges: vec![61, 62, 63],
+                port: None,
+            }, // v:0,-1,1
+            Vertex {
+                adjacent_hexes: vec![13, 14, 18],
+                adjacent_vertices: vec![49, 51, 14],
+                adjacent_edges: vec![63, 64, 65],
+                port: None,
+            }, // v:-1,1,0
+            Vertex {
+                adjacent_hexes: vec![14, 15, 18],
+                adjacent_vertices: vec![52, 22, 50],
+                adjacent_edges: vec![65, 66, 68],
+                port: None,
+            }, // v:0,0,1
+            Vertex {
+                adjacent_hexes: vec![15, 16, 18],
+                adjacent_vertices: vec![53, 33, 51],
+                adjacent_edges: vec![67, 68, 69],
+                port: None,
+            }, // v:0,1,0
+            Vertex {
+                adjacent_hexes: vec![16, 17, 18],
+                adjacent_vertices: vec![40, 52, 48],
+                adjacent_edges: vec![69, 70, 71],
+                port: None,
+            }, // v:1,-1,1
         ],
         edges: vec![
-            Edge { vertices: [1, 0], adjacent_hexes: vec![0] }, // e:1,-3,2
-            Edge { vertices: [2, 1], adjacent_hexes: vec![0, 11] }, // e:1,-2,1
-            Edge { vertices: [3, 2], adjacent_hexes: vec![0, 12] }, // e:0,-1,0
-            Edge { vertices: [3, 4], adjacent_hexes: vec![0, 1] }, // e:0,-2,2
-            Edge { vertices: [4, 5], adjacent_hexes: vec![0] }, // e:0,-2,1
-            Edge { vertices: [5, 0], adjacent_hexes: vec![0] }, // e:0,-2,0
-            Edge { vertices: [6, 3], adjacent_hexes: vec![1, 12] }, // e:0,-1,1
-            Edge { vertices: [7, 6], adjacent_hexes: vec![1, 13] }, // e:-1,0,0
-            Edge { vertices: [7, 8], adjacent_hexes: vec![1, 2] }, // e:-1,-1,2
-            Edge { vertices: [8, 9], adjacent_hexes: vec![1] }, // e:-1,-1,1
-            Edge { vertices: [9, 4], adjacent_hexes: vec![1] }, // e:-1,-1,0
-            Edge { vertices: [10, 7], adjacent_hexes: vec![2, 13] }, // e:-1,0,1
-            Edge { vertices: [11, 10], adjacent_hexes: vec![2, 3] }, // e:-2,1,0
-            Edge { vertices: [11, 12], adjacent_hexes: vec![2] }, // e:-2,0,2
-            Edge { vertices: [12, 13], adjacent_hexes: vec![2] }, // e:-2,0,1
-            Edge { vertices: [13, 8], adjacent_hexes: vec![2] }, // e:-2,0,0
-            Edge { vertices: [14, 10], adjacent_hexes: vec![3, 13] }, // e:-1,0,2
-            Edge { vertices: [15, 14], adjacent_hexes: vec![3, 14] }, // e:-1,1,1
-            Edge { vertices: [16, 15], adjacent_hexes: vec![3, 4] }, // e:-2,2,0
-            Edge { vertices: [16, 17], adjacent_hexes: vec![3] }, // e:-2,1,2
-            Edge { vertices: [17, 11], adjacent_hexes: vec![3] }, // e:-2,1,1
-            Edge { vertices: [18, 15], adjacent_hexes: vec![4, 14] }, // e:-1,1,2
-            Edge { vertices: [19, 18], adjacent_hexes: vec![4, 5] }, // e:-1,2,1
-            Edge { vertices: [20, 19], adjacent_hexes: vec![4] }, // e:-2,3,0
-            Edge { vertices: [20, 21], adjacent_hexes: vec![4] }, // e:-2,2,2
-            Edge { vertices: [21, 16], adjacent_hexes: vec![4] }, // e:-2,2,1
-            Edge { vertices: [23, 22], adjacent_hexes: vec![5, 15] }, // e:0,1,2
-            Edge { vertices: [24, 23], adjacent_hexes: vec![5, 6] }, // e:0,2,1
-            Edge { vertices: [25, 24], adjacent_hexes: vec![5] }, // e:-1,3,0
-            Edge { vertices: [25, 19], adjacent_hexes: vec![5] }, // e:-1,2,2
-            Edge { vertices: [18, 22], adjacent_hexes: vec![5, 14] }, // e:-1,2,0
-            Edge { vertices: [27, 26], adjacent_hexes: vec![6, 7] }, // e:1,1,2
-            Edge { vertices: [28, 27], adjacent_hexes: vec![6] }, // e:1,2,1
-            Edge { vertices: [29, 28], adjacent_hexes: vec![6] }, // e:0,3,0
-            Edge { vertices: [29, 24], adjacent_hexes: vec![6] }, // e:0,2,2
-            Edge { vertices: [23, 26], adjacent_hexes: vec![6, 15] }, // e:0,2,0
-            Edge { vertices: [31, 30], adjacent_hexes: vec![7, 8] }, // e:2,0,2
-            Edge { vertices: [32, 31], adjacent_hexes: vec![7] }, // e:2,1,1
-            Edge { vertices: [27, 32], adjacent_hexes: vec![7] }, // e:1,2,0
-            Edge { vertices: [26, 33], adjacent_hexes: vec![7, 15] }, // e:1,1,1
-            Edge { vertices: [33, 30], adjacent_hexes: vec![7, 16] }, // e:1,1,0
-            Edge { vertices: [35, 34], adjacent_hexes: vec![8] }, // e:3,-1,2
-            Edge { vertices: [36, 35], adjacent_hexes: vec![8] }, // e:3,0,1
-            Edge { vertices: [31, 36], adjacent_hexes: vec![8] }, // e:2,1,0
-            Edge { vertices: [30, 37], adjacent_hexes: vec![8, 16] }, // e:2,0,1
-            Edge { vertices: [37, 34], adjacent_hexes: vec![8, 9] }, // e:2,0,0
-            Edge { vertices: [39, 38], adjacent_hexes: vec![9] }, // e:3,-2,2
-            Edge { vertices: [34, 39], adjacent_hexes: vec![9] }, // e:3,-1,1
-            Edge { vertices: [37, 40], adjacent_hexes: vec![9, 16] }, // e:2,-1,2
-            Edge { vertices: [40, 41], adjacent_hexes: vec![9, 17] }, // e:2,-1,1
-            Edge { vertices: [41, 38], adjacent_hexes: vec![9, 10] }, // e:2,-1,0
-            Edge { vertices: [43, 42], adjacent_hexes: vec![10] }, // e:3,-3,2
-            Edge { vertices: [38, 43], adjacent_hexes: vec![10] }, // e:3,-2,1
-            Edge { vertices: [41, 44], adjacent_hexes: vec![10, 17] }, // e:2,-2,2
-            Edge { vertices: [44, 45], adjacent_hexes: vec![10, 11] }, // e:2,-2,1
-            Edge { vertices: [45, 42], adjacent_hexes: vec![10] }, // e:2,-2,0
-            Edge { vertices: [45, 46], adjacent_hexes: vec![11] }, // e:2,-3,2
-            Edge { vertices: [47, 44], adjacent_hexes: vec![11, 17] }, // e:1,-1,0
-            Edge { vertices: [47, 2], adjacent_hexes: vec![11, 12] }, // e:1,-2,2
-            Edge { vertices: [1, 46], adjacent_hexes: vec![11] }, // e:1,-2,0
-            Edge { vertices: [48, 47], adjacent_hexes: vec![12, 17] }, // e:1,-1,1
-            Edge { vertices: [49, 48], adjacent_hexes: vec![12, 18] }, // e:0,0,0
-            Edge { vertices: [49, 6], adjacent_hexes: vec![12, 13] }, // e:0,-1,2
-            Edge { vertices: [50, 49], adjacent_hexes: vec![13, 18] }, // e:0,0,1
-            Edge { vertices: [14, 50], adjacent_hexes: vec![13, 14] }, // e:-1,1,0
-            Edge { vertices: [51, 50], adjacent_hexes: vec![14, 18] }, // e:0,0,2
-            Edge { vertices: [22, 51], adjacent_hexes: vec![14, 15] }, // e:0,1,1
-            Edge { vertices: [33, 52], adjacent_hexes: vec![15, 16] }, // e:1,0,2
-            Edge { vertices: [51, 52], adjacent_hexes: vec![15, 18] }, // e:0,1,0
-            Edge { vertices: [52, 53], adjacent_hexes: vec![16, 18] }, // e:1,0,1
-            Edge { vertices: [53, 40], adjacent_hexes: vec![16, 17] }, // e:1,0,0
-            Edge { vertices: [53, 48], adjacent_hexes: vec![17, 18] }, // e:1,-1,2
+            Edge {
+                vertices: [1, 0],
+                adjacent_hexes: vec![0],
+            }, // e:1,-3,2
+            Edge {
+                vertices: [2, 1],
+                adjacent_hexes: vec![0, 11],
+            }, // e:1,-2,1
+            Edge {
+                vertices: [3, 2],
+                adjacent_hexes: vec![0, 12],
+            }, // e:0,-1,0
+            Edge {
+                vertices: [3, 4],
+                adjacent_hexes: vec![0, 1],
+            }, // e:0,-2,2
+            Edge {
+                vertices: [4, 5],
+                adjacent_hexes: vec![0],
+            }, // e:0,-2,1
+            Edge {
+                vertices: [5, 0],
+                adjacent_hexes: vec![0],
+            }, // e:0,-2,0
+            Edge {
+                vertices: [6, 3],
+                adjacent_hexes: vec![1, 12],
+            }, // e:0,-1,1
+            Edge {
+                vertices: [7, 6],
+                adjacent_hexes: vec![1, 13],
+            }, // e:-1,0,0
+            Edge {
+                vertices: [7, 8],
+                adjacent_hexes: vec![1, 2],
+            }, // e:-1,-1,2
+            Edge {
+                vertices: [8, 9],
+                adjacent_hexes: vec![1],
+            }, // e:-1,-1,1
+            Edge {
+                vertices: [9, 4],
+                adjacent_hexes: vec![1],
+            }, // e:-1,-1,0
+            Edge {
+                vertices: [10, 7],
+                adjacent_hexes: vec![2, 13],
+            }, // e:-1,0,1
+            Edge {
+                vertices: [11, 10],
+                adjacent_hexes: vec![2, 3],
+            }, // e:-2,1,0
+            Edge {
+                vertices: [11, 12],
+                adjacent_hexes: vec![2],
+            }, // e:-2,0,2
+            Edge {
+                vertices: [12, 13],
+                adjacent_hexes: vec![2],
+            }, // e:-2,0,1
+            Edge {
+                vertices: [13, 8],
+                adjacent_hexes: vec![2],
+            }, // e:-2,0,0
+            Edge {
+                vertices: [14, 10],
+                adjacent_hexes: vec![3, 13],
+            }, // e:-1,0,2
+            Edge {
+                vertices: [15, 14],
+                adjacent_hexes: vec![3, 14],
+            }, // e:-1,1,1
+            Edge {
+                vertices: [16, 15],
+                adjacent_hexes: vec![3, 4],
+            }, // e:-2,2,0
+            Edge {
+                vertices: [16, 17],
+                adjacent_hexes: vec![3],
+            }, // e:-2,1,2
+            Edge {
+                vertices: [17, 11],
+                adjacent_hexes: vec![3],
+            }, // e:-2,1,1
+            Edge {
+                vertices: [18, 15],
+                adjacent_hexes: vec![4, 14],
+            }, // e:-1,1,2
+            Edge {
+                vertices: [19, 18],
+                adjacent_hexes: vec![4, 5],
+            }, // e:-1,2,1
+            Edge {
+                vertices: [20, 19],
+                adjacent_hexes: vec![4],
+            }, // e:-2,3,0
+            Edge {
+                vertices: [20, 21],
+                adjacent_hexes: vec![4],
+            }, // e:-2,2,2
+            Edge {
+                vertices: [21, 16],
+                adjacent_hexes: vec![4],
+            }, // e:-2,2,1
+            Edge {
+                vertices: [23, 22],
+                adjacent_hexes: vec![5, 15],
+            }, // e:0,1,2
+            Edge {
+                vertices: [24, 23],
+                adjacent_hexes: vec![5, 6],
+            }, // e:0,2,1
+            Edge {
+                vertices: [25, 24],
+                adjacent_hexes: vec![5],
+            }, // e:-1,3,0
+            Edge {
+                vertices: [25, 19],
+                adjacent_hexes: vec![5],
+            }, // e:-1,2,2
+            Edge {
+                vertices: [18, 22],
+                adjacent_hexes: vec![5, 14],
+            }, // e:-1,2,0
+            Edge {
+                vertices: [27, 26],
+                adjacent_hexes: vec![6, 7],
+            }, // e:1,1,2
+            Edge {
+                vertices: [28, 27],
+                adjacent_hexes: vec![6],
+            }, // e:1,2,1
+            Edge {
+                vertices: [29, 28],
+                adjacent_hexes: vec![6],
+            }, // e:0,3,0
+            Edge {
+                vertices: [29, 24],
+                adjacent_hexes: vec![6],
+            }, // e:0,2,2
+            Edge {
+                vertices: [23, 26],
+                adjacent_hexes: vec![6, 15],
+            }, // e:0,2,0
+            Edge {
+                vertices: [31, 30],
+                adjacent_hexes: vec![7, 8],
+            }, // e:2,0,2
+            Edge {
+                vertices: [32, 31],
+                adjacent_hexes: vec![7],
+            }, // e:2,1,1
+            Edge {
+                vertices: [27, 32],
+                adjacent_hexes: vec![7],
+            }, // e:1,2,0
+            Edge {
+                vertices: [26, 33],
+                adjacent_hexes: vec![7, 15],
+            }, // e:1,1,1
+            Edge {
+                vertices: [33, 30],
+                adjacent_hexes: vec![7, 16],
+            }, // e:1,1,0
+            Edge {
+                vertices: [35, 34],
+                adjacent_hexes: vec![8],
+            }, // e:3,-1,2
+            Edge {
+                vertices: [36, 35],
+                adjacent_hexes: vec![8],
+            }, // e:3,0,1
+            Edge {
+                vertices: [31, 36],
+                adjacent_hexes: vec![8],
+            }, // e:2,1,0
+            Edge {
+                vertices: [30, 37],
+                adjacent_hexes: vec![8, 16],
+            }, // e:2,0,1
+            Edge {
+                vertices: [37, 34],
+                adjacent_hexes: vec![8, 9],
+            }, // e:2,0,0
+            Edge {
+                vertices: [39, 38],
+                adjacent_hexes: vec![9],
+            }, // e:3,-2,2
+            Edge {
+                vertices: [34, 39],
+                adjacent_hexes: vec![9],
+            }, // e:3,-1,1
+            Edge {
+                vertices: [37, 40],
+                adjacent_hexes: vec![9, 16],
+            }, // e:2,-1,2
+            Edge {
+                vertices: [40, 41],
+                adjacent_hexes: vec![9, 17],
+            }, // e:2,-1,1
+            Edge {
+                vertices: [41, 38],
+                adjacent_hexes: vec![9, 10],
+            }, // e:2,-1,0
+            Edge {
+                vertices: [43, 42],
+                adjacent_hexes: vec![10],
+            }, // e:3,-3,2
+            Edge {
+                vertices: [38, 43],
+                adjacent_hexes: vec![10],
+            }, // e:3,-2,1
+            Edge {
+                vertices: [41, 44],
+                adjacent_hexes: vec![10, 17],
+            }, // e:2,-2,2
+            Edge {
+                vertices: [44, 45],
+                adjacent_hexes: vec![10, 11],
+            }, // e:2,-2,1
+            Edge {
+                vertices: [45, 42],
+                adjacent_hexes: vec![10],
+            }, // e:2,-2,0
+            Edge {
+                vertices: [45, 46],
+                adjacent_hexes: vec![11],
+            }, // e:2,-3,2
+            Edge {
+                vertices: [47, 44],
+                adjacent_hexes: vec![11, 17],
+            }, // e:1,-1,0
+            Edge {
+                vertices: [47, 2],
+                adjacent_hexes: vec![11, 12],
+            }, // e:1,-2,2
+            Edge {
+                vertices: [1, 46],
+                adjacent_hexes: vec![11],
+            }, // e:1,-2,0
+            Edge {
+                vertices: [48, 47],
+                adjacent_hexes: vec![12, 17],
+            }, // e:1,-1,1
+            Edge {
+                vertices: [49, 48],
+                adjacent_hexes: vec![12, 18],
+            }, // e:0,0,0
+            Edge {
+                vertices: [49, 6],
+                adjacent_hexes: vec![12, 13],
+            }, // e:0,-1,2
+            Edge {
+                vertices: [50, 49],
+                adjacent_hexes: vec![13, 18],
+            }, // e:0,0,1
+            Edge {
+                vertices: [14, 50],
+                adjacent_hexes: vec![13, 14],
+            }, // e:-1,1,0
+            Edge {
+                vertices: [51, 50],
+                adjacent_hexes: vec![14, 18],
+            }, // e:0,0,2
+            Edge {
+                vertices: [22, 51],
+                adjacent_hexes: vec![14, 15],
+            }, // e:0,1,1
+            Edge {
+                vertices: [33, 52],
+                adjacent_hexes: vec![15, 16],
+            }, // e:1,0,2
+            Edge {
+                vertices: [51, 52],
+                adjacent_hexes: vec![15, 18],
+            }, // e:0,1,0
+            Edge {
+                vertices: [52, 53],
+                adjacent_hexes: vec![16, 18],
+            }, // e:1,0,1
+            Edge {
+                vertices: [53, 40],
+                adjacent_hexes: vec![16, 17],
+            }, // e:1,0,0
+            Edge {
+                vertices: [53, 48],
+                adjacent_hexes: vec![17, 18],
+            }, // e:1,-1,2
         ],
     }
 }
@@ -250,9 +812,21 @@ fn road4311_d14_base_with_dice(mref: bool) -> GameState {
             StochasticBelief::from_public_history(
                 4,
                 &[
-                    PublicRollObservation { ordinal: 0, actor: 0, total: 7 },
-                    PublicRollObservation { ordinal: 1, actor: 1, total: 10 },
-                    PublicRollObservation { ordinal: 2, actor: 2, total: 10 },
+                    PublicRollObservation {
+                        ordinal: 0,
+                        actor: 0,
+                        total: 7,
+                    },
+                    PublicRollObservation {
+                        ordinal: 1,
+                        actor: 1,
+                        total: 10,
+                    },
+                    PublicRollObservation {
+                        ordinal: 2,
+                        actor: 2,
+                        total: 10,
+                    },
                 ],
                 &DiceHistoryProvenance::CompleteFromFirstGameplayRoll,
                 0,
@@ -341,10 +915,9 @@ fn road4311_d14_starved_floor_reproduces_live_values() {
     // that mistake structurally impossible.
     let actor = particles[0].state.actor() as usize;
     assert_eq!(actor, 2, "P2 (Heida#8858) is the acting/root player");
-    let report = search_weighted_belief_maxn_iterative_timed_excluding(
-        &particles, 5, 10, 60, 0, 0, &[],
-    )
-    .unwrap();
+    let report =
+        search_weighted_belief_maxn_iterative_timed_excluding(&particles, 5, 10, 60, 0, 0, &[])
+            .unwrap();
     assert_eq!(report.depth, 0);
     assert_eq!(report.chosen, Some(Action::BuyDevelopment));
     let value = |action: &Action| {
@@ -382,7 +955,8 @@ fn road4311_d14_starved_floor_reproduces_live_values() {
 fn probe_m2_admission_d14() {
     use crate::StrategyPolicy;
     use crate::depth::{
-        BeliefDepthConfig, search_weighted_belief_maxn_iterative_timed_excluding_with_strategy_policy,
+        BeliefDepthConfig,
+        search_weighted_belief_maxn_iterative_timed_excluding_with_strategy_policy,
     };
     fn m2_entry(particles: &[BeliefParticle]) -> crate::depth::BeliefDepthResult {
         search_weighted_belief_maxn_iterative_timed_excluding_with_strategy_policy(
@@ -498,10 +1072,14 @@ fn probe_d14_counter_suppressed_continuation() {
     for _ in 0..3 {
         let legal = state.legal_actions();
         assert!(
-            legal.iter().all(|action| !matches!(action, Action::CounterTrade { .. })),
+            legal
+                .iter()
+                .all(|action| !matches!(action, Action::CounterTrade { .. })),
             "counters suppressed: {legal:?}"
         );
-        state.apply(&Action::RespondTrade { accept: false }).unwrap();
+        state
+            .apply(&Action::RespondTrade { accept: false })
+            .unwrap();
         if !matches!(state.phase, colonist_catan_core::Phase::TradeResponses) {
             break;
         }
@@ -594,7 +1172,9 @@ fn probe_d14_reject_continuation() {
         let legal = state.legal_actions();
         eprintln!("responder P{actor}: {legal:?}");
         assert!(legal.contains(&Action::RespondTrade { accept: false }));
-        state.apply(&Action::RespondTrade { accept: false }).unwrap();
+        state
+            .apply(&Action::RespondTrade { accept: false })
+            .unwrap();
         if !matches!(state.phase, colonist_catan_core::Phase::TradeResponses) {
             break;
         }
@@ -632,13 +1212,8 @@ fn probe_d14_reject_continuation() {
 fn probe_d14_offer_availability_subsets() {
     let base = road4311_d14_base();
     let worlds = road4311_d14_worlds();
-    let has_payer = |p0: [u8; 5], p1: [u8; 5], p3: [u8; 5]| {
-        p0[4] >= 2 || p1[4] >= 2 || p3[4] >= 2
-    };
-    for (tag, select) in [
-        ("no-payer", false),
-        ("payer", true),
-    ] {
+    let has_payer = |p0: [u8; 5], p1: [u8; 5], p3: [u8; 5]| p0[4] >= 2 || p1[4] >= 2 || p3[4] >= 2;
+    for (tag, select) in [("no-payer", false), ("payer", true)] {
         let particles: Vec<BeliefParticle> = worlds
             .iter()
             .filter(|(_, p0, p1, p3)| has_payer(*p0, *p1, *p3) == select)
@@ -647,12 +1222,21 @@ fn probe_d14_offer_availability_subsets() {
                 state.players[0].resources = *p0;
                 state.players[1].resources = *p1;
                 state.players[3].resources = *p3;
-                BeliefParticle { state, weight: *weight }
+                BeliefParticle {
+                    state,
+                    weight: *weight,
+                }
             })
             .collect();
         eprintln!("subset {tag}: {} particles", particles.len());
         let report = search_weighted_belief_maxn_iterative_timed_excluding(
-            &particles, 5, 10, 8_000, 0, 0, &[],
+            &particles,
+            5,
+            10,
+            8_000,
+            0,
+            0,
+            &[],
         )
         .unwrap();
         let actor = particles[0].state.actor() as usize;
@@ -782,7 +1366,13 @@ fn diagnostic_road4311_d14_timed_slices() {
     let particles = road4311_d14_particles();
     for budget_ms in [600u32, 2_000u32] {
         let report = search_weighted_belief_maxn_iterative_timed_excluding(
-            &particles, 5, 10, 8_000, budget_ms, 0, &[],
+            &particles,
+            5,
+            10,
+            8_000,
+            budget_ms,
+            0,
+            &[],
         )
         .unwrap();
         eprintln!(
@@ -846,9 +1436,7 @@ fn diagnostic_road4311_d14_replay_variants() {
         for candidate in report.actions.iter().take(12) {
             eprintln!(
                 "    action={:?} value={:.4} lcb={:.4}",
-                candidate.action,
-                candidate.value[actor],
-                candidate.lower_confidence_value[actor]
+                candidate.action, candidate.value[actor], candidate.lower_confidence_value[actor]
             );
         }
         let end_rank = report

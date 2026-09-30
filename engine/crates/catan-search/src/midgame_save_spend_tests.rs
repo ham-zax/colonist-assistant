@@ -98,10 +98,12 @@ fn two_player_city_now_counterexample_matches_reference() {
     let mut state = main_phase_state(3, 2);
     set_hand(&mut state, 0, [0, 0, 0, 2, 3]);
     set_hand(&mut state, 1, [0, 0, 0, 0, 0]);
-    assert!(state
-        .legal_actions()
-        .iter()
-        .any(|action| matches!(action, Action::BuildCity { .. })));
+    assert!(
+        state
+            .legal_actions()
+            .iter()
+            .any(|action| matches!(action, Action::BuildCity { .. }))
+    );
     let particles = single_particle(state);
     let live = production_entry(&particles);
     let deep = deep_reference(&particles);
@@ -221,7 +223,11 @@ fn race_pair(seed: u64, mask_own_trades: bool) -> Option<(GameState, GameState, 
             let endpoints = base.board.edges[usize::from(*edge)].vertices;
             let crowded = endpoints
                 .iter()
-                .flat_map(|v| base.board.vertices[usize::from(*v)].adjacent_vertices.iter())
+                .flat_map(|v| {
+                    base.board.vertices[usize::from(*v)]
+                        .adjacent_vertices
+                        .iter()
+                })
                 .filter(|v| base.buildings[usize::from(**v)].is_some())
                 .count();
             (crowded, *edge)
@@ -253,9 +259,10 @@ fn race_pair(seed: u64, mask_own_trades: bool) -> Option<(GameState, GameState, 
         let mut trial = base.clone();
         trial.current_player = 1;
         trial.roads[usize::from(incident[0])] = Some(1);
-        let takes = trial.legal_actions().iter().any(|action| {
-            matches!(action, Action::BuildSettlement { vertex: v } if *v == vertex)
-        });
+        let takes = trial
+            .legal_actions()
+            .iter()
+            .any(|action| matches!(action, Action::BuildSettlement { vertex: v } if *v == vertex));
         if !takes {
             continue;
         }
@@ -343,8 +350,16 @@ fn race_site_loss_priced_into_endturn() {
 /// Timed production entry mirror for wall-clock checks.
 #[allow(dead_code)]
 fn timed_entry(particles: &[BeliefParticle], budget_ms: u32) -> BeliefDepthResult {
-    search_weighted_belief_maxn_iterative_timed_excluding(particles, 3, 12, 1_500, budget_ms, 0, &[])
-        .unwrap()
+    search_weighted_belief_maxn_iterative_timed_excluding(
+        particles,
+        3,
+        12,
+        1_500,
+        budget_ms,
+        0,
+        &[],
+    )
+    .unwrap()
 }
 
 /// Retained diagnostic (ignored): race pair with our domestic trades enabled
@@ -356,8 +371,7 @@ fn timed_entry(particles: &[BeliefParticle], budget_ms: u32) -> BeliefDepthResul
 #[ignore]
 fn diagnostic_race_trades_enabled_and_timed() {
     for mask in [true, false] {
-        let (no_race, race, target) =
-            race_pair(15, mask).expect("seed 15 race pair");
+        let (no_race, race, target) = race_pair(15, mask).expect("seed 15 race pair");
         let end_value = |report: &BeliefDepthResult| {
             report
                 .actions
@@ -398,7 +412,8 @@ fn diagnostic_race_trades_enabled_and_timed() {
 fn probe_m2_admission_audit() {
     use crate::StrategyPolicy;
     use crate::depth::{
-        BeliefDepthConfig, search_weighted_belief_maxn_iterative_timed_excluding_with_strategy_policy,
+        BeliefDepthConfig,
+        search_weighted_belief_maxn_iterative_timed_excluding_with_strategy_policy,
     };
     fn m2_entry(particles: &[BeliefParticle]) -> crate::depth::BeliefDepthResult {
         search_weighted_belief_maxn_iterative_timed_excluding_with_strategy_policy(
@@ -473,13 +488,19 @@ fn find_road_path(
     let mut candidates: Vec<u8> = (0..state.board.edges.len() as u8)
         .filter(|edge| {
             state.roads[usize::from(*edge)].is_none()
-                && state.board.edges[usize::from(*edge)].vertices.contains(&tip)
+                && state.board.edges[usize::from(*edge)]
+                    .vertices
+                    .contains(&tip)
         })
         .collect();
     candidates.sort();
     for edge in candidates {
         let vertices = state.board.edges[usize::from(edge)].vertices;
-        let next_tip = if vertices[0] == tip { vertices[1] } else { vertices[0] };
+        let next_tip = if vertices[0] == tip {
+            vertices[1]
+        } else {
+            vertices[0]
+        };
         if visited.contains(&next_tip) {
             continue;
         }
@@ -503,7 +524,11 @@ fn extend_tip(state: &mut GameState, player: u8, tip: u8, count: usize) -> Optio
     for edge in path {
         state.roads[usize::from(edge)] = Some(player);
         let vertices = state.board.edges[usize::from(edge)].vertices;
-        tip = if vertices[0] == tip { vertices[1] } else { vertices[0] };
+        tip = if vertices[0] == tip {
+            vertices[1]
+        } else {
+            vertices[0]
+        };
     }
     Some(tip)
 }
@@ -520,17 +545,23 @@ fn probe_award_takeover_omission() {
         let mut base = main_phase_state(seed, 2);
         base.domestic_trade_disabled = 0;
         // Our chain from our first setup road.
-        let our_start = match base.roads.iter().enumerate().find_map(|(i, owner)| {
-            (*owner == Some(0)).then_some(i as u8)
-        }) {
+        let our_start = match base
+            .roads
+            .iter()
+            .enumerate()
+            .find_map(|(i, owner)| (*owner == Some(0)).then_some(i as u8))
+        {
             Some(edge) => edge,
             None => continue,
         };
         let our_tip = base.board.edges[usize::from(our_start)].vertices[0];
         // Opponent chain from their first setup road.
-        let opp_start = match base.roads.iter().enumerate().find_map(|(i, owner)| {
-            (*owner == Some(1)).then_some(i as u8)
-        }) {
+        let opp_start = match base
+            .roads
+            .iter()
+            .enumerate()
+            .find_map(|(i, owner)| (*owner == Some(1)).then_some(i as u8))
+        {
             Some(edge) => edge,
             None => continue,
         };
@@ -557,8 +588,7 @@ fn probe_award_takeover_omission() {
                 return false;
             };
             let mut next = base.clone();
-            next.apply(action).is_ok()
-                && next.longest_road_holder == Some(0)
+            next.apply(action).is_ok() && next.longest_road_holder == Some(0)
         });
         if takeover.is_none() && seed < 3 {
             let ours: Vec<u8> = base
@@ -569,7 +599,10 @@ fn probe_award_takeover_omission() {
                     _ => None,
                 })
                 .collect();
-            eprintln!("seed={seed} no-flip, our road options={ours:?} holder={:?}", base.longest_road_holder);
+            eprintln!(
+                "seed={seed} no-flip, our road options={ours:?} holder={:?}",
+                base.longest_road_holder
+            );
         }
         let Some(takeover) = takeover else { continue };
         eprintln!("seed={seed} takeover={takeover:?}");
@@ -582,9 +615,7 @@ fn probe_award_takeover_omission() {
             .any(|root| root.action == takeover);
         eprintln!(
             "  live chosen={:?} takeover_retained={retained_takeover} ranked_total={} pruned={}",
-            live.chosen,
-            live.provenance.ranked_root_count,
-            live.provenance.pruned_root_count
+            live.chosen, live.provenance.ranked_root_count, live.provenance.pruned_root_count
         );
         let deep = search_weighted_belief_maxn_bounded(&particles, 5, 16, 40_000).unwrap();
         eprintln!("  deep chosen={:?}", deep.chosen);

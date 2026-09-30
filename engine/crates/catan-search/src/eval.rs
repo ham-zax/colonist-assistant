@@ -1814,9 +1814,8 @@ mod tests {
 
     #[test]
     fn unchanged_production_value_does_not_change_when_hand_is_spent() {
-        let production_term = |state: &GameState| {
-            strategic_utility_breakdown(state, 0).weighted_production
-        };
+        let production_term =
+            |state: &GameState| strategic_utility_breakdown(state, 0).weighted_production;
 
         for player_trades_enabled in [false, true] {
             let mut state = after_setup(71, 3);

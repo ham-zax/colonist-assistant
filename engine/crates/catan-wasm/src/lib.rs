@@ -11,15 +11,16 @@ use colonist_catan_core::{
     Port, PublicRollObservation, Resource, StochasticBelief, StochasticState, TradeOffer, Vertex,
 };
 use colonist_catan_search::{
-    ActionStats, BeliefDepthResult, BeliefParticle, BeliefSearchProvenance, DepthBeliefError,
-    BeliefSearchStageTimings, CooperativeDeadline, DecisionFailureClass, DomesticTradeThreat,
-    ENGINE_REVISION, ExactActionFamily, ExactActionValue, ExactDecisionResult, HARD_VETO_POSTERIOR,
-    IntroducedRoadFragility, Mcts, ReachabilityDiagnostic, RoadCutContinuationAssessment,
-    RootPromotionReason, RootPruneReason, SearchConfig, SearchMode, SearchReport, SearchStatistics,
-    StrategyAdmissionDiagnostic, StrategyEvidenceTier, StrategyId, StrategyOmissionReason,
-    StrategyPolicy, StrategyProposalReason, StrategyProposalStatus, StrategyShadowDiagnostics,
-    TacticalResult, action_prior, evaluate, exact_action_comparator_score, exact_family_for_action,
-    learned_model_version, learned_trade_model_version, safer_end_turn_alternative,
+    ActionStats, BeliefDepthResult, BeliefParticle, BeliefSearchProvenance,
+    BeliefSearchStageTimings, CooperativeDeadline, DecisionFailureClass, DepthBeliefError,
+    DomesticTradeThreat, ENGINE_REVISION, ExactActionFamily, ExactActionValue, ExactDecisionResult,
+    HARD_VETO_POSTERIOR, IntroducedRoadFragility, Mcts, ReachabilityDiagnostic,
+    RoadCutContinuationAssessment, RootPromotionReason, RootPruneReason, SearchConfig, SearchMode,
+    SearchReport, SearchStatistics, StrategyAdmissionDiagnostic, StrategyEvidenceTier, StrategyId,
+    StrategyOmissionReason, StrategyPolicy, StrategyProposalReason, StrategyProposalStatus,
+    StrategyShadowDiagnostics, TacticalResult, action_prior, evaluate,
+    exact_action_comparator_score, exact_family_for_action, learned_model_version,
+    learned_trade_model_version, safer_end_turn_alternative,
     search_weighted_belief_maxn_iterative_timed_excluding_with_strategy_policy,
     search_weighted_belief_paranoid_iterative_timed_excluding_with_strategy_policy,
     solve_belief_current_turn, solve_belief_current_turn_timed, solve_exact_belief_excluding,
@@ -1705,9 +1706,7 @@ fn root_provenance_output(provenance: BeliefSearchProvenance) -> RootProvenanceO
         horizon_escalation: None,
         trade_hard_veto_threshold: provenance.trade_hard_veto_threshold,
         search_winner: provenance.search_winner.map(action),
-        decisive_plan_replacement: provenance
-            .decisive_plan_replacement
-            .map(replacement_output),
+        decisive_plan_replacement: provenance.decisive_plan_replacement.map(replacement_output),
         exact_family_replacement: provenance.exact_family_replacement.map(replacement_output),
         safety_replacement: provenance.safety_replacement.map(replacement_output),
     }
@@ -2536,9 +2535,7 @@ fn analyze_maxn_request(
         depth_report,
         should_cancel,
     )
-    .ok_or_else(|| {
-        MaxnRequestError::Cancelled("MaxN cancelled during final arbitration".into())
-    })?;
+    .ok_or_else(|| MaxnRequestError::Cancelled("MaxN cancelled during final arbitration".into()))?;
     if should_cancel() {
         return Err(MaxnRequestError::Cancelled(
             "MaxN cancelled during final arbitration".into(),

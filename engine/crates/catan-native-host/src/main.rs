@@ -204,9 +204,7 @@ fn main() -> io::Result<()> {
                         }
                         cancelled.lock().map_or(true, |ids| ids.contains(&id))
                     }),
-                    Err(error) => {
-                        Err(NativeGpuAnalyzeError::backend_unavailable(error.clone()))
-                    }
+                    Err(error) => Err(NativeGpuAnalyzeError::backend_unavailable(error.clone())),
                 };
                 if let Ok(mut ids) = cancelled.lock() {
                     ids.remove(&id);

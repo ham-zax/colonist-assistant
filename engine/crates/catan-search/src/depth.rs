@@ -472,9 +472,7 @@ impl TranspositionTable {
     }
 
     fn insert(&mut self, key: TranspositionIdentity, state: &GameState, value: [f32; 4]) {
-        if self.entries.len() >= TRANSPOSITION_MAX_WAVE_ENTRIES
-            || self.entries.contains_key(&key)
-        {
+        if self.entries.len() >= TRANSPOSITION_MAX_WAVE_ENTRIES || self.entries.contains_key(&key) {
             return;
         }
         self.entries.insert(
@@ -668,7 +666,8 @@ fn accumulate_controlled_ambiguity_evidence(
             .iter_mut()
             .find(|candidate| candidate.target.key == hit.target.key)
         {
-            existing.action_consistent &= existing.target.baseline_action == hit.target.baseline_action
+            existing.action_consistent &= existing.target.baseline_action
+                == hit.target.baseline_action
                 && existing.target.challenger_action == hit.target.challenger_action;
             existing.ambiguity_ratio = existing.ambiguity_ratio.max(hit.ambiguity_ratio);
         } else {
@@ -704,10 +703,7 @@ fn select_controlled_widening_target(
         .map(|candidate| candidate.target.clone())
 }
 
-fn controlled_widening_ambiguity_ratio(
-    baseline_prior: f32,
-    challenger_prior: f32,
-) -> Option<f32> {
+fn controlled_widening_ambiguity_ratio(baseline_prior: f32, challenger_prior: f32) -> Option<f32> {
     let baseline_prior = baseline_prior.max(0.0);
     if baseline_prior <= f32::EPSILON {
         return None;
@@ -725,8 +721,7 @@ fn controlled_ambiguity_hit_from_observation(
     let ranked = recursive_observation_ranked_policy_actions(state, actions, actor);
     let (baseline_action, baseline_prior) = ranked.first()?;
     let (challenger_action, challenger_prior) = ranked.get(1)?;
-    let ambiguity_ratio =
-        controlled_widening_ambiguity_ratio(*baseline_prior, *challenger_prior)?;
+    let ambiguity_ratio = controlled_widening_ambiguity_ratio(*baseline_prior, *challenger_prior)?;
     Some(ControlledAmbiguityHit {
         target: ControlledWideningTarget {
             key: ControlledInformationSetKey {
@@ -756,8 +751,12 @@ fn controlled_policy_action(
     };
     let challenger = policy_override.is_some_and(|target| {
         target.key == key
-            && ranked.first().is_some_and(|entry| entry.0 == target.baseline_action)
-            && ranked.get(1).is_some_and(|entry| entry.0 == target.challenger_action)
+            && ranked
+                .first()
+                .is_some_and(|entry| entry.0 == target.baseline_action)
+            && ranked
+                .get(1)
+                .is_some_and(|entry| entry.0 == target.challenger_action)
     });
     let index = usize::from(challenger && ranked.len() > 1);
     let mut selected = ranked.swap_remove(index);
@@ -960,21 +959,14 @@ fn decisive_current_turn_plan_replacement_index(
             let candidate = diagnostic(&action.action)?;
             let planner_value = candidate.planner_value?;
             (candidate.planner_completion_mass.unwrap_or(0.0) >= DECISIVE_CURRENT_TURN_MASS
-                && candidate
-                    .planner_decisive_completion_mass
-                    .unwrap_or(0.0)
+                && candidate.planner_decisive_completion_mass.unwrap_or(0.0)
                     >= DECISIVE_CURRENT_TURN_MASS
-                && candidate.planner_response_windows.unwrap_or(f32::INFINITY)
-                    <= f32::EPSILON
+                && candidate.planner_response_windows.unwrap_or(f32::INFINITY) <= f32::EPSILON
                 && planner_value.is_finite())
             .then_some((index, planner_value))
         })
         .collect::<Vec<_>>();
-    let Some(best_planner_value) = decisive
-        .iter()
-        .map(|(_, value)| *value)
-        .reduce(f32::max)
-    else {
+    let Some(best_planner_value) = decisive.iter().map(|(_, value)| *value).reduce(f32::max) else {
         return current_index;
     };
 
@@ -1072,12 +1064,7 @@ impl Searcher {
             .lookup(key, state)
     }
 
-    fn insert_transposition(
-        &self,
-        key: TranspositionIdentity,
-        state: &GameState,
-        value: [f32; 4],
-    ) {
+    fn insert_transposition(&self, key: TranspositionIdentity, state: &GameState, value: [f32; 4]) {
         if let Some(table) = self.transposition_table.as_ref() {
             table.borrow_mut().insert(key, state, value);
         }
@@ -1092,10 +1079,7 @@ impl Searcher {
     }
 
     fn record_controlled_ambiguity(&mut self, state: &GameState, actor: u8, depth: u8) {
-        if !self.observation_safe_recursive
-            || self.controlled_player != Some(actor)
-            || depth == 0
-        {
+        if !self.observation_safe_recursive || self.controlled_player != Some(actor) || depth == 0 {
             return;
         }
         let actions = actor_proposal_actions(state);
@@ -1674,8 +1658,7 @@ fn allocate_particle_node_budgets(
         return budgets;
     }
 
-    let minimum_total =
-        minimum_nodes_per_positive_particle.saturating_mul(positive.len() as u32);
+    let minimum_total = minimum_nodes_per_positive_particle.saturating_mul(positive.len() as u32);
     if total_nodes < minimum_total {
         return budgets;
     }
@@ -1702,20 +1685,22 @@ fn allocate_particle_node_budgets(
     }
     debug_assert!(assigned <= distributable);
 
-    remainders.sort_by(|(left_index, left_remainder), (right_index, right_remainder)| {
-        right_remainder
-            .total_cmp(left_remainder)
-            .then_with(|| {
-                particles[*left_index]
-                    .state
-                    .state_hash()
-                    .cmp(&particles[*right_index].state.state_hash())
-            })
-            .then_with(|| {
-                format!("{:?}", particles[*left_index].state)
-                    .cmp(&format!("{:?}", particles[*right_index].state))
-            })
-    });
+    remainders.sort_by(
+        |(left_index, left_remainder), (right_index, right_remainder)| {
+            right_remainder
+                .total_cmp(left_remainder)
+                .then_with(|| {
+                    particles[*left_index]
+                        .state
+                        .state_hash()
+                        .cmp(&particles[*right_index].state.state_hash())
+                })
+                .then_with(|| {
+                    format!("{:?}", particles[*left_index].state)
+                        .cmp(&format!("{:?}", particles[*right_index].state))
+                })
+        },
+    );
     let leftover = distributable.saturating_sub(assigned) as usize;
     for (index, _) in remainders.into_iter().take(leftover) {
         budgets[index] = budgets[index].saturating_add(1);
@@ -1878,10 +1863,7 @@ impl BeliefBackend<'_> {
                 controlled_next_decision_reached: false,
                 terminal_reached: false,
                 cutoff_depth_counts: Vec::new(),
-                transposition_table: searcher
-                    .transposition_table
-                    .as_ref()
-                    .map(Rc::clone),
+                transposition_table: searcher.transposition_table.as_ref().map(Rc::clone),
                 local_transpositions: HashMap::new(),
                 pending_transpositions: Vec::new(),
             };
@@ -1896,10 +1878,8 @@ impl BeliefBackend<'_> {
             let pending_transpositions = std::mem::take(&mut deferred.pending_transpositions);
             drop(deferred);
             record_cuda_duration(&CUDA_TREE_BUILD_NANOS, tree_build_started.elapsed());
-            CUDA_HOST_PACKING_NANOS.fetch_add(
-                tree.packing_nanos,
-                std::sync::atomic::Ordering::Relaxed,
-            );
+            CUDA_HOST_PACKING_NANOS
+                .fetch_add(tree.packing_nanos, std::sync::atomic::Ordering::Relaxed);
             CUDA_STREAMED_LEAVES.fetch_add(
                 tree.leaves.len() as u64,
                 std::sync::atomic::Ordering::Relaxed,
@@ -1936,11 +1916,7 @@ impl BeliefBackend<'_> {
             {
                 let mut table = table.borrow_mut();
                 for pending in pending_transpositions {
-                    table.insert(
-                        pending.key,
-                        &pending.state,
-                        node_values[pending.node],
-                    );
+                    table.insert(pending.key, &pending.state, node_values[pending.node]);
                 }
             }
             return Ok(node_values[node]);
@@ -2707,11 +2683,8 @@ fn belief_search_backend(
             target_depth
         };
         attempted_depth = attempted_depth.max(wave_target_depth);
-        let wave_particle_budgets = allocate_particle_node_budgets(
-            particles,
-            wave_node_budget,
-            root_actions.len() as u32,
-        );
+        let wave_particle_budgets =
+            allocate_particle_node_budgets(particles, wave_node_budget, root_actions.len() as u32);
         debug_assert!(
             particles.iter().all(|particle| particle.weight <= 0.0)
                 || wave_particle_budgets.iter().sum::<u32>() == wave_node_budget
@@ -2776,15 +2749,18 @@ fn belief_search_backend(
             .map(|(action_index, _)| {
                 !evidence_escalation_pending
                     && future_self_widening_targets[action_index].is_some()
-                    && particles.iter().enumerate().all(|(particle_index, particle)| {
-                        if particle.weight <= 0.0 {
-                            return true;
-                        }
-                        controlled_widening_budgets(
-                            wave_action_budgets_by_particle[particle_index][action_index],
-                        )
-                        .is_some()
-                    })
+                    && particles
+                        .iter()
+                        .enumerate()
+                        .all(|(particle_index, particle)| {
+                            if particle.weight <= 0.0 {
+                                return true;
+                            }
+                            controlled_widening_budgets(
+                                wave_action_budgets_by_particle[particle_index][action_index],
+                            )
+                            .is_some()
+                        })
             })
             .collect::<Vec<_>>();
 
@@ -2869,12 +2845,7 @@ fn belief_search_backend(
                         u8::from(completed_turn),
                         if completed_turn { 0 } else { 1 },
                     )?;
-                    apply_action_friction(
-                        &mut candidate_value,
-                        &particle.state,
-                        action,
-                        observer,
-                    );
+                    apply_action_friction(&mut candidate_value, &particle.state, action, observer);
 
                     wave_root_nodes[action_index] =
                         wave_root_nodes[action_index].saturating_add(searcher.nodes);
@@ -3001,8 +2972,8 @@ fn belief_search_backend(
             })
             .collect::<Vec<_>>();
 
-        wave_complete &= wave_particles == positive_particle_count as usize
-            && wave.len() == root_actions.len();
+        wave_complete &=
+            wave_particles == positive_particle_count as usize && wave.len() == root_actions.len();
 
         if !wave_complete {
             if evidence_escalation_pending {
@@ -3038,8 +3009,7 @@ fn belief_search_backend(
                     .map(|candidate| {
                         (
                             candidate.lower_bound[actor],
-                            candidate.value[actor]
-                                / candidate.covered_weight.max(f32::EPSILON),
+                            candidate.value[actor] / candidate.covered_weight.max(f32::EPSILON),
                         )
                     })
             })
@@ -3132,8 +3102,10 @@ fn belief_search_backend(
                 ) <= 1e-6
             })
         {
-            provenance.safety_replacement =
-                Some((provisional.action.clone(), actions[escape_index].action.clone()));
+            provenance.safety_replacement = Some((
+                provisional.action.clone(),
+                actions[escape_index].action.clone(),
+            ));
             chosen_index = escape_index;
         }
     }
@@ -4000,8 +3972,7 @@ impl CudaDeferredTree {
                     for child in children {
                         let mut value = values[child.node];
                         if let Some((actor, friction)) = child.friction {
-                            value[actor as usize] =
-                                (value[actor as usize] - friction).max(0.0);
+                            value[actor as usize] = (value[actor as usize] - friction).max(0.0);
                         }
                         for player in 0..4 {
                             expected[player] += value[player] * child.weight;
@@ -4014,7 +3985,6 @@ impl CudaDeferredTree {
         }
         values
     }
-
 }
 
 #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
@@ -4112,12 +4082,7 @@ impl CudaDeferredSearcher<'_> {
         node
     }
 
-    fn record_transposition(
-        &mut self,
-        key: TranspositionIdentity,
-        state: &GameState,
-        node: usize,
-    ) {
+    fn record_transposition(&mut self, key: TranspositionIdentity, state: &GameState, node: usize) {
         let Some(table) = self.transposition_table.as_ref() else {
             return;
         };
@@ -4138,11 +4103,12 @@ impl CudaDeferredSearcher<'_> {
         }
         self.local_transpositions
             .insert(key.clone(), (state.clone(), node));
-        self.pending_transpositions.push(CudaDeferredPendingTransposition {
-            key,
-            state: state.clone(),
-            node,
-        });
+        self.pending_transpositions
+            .push(CudaDeferredPendingTransposition {
+                key,
+                state: state.clone(),
+                node,
+            });
     }
 
     fn mark_cutoff(&mut self, depth: u8) {
@@ -4556,18 +4522,19 @@ mod tests {
                 lower_confidence_value: [0.3085, 0.0, 0.0, 0.0],
             },
         ];
-        let diagnostic = |action, rank, planner_value, decisive_completion_mass, response_windows| {
-            RankedRootDiagnostic {
-                action,
-                rank,
-                prior: 0.0,
-                planner_value: Some(planner_value),
-                planner_completion_mass: Some(1.0),
-                planner_decisive_completion_mass: Some(decisive_completion_mass),
-                planner_response_windows: Some(response_windows),
-                quota_score: 0.0,
-            }
-        };
+        let diagnostic =
+            |action, rank, planner_value, decisive_completion_mass, response_windows| {
+                RankedRootDiagnostic {
+                    action,
+                    rank,
+                    prior: 0.0,
+                    planner_value: Some(planner_value),
+                    planner_completion_mass: Some(1.0),
+                    planner_decisive_completion_mass: Some(decisive_completion_mass),
+                    planner_response_windows: Some(response_windows),
+                    quota_score: 0.0,
+                }
+            };
         let ranked = vec![
             diagnostic(end_turn, 4, 17.4961, 0.0, 3.0),
             diagnostic(road_a, 3, 34.6522, 1.0, 0.0),
@@ -4822,7 +4789,8 @@ mod tests {
             BeliefNodeBudgetMode::PerDepthWave,
             0,
             &mut super::BeliefBackend::BeforeVisit(&mut capture_deadline),
-        ).unwrap();
+        )
+        .unwrap();
 
         assert!(!report.deadline_reached);
         assert_eq!(report.depth, 2);
@@ -5030,10 +4998,7 @@ mod tests {
 
     #[test]
     fn selective_future_self_ambiguity_gate_defaults_to_k1() {
-        assert_eq!(
-            super::controlled_widening_ambiguity_ratio(1.0, 0.84),
-            None
-        );
+        assert_eq!(super::controlled_widening_ambiguity_ratio(1.0, 0.84), None);
         let threshold = super::controlled_widening_ambiguity_ratio(1.0, 0.85)
             .expect("a challenger at the private threshold is eligible");
         assert!((threshold - 0.85).abs() <= f32::EPSILON);
@@ -5053,9 +5018,11 @@ mod tests {
             let budgets = super::controlled_widening_budgets(total)
                 .expect("sufficient allowance must fund both policy variants");
             assert_eq!(budgets[0] + budgets[1], total);
-            assert!(budgets.iter().all(|budget| {
-                *budget >= super::FUTURE_SELF_WIDENING_MIN_NODES_PER_VARIANT
-            }));
+            assert!(
+                budgets
+                    .iter()
+                    .all(|budget| { *budget >= super::FUTURE_SELF_WIDENING_MIN_NODES_PER_VARIANT })
+            );
         }
     }
 
@@ -5104,17 +5071,16 @@ mod tests {
             transposition_table: None,
         };
 
-        let baseline_left =
-            make_searcher(None).controlled_policy_action(&left, &left_actions, 0);
+        let baseline_left = make_searcher(None).controlled_policy_action(&left, &left_actions, 0);
         let baseline_right =
             make_searcher(None).controlled_policy_action(&right, &right_actions, 0);
         assert_eq!(baseline_left, baseline_right);
         assert_eq!(baseline_left, vec![(target.baseline_action.clone(), 1.0)]);
 
-        let challenger_left = make_searcher(Some(target.clone()))
-            .controlled_policy_action(&left, &left_actions, 0);
-        let challenger_right = make_searcher(Some(target.clone()))
-            .controlled_policy_action(&right, &right_actions, 0);
+        let challenger_left =
+            make_searcher(Some(target.clone())).controlled_policy_action(&left, &left_actions, 0);
+        let challenger_right =
+            make_searcher(Some(target.clone())).controlled_policy_action(&right, &right_actions, 0);
         assert_eq!(challenger_left, challenger_right);
         assert_eq!(
             challenger_left,
@@ -5243,14 +5209,12 @@ mod tests {
             transposition_table: None,
         };
 
-        let cpu_baseline_left =
-            make_cpu(None).controlled_policy_action(&left, &left_actions, 0);
-        let cpu_baseline_right =
-            make_cpu(None).controlled_policy_action(&right, &right_actions, 0);
-        let cpu_challenger_left = make_cpu(Some(target.clone()))
-            .controlled_policy_action(&left, &left_actions, 0);
-        let cpu_challenger_right = make_cpu(Some(target.clone()))
-            .controlled_policy_action(&right, &right_actions, 0);
+        let cpu_baseline_left = make_cpu(None).controlled_policy_action(&left, &left_actions, 0);
+        let cpu_baseline_right = make_cpu(None).controlled_policy_action(&right, &right_actions, 0);
+        let cpu_challenger_left =
+            make_cpu(Some(target.clone())).controlled_policy_action(&left, &left_actions, 0);
+        let cpu_challenger_right =
+            make_cpu(Some(target.clone())).controlled_policy_action(&right, &right_actions, 0);
 
         let mut baseline_tree = super::CudaDeferredTree::new();
         let cuda_baseline = super::CudaDeferredSearcher {
