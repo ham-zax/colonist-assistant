@@ -21,11 +21,22 @@ const safeGameKey = (gameKey: string | undefined): string =>
     .replace(/^-+|-+$/gu, "")
     .slice(0, 48) || "unknown-game";
 
+// Idempotent observations that re-fire on every render with the same payload.
+// Repeats fold into one entry (with a count) so they cannot evict the board,
+// DOM, and dice evidence from the bounded log.
+const FOLDED_CHANNELS = new Set([
+  "dice:board-roll-duplicate",
+  "dice:source-reconciliation",
+  "decision:stochastic-input-attempt",
+  "decision:stochastic-input-accepted",
+]);
+
 export class InvestigationRecorder {
   private readonly log: InvestigationLog;
-  private readonly lastTransitionByChannel = new Map<string, string>();
+  private readonly lastTransitionByChannel = new Map<string, { signature: string; seq: number }>();
   private enabled = false;
   private saveTimer: number | undefined;
+  private saveError: string | undefined;
 
   constructor(maxEntries?: number) {
     this.log = new InvestigationLog(maxEntries);
@@ -82,19 +93,25 @@ export class InvestigationRecorder {
   record(kind: InvestigationKind, data: Record<string, unknown>): void {
     if (!this.enabled) return;
     const discriminator = data.action ?? data.phase ?? "state";
-    // Keep dedupe intentionally narrow. Decision attempt/accepted/rejected rows
-    // are causal evidence even when payloads repeat; broad dedupe once hid real
-    // outcomes and made an investigation export look as if a decision vanished.
-    // Collapse only the two high-frequency idempotent dice diagnostics.
-    const shouldDedupe = kind === "dice" &&
-      (discriminator === "board-roll-duplicate" || discriminator === "source-reconciliation");
-    if (shouldDedupe) {
-      const channel = `${kind}:${String(discriminator)}`;
+    const channel = `${kind}:${String(discriminator)}`;
+    // Folding is deliberately narrow and never silent: a repeat increments the
+    // original entry's count, and any other entry of the same kind (e.g. a
+    // rejected decision) ends the run so outcomes stay in causal order.
+    if (FOLDED_CHANNELS.has(channel)) {
       const signature = JSON.stringify(data);
-      if (this.lastTransitionByChannel.get(channel) === signature) return;
-      this.lastTransitionByChannel.set(channel, signature);
+      const previous = this.lastTransitionByChannel.get(channel);
+      if (previous?.signature === signature && this.log.bump(previous.seq)) {
+        this.scheduleSave();
+        return;
+      }
+      const seq = this.log.record(kind, data);
+      this.lastTransitionByChannel.set(channel, { signature, seq });
+    } else {
+      for (const key of [...this.lastTransitionByChannel.keys()]) {
+        if (key.startsWith(`${kind}:`)) this.lastTransitionByChannel.delete(key);
+      }
+      this.log.record(kind, data);
     }
-    this.log.record(kind, data);
     this.scheduleSave();
   }
 
@@ -111,12 +128,16 @@ export class InvestigationRecorder {
       await chrome.storage.local.set({
         [INVESTIGATION_STORAGE_KEY]: this.log.snapshot(),
       });
+      this.saveError = undefined;
     } catch (error) {
       if (isExtensionContextInvalidatedError(error)) {
         this.enabled = false;
         return;
       }
-      throw error;
+      // Saves are fire-and-forget; a quota failure must not surface as an
+      // unhandled rejection. The in-memory log stays exportable and the export
+      // header records that persistence failed.
+      this.saveError = error instanceof Error ? error.message : String(error);
     }
   }
 
@@ -140,9 +161,14 @@ export class InvestigationRecorder {
     }
   }
 
-  download(): void {
+  download(build?: string): void {
     const snapshot = this.log.snapshot();
-    const blob = new Blob([formatInvestigationLog(snapshot)], { type: "text/plain;charset=utf-8" });
+    const text = formatInvestigationLog(snapshot, {
+      ...(build ? { build } : {}),
+      exportedAt: Date.now(),
+      ...(this.saveError ? { saveError: this.saveError } : {}),
+    });
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     const stamp = new Date().toISOString().replace(/[:.]/gu, "-");

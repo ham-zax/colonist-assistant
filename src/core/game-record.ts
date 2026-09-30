@@ -182,12 +182,28 @@ const migrateLegacyRecordedGame = (value: unknown): RecordedGame | undefined => 
 const normalizeAnyRecordedGame = (value: unknown): RecordedGame | undefined =>
   normalizeRecordedGame(value) ?? migrateLegacyRecordedGame(value);
 
+// Records grow through a game and are rewritten whole on each save, so saves
+// are throttled; the overlay flushes on destroy/pagehide and before export.
+const PERSIST_INTERVAL_MS = 1500;
+
 export class GameRecordRecorder {
   private active?: RecordedGame;
   private builder?: CompactGameBuilder;
   private loaded?: Promise<void>;
   private persistTimer?: ReturnType<typeof globalThis.setTimeout>;
   private storageOperations: Promise<void> = Promise.resolve();
+  /** Bumped by reset() so captures queued before it are dropped. */
+  private generation = 0;
+  private persistError?: string;
+
+  /** The live record, including captures not yet written to storage. */
+  current(): RecordedGame | undefined {
+    return this.active ? structuredClone(this.active) : undefined;
+  }
+
+  lastPersistError(): string | undefined {
+    return this.persistError;
+  }
 
   private snapshotCapture(input: GameRecordCapture): GameRecordCapture {
     return {
@@ -208,15 +224,17 @@ export class GameRecordRecorder {
 
   capture(input: GameRecordCapture): void {
     const snapshot = this.snapshotCapture(input);
+    const generation = this.generation;
     void this.ensureLoaded().then(() => {
-      this.applyCapture(snapshot, false);
+      if (generation === this.generation) this.applyCapture(snapshot, false);
     });
   }
 
   finalize(input: GameRecordCapture): void {
     const snapshot = this.snapshotCapture(input);
+    const generation = this.generation;
     void this.ensureLoaded().then(() => {
-      this.applyCapture(snapshot, true);
+      if (generation === this.generation) this.applyCapture(snapshot, true);
     });
   }
 
@@ -232,6 +250,8 @@ export class GameRecordRecorder {
 
   async reset(): Promise<void> {
     await this.flush();
+    this.generation += 1;
+    this.persistError = undefined;
     this.active = undefined;
     this.builder = undefined;
     this.loaded = Promise.resolve();
@@ -285,7 +305,7 @@ export class GameRecordRecorder {
     this.persistTimer = globalThis.setTimeout(() => {
       this.persistTimer = undefined;
       void this.persist();
-    }, 220);
+    }, PERSIST_INTERVAL_MS);
   }
 
   private async persist(): Promise<void> {
@@ -306,7 +326,16 @@ export class GameRecordRecorder {
   }
 
   private enqueueStorage(operation: () => Promise<void>): Promise<void> {
-    const next = this.storageOperations.then(operation, operation);
+    const guarded = async (): Promise<void> => {
+      try {
+        await operation();
+        this.persistError = undefined;
+      } catch (error) {
+        this.persistError = error instanceof Error ? error.message : String(error);
+        throw error;
+      }
+    };
+    const next = this.storageOperations.then(guarded, guarded);
     // Reloading/updating an unpacked extension invalidates the old content
     // script's chrome.storage context. Persistence is best-effort, so return the
     // guarded queue promise itself; returning `next` leaked an unhandled

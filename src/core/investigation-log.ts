@@ -11,6 +11,15 @@ export interface InvestigationEntry {
   at: number;
   kind: InvestigationKind;
   data: Record<string, unknown>;
+  /** Identical follow-up observations folded into this entry. */
+  repeat?: number;
+  lastAt?: number;
+}
+
+export interface InvestigationExportMeta {
+  build?: string;
+  exportedAt?: number;
+  saveError?: string;
 }
 
 export interface InvestigationSnapshot {
@@ -49,11 +58,21 @@ export class InvestigationLog {
         at: entry.at,
         kind: entry.kind,
         data: { ...entry.data },
+        ...(entry.repeat ? { repeat: entry.repeat, lastAt: entry.lastAt } : {}),
       }));
     this.sequence = this.entries.at(-1)?.seq ?? 0;
   }
 
-  record(kind: InvestigationKind, data: Record<string, unknown>, at = Date.now()): void {
+  /** Fold an identical repeat into an existing entry; false if it was evicted. */
+  bump(seq: number, at = Date.now()): boolean {
+    const entry = this.entries.find((candidate) => candidate.seq === seq);
+    if (!entry) return false;
+    entry.repeat = (entry.repeat ?? 0) + 1;
+    entry.lastAt = at;
+    return true;
+  }
+
+  record(kind: InvestigationKind, data: Record<string, unknown>, at = Date.now()): number {
     this.sequence += 1;
     this.entries.push({
       seq: this.sequence,
@@ -64,6 +83,7 @@ export class InvestigationLog {
     if (this.entries.length > this.maxEntries) {
       this.entries.splice(0, this.entries.length - this.maxEntries);
     }
+    return this.sequence;
   }
 
   snapshot(): InvestigationSnapshot {
@@ -78,11 +98,18 @@ export class InvestigationLog {
   }
 }
 
-export const formatInvestigationLog = (snapshot: InvestigationSnapshot): string => {
+export const formatInvestigationLog = (
+  snapshot: InvestigationSnapshot,
+  meta: InvestigationExportMeta = {},
+): string => {
   const lines = [
     `@schema=${snapshot.schema}`,
     `@gameKey=${JSON.stringify(snapshot.gameKey ?? null)}`,
+    ...(meta.build ? [`@build=${JSON.stringify(meta.build)}`] : []),
+    ...(meta.exportedAt !== undefined ? [`@exported=${meta.exportedAt}`] : []),
+    ...(meta.saveError ? [`@saveError=${JSON.stringify(meta.saveError)}`] : []),
     `@entries=${snapshot.entries.length}`,
+    `@repeat=${JSON.stringify("repeat/lastAt count identical follow-up observations folded into the entry")}`,
     "@format=jsonl",
     "",
   ];
