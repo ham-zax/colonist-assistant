@@ -1,3 +1,4 @@
+import { ensureOverlayFont } from "./fonts";
 import {
   createCoachReport,
   type CoachReport,
@@ -60,6 +61,7 @@ import {
 } from "../core/resources";
 import {
   createTrackerState,
+  affordability,
   getPlayerEstimate,
   reconcilePublicResourceEvidence,
   reduceTracker,
@@ -379,6 +381,10 @@ export class AssistantOverlay {
   private readonly shadow: ShadowRoot;
   private activeView: ViewName = "advice";
   private lastRenderedView?: ViewName;
+  /** Survives innerHTML re-renders; the shadow DOM is rebuilt on every render. */
+  private advancedSettingsOpen = false;
+  /** "Why" sections stay open only for the decision they were opened on. */
+  private whyOpenKey?: string;
   private collapsed: boolean;
   private session?: GameSession;
   private board?: BoardSnapshot;
@@ -474,12 +480,8 @@ export class AssistantOverlay {
     // sees. A closed shadow root is not a security boundary and made live
     // failures impossible to diagnose.
     this.shadow = this.host.attachShadow({ mode: "open" });
-    this.shadow.innerHTML = `<style>@font-face {
-      font-family: "Archivo Narrow";
-      src: url("${chrome.runtime.getURL("assets/fonts/ArchivoNarrow-Variable.ttf")}") format("truetype");
-      font-weight: 400 700;
-      font-display: swap;
-    }${OVERLAY_STYLES}</style><div id="mount"></div>`;
+    this.shadow.innerHTML = `<style>${OVERLAY_STYLES}</style><div id="mount"></div>`;
+    void ensureOverlayFont();
     document.documentElement.append(this.host);
     this.installHandlers();
     void this.restorePosition();
@@ -1086,6 +1088,9 @@ export class AssistantOverlay {
     destroyWinOdds();
     await this.decisionTraces.reset();
     await this.gameRecorder.reset();
+    // Reset session promises to clear decision diagnostics (PRIVACY.md), which
+    // includes the investigation log.
+    await investigationRecorder.clear();
     this.render();
   }
 
@@ -1170,7 +1175,7 @@ export class AssistantOverlay {
         return;
       }
       if (action === "export-investigation") {
-        investigationRecorder.download();
+        investigationRecorder.download(this.buildInfo.identity);
         return;
       }
       if (action === "retry-engine") {
@@ -1191,6 +1196,24 @@ export class AssistantOverlay {
         this.shadow.querySelector<HTMLButtonElement>(".diagnostics-heading button")?.focus({ preventScroll: true });
       }
     });
+
+    // Record disclosure state synchronously on the summary click. The async
+    // `toggle` event can land on a detached element after a re-render.
+    this.shadow.addEventListener(
+      "click",
+      (rawEvent) => {
+        const summary = (rawEvent.target as Element | null)?.closest?.("summary");
+        const details = summary?.parentElement;
+        if (!(details instanceof HTMLDetailsElement)) return;
+        const opening = !details.open;
+        if (details.classList.contains("settings-advanced")) {
+          this.advancedSettingsOpen = opening;
+        } else if (details.classList.contains("more")) {
+          this.whyOpenKey = opening ? this.decisionKey : undefined;
+        }
+      },
+      true,
+    );
 
     this.shadow.addEventListener("change", (rawEvent) => {
       const target = rawEvent.target;
@@ -1524,6 +1547,12 @@ export class AssistantOverlay {
     this.decisionWorker.reset();
   }
 
+  private moreOpenAttr(): string {
+    return this.whyOpenKey !== undefined && this.whyOpenKey === this.decisionKey
+      ? " open"
+      : "";
+  }
+
   private settingsInteractionKey(
     target: EventTarget | null | undefined,
   ): string | undefined {
@@ -1691,7 +1720,9 @@ export class AssistantOverlay {
     await this.gameRecorder.flush();
     let record: Awaited<ReturnType<typeof readRecordedGame>>;
     try {
-      record = await readRecordedGame();
+      // Prefer the in-memory record: storage can lag or fail (quota) while the
+      // live record is complete.
+      record = this.gameRecorder.current() ?? await readRecordedGame();
     } catch (error) {
       if (!isExtensionContextInvalidatedError(error)) throw error;
       alert(EXTENSION_CONTEXT_RELOAD_MESSAGE);
@@ -1806,7 +1837,7 @@ export class AssistantOverlay {
     const previewMarker = this.renderAlternativePreviewMarker();
     const advice =
       executionNotice +
-      this.renderAdvice(state, spatial, report, next) +
+      this.renderAdvice(state, spatial, report, next, displayedWinAnalysis) +
       this.renderAlternativesPanel(spatial);
     const panel = this.activeView === "settings"
       ? this.renderSettings()
@@ -3988,12 +4019,13 @@ export class AssistantOverlay {
       this.decisionAnalysis?.deepSearch
     ) {
       const search = this.decisionAnalysis.deepSearch;
-      const rationale = explainDeepSearchDecision(search);
+      const rationale = this.labelledRationale(explainDeepSearchDecision(search));
       recommendation = {
         ...recommendation,
         ...(deepAction.player ? { targetPlayer: deepAction.player } : {}),
         reasons: rationale
           ? [
+              ...(rationale.plain ? [rationale.plain] : []),
               rationale.summary,
               ...(rationale.reasons.length
                 ? rationale.reasons
@@ -4730,6 +4762,7 @@ export class AssistantOverlay {
     spatial?: ReturnType<AssistantOverlay["spatialRecommendation"]>,
     preparedReport?: CoachReport,
     next?: NextClick,
+    displayedWinAnalysis?: DecisionAnalysis,
   ): string {
     if (this.board?.gameOver) {
       const winner = this.board.winner;
@@ -4817,11 +4850,7 @@ export class AssistantOverlay {
       ).length &&
       !this.decisionPendingKey
     ) {
-      return `<section class="empty compact-empty" aria-live="polite">
-        <span class="empty-mark">${assistantMark()}</span>
-        <h1>Waiting for ${escapeHtml(this.board.currentPlayer ?? "the next player")}</h1>
-        <p>Strategist will evaluate the authoritative board when your turn or a trade response begins.</p>
-      </section>`;
+      return this.renderBetweenTurns(state, displayedWinAnalysis);
     }
     if (
       !next &&
@@ -5014,7 +5043,8 @@ export class AssistantOverlay {
   }
 
   private deepActionDisplayLabel(action: DeepSearchAction): string {
-    const raw = describeDeepSearchAction(action);
+    const described = describeDeepSearchAction(action);
+    const raw = `${described.charAt(0).toUpperCase()}${described.slice(1)}`;
     const targetId = action.targetId;
     if (!targetId || !this.board) return raw;
     const boardLabel =
@@ -5023,6 +5053,207 @@ export class AssistantOverlay {
     return boardLabel && boardLabel !== targetId
       ? raw.replace(targetId, boardLabel)
       : raw;
+  }
+
+  /**
+   * Opponent-turn panel. Everything here is descriptive (public board facts and
+   * tracker estimates); it deliberately contains no "what to do next" advice so
+   * it can never contradict the engine's later recommendation.
+   */
+  private renderBetweenTurns(
+    state?: TrackerState,
+    displayedWinAnalysis?: DecisionAnalysis,
+  ): string {
+    const board = this.board;
+    const current = board?.currentPlayer;
+    const user = board?.myPlayer ?? this.userPlayer(state);
+    const blocks = [
+      this.renderThreatRows(state, user, displayedWinAnalysis),
+      this.renderDiceCoverage(user),
+      this.renderSevenRisk(state, user),
+    ].filter(Boolean);
+    if (!blocks.length) {
+      return `<section class="empty compact-empty" aria-live="polite">
+        <span class="empty-mark">${assistantMark()}</span>
+        <h1>Waiting for ${escapeHtml(current ?? "the next player")}</h1>
+        <p>Strategist will evaluate the authoritative board when your turn or a trade response begins.</p>
+      </section>`;
+    }
+    return `<section class="between-turns" aria-live="polite">
+      <header class="between-heading">
+        <span class="between-kicker"><i></i>Opponent&rsquo;s turn</span>
+        <h1 title="${escapeHtml(current ?? "Between turns")}">${current ? escapeHtml(current) : "Between turns"}</h1>
+        <p>Your next move appears when your turn or a trade starts.</p>
+      </header>
+      ${blocks.join("")}
+    </section>`;
+  }
+
+  private renderThreatRows(
+    state: TrackerState | undefined,
+    user: string | undefined,
+    displayedWinAnalysis?: DecisionAnalysis,
+  ): string {
+    const board = this.board;
+    if (!board || !state) return "";
+    const rows = state.playerOrder
+      .filter((player) => player !== user && state.players[player])
+      .map((player) => {
+        const meta = state.players[player]!;
+        const estimate = getPlayerEstimate(state, player);
+        const hasBuildings = board.vertices.some(
+          (vertex) => vertex.building?.player === player,
+        );
+        const profile = hasBuildings ? playerBoardProfile(board, player) : undefined;
+        const visiblePoints =
+          profile?.visiblePoints ?? board.players?.[player]?.visiblePoints;
+        const target = profile?.victoryTarget ?? board.victoryTarget;
+        const win = displayedWinAnalysis?.players.find(
+          (entry) => entry.player === player,
+        )?.probability;
+        const path = profile
+          ? likelyUpgradePath(board, player, estimate.average)
+          : undefined;
+        // Affordability is the belief-weighted probability over card worlds,
+        // not the average hand, so an exact card total never implies "Can".
+        const buildChance = path ? affordability(state, player, path.kind) : 0;
+        const buildTag = path && buildChance >= 0.5
+          ? `${buildChance >= 0.999 ? "Can" : "Likely can"} ${
+              path.kind === "development"
+                ? "buy dev card"
+                : `build ${path.kind}`
+            }`
+          : "";
+        const remaining =
+          visiblePoints !== undefined && target !== undefined
+            ? Math.max(0, target - visiblePoints)
+            : undefined;
+        const winTag =
+          remaining !== undefined && remaining >= 1 && remaining <= 2
+            ? `${remaining} VP from winning`
+            : "";
+        return {
+          player,
+          color: meta.color,
+          visiblePoints,
+          target,
+          win,
+          tags: [buildTag, winTag].filter(Boolean),
+        };
+      })
+      .filter((row) => row.visiblePoints !== undefined || row.win !== undefined)
+      .sort(
+        (left, right) =>
+          (right.win ?? -1) - (left.win ?? -1) ||
+          (right.visiblePoints ?? -1) - (left.visiblePoints ?? -1),
+      )
+      .slice(0, 3);
+    if (!rows.length) return "";
+    return `<section class="between-block" aria-label="Opponent threats">
+      <h2>Threats</h2>
+      ${rows
+        .map(
+          (row) => `<article class="threat-row" style="--player:${safeColor(row.color)}">
+        <i class="player-stripe"></i>
+        <b class="threat-name" title="${escapeHtml(row.player)}">${escapeHtml(row.player)}</b>
+        <span class="threat-points">${row.visiblePoints !== undefined ? `${row.visiblePoints}${row.target !== undefined ? `/${row.target}` : ""} VP` : ""}</span>
+        <span class="threat-win">${row.win !== undefined ? `<b>${Math.round(row.win * 100)}%</b> est. win` : ""}</span>
+        ${row.tags.length ? `<span class="threat-tags">${row.tags.map((tag) => `<em class="threat-tag">${escapeHtml(tag)}</em>`).join("")}</span>` : ""}
+      </article>`,
+        )
+        .join("")}
+    </section>`;
+  }
+
+  private renderDiceCoverage(user: string | undefined): string {
+    const board = this.board;
+    if (!board || !user) return "";
+    if (!board.vertices.some((vertex) => vertex.building?.player === user)) return "";
+    // Rates and roll share come from the shared core production model; this
+    // loop only groups hexes into display tokens.
+    const profile = playerBoardProfile(board, user);
+    const hexes = new Map(board.hexes.map((hex) => [hex.id, hex]));
+    const tokens = new Map<string, { resource: Resource; number: number; count: number; blocked: boolean }>();
+    for (const vertex of board.vertices) {
+      if (vertex.building?.player !== user) continue;
+      const multiplier = vertex.building.kind === "city" ? 2 : 1;
+      for (const id of vertex.adjacentHexes) {
+        const hex = hexes.get(id);
+        if (!hex?.resource || !hex.number || !NUMBER_PIPS[hex.number]) continue;
+        const blocked = Boolean(hex.blocked);
+        const key = `${hex.resource}:${hex.number}:${blocked}`;
+        const token = tokens.get(key) ?? { resource: hex.resource, number: hex.number, count: 0, blocked };
+        token.count += multiplier;
+        tokens.set(key, token);
+      }
+    }
+    if (!tokens.size) return "";
+    const active = profile.activeProduction;
+    const maxPips = Math.max(1, ...RESOURCE_ORDER.map((resource) => active[resource]));
+    const missing = RESOURCE_ORDER.filter((resource) => !active[resource]);
+    const rows = RESOURCE_ORDER.map((resource) => {
+      const pipsForResource = active[resource];
+      const label = RESOURCE_LABELS[resource];
+      const tokenHtml = [...tokens.values()]
+        .filter((token) => token.resource === resource)
+        .sort(
+          (left, right) =>
+            Number(left.blocked) - Number(right.blocked) ||
+            (NUMBER_PIPS[right.number] ?? 0) - (NUMBER_PIPS[left.number] ?? 0),
+        )
+        .map((token) => {
+          const pips = NUMBER_PIPS[token.number] ?? 0;
+          const hot = token.number === 6 || token.number === 8;
+          return `<span class="number-token${hot ? " hot" : ""}${token.blocked ? " blocked" : ""}" title="${token.number}: ${pips}/36 rolls${token.count > 1 ? ` · pays ${token.count} ${label.toLowerCase()}` : ""}${token.blocked ? " · blocked by the robber" : ""}"><b>${token.number}</b><i>${"•".repeat(pips)}</i>${token.count > 1 ? `<em>×${token.count}</em>` : ""}</span>`;
+        })
+        .join("");
+      return `<div class="income-row${pipsForResource ? "" : " dry"}" style="--resource:${RESOURCE_COLORS[resource]};--share:${Math.round((pipsForResource / maxPips) * 100)}%">
+        <span class="income-art" title="${label}">${this.resourceArt(resource)}</span>
+        <span class="income-bar" aria-hidden="true"><i></i></span>
+        <span class="income-tokens">${tokenHtml || "<small>No income</small>"}</span>
+        <b class="income-rate" title="Expected ${label.toLowerCase()} per 10 rolls">${pipsForResource ? ((pipsForResource / 36) * 10).toFixed(1) : "—"}</b>
+      </div>`;
+    }).join("");
+    const percent = Math.round((profile.metrics.activeStrikeWays / 36) * 100);
+    return `<section class="between-block income-block" aria-label="Your income">
+      <header class="income-head">
+        <h2>Your income</h2>
+        <span><b>${percent}%</b> of rolls pay you</span>
+      </header>
+      <div class="income-legend" aria-hidden="true"><span>Your numbers</span><span>per 10 rolls</span></div>
+      ${rows}
+      ${missing.length ? `<p class="between-line">No income from <b>${missing.map((resource) => RESOURCE_LABELS[resource].toLowerCase()).join(", ")}</b>.</p>` : ""}
+    </section>`;
+  }
+
+  private renderSevenRisk(
+    state: TrackerState | undefined,
+    user: string | undefined,
+  ): string {
+    const board = this.board;
+    if (!board || !user) return "";
+    const ownHand = board.ownHand;
+    const estimate = state?.players[user] ? getPlayerEstimate(state, user) : undefined;
+    const total = ownHand ? resourceTotal(ownHand) : estimate?.totalMinimum;
+    if (total === undefined) return "";
+    const exact = Boolean(
+      ownHand ||
+        (estimate &&
+          estimate.totalMinimum === estimate.totalMaximum &&
+          !estimate.approximate),
+    );
+    const limit =
+      board.players?.[user]?.cardDiscardLimit ??
+      (board.vertices.some((vertex) => vertex.building?.player === user)
+        ? playerBoardProfile(board, user).cardDiscardLimit
+        : undefined) ??
+      7;
+    if (total <= limit) return "";
+    const qualifier = exact ? "" : "at least ";
+    return `<section class="between-block" aria-label="Seven risk">
+      <h2>Seven risk</h2>
+      <p class="between-line between-warn">Holding ${qualifier}${total} cards &mdash; a 7 (17% per roll) makes you discard ${qualifier}${Math.floor(total / 2)}</p>
+    </section>`;
   }
 
   private renderAlternativesPanel(
@@ -5074,45 +5305,70 @@ export class AssistantOverlay {
           (item) => deepActionUiKey(item.action) === deepActionUiKey(candidate.action),
         );
         const reason = isSelected
-          ? rationale?.reasons[0] ?? rationale?.summary ?? "Final search authority selected this move"
+          ? rationale?.plain ?? rationale?.reasons[0] ?? rationale?.summary ?? "Final search authority selected this move"
           : spatialReason ??
             (causal?.roadIntent?.targetVertexId
               ? `Preserves a route toward ${causal.roadIntent.targetVertexId}`
               : causal?.promotionReason
                 ? causal.promotionReason.replaceAll("-", " ")
-                : `Legal across ${Math.round(candidate.legalWeight * 100)}% of searched belief mass`);
+                : `Works in ${Math.round(candidate.legalWeight * 100)}% of likely hands`);
         const gap = isSelected
-          ? "SELECTED"
-          : delta <= 0
-            ? `${Math.abs(delta).toFixed(3)} behind #1`
-            : `${delta.toFixed(3)} raw-value lead`;
+          ? "Engine pick"
+          : delta > 0
+            ? "Ranked lower by final checks"
+            : Math.abs(delta) < 0.01
+              ? "Near tie"
+              : Math.abs(delta) < 0.04
+                ? "Slightly worse"
+                : "Clearly worse";
+        const detail = isSelected
+          ? `Search value ${candidateScore.toFixed(3)}`
+          : `Search value ${candidateScore.toFixed(3)} · ${Math.abs(delta).toFixed(3)} ${delta > 0 ? "ahead of" : "behind"} #1`;
         const encodedKey = escapeHtml(actionKey);
-        return `<button type="button" class="alternative-choice${isSelected ? " selected" : ""}${isPreviewing ? " previewing" : ""}" data-action="preview-alternative" data-alternative-key="${encodedKey}" data-alternative-rank="${index + 1}" aria-pressed="${isPreviewing}" title="${isSelected ? "Return to the engine's selected move" : `Preview move #${index + 1} on the board`}">
+        return `<button type="button" class="alternative-choice${isSelected ? " selected" : ""}${isPreviewing ? " previewing" : ""}" data-action="preview-alternative" data-alternative-key="${encodedKey}" data-alternative-rank="${index + 1}" aria-pressed="${isPreviewing}" title="${escapeHtml(`${isSelected ? "Return to the engine's selected move" : `Preview move #${index + 1} on the board`} · ${detail}`)}">
           <b class="alternative-rank">#${index + 1}</b>
           <span class="alternative-copy">
             <strong>${escapeHtml(this.deepActionDisplayLabel(candidate.action))}</strong>
             <small>${escapeHtml(reason)}</small>
           </span>
-          <span class="alternative-score"><b>${escapeHtml(isPreviewing ? `PREVIEWING · ${gap}` : gap)}</b><small>value ${candidateScore.toFixed(3)}</small></span>
+          <span class="alternative-score"><b>${escapeHtml(isPreviewing ? `Previewing · ${gap}` : gap)}</b></span>
         </button>`;
       })
       .join("");
 
     return `<section class="alternatives-panel" aria-label="Alternative moves">
-      <header><span>TOP MOVES</span><small>Click a move to preview its board target</small></header>
+      <header><span>TOP MOVES</span><small>Tap to preview on board</small></header>
       <div class="alternatives-list">${rows}</div>
-      <p>Previewing never changes the engine's #1 or autopilot. Score gaps compare searched root value; exact or safety arbitration can still override a raw-value lead.</p>
     </section>`;
   }
 
   private currentDecisionRationale(): DecisionRationale | undefined {
     const search = this.decisionAnalysis?.deepSearch;
-    return search ? explainDeepSearchDecision(search) : undefined;
+    return search ? this.labelledRationale(explainDeepSearchDecision(search)) : undefined;
+  }
+
+  /** Swap raw board ids in the player-facing sentence for readable labels. */
+  private labelledRationale(
+    rationale: DecisionRationale | undefined,
+  ): DecisionRationale | undefined {
+    const board = this.board;
+    if (!rationale?.plain || !board) return rationale;
+    const labels = new Map<string, string>();
+    for (const item of [...board.vertices, ...board.edges]) {
+      if (item.label && item.label !== item.id) labels.set(item.id, item.label);
+    }
+    if (!labels.size) return rationale;
+    // Ids contain commas (e.g. "v:1,-2,0"), so match whole ids, longest first.
+    let plain = rationale.plain;
+    for (const [id, label] of [...labels].sort((a, b) => b[0].length - a[0].length)) {
+      if (plain.includes(id)) plain = plain.split(id).join(label);
+    }
+    return { ...rationale, plain };
   }
 
   private rationaleEvidenceHtml(rationale: DecisionRationale | undefined): string {
     if (!rationale) return "";
-    return [...rationale.reasons, ...rationale.evidence]
+    return [...(rationale.plain ? [rationale.summary] : []), ...rationale.reasons, ...rationale.evidence]
       .map((line) => `<p>${escapeHtml(line)}.</p>`)
       .join("");
   }
@@ -5180,7 +5436,7 @@ export class AssistantOverlay {
       ? "Roll before the engine evaluates spend, trade, and development-card lines from the resulting hand"
       : "No remaining legal conversion beats passing; the highlighted control ends this turn";
     const why = rationale
-      ? `${rationale.summary}. ${rationale.reasons[0] ?? "The final authority selected this action from the legal choices"}`
+      ? (rationale.plain ?? `${rationale.summary}. ${rationale.reasons[0] ?? "The final authority selected this action from the legal choices"}`)
       : fallbackWhy;
     const icon = roll
       ? '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="2" fill="currentColor"/><circle cx="8" cy="8" r="1.35" fill="#0d1821"/><circle cx="16" cy="8" r="1.35" fill="#0d1821"/><circle cx="12" cy="12" r="1.35" fill="#0d1821"/><circle cx="8" cy="16" r="1.35" fill="#0d1821"/><circle cx="16" cy="16" r="1.35" fill="#0d1821"/></svg>'
@@ -5193,7 +5449,7 @@ export class AssistantOverlay {
       </div>
       <p class="why">${escapeHtml(why)}.</p>
       <div class="board-confirm"><i></i><span>${roll ? "The active dice face is highlighted" : "The pass-turn button is highlighted"}</span></div>
-      ${rationale ? `<details class="more"><summary>Why this action</summary>${this.rationaleEvidenceHtml(rationale)}</details>` : ""}
+      ${rationale ? `<details class="more"${this.moreOpenAttr()}><summary>Why this action</summary>${this.rationaleEvidenceHtml(rationale)}</details>` : ""}
     </section>`;
   }
 
@@ -5218,7 +5474,7 @@ export class AssistantOverlay {
           ? "The original offer is close, but the highlighted counter sequence improves your conversion"
           : "The offer helps the opponent more than it advances your best reachable build";
     const detail = rationale
-      ? `${rationale.summary}. ${rationale.reasons[0] ?? fallbackDetail}`
+      ? (rationale.plain ?? `${rationale.summary}. ${rationale.reasons[0] ?? fallbackDetail}`)
       : fallbackDetail;
     return `<section class="decision trade-decision" aria-live="polite">
       <div class="decision-meta"><span>INCOMING TRADE · ${next.verdict.toUpperCase()}</span>${this.renderEngineMetaChip()}</div>
@@ -5226,10 +5482,10 @@ export class AssistantOverlay {
         <span class="command-art">${this.pieceArt("development")}</span>
         <h1>${title}</h1>
       </div>
-      <div class="single-tactic"><span>FROM</span><strong>${escapeHtml(creator)}</strong></div>
+      <div class="single-tactic"><span>From</span><strong>${escapeHtml(creator)}</strong></div>
       <p class="why">${escapeHtml(detail)}.</p>
       <div class="board-confirm"><i></i><span>The exact ${next.verdict} control is highlighted on the offer</span></div>
-      ${rationale ? `<details class="more"><summary>Why this verdict</summary>${this.rationaleEvidenceHtml(rationale)}</details>` : ""}
+      ${rationale ? `<details class="more"${this.moreOpenAttr()}><summary>Why this verdict</summary>${this.rationaleEvidenceHtml(rationale)}</details>` : ""}
     </section>`;
   }
 
@@ -5238,7 +5494,7 @@ export class AssistantOverlay {
   ): string {
     const rationale = this.decisionRationaleForNext(next);
     const why = rationale
-      ? `${rationale.summary}. ${rationale.reasons[0] ?? "The final authority preferred closing this trade state"}`
+      ? (rationale.plain ?? `${rationale.summary}. ${rationale.reasons[0] ?? "The final authority preferred closing this trade state"}`)
       : "This offer has no useful live response. Closing it releases Colonist's trade state; the same bundle stays blocked for this turn";
     return `<section class="decision trade-decision" aria-live="polite">
       <div class="decision-meta"><span>OUTGOING TRADE · RECOVERY</span>${this.renderEngineMetaChip()}</div>
@@ -5248,7 +5504,7 @@ export class AssistantOverlay {
       </div>
       <p class="why">${escapeHtml(why)}.</p>
       <div class="board-confirm"><i></i><span>The offer's cancel control is highlighted</span></div>
-      ${rationale ? `<details class="more"><summary>Why this action</summary>${this.rationaleEvidenceHtml(rationale)}</details>` : ""}
+      ${rationale ? `<details class="more"${this.moreOpenAttr()}><summary>Why this action</summary>${this.rationaleEvidenceHtml(rationale)}</details>` : ""}
     </section>`;
   }
 
@@ -5272,7 +5528,7 @@ export class AssistantOverlay {
   ): string {
     const rationale = this.decisionRationaleForNext(next);
     const why = rationale
-      ? `${rationale.summary}. ${rationale.reasons[0] ?? "This victim remained the strongest legal steal target"}`
+      ? (rationale.plain ?? `${rationale.summary}. ${rationale.reasons[0] ?? "This victim remained the strongest legal steal target"}`)
       : "This victim best combines current win threat, steal value, and disruption of the strongest reachable build line";
     return `<section class="decision control-decision" aria-live="polite">
       <div class="decision-meta"><span>ROBBER TARGET</span>${this.renderEngineMetaChip()}</div>
@@ -5282,7 +5538,7 @@ export class AssistantOverlay {
       </div>
       <p class="why">${escapeHtml(why)}.</p>
       <div class="board-confirm"><i></i><span>Select the highlighted player, then confirm the victim</span></div>
-      ${rationale ? `<details class="more"><summary>Why this victim</summary>${this.rationaleEvidenceHtml(rationale)}</details>` : ""}
+      ${rationale ? `<details class="more"${this.moreOpenAttr()}><summary>Why this victim</summary>${this.rationaleEvidenceHtml(rationale)}</details>` : ""}
     </section>`;
   }
 
@@ -5345,7 +5601,7 @@ export class AssistantOverlay {
     const firstGive = RESOURCE_ORDER.find((resource) => give[resource] > 0);
     const rationale = this.currentDecisionRationale();
     const why = rationale
-      ? `${rationale.summary}. ${rationale.reasons[0] ?? "This conversion had the strongest continuation"}`
+      ? (rationale.plain ?? `${rationale.summary}. ${rationale.reasons[0] ?? "This conversion had the strongest continuation"}`)
       : "The modeled conversion beats building, another trade, or ending the turn";
     return `<section class="decision trade-decision" aria-live="polite">
       <div class="decision-meta"><span>${maritime ? "BANK TRADE" : "PLAYER TRADE"}</span>${this.renderEngineMetaChip()}</div>
@@ -5360,7 +5616,7 @@ export class AssistantOverlay {
       </div>
       <div class="trade-next"><span>${maritime ? "BANK / PORT" : "RECIPIENTS"}</span><strong>${escapeHtml(recipients)}</strong></div>
       <p class="why">${escapeHtml(why)}.</p>
-      <details class="more">
+      <details class="more"${this.moreOpenAttr()}>
         <summary>Why this trade</summary>
         ${this.rationaleEvidenceHtml(rationale)}
         <p>${escapeHtml(this.decisionAnalysis?.model ?? "")}.</p>
@@ -5407,7 +5663,7 @@ export class AssistantOverlay {
     const search = this.decisionAnalysis?.deepSearch;
     const rationale = this.currentDecisionRationale();
     const why = rationale
-      ? `${rationale.summary}. ${rationale.reasons[0] ?? "This line had the strongest modeled continuation"}`
+      ? (rationale.plain ?? `${rationale.summary}. ${rationale.reasons[0] ?? "This line had the strongest modeled continuation"}`)
       : "This line has the best modeled continuation from your exact hand and the current opponent-card belief set";
     return `<section class="decision development-decision" aria-live="polite">
       <div class="decision-meta"><span>PLAY DEVELOPMENT CARD</span>${this.renderEngineMetaChip()}</div>
@@ -5417,7 +5673,7 @@ export class AssistantOverlay {
       </div>
       <div class="single-tactic"><span>NEXT</span><strong>${escapeHtml(card.instruction)}</strong></div>
       <p class="why">${escapeHtml(why)}.</p>
-      <details class="more">
+      <details class="more"${this.moreOpenAttr()}>
         <summary>Why this card now</summary>
         ${this.rationaleEvidenceHtml(rationale)}
         <p>${escapeHtml(this.decisionAnalysis?.model ?? "")}.</p>
@@ -5461,7 +5717,7 @@ export class AssistantOverlay {
       </div>
       <p class="why">${escapeHtml(recommendation.reason)}. ${escapeHtml(recommendation.detail)}</p>
       ${instruction}
-      <details class="more">
+      <details class="more"${this.moreOpenAttr()}>
         <summary>Timing and held cards</summary>
         <p>${escapeHtml(recommendation.detail)}</p>
         ${otherCards}
@@ -5472,6 +5728,10 @@ export class AssistantOverlay {
   private renderSpatialAdvice(
     spatial: NonNullable<ReturnType<AssistantOverlay["spatialRecommendation"]>>,
   ): string {
+    // When reasons lead with the plain sentence, the technical summary follows
+    // it and belongs in the details list rather than the headline.
+    const plain = this.currentDecisionRationale()?.plain;
+    const leadsWithPlain = Boolean(plain && spatial.recommendation.reasons[0] === plain);
     const labels: Record<Exclude<BoardAction, "none" | "discard">, [string, string]> = {
       settlement: ["PLACE YOUR SETTLEMENT", "Build here"],
       city: ["PLACE YOUR CITY", "Upgrade here"],
@@ -5510,12 +5770,12 @@ export class AssistantOverlay {
           .filter(Boolean)
           .join(" · ")
       : "";
-    const alternatives = `<details class="more">
+    const alternatives = `<details class="more"${this.moreOpenAttr()}>
       <summary>Why this target wins</summary>
       ${this.decisionAnalysis?.deepSearch ? `<p>${escapeHtml(this.decisionAnalysis.model)}.</p>` : ""}
       ${metricLine ? `<p>${escapeHtml(metricLine)}.</p>` : ""}
       ${spatial.recommendation.reasons
-        .slice(2)
+        .slice(leadsWithPlain ? 1 : 2)
         .map((reason) => `<p>${escapeHtml(reason)}.</p>`)
         .join("")}
       ${spatial.alternatives
@@ -5534,7 +5794,7 @@ export class AssistantOverlay {
         <h1>${title}</h1>
       </div>
       <h2>${escapeHtml(spatial.recommendation.label)}</h2>
-      <p class="why">${escapeHtml(spatial.recommendation.reasons[0] ?? "")}. ${escapeHtml(spatial.recommendation.reasons[1] ?? "")}.</p>
+      <p class="why">${escapeHtml(spatial.recommendation.reasons[0] ?? "")}.${leadsWithPlain ? "" : ` ${escapeHtml(spatial.recommendation.reasons[1] ?? "")}.`}</p>
       <div class="board-confirm"><i></i><span>Marked directly on the board</span></div>
       ${target}
       ${alternatives}
@@ -5574,14 +5834,14 @@ export class AssistantOverlay {
             Math.max(0, board.ownHand![resource] - discard[resource]),
           ]),
         ) as ResourceVector;
-        const rationale = explainDeepSearchDecision(deepSearch);
+        const rationale = this.labelledRationale(explainDeepSearchDecision(deepSearch));
         return {
           count: board.discardCount,
           discard,
           keep,
           score: deepSearch.tacticalWinProbability,
           reasons: rationale
-            ? [rationale.summary, ...rationale.reasons, ...rationale.evidence]
+            ? [...(rationale.plain ? [rationale.plain] : []), rationale.summary, ...rationale.reasons, ...rationale.evidence]
             : [
                 deepSearch.exactDecision
                   ? `The exact solver compared every legal discard across ${deepSearch.particles.toLocaleString()} weighted belief ${deepSearch.particles === 1 ? "world" : "worlds"}`
@@ -5626,7 +5886,7 @@ export class AssistantOverlay {
       </div>
       <div class="discard-plan" aria-label="Recommended cards to discard">${cards}</div>
       <p class="why">${escapeHtml(recommendation.reasons[0] ?? "")}. ${escapeHtml(recommendation.reasons[1] ?? "")}.</p>
-      <details class="more">
+      <details class="more"${this.moreOpenAttr()}>
         <summary>How this was chosen</summary>
         ${recommendation.reasons
           .slice(2)
@@ -5734,10 +5994,10 @@ export class AssistantOverlay {
         <span class="command-art">${this.pieceArt(primary.kind === "development" ? "development" : primary.kind)}</span>
         <h1>${escapeHtml(title)}</h1>
       </div>
-      <p class="why">${escapeHtml(buildRationale ? `${buildRationale.summary}. ${buildRationale.reasons[0] ?? "The final search authority selected this build"}` : primary.reasons[1] ?? "")}.</p>
+      <p class="why">${escapeHtml(buildRationale ? (buildRationale.plain ?? `${buildRationale.summary}. ${buildRationale.reasons[0] ?? "The final search authority selected this build"}`) : primary.reasons[1] ?? "")}.</p>
       <div class="resource-plan" aria-label="Resources for this goal">${resourcePlan}</div>
       ${tactic}
-      <details class="more">
+      <details class="more"${this.moreOpenAttr()}>
         <summary>Why this recommendation</summary>
         ${this.decisionAnalysis?.deepSearch ? `<p>${escapeHtml(this.decisionAnalysis.model)}.</p>` : ""}
         ${buildRationale ? this.rationaleEvidenceHtml(buildRationale) : ""}
@@ -5877,27 +6137,7 @@ export class AssistantOverlay {
         <i aria-hidden="true"></i>
       </label>
       <label class="settings-field">
-        <span><b>Show alternatives</b><small>Compare the top three searched moves, their score gap, and why each remains viable.</small></span>
-        <input type="checkbox" data-setting="showAlternatives"${this.settings.showAlternatives ? " checked" : ""}>
-        <i aria-hidden="true"></i>
-      </label>
-      <label class="settings-field">
-        <span><b>Disable player trades</b><small>Only bank and port trades are allowed.</small></span>
-        <input type="checkbox" data-setting="disablePlayerTrades"${this.settings.disablePlayerTrades ? " checked" : ""}>
-        <i aria-hidden="true"></i>
-      </label>
-      <label class="settings-field">
-        <span><b>Record game</b><small>Keep a compact LLM-ready timeline with engine reasoning, belief evidence, timing, status, and execution results.</small></span>
-        <input type="checkbox" data-setting="recordGame"${this.settings.recordGame ? " checked" : ""}>
-        <i aria-hidden="true"></i>
-      </label>
-      <label class="settings-field">
-        <span><b>Investigation log</b><small>Capture bounded board, log-parser, dice-authority, restore, and decision transitions for debugging.</small></span>
-        <input type="checkbox" data-setting="investigationLog"${this.settings.investigationLog ? " checked" : ""}>
-        <i aria-hidden="true"></i>
-      </label>
-      <label class="settings-field">
-        <span><b>Autopilot</b><small>Play recommended steps automatically in any Colonist game.</small></span>
+        <span><b>Autopilot</b><small>Play recommended steps automatically in friendly games where all players agree.</small></span>
         <input type="checkbox" data-setting="autonomousPrivateGames"${this.settings.autonomousPrivateGames ? " checked" : ""}>
         <i aria-hidden="true"></i>
       </label>
@@ -5910,6 +6150,28 @@ export class AssistantOverlay {
           ).join("")}
         </select>
       </label>
+      <label class="settings-field">
+        <span><b>Show alternatives</b><small>Compare the top three searched moves in plain language and preview each on the board.</small></span>
+        <input type="checkbox" data-setting="showAlternatives"${this.settings.showAlternatives ? " checked" : ""}>
+        <i aria-hidden="true"></i>
+      </label>
+      <label class="settings-field">
+        <span><b>Disable player trades</b><small>Only bank and port trades are allowed.</small></span>
+        <input type="checkbox" data-setting="disablePlayerTrades"${this.settings.disablePlayerTrades ? " checked" : ""}>
+        <i aria-hidden="true"></i>
+      </label>
+      <details class="settings-advanced"${this.advancedSettingsOpen ? " open" : ""}>
+        <summary>Advanced &amp; diagnostics</summary>
+      <label class="settings-field">
+        <span><b>Record game</b><small>Keep a compact LLM-ready timeline with engine reasoning, belief evidence, timing, status, and execution results.</small></span>
+        <input type="checkbox" data-setting="recordGame"${this.settings.recordGame ? " checked" : ""}>
+        <i aria-hidden="true"></i>
+      </label>
+      <label class="settings-field">
+        <span><b>Investigation log</b><small>Capture bounded board, log-parser, dice-authority, restore, and decision transitions for debugging.</small></span>
+        <input type="checkbox" data-setting="investigationLog"${this.settings.investigationLog ? " checked" : ""}>
+        <i aria-hidden="true"></i>
+      </label>
       <div class="settings-version">
         <span>INSTALLED BUILD</span>
         <strong title="${escapeHtml(buildIdentity)}">${escapeHtml(buildLabel)}</strong>
@@ -5917,6 +6179,7 @@ export class AssistantOverlay {
       ${builtAt ? `<div class="settings-version"><span>BUILT AT</span><strong>${escapeHtml(builtAt)}</strong></div>` : ""}
       <button class="reset-link" data-action="export-record">Export compact LLM record (.txt)</button>
       <button class="reset-link" data-action="export-investigation">Export investigation log (.txt)</button>
+      </details>
       <button class="reset-link" data-action="reset">Reset this game session</button>
     </section>`;
   }
@@ -5943,9 +6206,6 @@ export class AssistantOverlay {
       this.board && profile
         ? likelyUpgradePath(this.board, player, estimate.average)
         : undefined;
-    const pathLabel = path
-      ? `${path.kind === "development" ? "DEV" : path.kind.toUpperCase()} ${path.affordable ? "READY" : "PATH"}`
-      : "";
     const bestPort = profile
       ? RESOURCE_ORDER.filter(
           (resource) => profile.tradeRatios[resource] === 2,
@@ -5956,26 +6216,52 @@ export class AssistantOverlay {
       : undefined;
     const portLabel =
       bestPort && profile
-        ? `${profile.tradeRatios[bestPort]}:1 ${RESOURCE_LABELS[bestPort].toUpperCase()}`
+        ? `${profile.tradeRatios[bestPort]}:1 ${RESOURCE_LABELS[bestPort].toLowerCase()}`
         : profile && RESOURCE_ORDER.every((resource) => profile.tradeRatios[resource] <= 3)
-          ? "3:1 PORT"
+          ? "3:1 port"
           : "";
-    const metaLabel = isUser
-      ? this.board?.ownHand
-        ? `YOU · EXACT${winProbability !== undefined ? ` · ${Math.round(winProbability * 100)}% WIN` : ""}`
-        : `YOU${winProbability !== undefined ? ` · ${Math.round(winProbability * 100)}% WIN` : ""}`
-      : [
-          winProbability !== undefined
-            ? `${Math.round(winProbability * 100)}% WIN`
-            : "",
-          pathLabel,
-          portLabel,
-          (this.board?.players?.[player]?.developmentCards ?? meta.devCards?.length ?? 0)
-            ? `${this.board?.players?.[player]?.developmentCards ?? meta.devCards?.length ?? 0} DEV`
-            : "",
+    const buildChance = path && !isUser ? affordability(state, player, path.kind) : 0;
+    const pointsToWin = profile
+      ? Math.max(0, profile.victoryTarget - profile.visiblePoints)
+      : undefined;
+    const isThreat =
+      !isUser &&
+      Boolean(
+        buildChance >= 0.5 || (pointsToWin !== undefined && pointsToWin <= 2),
+      );
+    const devCount =
+      this.board?.players?.[player]?.developmentCards ??
+      meta.devCards?.length ??
+      0;
+    // Most decision-relevant facts first: the cell truncates at narrow widths.
+    const metaParts = isUser
+      ? [
+          { text: "You", threat: false },
+          ...(winProbability !== undefined
+            ? [{ text: `${Math.round(winProbability * 100)}% win`, threat: false }]
+            : []),
         ]
-          .filter(Boolean)
-          .join(" · ");
+      : [
+          ...(pointsToWin !== undefined && pointsToWin >= 1 && pointsToWin <= 2
+            ? [{ text: `${pointsToWin} VP to win`, threat: true }]
+            : []),
+          ...(path && buildChance >= 0.5
+            ? [{ text: `${path.kind === "development" ? "Dev" : `${path.kind[0]!.toUpperCase()}${path.kind.slice(1)}`} ${buildChance >= 0.999 ? "ready" : "likely"}`, threat: true }]
+            : []),
+          ...(winProbability !== undefined
+            ? [{ text: `${Math.round(winProbability * 100)}% win`, threat: false }]
+            : []),
+          ...(devCount ? [{ text: `${devCount} dev`, threat: false }] : []),
+          ...(portLabel ? [{ text: portLabel, threat: false }] : []),
+        ];
+    const metaTitle = metaParts.map((part) => part.text).join(" · ");
+    const metaHtml = metaParts
+      .map((part) =>
+        part.threat
+          ? `<em class="threat-tag">${escapeHtml(part.text)}</em>`
+          : escapeHtml(part.text),
+      )
+      .join(" · ");
     const awards = [
       this.board?.players?.[player]?.hasLargestArmy
         ? `<i class="award" title="Largest Army">${this.pieceArt("largestArmy")}</i>`
@@ -5986,8 +6272,8 @@ export class AssistantOverlay {
     ]
       .filter(Boolean)
       .join("");
-    return `<article class="matrix-row ${isUser ? "is-user" : ""}" style="--player:${safeColor(meta.color)}">
-      <span class="player-name"><i class="player-stripe"></i><b>${escapeHtml(player)}${awards ? `<span class="player-awards">${awards}</span>` : ""}</b><small>${escapeHtml(metaLabel)}</small></span>
+    return `<article class="matrix-row ${isUser ? "is-user" : ""}${isThreat ? " is-threat" : ""}" style="--player:${safeColor(meta.color)}">
+      <span class="player-name"><i class="player-stripe"></i><b title="${escapeHtml(player)}"><span class="player-label">${escapeHtml(player)}</span>${awards ? `<span class="player-awards">${awards}</span>` : ""}</b><small title="${escapeHtml(metaTitle)}">${metaHtml}</small></span>
       ${resources}
       <span class="total-cell ${estimate.totalMinimum === estimate.totalMaximum ? "exact" : "range"}">${formatRange(estimate.totalMinimum, estimate.totalMaximum, estimate.approximate)}</span>
     </article>`;

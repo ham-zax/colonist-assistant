@@ -36,7 +36,7 @@ export interface AssistantSettings {
   disablePlayerTrades: boolean;
   recordGame: boolean;
   investigationLog: boolean;
-  /** Legacy key name; enables autopilot in any Colonist game. */
+  /** Legacy key name; enables autopilot (friendly games where all players agree). */
   autonomousPrivateGames: boolean;
   autopilotDelaySeconds: AutopilotDelaySeconds;
   interfaceScale: InterfaceScale;

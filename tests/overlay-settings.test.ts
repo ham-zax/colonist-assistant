@@ -328,7 +328,7 @@ describe("overlay settings interaction", () => {
       )
       ?.closest("label")
       ?.textContent;
-    expect(autopilotLabel).toMatch(/any Colonist game/i);
+    expect(autopilotLabel).toMatch(/friendly games where all players agree/i);
     expect(autopilotLabel).not.toMatch(/private or bot/i);
     overlay.destroy();
   });
@@ -1694,8 +1694,9 @@ describe("overlay settings interaction", () => {
     expect(html).toContain("10 brick / 8 ore / 4 sheep");
     expect(html).toContain("5 wood / 6 grain / 11 brick");
     expect(html).toContain("3 brick / 9 ore / 6 grain");
-    expect(html).toContain("0.100 behind #1");
-    expect(html).toContain("0.250 behind #1");
+    expect(html).toContain("Clearly worse");
+    expect(html).toContain("Search value 2.900 · 0.100 behind #1");
+    expect(html).toContain("Search value 2.750 · 0.250 behind #1");
     expect(html).not.toContain("v:four");
     expect(html).toContain('data-action="preview-alternative"');
 
@@ -1713,7 +1714,7 @@ describe("overlay settings interaction", () => {
     internals.selectAlternativePreview(second!.dataset.alternativeKey!, 2);
     expect(internals.renderAlternativePreviewMarker()).toContain("PREVIEW #2");
     expect(internals.renderAlternativePreviewMarker()).toContain("left:630px");
-    expect(internals.renderAlternativesPanel()).toContain("PREVIEWING");
+    expect(internals.renderAlternativesPanel()).toContain("Previewing · ");
 
     internals.selectAlternativePreview(first!.dataset.alternativeKey!, 1);
     expect(internals.renderAlternativePreviewMarker()).toBe("");

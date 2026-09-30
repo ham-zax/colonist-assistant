@@ -514,6 +514,8 @@ export interface DeepSearchResult {
 
 export interface DecisionRationale {
   summary: string;
+  /** One short player-facing sentence; technical detail stays in reasons/evidence. */
+  plain?: string;
   reasons: string[];
   evidence: string[];
 }
@@ -858,9 +860,69 @@ export const explainDeepSearchDecision = (
 
   return {
     summary,
+    plain: plainDeepSearchReason(search, {
+      replacement: replacement?.from,
+      // The named runner-up and the gap must come from the same ranking.
+      ...(chosenExact && exactRunnerUp
+        ? {
+            runnerUp: exactRunnerUp.action,
+            gap: chosenExact.comparatorScore - exactRunnerUp.comparatorScore,
+          }
+        : chosenStats && strategicRunnerUp
+          ? {
+              runnerUp: strategicRunnerUp.action,
+              gap:
+                (chosenStats.value[search.rootIndex] ?? Number.NaN) -
+                (strategicRunnerUp.value[search.rootIndex] ?? Number.NaN),
+            }
+          : {}),
+      roadsRemaining: roadIntent?.targetVertexId
+        ? roadIntent.roadsRemaining
+        : undefined,
+    }),
     reasons: reasons.slice(0, 4),
     evidence: evidence.slice(0, 6),
   };
+};
+
+const plainDeepSearchReason = (
+  search: DeepSearchResult,
+  context: {
+    replacement?: DeepSearchAction;
+    runnerUp?: DeepSearchAction;
+    gap?: number;
+    roadsRemaining?: number;
+  },
+): string => {
+  if (search.authority === "safety-override" && context.replacement) {
+    return `Safer than ${describeDeepSearchAction(context.replacement)}, which risked a losing position`;
+  }
+  if (search.authority === "tactical-proven") {
+    return "Starts a forcing line the engine checked to the end of this turn";
+  }
+  const road =
+    context.roadsRemaining !== undefined
+      ? context.roadsRemaining === 0
+        ? "Reaches a new settlement spot"
+        : `Heads for a new settlement spot, ${context.roadsRemaining} more road${context.roadsRemaining === 1 ? "" : "s"} away`
+      : undefined;
+  const comparison = (() => {
+    if (!context.runnerUp || context.gap === undefined || !Number.isFinite(context.gap)) {
+      return undefined;
+    }
+    const other = describeDeepSearchAction(context.runnerUp);
+    const gap = Math.abs(context.gap);
+    if (context.gap < 0) return `Chosen over ${other} by the engine's final checks`;
+    if (gap < 0.01) return `A close call over ${other}`;
+    if (gap < 0.04) return `Better than the next option, ${other}`;
+    return `Clearly better than the next option, ${other}`;
+  })();
+  if (road && comparison) return `${road}. ${comparison}`;
+  if (road) return road;
+  if (comparison) return comparison;
+  return search.authority === "exact-mandatory"
+    ? "Every legal choice was compared exactly"
+    : "The strongest option the engine found this turn";
 };
 
 export interface PlayerWinEstimate {

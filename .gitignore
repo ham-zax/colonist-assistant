@@ -4,6 +4,7 @@ colonist-assistant-*.zip
 node_modules/
 engine/target/
 benchmark-results/
+scripts/ui-preview/out/
 training-data/
 __pycache__/
 coverage/
