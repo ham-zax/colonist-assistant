@@ -178,6 +178,7 @@ pub fn admit_promoted_roots(
     }
 
     // Tier 2: ordinary ranked roots fill the remaining non-EndTurn capacity.
+    let ordinary_start = admitted.len();
     for (action, prior) in ranked {
         if admitted.len() >= non_end_turn_cap {
             break;
@@ -186,6 +187,28 @@ pub fn admit_promoted_roots(
             continue;
         }
         if !admitted.iter().any(|(existing, _)| existing == action) {
+            admitted.push((action.clone(), *prior));
+        }
+    }
+
+    // Tier 2b: keep one development line in the comparison. Construction and
+    // trade quotas can otherwise fill every ordinary slot before any
+    // development representative is reached. It replaces only the weakest
+    // ordinary root, never a safety blocker or spatial promotion.
+    let is_development = |action: &Action| {
+        matches!(
+            action,
+            Action::BuyDevelopment
+                | Action::PlayKnight { .. }
+                | Action::PlayRoadBuilding { .. }
+                | Action::PlayYearOfPlenty { .. }
+                | Action::PlayMonopoly { .. }
+        )
+    };
+    let ordinary_len = admitted.len().saturating_sub(ordinary_start);
+    if ordinary_len > 0 && !admitted.iter().any(|(action, _)| is_development(action)) {
+        if let Some((action, prior)) = ranked.iter().find(|(action, _)| is_development(action)) {
+            admitted.pop();
             admitted.push((action.clone(), *prior));
         }
     }

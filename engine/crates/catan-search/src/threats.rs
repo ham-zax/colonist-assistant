@@ -338,6 +338,25 @@ fn city_sites(state: &GameState, player: u8) -> Vec<u8> {
         .collect()
 }
 
+fn knight_play_takes_largest_army_win(probe: &GameState, player: u8, target: u8) -> bool {
+    let holder = &probe.players[player as usize];
+    let knight = DevCard::Knight.index();
+    if holder.played_development_this_turn
+        || holder.development[knight] <= holder.bought_development[knight]
+    {
+        return false;
+    }
+    probe.legal_actions().into_iter().any(|action| {
+        if !matches!(action, Action::PlayKnight { .. }) {
+            return false;
+        }
+        let mut next = probe.clone();
+        next.apply(&action).is_ok()
+            && next.largest_army_holder == Some(player)
+            && next.players[player as usize].victory_points() >= target
+    })
+}
+
 fn road_edges(state: &GameState, player: u8) -> Vec<u8> {
     main_phase_for(state, player)
         .legal_actions()
@@ -472,9 +491,16 @@ fn opponent_can_win_main_phase(
     let cities = city_sites(state, opponent);
     let can_settle = !settlements.is_empty() && can_afford(state, opponent, &SETTLEMENT_COST);
     let can_city = !cities.is_empty() && can_afford(state, opponent, &CITY_COST);
-    let with_builds = base
-        .saturating_add(u8::from(can_settle))
-        .saturating_add(u8::from(can_city));
+    // Settlement and city each spend from the same hand, so both count only
+    // when the hand covers their combined cost.
+    let combined_cost: [u8; 5] =
+        std::array::from_fn(|resource| SETTLEMENT_COST[resource] + CITY_COST[resource]);
+    let build_gain = if can_settle && can_city && can_afford(state, opponent, &combined_cost) {
+        2
+    } else {
+        u8::from(can_settle || can_city)
+    };
+    let with_builds = base.saturating_add(build_gain);
     if with_builds >= target {
         return Some(OpponentThreat {
             opponent,
@@ -506,10 +532,12 @@ fn opponent_can_win_main_phase(
         }
     }
 
-    let army = largest_army_outlook(state, opponent);
+    // Largest Army is an immediate win only if a Knight this turn actually
+    // transfers the award and reaches the target; a strong outlook is not an
+    // award.
     if state.largest_army_holder != Some(opponent)
-        && army.acquire >= 0.95
         && base.saturating_add(2) >= target
+        && knight_play_takes_largest_army_win(&probe, opponent, target)
     {
         return Some(OpponentThreat {
             opponent,
@@ -521,12 +549,7 @@ fn opponent_can_win_main_phase(
     }
 
     let award_bonus = award_swing_bonus(state, opponent);
-    if base
-        .saturating_add(award_bonus)
-        .saturating_add(u8::from(can_settle))
-        .saturating_add(u8::from(can_city))
-        >= target
-    {
+    if base.saturating_add(award_bonus).saturating_add(build_gain) >= target {
         return Some(OpponentThreat {
             opponent,
             kind: if state.longest_road_holder != Some(opponent) && award_bonus >= 2 {
@@ -682,7 +705,15 @@ fn has_verified_immediate_opponent_win_after_transition(state: &GameState, prote
     if state.is_terminal() {
         return false;
     }
-    let next_turn_player = state.current_player;
+    // A mid-turn action leaves the protected player to move. The threat then
+    // belongs to the next seat, so an action that merely continues the turn is
+    // not an escape by itself.
+    let num_players = state.board.num_players.max(1);
+    let next_turn_player = if state.current_player == protected {
+        (protected + 1) % num_players
+    } else {
+        state.current_player
+    };
     if next_turn_player == protected {
         return false;
     }

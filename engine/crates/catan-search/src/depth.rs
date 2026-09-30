@@ -555,6 +555,52 @@ fn allocate_weighted_node_budgets(weights: &[f32], total_nodes: u32) -> Vec<u32>
     budgets
 }
 
+/// Chooses the opponent mixture support. The quota leader stays, `EndTurn`
+/// keeps a slot when legal, and the remaining slots go to the highest priors,
+/// so trades and development plays are not dropped only by quota order.
+fn select_opponent_policy_support(ranked: Vec<(Action, f32)>, size: usize) -> Vec<(Action, f32)> {
+    if ranked.len() <= size {
+        return ranked;
+    }
+    let mut keep = vec![false; ranked.len()];
+    keep[0] = true;
+    let mut kept = 1usize;
+    if let Some(end_turn) = ranked
+        .iter()
+        .position(|(action, _)| *action == Action::EndTurn)
+        && !keep[end_turn]
+    {
+        keep[end_turn] = true;
+        kept += 1;
+    }
+    let mut by_prior = (0..ranked.len())
+        .filter(|index| !keep[*index])
+        .collect::<Vec<_>>();
+    // Stable: equal priors keep the quota order.
+    by_prior.sort_by(|left, right| ranked[*right].1.total_cmp(&ranked[*left].1));
+    for index in by_prior.into_iter().take(size.saturating_sub(kept)) {
+        keep[index] = true;
+    }
+    ranked
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(entry, keep)| keep.then_some(entry))
+        .collect()
+}
+
+/// Rescales the positive weights of a truncated opponent mixture to sum to 1.
+fn renormalize_mixture_weights(ranked: &mut [(Action, f32)]) {
+    let mass = ranked
+        .iter()
+        .map(|(_, weight)| weight.max(0.0))
+        .sum::<f32>();
+    if mass > f32::EPSILON && (mass - 1.0).abs() > 1e-6 {
+        for (_, weight) in ranked.iter_mut() {
+            *weight = weight.max(0.0) / mass;
+        }
+    }
+}
+
 fn canonicalize_equal_prior_siblings(ranked: &mut [(Action, f32)]) {
     let mut start = 0usize;
     while start < ranked.len() {
@@ -590,7 +636,7 @@ fn recursive_observation_policy(
             .collect();
     }
     canonicalize_equal_prior_siblings(&mut ranked);
-    ranked.truncate(3.min(ranked.len()));
+    let mut ranked = select_opponent_policy_support(ranked, 3);
     let mass = ranked
         .iter()
         .map(|(_, prior)| prior.max(0.0))
@@ -1081,8 +1127,11 @@ impl Searcher {
         self.cutoff_depth_counts[index] = self.cutoff_depth_counts[index].saturating_add(1);
     }
 
-    fn record_controlled_ambiguity(&mut self, state: &GameState, actor: u8, depth: u8) {
-        if !self.observation_safe_recursive || self.controlled_player != Some(actor) || depth == 0 {
+    fn record_controlled_ambiguity(&mut self, state: &GameState, actor: u8, _depth: u8) {
+        // Depth counts completed turns, so depth 0 is the rest of the root
+        // turn. Recording there lets a close same-turn continuation (for
+        // example a conversion that closes a build) compete as a challenger.
+        if !self.observation_safe_recursive || self.controlled_player != Some(actor) {
             return;
         }
         let actions = actor_proposal_actions(state);
@@ -1409,7 +1458,10 @@ impl Searcher {
                     // over the top observation-ranked actions. The mixture depends
                     // only on the actor's observation, so indistinguishable worlds
                     // share one strategy while still covering more than a single
-                    // greedy prior line.
+                    // greedy prior line. A tight node allowance can truncate
+                    // that mixture, so renormalize the kept weights; otherwise
+                    // the expectation shrinks toward zero.
+                    renormalize_mixture_weights(&mut ranked);
                     let budgets = allocate_root_node_budgets(ranked.len(), remaining);
                     let mut carry = 0_u32;
                     let mut expected = [0.0_f32; 4];
@@ -2263,6 +2315,13 @@ fn belief_search_backend(
     let mut verified_blockers = immediate_winning_roots(first, observer, &root_scored);
     if immediate_threat_weight > f32::EPSILON {
         for (action, _) in &root_scored {
+            // Blocker verification is per root and per particle. Stop at the
+            // deadline so preparation cannot consume the search budget; the
+            // roots checked so far keep their verified status.
+            if deadline.has_elapsed() {
+                deadline_reached = true;
+                break;
+            }
             if verified_blockers
                 .iter()
                 .any(|(candidate, _)| candidate == action)
@@ -4120,8 +4179,8 @@ impl CudaDeferredSearcher<'_> {
         self.cutoff_depth_counts[depth as usize] += 1;
     }
 
-    fn record_controlled_ambiguity(&mut self, state: &GameState, actor: u8, depth: u8) {
-        if actor != self.controlled_player || depth == 0 {
+    fn record_controlled_ambiguity(&mut self, state: &GameState, actor: u8, _depth: u8) {
+        if actor != self.controlled_player {
             return;
         }
         let actions = actor_proposal_actions(state);
@@ -4262,6 +4321,9 @@ impl CudaDeferredSearcher<'_> {
                     recursive_observation_policy(state, &proposal_actions, actor, self.branch_cap)
                 };
                 ranked.truncate(ranked.len().min(remaining as usize));
+                if actor != self.controlled_player {
+                    renormalize_mixture_weights(&mut ranked);
+                }
                 let budgets = allocate_root_node_budgets(ranked.len(), remaining);
                 let mut carry = 0_u32;
                 let mut children = Vec::with_capacity(ranked.len());
