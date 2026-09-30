@@ -35,6 +35,7 @@ path = "src/bin/gpu-latent-threat-benchmark.rs"
 required-features = ["cuda-sim"]
 
 [features]
+parallel = ["colonist-catan-search/parallel"]
 cuda-exact = ["colonist-catan-search/cuda-exact"]
 cuda-sim = ["colonist-catan-search/cuda-sim"]
 

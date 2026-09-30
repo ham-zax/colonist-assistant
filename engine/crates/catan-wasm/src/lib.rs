@@ -29,6 +29,9 @@ use colonist_catan_search::{
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
+#[cfg(all(feature = "wasm-threads", target_arch = "wasm32"))]
+pub use wasm_bindgen_rayon::init_thread_pool;
+
 #[cfg(all(feature = "native-gpu", not(target_arch = "wasm32")))]
 mod native_gpu;
 #[cfg(all(feature = "native-gpu", not(target_arch = "wasm32")))]
@@ -2550,6 +2553,15 @@ fn analyze_maxn_request(
         diagnostics,
         &stochastic,
     ))
+}
+
+/// Run the same request boundary natively for reproducible search benchmarks.
+#[cfg(all(feature = "native-benchmark", not(target_arch = "wasm32")))]
+pub fn analyze_benchmark_request(request: serde_json::Value) -> Result<serde_json::Value, String> {
+    let request = serde_json::from_value(request).map_err(|error| error.to_string())?;
+    let report = analyze_maxn_request(request, MaxnBackend::Cpu, "maxn", &|| false)
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(report).map_err(|error| error.to_string())
 }
 
 #[wasm_bindgen]

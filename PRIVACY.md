@@ -1,6 +1,6 @@
 # Colonist Ally Privacy Policy
 
-Last updated: July 30, 2026
+Last updated: September 30, 2026
 
 Colonist Ally reads game data shown to you on `colonist.io`. It uses that
 data to track the game, give advice, and carry out moves when you turn on
@@ -34,7 +34,8 @@ The extension uses the data only for these features.
 ## Where data goes
 
 Game work runs in your browser. The extension has no server, ads, tracking,
-or usage reports. It does not sell or share game data.
+or usage reports. It does not sell or share game data. The offscreen document
+and its worker threads compute locally using the same shown game data.
 
 The extension may load card and piece images from Colonist or its image host.
 Those image links contain no game or player data.
@@ -71,7 +72,9 @@ the prior game's local records. It may keep settings in Chrome Sync.
 
 The extension asks for:
 
-- `storage`, to save settings and current game data; and
+- `storage`, to save settings and current game data;
+- `offscreen`, to run the packaged WebAssembly engine with local worker
+  threads in a hidden extension document; and
 - `https://colonist.io/*`, to read shown game data and add the assistant to
   Colonist pages.
 

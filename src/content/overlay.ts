@@ -434,6 +434,7 @@ export class AssistantOverlay {
   private decisionPendingKey = "";
   private decisionSlowKey = "";
   private decisionRuntime?: DecisionRuntime;
+  private decisionThreadCount?: number;
   private decisionRuntimeDetail = "Connecting to the packaged search engine.";
   private decisionRuntimeError = "";
   private lastDecisionRuntimeError = "";
@@ -499,8 +500,9 @@ export class AssistantOverlay {
         this.decisionKey !== decisionKey &&
         status.detail !== EXTENSION_CONTEXT_RELOAD_MESSAGE
       ) return;
-      if (status.runtime === "background-wasm") {
+      if (status.runtime === "background-wasm" || status.runtime === "offscreen-wasm-threads") {
         this.decisionRuntime = status.runtime;
+        this.decisionThreadCount = status.threadCount;
         if (!this.decisionRuntimeError) {
           this.decisionRuntimeDetail =
             `${status.detail}${status.initializationMs !== undefined ? ` in ${Math.max(1, Math.round(status.initializationMs))} ms` : ""}.`;
@@ -2678,12 +2680,12 @@ export class AssistantOverlay {
       }
       return {
         label:
-          observedRuntime === "background-wasm"
-            ? "WASM searching"
+          isSearchDecisionRuntime(observedRuntime)
+            ? observedRuntime === "offscreen-wasm-threads" ? `WASM · ${this.decisionAnalysis?.runtimeThreadCount ?? this.decisionThreadCount ?? 1} threads` : "WASM searching"
             : "Connecting",
         detail:
-          observedRuntime === "background-wasm"
-            ? "The background engine is evaluating this position with a bounded node budget."
+          isSearchDecisionRuntime(observedRuntime)
+            ? "The local engine is evaluating this position with a bounded node budget."
             : "Waking Strategist before evaluating this position.",
         state: isSearchDecisionRuntime(observedRuntime) ? "searching" : "connecting",
       };
@@ -2696,10 +2698,10 @@ export class AssistantOverlay {
         state: "healthy",
       };
     }
-    if (observedRuntime === "background-wasm") {
+    if (observedRuntime === "background-wasm" || observedRuntime === "offscreen-wasm-threads") {
       const search = this.decisionAnalysis?.deepSearch;
       return {
-        label: "Background WASM",
+        label: observedRuntime === "offscreen-wasm-threads" ? `WASM · ${this.decisionAnalysis?.runtimeThreadCount ?? this.decisionThreadCount ?? 1} threads` : "Background WASM",
         detail: search
           ? `Last search completed in ${Math.max(1, Math.round(search.elapsedMs)).toLocaleString()} ms across ${search.nodes.toLocaleString()} bounded nodes.`
           : this.decisionRuntimeDetail,

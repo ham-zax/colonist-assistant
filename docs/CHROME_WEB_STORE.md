@@ -132,6 +132,16 @@ Reset session clears them. Chrome
 may sync settings when Chrome Sync is on.
 ```
 
+### Offscreen reason
+
+```text
+The offscreen permission hosts the packaged WebAssembly decision engine and
+local worker threads in a hidden extension document. This lets game analysis
+use multiple CPU cores. All computation stays in the browser, with no server,
+remote code, analytics, or additional site access. If initialization fails, the
+packaged single-threaded background engine remains available.
+```
+
 ### Host access reason
 
 ```text

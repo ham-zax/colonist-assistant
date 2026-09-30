@@ -32,6 +32,21 @@ const shared = {
 await Promise.all([
   build({
     ...shared,
+    entryPoints: [join(root, "src/offscreen/index.ts")],
+    outfile: join(outdir, "offscreen.js"),
+    format: "esm",
+  }),
+  build({
+    ...shared,
+    entryPoints: [join(root, "src/offscreen/engine-worker.ts")],
+    outfile: join(outdir, "offscreen-engine-worker.js"),
+    format: "esm",
+    plugins: [{ name: "threaded-wasm-module", setup(builder) {
+      builder.onResolve({ filter: /generated\/wasm-threads\/colonist_search\.js$/ }, () => ({ path: "./wasm-threads/colonist_search.js", external: true }));
+    } }],
+  }),
+  build({
+    ...shared,
     entryPoints: [join(root, "src/content/index.ts")],
     outfile: join(outdir, "content.js"),
     format: "iife",
@@ -63,6 +78,8 @@ await cp(
   join(root, "src", "generated", "wasm", "colonist_search_bg.wasm"),
   join(outdir, "colonist_search_bg.wasm"),
 );
+
+await cp(join(root, "src/generated/wasm-threads"), join(outdir, "wasm-threads"), { recursive: true });
 
 const manifestPath = join(outdir, "manifest.json");
 const manifest = JSON.parse(await readFile(manifestPath, "utf8"));

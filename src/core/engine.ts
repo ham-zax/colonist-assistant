@@ -36,6 +36,7 @@ export const isWasmDecisionEngine = (engine: DecisionEngine): boolean =>
 export type DecisionRuntime =
   | "background-gpu"
   | "background-wasm"
+  | "offscreen-wasm-threads"
   | "background-rollout";
 
 export interface NativeGpuBuildIdentity {
@@ -47,7 +48,7 @@ export interface NativeGpuBuildIdentity {
 
 export const isSearchDecisionRuntime = (
   runtime: DecisionRuntime | undefined,
-): boolean => runtime === "background-gpu" || runtime === "background-wasm";
+): boolean => runtime === "background-gpu" || runtime === "background-wasm" || runtime === "offscreen-wasm-threads";
 
 export interface DeepSearchAction {
   kind: string;
@@ -942,6 +943,7 @@ export interface DecisionAnalysis {
   model: string;
   runtime?: DecisionRuntime;
   runtimeReason?: string;
+  runtimeThreadCount?: number;
   nativeGpuBuild?: NativeGpuBuildIdentity;
   deepSearch?: DeepSearchResult;
 }

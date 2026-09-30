@@ -707,6 +707,7 @@ fn expansion_option_value_with_routes_and_weights(
         &owned_arrivals
     };
     let production = production_pips(state, player);
+    let ratios = state.trade_ratios(player);
     let mut best = ExpansionOption::default();
     let mut top = [0.0_f32; 3];
     let mut option_count = 0u8;
@@ -730,6 +731,7 @@ fn expansion_option_value_with_routes_and_weights(
             player,
             &production,
             exact_hand_visible,
+            &ratios,
         );
         let road_cost = distance as f32 * 1.45;
         let immediate_window = turns_until_action(state, player) + distance as f32 * 0.08;
@@ -1406,12 +1408,16 @@ fn prospective_port_option_value(
     current_production: &[f32; 5],
     site_production: &[f32; 5],
     exact_hand_visible: bool,
+    before: &ResourceHand,
 ) -> f32 {
     let Some(port) = state.board.vertices[vertex as usize].port else {
         return 0.0;
     };
-    let before = state.trade_ratios(player);
-    let mut after = before;
+    // `before` is the owning player's maritime ratios, hoisted to once per
+    // expansion scan. `GameState::trade_ratios` walks every building on the
+    // board, so recomputing it per candidate vertex made this O(vertices^2)
+    // per player. Keep the unchanged ratio calculation outside the vertex loop.
+    let mut after = *before;
     match port {
         Port::Generic => {
             for ratio in &mut after {
@@ -1440,19 +1446,18 @@ fn prospective_port_option_value(
         // Sample whole-build access at the same 18-roll scale used by the
         // strategic economy. A ratio change earns no access credit unless it
         // completes the entire cost at one of these horizons.
-        let access = [0.0, 18.0, 36.0]
+        [0.0, 18.0, 36.0]
             .into_iter()
             .filter(|rolls| {
                 build_fundable_at_rolls(&prospective_production, hand, ratios, cost, *rolls)
             })
             .count() as f32
-            / 3.0;
-        access
+            / 3.0
     };
     let gains = BUILD_COSTS
         .iter()
         .map(|cost| {
-            (complete_build_access(&after, cost) - complete_build_access(&before, cost)).max(0.0)
+            (complete_build_access(&after, cost) - complete_build_access(before, cost)).max(0.0)
                 * build_conversion_efficiency(&prospective_production, &after, cost)
         })
         .collect::<Vec<_>>();
@@ -1467,6 +1472,7 @@ fn vertex_value_with_weights(
     player: u8,
     current_production: &[f32; 5],
 ) -> f32 {
+    let ratios = state.trade_ratios(player);
     vertex_value_with_weights_and_knowledge(
         state,
         vertex,
@@ -1474,6 +1480,7 @@ fn vertex_value_with_weights(
         player,
         current_production,
         true,
+        &ratios,
     )
 }
 
@@ -1484,6 +1491,7 @@ fn vertex_value_with_weights_and_knowledge(
     player: u8,
     current_production: &[f32; 5],
     exact_hand_visible: bool,
+    ratios: &ResourceHand,
 ) -> f32 {
     let mut value: f32 = 0.0;
     let mut numbers = 0u16;
@@ -1510,6 +1518,7 @@ fn vertex_value_with_weights_and_knowledge(
         current_production,
         &site_production,
         exact_hand_visible,
+        ratios,
     );
     value
 }

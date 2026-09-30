@@ -1394,21 +1394,42 @@ impl GameState {
             };
             completed + 1.5 / (1.0 + nearest) + receive_total * 0.32 - give_total * 0.18 + safety
         };
-        // Score each offer once and tie-break on a byte key that orders exactly
-        // like the offers' Debug strings. Formatting Debug strings inside the
-        // comparator dominated whole-search profiles.
+        // Order by score first, then materialize the byte tiebreaker only
+        // inside runs of equal score. This is the same total order as a single
+        // composite sort, because both are stable and the key is only ever
+        // consulted when the scores are equal. Offers with distinct scores
+        // do not need the 72-byte tiebreaker key.
         let mut keyed = actions
             .into_iter()
-            .map(|action| (score(&action), offer_debug_order_key(&action), action))
+            .map(|action| (score(&action), action))
             .collect::<Vec<_>>();
-        keyed.sort_by(|left, right| {
-            right
-                .0
-                .total_cmp(&left.0)
-                .then_with(|| left.1.as_slice().cmp(right.1.as_slice()))
-        });
+        keyed.sort_by(|left, right| right.0.total_cmp(&left.0));
+        let mut run_start = 0;
+        while run_start < keyed.len() {
+            let mut run_end = run_start + 1;
+            while run_end < keyed.len() && keyed[run_end].0.total_cmp(&keyed[run_start].0).is_eq() {
+                run_end += 1;
+            }
+            if run_end - run_start > 1 {
+                let mut order = (run_start..run_end)
+                    .map(|index| (offer_debug_order_key(&keyed[index].1), index))
+                    .collect::<Vec<_>>();
+                order.sort_by(|left, right| {
+                    left.0
+                        .as_slice()
+                        .cmp(right.0.as_slice())
+                        .then_with(|| left.1.cmp(&right.1))
+                });
+                let ordered = order
+                    .iter()
+                    .map(|(_, index)| keyed[*index].clone())
+                    .collect::<Vec<_>>();
+                keyed[run_start..run_end].clone_from_slice(&ordered);
+            }
+            run_start = run_end;
+        }
         keyed.truncate(96);
-        keyed.into_iter().map(|(_, _, action)| action).collect()
+        keyed.into_iter().map(|(_, action)| action).collect()
     }
 
     fn playable_development_actions(&self) -> Vec<Action> {

@@ -70,8 +70,10 @@ describe("extension runs only on the packaged WASM engine", () => {
       ).resolves.toEqual({
         id: 1,
         runtime: "background-wasm",
+        threadCount: 1,
         engineRevision: "deep-maxn-test",
         initializationMs: 7,
+        runtimeReason: "Offscreen worker API unavailable; using single-threaded WASM",
       });
     }
     expect(warm).toHaveBeenCalledTimes(2);

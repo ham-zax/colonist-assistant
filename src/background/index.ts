@@ -13,6 +13,8 @@ import {
   type DecisionStatusMessageResponse,
 } from "../worker/protocol";
 
+import { threadedExecutor, warmThreadedEngine, threadedFallbackReason } from "./threaded-engine";
+
 interface ActiveDecision {
   controller: AbortController;
 }
@@ -91,10 +93,13 @@ chrome.runtime.onMessage.addListener(
     ) {
       const status = message as DecisionStatusMessage;
       void (async () => {
-        const wasm = await warmDeepSearchEngine();
+        const threaded = await warmThreadedEngine();
+        const wasm = threaded ?? await warmDeepSearchEngine();
         const response: DecisionStatusMessageResponse = {
           id: status.id,
-          runtime: "background-wasm",
+          runtime: threaded ? "offscreen-wasm-threads" : "background-wasm",
+          threadCount: threaded?.threadCount ?? 1,
+          ...(!threaded ? { runtimeReason: threadedFallbackReason } : {}),
           engineRevision: wasm.engineRevision,
           initializationMs: wasm.initializationMs,
         };
@@ -123,15 +128,18 @@ chrome.runtime.onMessage.addListener(
     void (async () => {
       const backgroundStartedAt = performance.now();
       signal.throwIfAborted();
+      const threaded = await warmThreadedEngine();
+      signal.throwIfAborted();
       const analysis = await analyzeDecisionRequest(
         withRemainingDecisionBudget(message, backgroundStartedAt),
+        threaded ? threadedExecutor(signal) : undefined,
       );
       const runtime = analysis.deepSearch
-        ? ("background-wasm" as const)
+        ? threaded ? ("offscreen-wasm-threads" as const) : ("background-wasm" as const)
         : ("background-rollout" as const);
       const runtimeReason =
         analysis.runtimeReason ??
-        (runtime === "background-wasm"
+        (runtime === "background-wasm" || runtime === "offscreen-wasm-threads"
           ? message.engine === "deep-search" && message.board.initialPlacement
             ? "Dedicated opening solver runs on WASM/CPU"
             : message.engine === "deep-search"
@@ -143,6 +151,7 @@ chrome.runtime.onMessage.addListener(
       return {
         ...analysis,
         runtime,
+        runtimeThreadCount: threaded?.threadCount ?? 1,
         ...(runtimeReason ? { runtimeReason } : {}),
       };
     })()

@@ -34,7 +34,8 @@ const HARD_DECISION_ERROR =
   "Strategist did not return before the 12-second safety limit";
 
 export interface DecisionServiceStatus {
-  runtime: "background-wasm" | "engine-error";
+  runtime: "background-wasm" | "offscreen-wasm-threads" | "engine-error";
+  threadCount?: number;
   detail: string;
   initializationMs?: number;
 }
@@ -106,7 +107,8 @@ export class DecisionWorkerClient {
         }
         callback({
           runtime: response.runtime,
-          detail: `${response.engineRevision} ready`,
+          detail: `${response.engineRevision} ready${response.threadCount ? ` (${response.threadCount} threads)` : ""}${response.runtimeReason ? ` · ${response.runtimeReason}` : ""}`,
+          ...(response.threadCount ? { threadCount: response.threadCount } : {}),
           ...(response.initializationMs !== undefined
             ? { initializationMs: response.initializationMs }
             : {}),

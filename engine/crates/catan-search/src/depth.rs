@@ -1,6 +1,30 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
+#[cfg(all(test, feature = "parallel"))]
+thread_local! {
+    static FORCE_SEQUENTIAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+// Indexed collection preserves the input order even when workers finish out of order.
+fn ordered_search_map<T: Sync, R: Send>(
+    units: &[T],
+    map: impl Fn(&T) -> R + Sync + Send,
+) -> Vec<R> {
+    #[cfg(feature = "parallel")]
+    {
+        #[cfg(test)]
+        let parallel = !FORCE_SEQUENTIAL.with(std::cell::Cell::get);
+        #[cfg(not(test))]
+        let parallel = true;
+        if parallel {
+            return units.par_iter().map(map).collect();
+        }
+    }
+    units.iter().map(map).collect()
+}
 
 use colonist_catan_core::{Action, GameState, NodeKind, Phase};
 
@@ -840,8 +864,17 @@ struct Searcher {
     controlled_next_decision_reached: bool,
     terminal_reached: bool,
     cutoff_depth_counts: Vec<u32>,
-    evaluation_cache: Rc<RefCell<HashMap<u64, [f32; 4]>>>,
-    transposition_table: Option<Rc<RefCell<TranspositionTable>>>,
+    /// Pure memo of `evaluate`, owned by the searcher that fills it. Owned
+    /// rather than shared so a `Searcher` stays `Send` and wave cells can run
+    /// on a pool; a hit returns the same value a miss would have computed.
+    evaluation_cache: HashMap<u64, [f32; 4]>,
+    /// Per-cell transposition memo. Owned for the same `Send` reason, and
+    /// deliberately not shared between cells: a hit short-circuits a subtree
+    /// and so changes both node counts and the values that fit in a node
+    /// budget. Sharing it across concurrently running cells would make the
+    /// result depend on interleaving, so sequential and parallel runs must
+    /// agree on this being per-cell.
+    transposition_table: Option<TranspositionTable>,
 }
 
 struct DecisionVisitContext {
@@ -850,6 +883,192 @@ struct DecisionVisitContext {
     alpha: f32,
     beta: f32,
     subtree_limit: u32,
+}
+
+/// One posterior-weighted root action result folded into a wave aggregate.
+#[derive(Clone)]
+struct RowEntry {
+    action: Action,
+    value: [f32; 4],
+    legal: bool,
+}
+
+/// The shared CPU continuation visit: the exact CPU tail of
+/// `BeliefBackend::visit`, with no backend state, so a rayon closure can call
+/// it without the backend being `Sync`. Only valid when
+/// `BeliefBackend::is_shareable`.
+#[cfg(feature = "parallel")]
+fn visit_shared_cpu(
+    searcher: &mut Searcher,
+    state: &GameState,
+    depth: u8,
+    actions_in_turn: u8,
+) -> Result<[f32; 4], DepthBeliefError> {
+    Ok(searcher.visit(state, depth, actions_in_turn, 0.0, 1.0, searcher.node_limit))
+}
+
+/// One unit of parallel work inside a depth wave: a single
+/// (particle x root x policy variant) continuation cell.
+///
+/// Cells are built in canonical order, may be evaluated in any order, and are
+/// folded back in that same order, so the weighted f32 accumulation is
+/// bit-identical to the sequential loop it replaces. Each cell owns its own
+/// caches, so a cell's result depends only on its own inputs.
+struct WaveCell {
+    action_index: usize,
+    /// Weighted particle mass, already normalized by total weight.
+    weight: f32,
+    /// The state after applying the root action. `None` when the root action
+    /// is illegal for this particle, which folds a fallback without searching.
+    state: Option<GameState>,
+    particle_state: GameState,
+    action: Action,
+    completed_turn: bool,
+    allowance: u32,
+    target_depth: u8,
+    policy_override: Option<ControlledWideningTarget>,
+    algorithm: Algorithm,
+    branch_cap: usize,
+    observer: u8,
+    deadline: CooperativeDeadline,
+    /// Variant 1 of a root that funds a challenger policy.
+    is_challenger: bool,
+}
+
+/// A completed wave cell: the row to fold plus the diagnostics the wave
+/// aggregates. An incomplete cell still returns its diagnostics, because the
+/// wave discards itself and only the node counter is retained.
+struct WaveCellResult {
+    entry: RowEntry,
+    nodes: u32,
+    cutoffs: u32,
+    deepest_depth: u8,
+    controlled_ambiguity_hits: Vec<ControlledAmbiguityHit>,
+    controlled_next_decision_reached: bool,
+    terminal_reached: bool,
+    cutoff_depth_counts: Vec<u32>,
+    deadline_reached: bool,
+}
+
+/// A wave cell's continuation visit. Sequential callers pass
+/// `BeliefBackend::visit`; the pool passes the shared CPU visit.
+type WaveCellVisit<'v> =
+    &'v mut dyn FnMut(&mut Searcher, &GameState, u8, u8) -> Result<[f32; 4], DepthBeliefError>;
+
+fn run_wave_cell(
+    cell: &WaveCell,
+    visit: WaveCellVisit<'_>,
+) -> Result<WaveCellResult, DepthBeliefError> {
+    if cell.deadline.has_elapsed() {
+        return Ok(WaveCellResult {
+            entry: RowEntry {
+                action: cell.action.clone(),
+                value: [0.0; 4],
+                legal: false,
+            },
+            nodes: 0,
+            cutoffs: 0,
+            deepest_depth: 0,
+            controlled_ambiguity_hits: Vec::new(),
+            controlled_next_decision_reached: false,
+            terminal_reached: false,
+            cutoff_depth_counts: Vec::new(),
+            deadline_reached: true,
+        });
+    }
+    let Some(state) = cell.state.as_ref() else {
+        // An illegal root folds its own fallback evaluation and never searches.
+        return Ok(WaveCellResult {
+            entry: RowEntry {
+                action: cell.action.clone(),
+                value: evaluate(&cell.particle_state),
+                legal: false,
+            },
+            nodes: 0,
+            cutoffs: 0,
+            deepest_depth: 0,
+            controlled_ambiguity_hits: Vec::new(),
+            controlled_next_decision_reached: false,
+            terminal_reached: false,
+            cutoff_depth_counts: Vec::new(),
+            deadline_reached: false,
+        });
+    };
+    let mut searcher = Searcher {
+        algorithm: cell.algorithm,
+        maximum_depth: cell.target_depth,
+        maximum_nodes: cell.allowance,
+        node_limit: cell.allowance,
+        branch_cap: cell.branch_cap,
+        nodes: 0,
+        cutoffs: 0,
+        deepest_depth: 0,
+        // Variant allowances partition the original cell quota. Only the
+        // shared deadline can abort the wave.
+        deadline: cell.deadline.clone(),
+        deadline_reached: false,
+        observation_safe_recursive: true,
+        controlled_player: Some(cell.observer),
+        controlled_policy_override: cell.policy_override.clone(),
+        controlled_ambiguity_hits: Vec::new(),
+        controlled_next_decision_reached: false,
+        terminal_reached: false,
+        cutoff_depth_counts: Vec::new(),
+        evaluation_cache: HashMap::new(),
+        transposition_table: Some(TranspositionTable::default()),
+    };
+    let mut candidate_value = visit(
+        &mut searcher,
+        state,
+        u8::from(cell.completed_turn),
+        if cell.completed_turn { 0 } else { 1 },
+    )?;
+    apply_action_friction(
+        &mut candidate_value,
+        &cell.particle_state,
+        &cell.action,
+        cell.observer,
+    );
+    Ok(WaveCellResult {
+        entry: RowEntry {
+            action: cell.action.clone(),
+            value: candidate_value,
+            legal: true,
+        },
+        nodes: searcher.nodes,
+        cutoffs: searcher.cutoffs,
+        deepest_depth: searcher.deepest_depth,
+        controlled_ambiguity_hits: searcher.controlled_ambiguity_hits,
+        controlled_next_decision_reached: searcher.controlled_next_decision_reached,
+        terminal_reached: searcher.terminal_reached || state.is_terminal(),
+        cutoff_depth_counts: searcher.cutoff_depth_counts,
+        deadline_reached: searcher.deadline_reached,
+    })
+}
+
+/// Evaluate a wave's cells and return the results in canonical cell order.
+///
+/// With the `parallel` feature a shareable (CPU) backend is evaluated on the
+/// rayon pool. The CUDA and test-hook backends hold `&mut` state, so they keep
+/// the sequential path; both are compiled out of the packaged WASM engine.
+fn run_wave_cells(
+    cells: &[WaveCell],
+    backend: &mut BeliefBackend<'_>,
+) -> Result<Vec<WaveCellResult>, DepthBeliefError> {
+    #[cfg(feature = "parallel")]
+    if backend.is_shareable() {
+        return ordered_search_map(cells, |cell| run_wave_cell(cell, &mut visit_shared_cpu))
+            .into_iter()
+            .collect();
+    }
+    cells
+        .iter()
+        .map(|cell| {
+            run_wave_cell(cell, &mut |searcher, state, depth, actions_in_turn| {
+                backend.visit(searcher, state, depth, actions_in_turn)
+            })
+        })
+        .collect()
 }
 
 fn normalize_belief_root_priors_with_diagnostics(
@@ -882,10 +1101,26 @@ fn normalize_belief_root_priors_with_diagnostics(
     let per_particle_planner_nodes = (planner_nodes / positive_particles).max(1);
     let mut aggregate = Vec::<Aggregate>::new();
 
-    for particle in particles {
+    // Score every particle independently, then fold the per-particle rows in
+    // particle order. Scoring dominates preparation on wide posteriors, and
+    // folding in particle order keeps the f32 sums bit-identical to a
+    // sequential run.
+    #[derive(Clone)]
+    struct ScoredRow {
+        action: Action,
+        prior: f32,
+        quota_score: f32,
+        planner_value: f32,
+        planner_completion_mass: f32,
+        planner_decisive_completion_mass: f32,
+        planner_weighted_response_windows: f32,
+        planner_response_weight: f32,
+        planner_weight: f32,
+    }
+    let score_particle = |particle: &BeliefParticle| -> Vec<ScoredRow> {
         let weight = particle.weight.max(0.0) / total_weight;
         if weight <= 0.0 {
-            continue;
+            return Vec::new();
         }
         let legal = actor_proposal_actions(&particle.state);
         let mut ranked = normalize_priors(&particle.state, &legal, actor);
@@ -896,43 +1131,60 @@ fn normalize_belief_root_priors_with_diagnostics(
         );
         let ordered = order_scored_with_state_quotas(&particle.state, actor, ranked);
         let rank_scale = ordered.len().max(1) as f32;
-        for (position, (action, prior)) in ordered.into_iter().enumerate() {
-            let quota_score = (rank_scale - position as f32) / rank_scale;
-            let planner = plans.iter().find(|plan| plan.first_action == action);
-            let planner_weight = planner.map_or(0.0, |_| weight);
-            let planner_value = planner.map_or(0.0, |plan| plan.value * weight);
-            let planner_completion_mass = planner.map_or(0.0, |plan| plan.completion_mass * weight);
-            let planner_decisive_completion_mass =
-                planner.map_or(0.0, |plan| plan.decisive_completion_mass * weight);
-            let planner_weighted_response_windows = planner
-                .and_then(|plan| plan.response_windows)
-                .map_or(0.0, |windows| windows * weight);
-            let planner_response_weight = planner
-                .and_then(|plan| plan.response_windows)
-                .map_or(0.0, |_| weight);
-            if let Some(existing) = aggregate
-                .iter_mut()
-                .find(|candidate| candidate.action == action)
-            {
-                existing.prior += prior * weight;
-                existing.quota_score += quota_score * weight;
-                existing.planner_value += planner_value;
-                existing.planner_completion_mass += planner_completion_mass;
-                existing.planner_decisive_completion_mass += planner_decisive_completion_mass;
-                existing.planner_weighted_response_windows += planner_weighted_response_windows;
-                existing.planner_response_weight += planner_response_weight;
-                existing.planner_weight += planner_weight;
-            } else {
-                aggregate.push(Aggregate {
+        ordered
+            .into_iter()
+            .enumerate()
+            .map(|(position, (action, prior))| {
+                let quota_score = (rank_scale - position as f32) / rank_scale;
+                let planner = plans.iter().find(|plan| plan.first_action == action);
+                ScoredRow {
                     action,
                     prior: prior * weight,
                     quota_score: quota_score * weight,
-                    planner_value,
-                    planner_completion_mass,
-                    planner_decisive_completion_mass,
-                    planner_weighted_response_windows,
-                    planner_response_weight,
-                    planner_weight,
+                    planner_value: planner.map_or(0.0, |plan| plan.value * weight),
+                    planner_completion_mass: planner
+                        .map_or(0.0, |plan| plan.completion_mass * weight),
+                    planner_decisive_completion_mass: planner
+                        .map_or(0.0, |plan| plan.decisive_completion_mass * weight),
+                    planner_weighted_response_windows: planner
+                        .and_then(|plan| plan.response_windows)
+                        .map_or(0.0, |windows| windows * weight),
+                    planner_response_weight: planner
+                        .and_then(|plan| plan.response_windows)
+                        .map_or(0.0, |_| weight),
+                    planner_weight: planner.map_or(0.0, |_| weight),
+                }
+            })
+            .collect()
+    };
+
+    let scored_by_particle = ordered_search_map(particles, score_particle);
+
+    for scored in &scored_by_particle {
+        for row in scored {
+            if let Some(existing) = aggregate
+                .iter_mut()
+                .find(|candidate| candidate.action == row.action)
+            {
+                existing.prior += row.prior;
+                existing.quota_score += row.quota_score;
+                existing.planner_value += row.planner_value;
+                existing.planner_completion_mass += row.planner_completion_mass;
+                existing.planner_decisive_completion_mass += row.planner_decisive_completion_mass;
+                existing.planner_weighted_response_windows += row.planner_weighted_response_windows;
+                existing.planner_response_weight += row.planner_response_weight;
+                existing.planner_weight += row.planner_weight;
+            } else {
+                aggregate.push(Aggregate {
+                    action: row.action.clone(),
+                    prior: row.prior,
+                    quota_score: row.quota_score,
+                    planner_value: row.planner_value,
+                    planner_completion_mass: row.planner_completion_mass,
+                    planner_decisive_completion_mass: row.planner_decisive_completion_mass,
+                    planner_weighted_response_windows: row.planner_weighted_response_windows,
+                    planner_response_weight: row.planner_response_weight,
+                    planner_weight: row.planner_weight,
                 });
             }
         }
@@ -1107,15 +1359,17 @@ impl Searcher {
         key: &TranspositionIdentity,
         state: &GameState,
     ) -> Option<[f32; 4]> {
-        self.transposition_table
-            .as_ref()?
-            .borrow()
-            .lookup(key, state)
+        self.transposition_table.as_ref()?.lookup(key, state)
     }
 
-    fn insert_transposition(&self, key: TranspositionIdentity, state: &GameState, value: [f32; 4]) {
-        if let Some(table) = self.transposition_table.as_ref() {
-            table.borrow_mut().insert(key, state, value);
+    fn insert_transposition(
+        &mut self,
+        key: TranspositionIdentity,
+        state: &GameState,
+        value: [f32; 4],
+    ) {
+        if let Some(table) = self.transposition_table.as_mut() {
+            table.insert(key, state, value);
         }
     }
 
@@ -1154,13 +1408,13 @@ impl Searcher {
         )
     }
 
-    fn evaluate_cached(&self, state: &GameState) -> [f32; 4] {
+    fn evaluate_cached(&mut self, state: &GameState) -> [f32; 4] {
         let hash = state.state_hash();
-        if let Some(value) = self.evaluation_cache.borrow().get(&hash) {
+        if let Some(value) = self.evaluation_cache.get(&hash) {
             return *value;
         }
         let value = evaluate(state);
-        self.evaluation_cache.borrow_mut().insert(hash, value);
+        self.evaluation_cache.insert(hash, value);
         value
     }
 
@@ -1875,6 +2129,14 @@ impl BeliefBackend<'_> {
         Ok(())
     }
 
+    /// True when the shared CPU cell path may be used: only the plain CPU
+    /// backend. The CUDA arm owns `&mut` evaluator state and the test hook
+    /// owns a `FnMut`, so neither can be shared across threads.
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    fn is_shareable(&self) -> bool {
+        matches!(self, Self::Cpu)
+    }
+
     fn visit(
         &mut self,
         searcher: &mut Searcher,
@@ -1918,7 +2180,7 @@ impl BeliefBackend<'_> {
                 controlled_next_decision_reached: false,
                 terminal_reached: false,
                 cutoff_depth_counts: Vec::new(),
-                transposition_table: searcher.transposition_table.as_ref().map(Rc::clone),
+                transposition_table: searcher.transposition_table.take(),
                 local_transpositions: HashMap::new(),
                 pending_transpositions: Vec::new(),
             };
@@ -1931,6 +2193,7 @@ impl BeliefBackend<'_> {
             searcher.terminal_reached = deferred.terminal_reached;
             searcher.cutoff_depth_counts = std::mem::take(&mut deferred.cutoff_depth_counts);
             let pending_transpositions = std::mem::take(&mut deferred.pending_transpositions);
+            searcher.transposition_table = deferred.transposition_table.take();
             drop(deferred);
             record_cuda_duration(&CUDA_TREE_BUILD_NANOS, tree_build_started.elapsed());
             CUDA_HOST_PACKING_NANOS
@@ -1967,9 +2230,8 @@ impl BeliefBackend<'_> {
             let node_values = tree.backup_all(&values);
             record_cuda_duration(&CUDA_BACKUP_NANOS, backup_started.elapsed());
             if !searcher.deadline_reached
-                && let Some(table) = searcher.transposition_table.as_ref()
+                && let Some(table) = searcher.transposition_table.as_mut()
             {
-                let mut table = table.borrow_mut();
                 for pending in pending_transpositions {
                     table.insert(pending.key, &pending.state, node_values[pending.node]);
                 }
@@ -2141,12 +2403,6 @@ fn belief_search_backend(
         legal_weight: f32,
         lower_bound: [f32; 4],
     }
-    #[derive(Clone)]
-    struct RowEntry {
-        action: Action,
-        value: [f32; 4],
-        legal: bool,
-    }
     let mut aggregate = Vec::<Aggregate>::new();
     let accumulate = |aggregate: &mut Vec<Aggregate>, entry: RowEntry, weight: f32| {
         if let Some(existing) = aggregate
@@ -2177,7 +2433,6 @@ fn belief_search_backend(
     let mut cutoffs = 0;
     let mut depth = 0;
     let mut deadline_reached = false;
-    let evaluation_cache = Rc::new(RefCell::new(HashMap::new()));
     let total_weight = particles
         .iter()
         .map(|particle| particle.weight.max(0.0))
@@ -2314,32 +2569,45 @@ fn belief_search_backend(
     );
     let mut verified_blockers = immediate_winning_roots(first, observer, &root_scored);
     if immediate_threat_weight > f32::EPSILON {
-        for (action, _) in &root_scored {
-            // Blocker verification is per root and per particle. Stop at the
-            // deadline so preparation cannot consume the search budget; the
-            // roots checked so far keep their verified status.
-            if deadline.has_elapsed() {
-                deadline_reached = true;
-                break;
-            }
-            if verified_blockers
-                .iter()
-                .any(|(candidate, _)| candidate == action)
-            {
-                continue;
-            }
-            let residual_loss = forced_loss_weight(
+        // Blocker verification is a pure per-root reduction over the
+        // posterior, so evaluate the residual independently and then admit
+        // roots in canonical order. The deadline check stays on the ordered
+        // fold, so a deadline still truncates preparation at the same root
+        // boundary a sequential run would.
+        let residual_loss_of = |action: &Action| {
+            forced_loss_weight(
                 posterior
                     .iter()
                     .map(|particle| (&particle.state, particle.weight)),
                 observer,
                 action,
-            );
+            )
+        };
+        let residuals = ordered_search_map(&root_scored, |(action, _)| {
+            if deadline.has_elapsed()
+                || verified_blockers
+                    .iter()
+                    .any(|(candidate, _)| candidate == action)
+            {
+                None
+            } else {
+                Some(residual_loss_of(action))
+            }
+        });
+
+        for ((action, _), residual_loss) in root_scored.iter().zip(residuals) {
+            if deadline.has_elapsed() {
+                deadline_reached = true;
+                break;
+            }
+            let Some(residual_loss) = residual_loss else {
+                continue;
+            };
             if residual_loss + 1e-6 < immediate_threat_weight {
                 verified_blockers.push((action.clone(), residual_loss));
             }
         }
-    };
+    }
     let root_actions_list: Vec<Action> = root_scored.iter().map(|(a, _)| a.clone()).collect();
     let closeout_plans = closeout_plans_from_ranked_diagnostics(&ranked_diagnostics);
     let spatial_impact_report = particles.first().map(|first| {
@@ -2649,32 +2917,52 @@ fn belief_search_backend(
     // action-specific evidence this search may return. Finish it even if
     // preparation consumed the nominal deadline; otherwise every root receives
     // the same fallback value and root ordering becomes the recommendation.
-    for particle in particles {
-        let weight = particle.weight.max(0.0) / total_weight;
-        if weight <= 0.0 {
-            continue;
-        }
-        particles_searched += 1;
-        for (action_index, action) in root_actions.iter().enumerate() {
-            let mut next = particle.state.clone();
-            let entry = if next.apply(action).is_ok() {
-                if next.is_terminal() {
-                    completed_root_work[action_index].posterior_mass_reaching_terminal += weight;
-                }
-                let mut value = evaluate_after_forced_chance(&next, 0);
-                apply_action_friction(&mut value, &particle.state, action, observer);
-                RowEntry {
-                    action: action.clone(),
-                    value,
-                    legal: true,
-                }
-            } else {
+    // Each (particle, root) cell is an independent one-ply evaluation, so they
+    // are computed in parallel and folded back in particle-then-root order.
+    // A cell also reports whether its world reached a terminal position, which
+    // the ordered fold charges to the root's terminal-mass diagnostic.
+    let floor_row = |particle: &BeliefParticle, action: &Action| -> (RowEntry, bool) {
+        let mut next = particle.state.clone();
+        if next.apply(action).is_err() {
+            return (
                 RowEntry {
                     action: action.clone(),
                     value: evaluate(&particle.state),
                     legal: false,
-                }
-            };
+                },
+                false,
+            );
+        }
+        let terminal = next.is_terminal();
+        let mut value = evaluate_after_forced_chance(&next, 0);
+        apply_action_friction(&mut value, &particle.state, action, observer);
+        (
+            RowEntry {
+                action: action.clone(),
+                value,
+                legal: true,
+            },
+            terminal,
+        )
+    };
+    let floor_rows = ordered_search_map(particles, |particle| {
+        let weight = particle.weight.max(0.0) / total_weight;
+        if weight <= 0.0 {
+            return None;
+        }
+        Some((
+            weight,
+            ordered_search_map(&root_actions, |action| floor_row(particle, action)),
+        ))
+    });
+
+    for row_set in floor_rows.into_iter().flatten() {
+        let (weight, rows) = row_set;
+        particles_searched += 1;
+        for (action_index, (entry, terminal)) in rows.into_iter().enumerate() {
+            if terminal {
+                completed_root_work[action_index].posterior_mass_reaching_terminal += weight;
+            }
             accumulate(&mut aggregate, entry, weight);
         }
     }
@@ -2767,7 +3055,6 @@ fn belief_search_backend(
         let mut challenger_ambiguity_evidence =
             vec![Vec::<ControlledAmbiguityEvidence>::new(); root_actions.len()];
         let mut wave_root_cutoff_depth_counts = vec![Vec::<u32>::new(); root_actions.len()];
-        let wave_transposition_table = Rc::new(RefCell::new(TranspositionTable::default()));
         let mut wave_root_target_depths = vec![wave_target_depth; root_actions.len()];
         if wave_target_depth > 1 && wave_target_depth < maximum_depth {
             for canonical_index in root_allocation_priority
@@ -2826,7 +3113,12 @@ fn belief_search_backend(
             })
             .collect::<Vec<_>>();
 
-        'particles: for (particle_index, particle) in particles.iter().enumerate() {
+        // Build every cell of this wave in canonical (particle, root,
+        // variant) order, then evaluate them, then fold them back in that
+        // same order. The fold is what makes the weighted f32 accumulation
+        // bit-identical to a sequential run; the evaluation order is free.
+        let mut wave_cells = Vec::<WaveCell>::new();
+        for (particle_index, particle) in particles.iter().enumerate() {
             let weight = particle.weight.max(0.0) / total_weight;
             if weight <= 0.0 {
                 continue;
@@ -2834,11 +3126,6 @@ fn belief_search_backend(
             wave_particles += 1;
             let wave_action_budgets = &wave_action_budgets_by_particle[particle_index];
             for (action_index, action) in root_actions.iter().enumerate() {
-                if active_deadline.has_elapsed() {
-                    deadline_reached = true;
-                    wave_complete = false;
-                    break 'particles;
-                }
                 let nodes_for_action = wave_action_budgets[action_index].max(1);
                 let variant_budgets = if root_widening_enabled[action_index] {
                     let budgets = controlled_widening_budgets(nodes_for_action)
@@ -2850,127 +3137,107 @@ fn belief_search_backend(
                 debug_assert_eq!(variant_budgets.iter().sum::<u32>(), nodes_for_action);
 
                 let mut next = particle.state.clone();
-                if next.apply(action).is_err() {
-                    let entry = RowEntry {
-                        action: action.clone(),
-                        value: evaluate(&particle.state),
-                        legal: false,
-                    };
-                    accumulate(&mut baseline_wave, entry.clone(), weight);
-                    if root_widening_enabled[action_index] {
-                        accumulate(&mut challenger_wave, entry, weight);
-                    }
-                    continue;
-                }
-                let completed_turn = next.turn != particle.state.turn
-                    || next.current_player != particle.state.current_player;
-
+                let legal = next.apply(action).is_ok();
+                let completed_turn = legal
+                    && (next.turn != particle.state.turn
+                        || next.current_player != particle.state.current_player);
                 for (variant_index, allowance) in variant_budgets.into_iter().enumerate() {
-                    if active_deadline.has_elapsed() {
-                        deadline_reached = true;
-                        wave_complete = false;
-                        break 'particles;
-                    }
                     let policy_override = (variant_index == 1)
                         .then(|| future_self_widening_targets[action_index].clone())
                         .flatten();
-                    let mut searcher = Searcher {
+                    wave_cells.push(WaveCell {
+                        action_index,
+                        weight,
+                        state: legal.then_some(next.clone()),
+                        particle_state: particle.state.clone(),
+                        action: action.clone(),
+                        completed_turn,
+                        allowance,
+                        target_depth: wave_root_target_depths[action_index],
+                        policy_override,
                         algorithm: if paranoid {
                             Algorithm::Paranoid { root: observer }
                         } else {
                             Algorithm::MaxN
                         },
-                        maximum_depth: wave_root_target_depths[action_index],
-                        maximum_nodes: allowance,
-                        node_limit: allowance,
                         branch_cap: branch_cap.max(1),
-                        nodes: 0,
-                        cutoffs: 0,
-                        deepest_depth: 0,
-                        // Variant allowances partition the original cell quota.
-                        // Only the existing shared deadline can abort the wave.
+                        observer,
                         deadline: active_deadline.clone(),
-                        deadline_reached: false,
-                        observation_safe_recursive: true,
-                        controlled_player: Some(observer),
-                        controlled_policy_override: policy_override,
-                        controlled_ambiguity_hits: Vec::new(),
-                        controlled_next_decision_reached: false,
-                        terminal_reached: false,
-                        cutoff_depth_counts: Vec::new(),
-                        evaluation_cache: Rc::clone(&evaluation_cache),
-                        transposition_table: Some(Rc::clone(&wave_transposition_table)),
-                    };
-                    let mut candidate_value = backend.visit(
-                        &mut searcher,
-                        &next,
-                        u8::from(completed_turn),
-                        if completed_turn { 0 } else { 1 },
-                    )?;
-                    apply_action_friction(&mut candidate_value, &particle.state, action, observer);
-
-                    wave_root_nodes[action_index] =
-                        wave_root_nodes[action_index].saturating_add(searcher.nodes);
-                    let is_challenger = variant_index == 1;
-                    if searcher.controlled_next_decision_reached {
-                        if is_challenger {
-                            challenger_root_future_self_mass[action_index] += weight;
-                        } else {
-                            baseline_root_future_self_mass[action_index] += weight;
-                        }
-                    }
-                    if searcher.terminal_reached || next.is_terminal() {
-                        if is_challenger {
-                            challenger_root_terminal_mass[action_index] += weight;
-                        } else {
-                            baseline_root_terminal_mass[action_index] += weight;
-                        }
-                    }
-                    let ambiguity_evidence = if is_challenger {
-                        &mut challenger_ambiguity_evidence[action_index]
-                    } else {
-                        &mut baseline_ambiguity_evidence[action_index]
-                    };
-                    accumulate_controlled_ambiguity_evidence(
-                        ambiguity_evidence,
-                        &searcher.controlled_ambiguity_hits,
-                    );
-                    if wave_root_cutoff_depth_counts[action_index].len()
-                        < searcher.cutoff_depth_counts.len()
-                    {
-                        wave_root_cutoff_depth_counts[action_index]
-                            .resize(searcher.cutoff_depth_counts.len(), 0);
-                    }
-                    for (cutoff_depth, count) in searcher.cutoff_depth_counts.iter().enumerate() {
-                        wave_root_cutoff_depth_counts[action_index][cutoff_depth] =
-                            wave_root_cutoff_depth_counts[action_index][cutoff_depth]
-                                .saturating_add(*count);
-                    }
-                    nodes += searcher.nodes;
-                    cutoffs += searcher.cutoffs;
-                    wave_depth = wave_depth.max(searcher.deepest_depth);
-                    if searcher.deadline_reached || active_deadline.has_elapsed() {
-                        deadline_reached |=
-                            searcher.deadline_reached || active_deadline.has_elapsed();
-                        wave_complete = false;
-                        break 'particles;
-                    }
-                    let target_wave = if is_challenger {
-                        &mut challenger_wave
-                    } else {
-                        &mut baseline_wave
-                    };
-                    accumulate(
-                        target_wave,
-                        RowEntry {
-                            action: action.clone(),
-                            value: candidate_value,
-                            legal: true,
-                        },
-                        weight,
-                    );
+                        is_challenger: variant_index == 1,
+                    });
                 }
             }
+        }
+
+        let wave_results = run_wave_cells(&wave_cells, backend)?;
+
+        // Every dispatched cell has joined, including work from an abandoned
+        // wave. Report that actual work even when the deadline expired before
+        // the canonical fold; only complete waves supply root evidence.
+        for result in &wave_results {
+            nodes += result.nodes;
+            cutoffs += result.cutoffs;
+            wave_depth = wave_depth.max(result.deepest_depth);
+        }
+
+        // Fold in canonical order. A cell that ran out of time aborts the
+        // wave exactly as the sequential loop did: the wave is discarded and
+        // the last complete wave stands.
+        for (cell, result) in wave_cells.iter().zip(wave_results) {
+            if active_deadline.has_elapsed() {
+                deadline_reached = true;
+                wave_complete = false;
+                break;
+            }
+            let action_index = cell.action_index;
+            let weight = cell.weight;
+            let is_challenger = cell.is_challenger;
+            wave_root_nodes[action_index] =
+                wave_root_nodes[action_index].saturating_add(result.nodes);
+            if result.controlled_next_decision_reached {
+                if is_challenger {
+                    challenger_root_future_self_mass[action_index] += weight;
+                } else {
+                    baseline_root_future_self_mass[action_index] += weight;
+                }
+            }
+            if result.terminal_reached {
+                if is_challenger {
+                    challenger_root_terminal_mass[action_index] += weight;
+                } else {
+                    baseline_root_terminal_mass[action_index] += weight;
+                }
+            }
+            let ambiguity_evidence = if is_challenger {
+                &mut challenger_ambiguity_evidence[action_index]
+            } else {
+                &mut baseline_ambiguity_evidence[action_index]
+            };
+            accumulate_controlled_ambiguity_evidence(
+                ambiguity_evidence,
+                &result.controlled_ambiguity_hits,
+            );
+            if wave_root_cutoff_depth_counts[action_index].len() < result.cutoff_depth_counts.len()
+            {
+                wave_root_cutoff_depth_counts[action_index]
+                    .resize(result.cutoff_depth_counts.len(), 0);
+            }
+            for (cutoff_depth, count) in result.cutoff_depth_counts.iter().enumerate() {
+                wave_root_cutoff_depth_counts[action_index][cutoff_depth] =
+                    wave_root_cutoff_depth_counts[action_index][cutoff_depth]
+                        .saturating_add(*count);
+            }
+            if result.deadline_reached || active_deadline.has_elapsed() {
+                deadline_reached |= result.deadline_reached || active_deadline.has_elapsed();
+                wave_complete = false;
+                break;
+            }
+            let target_wave = if is_challenger {
+                &mut challenger_wave
+            } else {
+                &mut baseline_wave
+            };
+            accumulate(target_wave, result.entry, weight);
         }
 
         let mut wave = Vec::<Aggregate>::with_capacity(root_actions.len());
@@ -3455,7 +3722,7 @@ pub fn search_maxn_hostility_stress_bounded(
         controlled_next_decision_reached: false,
         terminal_reached: false,
         cutoff_depth_counts: Vec::new(),
-        evaluation_cache: Rc::new(RefCell::new(HashMap::new())),
+        evaluation_cache: HashMap::new(),
         transposition_table: None,
     }
     .root(state))
@@ -3499,7 +3766,7 @@ pub fn search_maxn_bounded_timed(
         controlled_next_decision_reached: false,
         terminal_reached: false,
         cutoff_depth_counts: Vec::new(),
-        evaluation_cache: Rc::new(RefCell::new(HashMap::new())),
+        evaluation_cache: HashMap::new(),
         transposition_table: None,
     }
     .root(state)
@@ -3563,7 +3830,7 @@ pub fn search_paranoid_bounded_timed(
         controlled_next_decision_reached: false,
         terminal_reached: false,
         cutoff_depth_counts: Vec::new(),
-        evaluation_cache: Rc::new(RefCell::new(HashMap::new())),
+        evaluation_cache: HashMap::new(),
         transposition_table: None,
     }
     .root(state)
@@ -4094,7 +4361,7 @@ struct CudaDeferredSearcher<'a> {
     controlled_next_decision_reached: bool,
     terminal_reached: bool,
     cutoff_depth_counts: Vec<u32>,
-    transposition_table: Option<Rc<RefCell<TranspositionTable>>>,
+    transposition_table: Option<TranspositionTable>,
     local_transpositions: HashMap<TranspositionIdentity, (GameState, usize)>,
     pending_transpositions: Vec<CudaDeferredPendingTransposition>,
 }
@@ -4133,7 +4400,7 @@ impl CudaDeferredSearcher<'_> {
         if let Some(value) = self
             .transposition_table
             .as_ref()
-            .and_then(|table| table.borrow().lookup(key, state))
+            .and_then(|table| table.lookup(key, state))
         {
             return Some(self.tree.constant(value));
         }
@@ -4149,7 +4416,6 @@ impl CudaDeferredSearcher<'_> {
             return;
         };
         {
-            let table = table.borrow();
             if table.entries.contains_key(&key)
                 || table
                     .entries
@@ -5130,9 +5396,7 @@ mod tests {
             controlled_next_decision_reached: false,
             terminal_reached: false,
             cutoff_depth_counts: Vec::new(),
-            evaluation_cache: std::rc::Rc::new(std::cell::RefCell::new(
-                std::collections::HashMap::new(),
-            )),
+            evaluation_cache: std::collections::HashMap::new(),
             transposition_table: None,
         };
 
@@ -5268,9 +5532,7 @@ mod tests {
             controlled_next_decision_reached: false,
             terminal_reached: false,
             cutoff_depth_counts: Vec::new(),
-            evaluation_cache: std::rc::Rc::new(std::cell::RefCell::new(
-                std::collections::HashMap::new(),
-            )),
+            evaluation_cache: std::collections::HashMap::new(),
             transposition_table: None,
         };
 
@@ -5976,9 +6238,7 @@ mod tests {
             controlled_next_decision_reached: false,
             terminal_reached: false,
             cutoff_depth_counts: Vec::new(),
-            evaluation_cache: std::rc::Rc::new(std::cell::RefCell::new(
-                std::collections::HashMap::new(),
-            )),
+            evaluation_cache: std::collections::HashMap::new(),
             transposition_table: None,
         };
         let context = || super::DecisionVisitContext {
@@ -6471,5 +6731,140 @@ mod tests {
         )
         .unwrap();
         assert_eq!(perfect.chosen, belief.chosen);
+    }
+
+    /// The threading gate. Wave cells, root scoring, blocker verification and
+    /// the one-ply floor are all evaluated on a pool, but each unit is
+    /// independent and the fold is in canonical order, so a one-thread pool
+    /// and a many-thread pool must produce byte-identical results on fixed
+    /// work. This is the in-tree form of the scratch-harness identity check.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_wave_execution_matches_sequential_on_fixed_work() {
+        use rayon::ThreadPoolBuilder;
+
+        // One public state with two genuinely distinct hidden worlds, so the
+        // posterior weighting and the per-cell budgets are both exercised. A
+        // belief search requires every particle to share the public hash, so
+        // the worlds differ only in an opponent's hidden holdings.
+        for (seed, players) in [(203, 4), (311, 3), (417, 2)] {
+            let mut first = GameState::standard(seed, players);
+            advance_setup_and_roll(&mut first, &mut SplitMix64::new(seed + 1));
+            first.phase = Phase::Main;
+            first.current_player = 0;
+            first.players[0].resources = [3, 2, 1, 1, 1];
+            let mut second = first.clone();
+            let opponent_total = first.players[1].resource_total().max(4);
+            first.players[1].resources = [opponent_total, 0, 0, 0, 0];
+            second.players[1].resources = [0, 0, 0, opponent_total, 0];
+
+            let particles = vec![
+                BeliefParticle {
+                    state: first,
+                    // Distinct weights so the canonical fold order is observable.
+                    weight: 0.65,
+                },
+                BeliefParticle {
+                    state: second,
+                    weight: 0.35,
+                },
+            ];
+
+            let search =
+                || super::search_weighted_belief_maxn_bounded(&particles, 3, 8, 2_500).unwrap();
+
+            struct ResetSequential;
+            impl Drop for ResetSequential {
+                fn drop(&mut self) {
+                    super::FORCE_SEQUENTIAL.with(|flag| flag.set(false));
+                }
+            }
+            let sequential = {
+                super::FORCE_SEQUENTIAL.with(|flag| flag.set(true));
+                let _reset = ResetSequential;
+                search()
+            };
+            for threads in [1, 2, 4, 8] {
+                let parallel = ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .expect("search pool")
+                    .install(search);
+
+                // The pool must actually have been used, or this proves nothing.
+                assert!(sequential.nodes > 0, "fixed work must actually search");
+                assert!(parallel.nodes > 0, "fixed work must actually search");
+
+                assert_eq!(sequential.chosen, parallel.chosen, "chosen action differs");
+                assert_eq!(
+                    sequential.value.map(f32::to_bits),
+                    parallel.value.map(f32::to_bits),
+                    "root value differs"
+                );
+                assert_eq!(sequential.nodes, parallel.nodes, "node count differs");
+                assert_eq!(sequential.cutoffs, parallel.cutoffs, "cutoffs differ");
+                assert_eq!(sequential.depth, parallel.depth, "completed depth differs");
+                assert_eq!(sequential.particles, parallel.particles);
+                assert_eq!(sequential.posterior_particles, parallel.posterior_particles);
+                assert_eq!(sequential.deadline_reached, parallel.deadline_reached);
+                assert_eq!(
+                    format!("{:?}", sequential.provenance),
+                    format!("{:?}", parallel.provenance),
+                    "authority/provenance differs"
+                );
+                // Provenance carries the per-root work diagnostics and the retained
+                // root ordering, so compare the parts that must not move.
+                assert_eq!(
+                    sequential.provenance.ranked_root_count,
+                    parallel.provenance.ranked_root_count
+                );
+                assert_eq!(
+                    sequential.provenance.pruned_root_count,
+                    parallel.provenance.pruned_root_count
+                );
+                assert_eq!(
+                    sequential.provenance.search_winner,
+                    parallel.provenance.search_winner
+                );
+                assert_eq!(
+                    sequential.provenance.safety_replacement,
+                    parallel.provenance.safety_replacement
+                );
+                assert_eq!(
+                    sequential
+                        .provenance
+                        .root_search_work
+                        .iter()
+                        .map(|work| (work.nodes, work.completed_wave_depth))
+                        .collect::<Vec<_>>(),
+                    parallel
+                        .provenance
+                        .root_search_work
+                        .iter()
+                        .map(|work| (work.nodes, work.completed_wave_depth))
+                        .collect::<Vec<_>>(),
+                    "per-root work diagnostics differ"
+                );
+                assert_eq!(
+                    sequential.actions.len(),
+                    parallel.actions.len(),
+                    "retained root count differs"
+                );
+                for (left, right) in sequential.actions.iter().zip(parallel.actions.iter()) {
+                    assert_eq!(left.action, right.action, "retained root order differs");
+                    assert_eq!(
+                        left.value.map(f32::to_bits),
+                        right.value.map(f32::to_bits),
+                        "per-root value differs"
+                    );
+                    assert_eq!(left.legal_weight, right.legal_weight);
+                    assert_eq!(
+                        left.lower_confidence_value.map(f32::to_bits),
+                        right.lower_confidence_value.map(f32::to_bits),
+                        "per-root lower confidence bound differs"
+                    );
+                }
+            }
+        }
     }
 }

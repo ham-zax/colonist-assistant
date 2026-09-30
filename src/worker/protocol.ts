@@ -35,7 +35,9 @@ export interface DecisionStatusMessage {
 
 export interface DecisionStatusMessageResponse {
   id: number;
-  runtime?: Extract<DecisionRuntime, "background-wasm">;
+  runtime?: Extract<DecisionRuntime, "background-wasm" | "offscreen-wasm-threads">;
+  runtimeReason?: string;
+  threadCount?: number;
   engineRevision?: string;
   initializationMs?: number;
   error?: string;

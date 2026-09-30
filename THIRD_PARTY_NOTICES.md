@@ -28,3 +28,13 @@ Colonist or CATAN Studio.
 The architecture was informed by published descriptions of information-set
 MCTS, RIS-MCTS, Catanatron, SmartSettlers/JSettlers, and Monte Catano. No code
 from those projects is copied or linked into the extension.
+
+## wasm-bindgen-rayon
+
+The threaded WASM package includes the worker helper from
+[wasm-bindgen-rayon](https://github.com/RReverser/wasm-bindgen-rayon),
+Copyright 2022 Google Inc., licensed under Apache License 2.0. Its bundled
+source retains the license notice; the full license is bundled at
+`assets/licenses/wasm-bindgen-rayon-LICENSE`. The build adapts worker creation to use a
+packaged extension URL rather than a blob URL, and uses the current
+wasm-bindgen object initialization API.

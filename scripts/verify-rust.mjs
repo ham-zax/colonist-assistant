@@ -28,6 +28,22 @@ const run = (arguments_) =>
     });
   });
 
-await run(["fmt", "--all", "--", "--check"]);
-await run(["test", "--workspace"]);
-await run(["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]);
+const checks = [
+  ["fmt", "--all", "--", "--check"],
+  // Run the feature gate even when the workspace has known failing tests.
+  ["test", "-p", "colonist-catan-search", "--features", "parallel",
+    "parallel_wave_execution_matches_sequential_on_fixed_work"],
+  ["test", "--workspace"],
+  ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"],
+  ["clippy", "-p", "colonist-catan-search", "--features", "parallel",
+    "--all-targets", "--", "-D", "warnings"],
+];
+const failures = [];
+for (const arguments_ of checks) {
+  try { await run(arguments_); }
+  catch (error) {
+    failures.push(error);
+    console.error(error.message);
+  }
+}
+if (failures.length) throw new AggregateError(failures, "Rust verification failed");

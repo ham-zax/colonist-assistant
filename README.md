@@ -6,7 +6,11 @@ player, tracks known cards, keeps honest ranges for unknown cards, and marks
 one legal next step in the Colonist page.
 
 The extension runs the decision engine locally in WebAssembly (Rust compiled
-to WASM) inside the browser. Strategist ★ is the single user-facing decision
+to WASM) inside the browser. When extension-page isolation is available, a
+local offscreen document runs the engine on a dedicated worker with up to eight
+WASM threads. Initialization failure falls back to the packaged single-threaded
+engine in the background. The `offscreen` permission enables this local
+computation; no game data leaves the browser. Strategist ★ is the single user-facing decision
 authority. The engine preserves the requested stochastic model, including the
 named Balanced-Dice reference model when public evidence supports it. See the
 [CPU/GPU Mref contract and verification gates](docs/CPU_GPU_MREF_CONTRACT.md).
@@ -103,7 +107,13 @@ Requirements:
 - Node.js 22+
 - Rust 1.90+
 - the `wasm32-unknown-unknown` Rust target
-- `wasm-bindgen-cli`
+- `wasm-bindgen-cli` matching the `wasm-bindgen` version in `engine/Cargo.lock`
+- the WASM-only `nightly-2025-11-15` toolchain with `rust-src`
+
+```bash
+rustup toolchain install nightly-2025-11-15 --component rust-src
+rustup target add wasm32-unknown-unknown
+```
 
 ```bash
 npm ci
@@ -119,7 +129,8 @@ settings screen shows the installed build number and Strategist runtime.
 For the Chrome Web Store field copy, test steps, and release package command,
 see [docs/CHROME_WEB_STORE.md](docs/CHROME_WEB_STORE.md).
 
-`Background WASM` means the packaged Rust Strategist is authoritative. A
+`WASM threads` reports the active pool size; `Background WASM` reports the
+single-threaded fallback. Both use the packaged Rust Strategist. A
 normal live request uses depth 5, a branch cap of 10, up to 8,000 strategic
 nodes per depth wave, and a cooperative 2,000 ms strategic-search budget. That
 larger live budget is intentional quality headroom; the normal slow-decision
@@ -178,6 +189,10 @@ In the native arena, `maxn` (also accepted as `deep`) is the comparison closest
 to the packaged live core. `puct` selects experimental belief PUCT; the old
 `strategist` token remains only as a compatibility alias for `puct`. Neither
 PUCT name identifies the current live authority.
+
+For search threading in native arena builds, enable `--features parallel` and
+set `RAYON_NUM_THREADS`; the arena’s `--threads` flag controls simultaneous
+games, so avoid multiplying both thread counts beyond the available CPUs.
 
 See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for results and limitations.
 For the matrix runner, live Colonist Base-map harness, and pinned Catanatron
