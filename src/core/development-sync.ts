@@ -28,11 +28,31 @@ export class DevelopmentSnapshotSync {
       const logged = state.players[player]?.playedDevCards[card] ?? 0;
       if (played[card] !== undefined && logged > played[card]!) return true;
       if (this.baseline && played[card] !== undefined) {
+        const sameTurn = board.turn === this.baseline.turn;
         const consumed = Math.max(0, played[card]! - (this.baseline.played[card] ?? 0));
-        if (consumed > 0 && board.turn === this.baseline.turn && !own.hasPlayedThisTurn) return true;
-        const purchased = Math.max(0, own.boughtThisTurn[card] - this.baseline.bought[card]);
-        if (consumed > 0 && board.turn === this.baseline.turn &&
+        // Only the same-turn played flag expires at a turn boundary; an
+        // outstanding consumed-card inventory stays unresolved so the stale
+        // exact hand is never adopted as a new baseline.
+        if (consumed > 0 && sameTurn && !own.hasPlayedThisTurn) return true;
+        // Bought-this-turn counters reset at turn boundaries, so an old-turn
+        // baseline purchase is already baked into baseline.held: only the
+        // current turn's counter counts as a new purchase after a turn change.
+        const purchased = sameTurn
+          ? Math.max(0, own.boughtThisTurn[card] - this.baseline.bought[card])
+          : Math.max(0, own.boughtThisTurn[card]);
+        if (consumed > 0 &&
           own.cards[card] > this.baseline.held[card] - consumed + purchased) {
+          return true;
+        }
+        // A private-only decrement (hand already dropped with no public
+        // consumption to explain it) must not be adopted as the new
+        // baseline: that would orphan the decrement and invent negative
+        // consumption debt when the public tally catches up. Purchases only
+        // ever add to the hand, so the shortfall is measured against the
+        // purchase-free expectation; a bought counter running ahead of the
+        // hand is left alone per the accepted-purchase contract below.
+        // Preserve the coherent pre-play baseline until corroboration arrives.
+        if (own.cards[card] < this.baseline.held[card] - consumed) {
           return true;
         }
       }

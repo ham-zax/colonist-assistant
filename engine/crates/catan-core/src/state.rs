@@ -1534,7 +1534,11 @@ impl GameState {
     }
 
     fn has_pending_free_road(&self) -> bool {
+        // A free credit without a physical road piece cannot be placed, so it
+        // must not monopolize the action phase: normal EndTurn/Roll controls
+        // stay available once the piece inventory is exhausted.
         self.free_roads > 0
+            && self.players[self.current_player as usize].roads_left > 0
             && matches!(self.phase, Phase::Main | Phase::PreRoll)
             && (0..self.board.edges.len() as u8).any(|edge| self.can_build_road(edge))
     }
@@ -3166,6 +3170,101 @@ mod tests {
             } else {
                 &Action::Roll
             }));
+        }
+    }
+
+    /// Builds a valid state with `extra` additional connected roads placed
+    /// for player 0 through free credits, so the piece inventory in
+    /// `validate()` stays consistent instead of assigning `roads_left`.
+    fn road_credit_state(seed: u64, extra: u8, phase: Phase) -> GameState {
+        let mut state = GameState::standard(seed, 4);
+        play_setup(&mut state);
+        state.phase = Phase::Main;
+        state.current_player = 0;
+        state.free_roads = extra;
+        for _ in 0..extra {
+            let action = state
+                .legal_actions()
+                .into_iter()
+                .find(|action| matches!(action, Action::BuildRoad { .. }))
+                .expect("a connected road edge must remain");
+            state.apply(&action).unwrap();
+        }
+        assert_eq!(state.free_roads, 0);
+        state.phase = phase;
+        state.current_player = 0;
+        state.validate().unwrap();
+        state
+    }
+
+    #[test]
+    fn exhausted_free_road_credit_yields_to_normal_controls() {
+        // Two credits with one physical piece: the first placement stays
+        // mandatory and free, then the leftover credit must not block the
+        // normal Main EndTurn or PreRoll Roll.
+        for phase in [Phase::Main, Phase::PreRoll] {
+            let mut state = road_credit_state(91, 12, phase);
+            assert_eq!(state.players[0].roads_left, 1);
+            state.free_roads = 2;
+            state.validate().unwrap();
+            let bank = state.bank;
+            let resources = state.players[0].resources;
+            let actions = state.legal_actions();
+            assert!(!actions.is_empty());
+            assert!(
+                actions
+                    .iter()
+                    .all(|action| matches!(action, Action::BuildRoad { .. }))
+            );
+            let before = state.clone();
+            assert!(state.apply(&Action::EndTurn).is_err());
+            assert!(state.apply(&Action::Roll).is_err());
+            assert_eq!(state, before);
+            state.apply(&actions[0]).unwrap();
+            assert_eq!(state.free_roads, 1);
+            assert_eq!(state.players[0].roads_left, 0);
+            assert_eq!(state.players[0].resources, resources);
+            assert_eq!(state.bank, bank);
+            assert_eq!(state.phase, phase);
+            state.validate().unwrap();
+            let actions = state.legal_actions();
+            assert!(
+                actions
+                    .iter()
+                    .all(|action| !matches!(action, Action::BuildRoad { .. }))
+            );
+            if phase == Phase::Main {
+                assert!(actions.contains(&Action::EndTurn));
+                state.apply(&Action::EndTurn).unwrap();
+            } else {
+                assert!(actions.contains(&Action::Roll));
+                state.apply(&Action::Roll).unwrap();
+            }
+            assert_eq!(state.free_roads, 0);
+            state.validate().unwrap();
+        }
+        // Zero-piece imported state: fifteen roads owned, none left, so a
+        // leftover credit never blocks normal controls either.
+        for phase in [Phase::Main, Phase::PreRoll] {
+            let mut state = road_credit_state(93, 13, phase);
+            assert_eq!(state.players[0].roads_left, 0);
+            state.free_roads = 1;
+            state.validate().unwrap();
+            let actions = state.legal_actions();
+            assert!(
+                actions
+                    .iter()
+                    .all(|action| !matches!(action, Action::BuildRoad { .. }))
+            );
+            if phase == Phase::Main {
+                assert!(actions.contains(&Action::EndTurn));
+                state.apply(&Action::EndTurn).unwrap();
+            } else {
+                assert!(actions.contains(&Action::Roll));
+                state.apply(&Action::Roll).unwrap();
+            }
+            assert_eq!(state.free_roads, 0);
+            state.validate().unwrap();
         }
     }
 

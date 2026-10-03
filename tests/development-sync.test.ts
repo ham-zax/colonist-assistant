@@ -80,6 +80,105 @@ describe("development hand synchronization", () => {
       ...board.ownDevelopmentCards!, cards: cards(),
     }, players: { You: { ...board.players!.You!, playedDevelopmentCards: { ...cards(2), "victory-point": 0 } } } })).toBe(false);
   });
+
+  it("keeps an outstanding consumed Monopoly unresolved across a turn advance", () => {
+    const { state, board } = fixture();
+    const sync = new DevelopmentSnapshotSync();
+    sync.isWaiting(state, board);
+    const played = reduceTracker(state, { type: "play-dev", player: "You", card: "monopoly" });
+    const tally = { ...cards(2), "victory-point": 0 };
+    // Same-turn stale hand waits, then the turn advances with the consumed
+    // card still present: repeated stale snapshots must keep waiting without
+    // adopting the stale hand, and no same-turn played flag is required.
+    expect(sync.isWaiting(played, { ...board, ownDevelopmentCards: {
+      ...board.ownDevelopmentCards!, cards: cards(1),
+    }, players: { You: { ...board.players!.You!, playedDevelopmentCards: tally } } })).toBe(true);
+    const staleNextTurn: BoardSnapshot = { ...board, turn: 92, ownDevelopmentCards: {
+      ...board.ownDevelopmentCards!, cards: cards(1), hasPlayedThisTurn: false,
+    }, players: { You: { ...board.players!.You!, playedDevelopmentCards: tally } } };
+    expect(sync.isWaiting(played, staleNextTurn)).toBe(true);
+    expect(sync.isWaiting(played, staleNextTurn)).toBe(true);
+    // The corrected hand resolves the wait even with a false same-turn flag.
+    const corrected: BoardSnapshot = { ...staleNextTurn, ownDevelopmentCards: {
+      ...staleNextTurn.ownDevelopmentCards!, cards: cards(), hasPlayedThisTurn: false,
+    } };
+    expect(sync.isWaiting(played, corrected)).toBe(false);
+    expect(sync.isWaiting(played, corrected)).toBe(false);
+  });
+
+  it("accepts a legitimate fresh purchase on the next turn", () => {
+    const { state, board } = fixture();
+    const sync = new DevelopmentSnapshotSync();
+    sync.isWaiting(state, board);
+    // Same-turn purchase with a consistent hand refreshes the baseline,
+    // which now carries an old-turn purchase count.
+    const withPurchase: BoardSnapshot = { ...board, ownDevelopmentCards: {
+      ...board.ownDevelopmentCards!, cards: cards(2), boughtThisTurn: cards(1),
+    }, players: { You: { ...board.players!.You!, playedDevelopmentCards: { ...cards(1), "victory-point": 0 } } } };
+    expect(sync.isWaiting(state, withPurchase)).toBe(false);
+    // Next turn brings both a logged play and a fresh purchase. Only the
+    // current turn's counter counts as new, so the consistent hand is
+    // accepted while a genuinely stale hand still waits.
+    const played = reduceTracker(state, { type: "play-dev", player: "You", card: "monopoly" });
+    const tally = { ...cards(2), "victory-point": 0 };
+    const stale: BoardSnapshot = { ...board, turn: 92, ownDevelopmentCards: {
+      ...board.ownDevelopmentCards!, cards: cards(3), boughtThisTurn: cards(1), hasPlayedThisTurn: false,
+    }, players: { You: { ...board.players!.You!, playedDevelopmentCards: tally } } };
+    expect(sync.isWaiting(played, stale)).toBe(true);
+    const nextTurn: BoardSnapshot = { ...stale, ownDevelopmentCards: {
+      ...stale.ownDevelopmentCards!, cards: cards(2),
+    } };
+    expect(sync.isWaiting(played, nextTurn)).toBe(false);
+    expect(sync.isWaiting(played, nextTurn)).toBe(false);
+  });
+
+  it("preserves the pre-play baseline when the exact hand runs ahead of the public tally", () => {
+    const { state, board } = fixture();
+    const sync = new DevelopmentSnapshotSync();
+    sync.isWaiting(state, board);
+    // The exact hand (and played flag) observe the Monopoly play before the
+    // tracker log and public tally catch up. Adopting the decremented hand
+    // here would orphan the private decrement and invent negative
+    // consumption debt once the tally arrives.
+    const privateFirst: BoardSnapshot = { ...board, ownDevelopmentCards: {
+      ...board.ownDevelopmentCards!, cards: cards(), hasPlayedThisTurn: true,
+    } };
+    expect(sync.isWaiting(state, privateFirst)).toBe(true);
+    expect(sync.isWaiting(state, privateFirst)).toBe(true);
+    // Tracker and public tally catch up with the already-seen hand: no wait,
+    // with no negative expected count and no adopted held-0 baseline.
+    const played = reduceTracker(state, { type: "play-dev", player: "You", card: "monopoly" });
+    const caughtUp: BoardSnapshot = { ...privateFirst, players: { You: {
+      ...board.players!.You!, playedDevelopmentCards: { ...cards(2), "victory-point": 0 },
+    } } };
+    expect(sync.isWaiting(played, caughtUp)).toBe(false);
+    expect(sync.isWaiting(played, caughtUp)).toBe(false);
+    // No permanent pause across the turn boundary either.
+    expect(sync.isWaiting(played, { ...caughtUp, turn: 92, ownDevelopmentCards: {
+      ...caughtUp.ownDevelopmentCards!, hasPlayedThisTurn: false,
+    } })).toBe(false);
+  });
+
+  it("accepts a legitimate purchase alongside the late public tally", () => {
+    const { state, board } = fixture();
+    const sync = new DevelopmentSnapshotSync();
+    sync.isWaiting(state, board);
+    const privateFirst: BoardSnapshot = { ...board, ownDevelopmentCards: {
+      ...board.ownDevelopmentCards!, cards: cards(), hasPlayedThisTurn: true,
+    } };
+    expect(sync.isWaiting(state, privateFirst)).toBe(true);
+    // The late tally arrives together with a legitimate new purchase: the
+    // purchase belongs in the bound, so the consistent hand is accepted
+    // rather than held against a clamped-zero expectation.
+    const played = reduceTracker(state, { type: "play-dev", player: "You", card: "monopoly" });
+    const withPurchase: BoardSnapshot = { ...board, ownDevelopmentCards: {
+      ...board.ownDevelopmentCards!, cards: cards(1), boughtThisTurn: cards(1), hasPlayedThisTurn: true,
+    }, players: { You: {
+      ...board.players!.You!, playedDevelopmentCards: { ...cards(2), "victory-point": 0 },
+    } } };
+    expect(sync.isWaiting(played, withPurchase)).toBe(false);
+    expect(sync.isWaiting(played, withPurchase)).toBe(false);
+  });
 });
 
 describe("free road prompt recognition", () => {
