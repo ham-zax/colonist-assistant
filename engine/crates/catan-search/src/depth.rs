@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 #[cfg(feature = "parallel")]
@@ -32,12 +33,14 @@ use crate::deadline::CooperativeDeadline;
 use crate::eval::{RoadIntent, evaluate, road_intent, strategic_utility};
 use crate::exact::{
     DEVELOPMENT_EXACT_FAMILIES, ExactActionFamily, ExactDecisionResult, exact_family_for_action,
-    solve_exact_belief_excluding_controlled,
+    road_race_challenger, solve_exact_belief_excluding_controlled,
 };
 use crate::mcts::BeliefParticle;
 use crate::opening::opening_adjusted_priors;
 use crate::opening::{OpeningConfig, solve_opening};
-use crate::planner::{TurnPlan, plan_adjusted_priors, plan_adjusted_priors_with_plans};
+use crate::planner::{
+    TurnPlan, next_maritime_mask, plan_adjusted_priors, plan_adjusted_priors_with_plans,
+};
 use crate::policy::{
     actor_proposal_actions, allocate_root_node_budgets, normalize_observed_priors,
     normalize_priors, order_scored_with_state_quotas, rank_with_class_quotas,
@@ -433,6 +436,7 @@ struct TranspositionIdentity {
     state_hash: u64,
     depth: u8,
     actions_in_turn: u8,
+    maritime_received: u8,
     actor: u8,
     node_kind: TranspositionNodeKindKey,
     algorithm: TranspositionAlgorithmKey,
@@ -453,6 +457,7 @@ fn transposition_identity(
     algorithm: Algorithm,
     depth: u8,
     actions_in_turn: u8,
+    maritime_received: u8,
     alpha: f32,
     beta: f32,
     remaining_subtree_allowance: u32,
@@ -466,6 +471,7 @@ fn transposition_identity(
         state_hash: state.state_hash(),
         depth,
         actions_in_turn,
+        maritime_received,
         actor: state.actor(),
         node_kind: state.node_kind().into(),
         algorithm: algorithm.into(),
@@ -840,6 +846,43 @@ fn controlled_policy_action(
     vec![selected]
 }
 
+/// True when `action` resells a resource received earlier in the same
+/// uninterrupted maritime segment. This mirrors the live turn planner's
+/// anti-churn rule: giving any previously received resource is dominated.
+fn maritime_churns_received(action: &Action, maritime_received: u8) -> bool {
+    matches!(action, Action::MaritimeTrade { give, .. }
+        if maritime_received & (1 << give.index()) != 0)
+}
+
+/// Path-local mask for the child reached via `action`. A maritime trade
+/// accumulates its received bit; any other action (build, development,
+/// domestic trade, chance outcome) or a turn/actor boundary resets the
+/// segment, matching `next_maritime_mask` planner semantics.
+fn child_maritime_mask(parent_mask: u8, action: &Action, completed_turn: bool) -> u8 {
+    if completed_turn {
+        0
+    } else {
+        next_maritime_mask(parent_mask, action)
+    }
+}
+
+/// Removes dominated receive-then-resell trades before policy ranking.
+/// Callers pass the result to ranking/truncation and ambiguity detection so a
+/// blocked rank-0 trade cannot starve legal alternatives. Core legality is
+/// unchanged: this only prunes strategic continuation paths.
+fn without_maritime_churn(actions: &[Action], maritime_received: u8) -> Cow<'_, [Action]> {
+    if maritime_received == 0 {
+        return Cow::Borrowed(actions);
+    }
+    Cow::Owned(
+        actions
+            .iter()
+            .filter(|action| !maritime_churns_received(action, maritime_received))
+            .cloned()
+            .collect(),
+    )
+}
+
 struct Searcher {
     algorithm: Algorithm,
     maximum_depth: u8,
@@ -883,6 +926,7 @@ struct Searcher {
 struct DecisionVisitContext {
     depth: u8,
     actions_in_turn: u8,
+    maritime_received: u8,
     alpha: f32,
     beta: f32,
     subtree_limit: u32,
@@ -906,8 +950,17 @@ fn visit_shared_cpu(
     state: &GameState,
     depth: u8,
     actions_in_turn: u8,
+    maritime_received: u8,
 ) -> Result<[f32; 4], DepthBeliefError> {
-    Ok(searcher.visit(state, depth, actions_in_turn, 0.0, 1.0, searcher.node_limit))
+    Ok(searcher.visit(
+        state,
+        depth,
+        actions_in_turn,
+        maritime_received,
+        0.0,
+        1.0,
+        searcher.node_limit,
+    ))
 }
 
 /// One unit of parallel work inside a depth wave: a single
@@ -927,6 +980,7 @@ struct WaveCell {
     particle_state: GameState,
     action: Action,
     completed_turn: bool,
+    maritime_received: u8,
     allowance: u32,
     target_depth: u8,
     policy_override: Option<ControlledWideningTarget>,
@@ -953,10 +1007,11 @@ struct WaveCellResult {
     deadline_reached: bool,
 }
 
-/// A wave cell's continuation visit. Sequential callers pass
-/// `BeliefBackend::visit`; the pool passes the shared CPU visit.
+/// A wave cell's continuation visit: searcher, state, depth,
+/// actions-in-turn, then the path-local maritime-received mask. Sequential
+/// callers pass `BeliefBackend::visit`; the pool passes the shared CPU visit.
 type WaveCellVisit<'v> =
-    &'v mut dyn FnMut(&mut Searcher, &GameState, u8, u8) -> Result<[f32; 4], DepthBeliefError>;
+    &'v mut dyn FnMut(&mut Searcher, &GameState, u8, u8, u8) -> Result<[f32; 4], DepthBeliefError>;
 
 fn run_wave_cell(
     cell: &WaveCell,
@@ -1025,6 +1080,7 @@ fn run_wave_cell(
         state,
         u8::from(cell.completed_turn),
         if cell.completed_turn { 0 } else { 1 },
+        cell.maritime_received,
     )?;
     apply_action_friction(
         &mut candidate_value,
@@ -1067,9 +1123,12 @@ fn run_wave_cells(
     cells
         .iter()
         .map(|cell| {
-            run_wave_cell(cell, &mut |searcher, state, depth, actions_in_turn| {
-                backend.visit(searcher, state, depth, actions_in_turn)
-            })
+            run_wave_cell(
+                cell,
+                &mut |searcher, state, depth, actions_in_turn, maritime_received| {
+                    backend.visit(searcher, state, depth, actions_in_turn, maritime_received)
+                },
+            )
         })
         .collect()
 }
@@ -1331,11 +1390,13 @@ fn normalize_belief_root_priors(
 }
 
 impl Searcher {
+    #[allow(clippy::too_many_arguments)]
     fn transposition_key(
         &self,
         state: &GameState,
         depth: u8,
         actions_in_turn: u8,
+        maritime_received: u8,
         alpha: f32,
         beta: f32,
         remaining_subtree_allowance: u32,
@@ -1346,6 +1407,7 @@ impl Searcher {
             self.algorithm,
             depth,
             actions_in_turn,
+            maritime_received,
             alpha,
             beta,
             remaining_subtree_allowance,
@@ -1384,7 +1446,13 @@ impl Searcher {
         self.cutoff_depth_counts[index] = self.cutoff_depth_counts[index].saturating_add(1);
     }
 
-    fn record_controlled_ambiguity(&mut self, state: &GameState, actor: u8, _depth: u8) {
+    fn record_controlled_ambiguity(
+        &mut self,
+        state: &GameState,
+        actor: u8,
+        _depth: u8,
+        maritime_received: u8,
+    ) {
         // Depth counts completed turns, so depth 0 is the rest of the root
         // turn. Recording there lets a close same-turn continuation (for
         // example a conversion that closes a build) compete as a challenger.
@@ -1392,7 +1460,9 @@ impl Searcher {
             return;
         }
         let actions = actor_proposal_actions(state);
-        if let Some(hit) = controlled_ambiguity_hit_from_observation(state, &actions, actor) {
+        let filtered = without_maritime_churn(&actions, maritime_received);
+        let actions = filtered.as_ref();
+        if let Some(hit) = controlled_ambiguity_hit_from_observation(state, actions, actor) {
             self.controlled_ambiguity_hits.push(hit);
         }
     }
@@ -1449,6 +1519,7 @@ impl Searcher {
         let DecisionVisitContext {
             depth,
             actions_in_turn,
+            maritime_received,
             mut alpha,
             mut beta,
             subtree_limit,
@@ -1482,6 +1553,7 @@ impl Searcher {
                 .expect("ranked depth-search action must transition");
             let completed_turn =
                 next.turn != state.turn || next.current_player != state.current_player;
+            let child_mask = child_maritime_mask(maritime_received, &action, completed_turn);
             let mut child = if allowance > 0 && self.nodes < child_limit {
                 self.visit(
                     &next,
@@ -1491,6 +1563,7 @@ impl Searcher {
                     } else {
                         actions_in_turn.saturating_add(1)
                     },
+                    child_mask,
                     alpha,
                     beta,
                     child_limit,
@@ -1534,11 +1607,13 @@ impl Searcher {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn visit(
         &mut self,
         state: &GameState,
         depth: u8,
         actions_in_turn: u8,
+        maritime_received: u8,
         alpha: f32,
         beta: f32,
         subtree_limit: u32,
@@ -1566,7 +1641,7 @@ impl Searcher {
             && depth > 0
         {
             self.controlled_next_decision_reached = true;
-            self.record_controlled_ambiguity(state, actor, depth);
+            self.record_controlled_ambiguity(state, actor, depth, maritime_received);
         }
         if depth >= self.maximum_depth || actions_in_turn >= 18 {
             self.mark_cutoff(depth);
@@ -1580,6 +1655,7 @@ impl Searcher {
             state,
             depth,
             actions_in_turn,
+            maritime_received,
             alpha,
             beta,
             remaining_subtree_allowance,
@@ -1627,11 +1703,15 @@ impl Searcher {
                     let mut next = state.clone();
                     next.apply(&action)
                         .expect("legal chance action must transition");
+                    // Chance outcomes are non-maritime, so planner semantics
+                    // reset the segment: new gains clear the received mask.
+                    let child_mask = next_maritime_mask(maritime_received, &action);
                     let child = if allowance > 0 && self.nodes < child_limit {
                         self.visit(
                             &next,
                             depth,
                             actions_in_turn.saturating_add(1),
+                            child_mask,
                             alpha,
                             beta,
                             child_limit,
@@ -1669,6 +1749,11 @@ impl Searcher {
                 } else {
                     exact_actions.as_slice()
                 };
+                // Prune dominated receive-then-resell trades before policy
+                // ranking/truncation, so a blocked rank-0 trade cannot starve
+                // legal alternatives. Core legality is unchanged.
+                let churn_filtered = without_maritime_churn(actions, maritime_received);
+                let actions = churn_filtered.as_ref();
                 if actions.is_empty() {
                     return self.evaluate_cached(state);
                 }
@@ -1704,6 +1789,7 @@ impl Searcher {
                         DecisionVisitContext {
                             depth,
                             actions_in_turn,
+                            maritime_received,
                             alpha,
                             beta,
                             subtree_limit,
@@ -1738,6 +1824,8 @@ impl Searcher {
                             .expect("observation-policy action must transition");
                         let completed_turn =
                             next.turn != state.turn || next.current_player != state.current_player;
+                        let child_mask =
+                            child_maritime_mask(maritime_received, action, completed_turn);
                         let mut child = if allowance > 0 && self.nodes < child_limit {
                             self.visit(
                                 &next,
@@ -1747,6 +1835,7 @@ impl Searcher {
                                 } else {
                                     actions_in_turn.saturating_add(1)
                                 },
+                                child_mask,
                                 alpha,
                                 beta,
                                 child_limit,
@@ -1773,6 +1862,7 @@ impl Searcher {
                         DecisionVisitContext {
                             depth,
                             actions_in_turn,
+                            maritime_received,
                             alpha,
                             beta,
                             subtree_limit,
@@ -1860,6 +1950,9 @@ impl Searcher {
                 .expect("ranked root action must transition");
             let completed_turn =
                 next.turn != state.turn || next.current_player != state.current_player;
+            // A root bank trade seeds the received bit for its continuation;
+            // the root itself has no prefix, so recovery trades stay available.
+            let root_mask = child_maritime_mask(0, &action, completed_turn);
             let mut child = if self.deadline.has_elapsed() {
                 self.deadline_reached = true;
                 self.evaluate_cached(&next)
@@ -1868,6 +1961,7 @@ impl Searcher {
                     &next,
                     u8::from(completed_turn),
                     if completed_turn { 0 } else { 1 },
+                    root_mask,
                     alpha,
                     beta,
                     self.node_limit,
@@ -2149,6 +2243,7 @@ impl BeliefBackend<'_> {
         state: &GameState,
         depth: u8,
         actions_in_turn: u8,
+        maritime_received: u8,
     ) -> Result<[f32; 4], DepthBeliefError> {
         self.check_cancelled()?;
         #[cfg(test)]
@@ -2190,7 +2285,14 @@ impl BeliefBackend<'_> {
                 local_transpositions: HashMap::new(),
                 pending_transpositions: Vec::new(),
             };
-            let node = deferred.visit(state, depth, actions_in_turn, searcher.node_limit, &stop);
+            let node = deferred.visit(
+                state,
+                depth,
+                actions_in_turn,
+                maritime_received,
+                searcher.node_limit,
+                &stop,
+            );
             searcher.nodes = deferred.nodes;
             searcher.deepest_depth = deferred.deepest_depth;
             searcher.controlled_next_decision_reached = deferred.controlled_next_decision_reached;
@@ -2244,8 +2346,44 @@ impl BeliefBackend<'_> {
             }
             return Ok(node_values[node]);
         }
-        Ok(searcher.visit(state, depth, actions_in_turn, 0.0, 1.0, searcher.node_limit))
+        Ok(searcher.visit(
+            state,
+            depth,
+            actions_in_turn,
+            maritime_received,
+            0.0,
+            1.0,
+            searcher.node_limit,
+        ))
     }
+}
+
+/// True when `action` is a retained representative of a resolved exact
+/// family: the endpoint representative for every family, plus the distinct
+/// positive road-race challenger for RoadBuilding.
+fn exact_rep_retained(
+    action: &Action,
+    family: ExactActionFamily,
+    exact: &ExactDecisionResult,
+) -> bool {
+    exact.chosen.as_ref() == Some(action)
+        || (family == ExactActionFamily::RoadBuilding
+            && road_race_challenger(exact).as_ref() == Some(action))
+}
+
+/// Root-preparation diagnostic for a retained family representative. A
+/// missing member diagnostic (the exact selection need not have been proposed
+/// in a positive-weight world) falls back to the first member rather than
+/// blocking admission.
+fn family_representative_diagnostic<'a>(
+    family_members: &'a [RankedRootDiagnostic],
+    action: &Action,
+) -> &'a RankedRootDiagnostic {
+    family_members
+        .iter()
+        .find(|candidate| candidate.action == *action)
+        .or_else(|| family_members.first())
+        .expect("non-empty exact family has a representative diagnostic")
 }
 
 fn belief_search_backend(
@@ -2498,6 +2636,13 @@ fn belief_search_backend(
         let Some(representative) = exact.chosen.clone() else {
             continue;
         };
+        // RoadBuilding alone may keep a second representative: the distinct
+        // best positive road-race parameterization, so a joining/race pair is
+        // not irreversibly discarded before deeper branch competition. Every
+        // other family keeps exactly one.
+        let challenger = (family == ExactActionFamily::RoadBuilding)
+            .then(|| road_race_challenger(&exact))
+            .flatten();
         let family_prior = family_members
             .iter()
             .map(|candidate| candidate.prior.max(0.0))
@@ -2506,13 +2651,22 @@ fn belief_search_backend(
             .iter()
             .map(|candidate| candidate.quota_score)
             .fold(f32::NEG_INFINITY, f32::max);
-        let representative_diagnostic = family_members
-            .iter()
-            .find(|candidate| candidate.action == representative)
-            .or_else(|| family_members.first())
-            .expect("non-empty exact family has a representative diagnostic");
+        // Split the existing family prior mass between the retained reps
+        // rather than double counting it. Both share the family-max quota
+        // score, so canonical quota/prior/Debug order keeps them adjacent.
+        let representative_prior = if challenger.is_some() {
+            family_prior / 2.0
+        } else {
+            family_prior
+        };
+        let representative_diagnostic =
+            family_representative_diagnostic(&family_members, &representative);
+        let challenger_diagnostic = challenger
+            .as_ref()
+            .map(|action| family_representative_diagnostic(&family_members, action));
         for candidate in &family_members {
-            if candidate.action != representative {
+            if candidate.action != representative && challenger.as_ref() != Some(&candidate.action)
+            {
                 pruned_roots.push(PrunedRootDiagnostic {
                     action: candidate.action.clone(),
                     pre_truncation_rank: Some(candidate.rank),
@@ -2525,7 +2679,7 @@ fn belief_search_backend(
         ranked_diagnostics.push(RankedRootDiagnostic {
             action: representative,
             rank: 0,
-            prior: family_prior,
+            prior: representative_prior,
             planner_value: representative_diagnostic.planner_value,
             planner_completion_mass: representative_diagnostic.planner_completion_mass,
             planner_decisive_completion_mass: representative_diagnostic
@@ -2533,6 +2687,20 @@ fn belief_search_backend(
             planner_response_windows: representative_diagnostic.planner_response_windows,
             quota_score,
         });
+        if let (Some(challenger), Some(challenger_diagnostic)) = (challenger, challenger_diagnostic)
+        {
+            ranked_diagnostics.push(RankedRootDiagnostic {
+                action: challenger,
+                rank: 0,
+                prior: family_prior / 2.0,
+                planner_value: challenger_diagnostic.planner_value,
+                planner_completion_mass: challenger_diagnostic.planner_completion_mass,
+                planner_decisive_completion_mass: challenger_diagnostic
+                    .planner_decisive_completion_mass,
+                planner_response_windows: challenger_diagnostic.planner_response_windows,
+                quota_score,
+            });
+        }
         exact_family_fallbacks.push((family, fallback));
         exact_family_results.push((family, exact));
     }
@@ -2546,7 +2714,7 @@ fn belief_search_backend(
                 return true;
             };
             exact_family_results.iter().any(|(resolved_family, exact)| {
-                *resolved_family == family && exact.chosen.as_ref() == Some(&candidate.action)
+                *resolved_family == family && exact_rep_retained(&candidate.action, family, exact)
             })
         });
     }
@@ -2632,12 +2800,28 @@ fn belief_search_backend(
                 .collect()
         })
         .unwrap_or_default();
+    // Protect the best complete exact pair when a race challenger is retained.
+    // At narrow widths the extra alternative must not displace the endpoint
+    // before the search compares them. Wider searches can admit both.
+    let mut promoted_actions = promoted_spatial_actions.clone();
+    for (family, exact) in &exact_family_results {
+        if *family != ExactActionFamily::RoadBuilding {
+            continue;
+        }
+        if road_race_challenger(exact).is_some()
+            && let Some(endpoint) = exact.chosen.as_ref()
+            && root_scored.iter().any(|(action, _)| action == endpoint)
+            && !promoted_actions.contains(endpoint)
+        {
+            promoted_actions.push(endpoint.clone());
+        }
+    }
     let retained_without_promotions =
         admit_promoted_roots(&root_scored, &verified_blockers, &[], branch_cap);
     let baseline_retained = admit_promoted_roots(
         &root_scored,
         &verified_blockers,
-        &promoted_spatial_actions,
+        &promoted_actions,
         branch_cap,
     );
     let mut strategy_admission = None;
@@ -2665,7 +2849,7 @@ fn belief_search_backend(
         {
             protected_actions.push(leader.clone());
         }
-        for action in &promoted_spatial_actions {
+        for action in &promoted_actions {
             if baseline_actions.contains(action) && !protected_actions.contains(action) {
                 protected_actions.push(action.clone());
             }
@@ -2675,7 +2859,7 @@ fn belief_search_backend(
             observer,
             &ranked_actions,
             &baseline_actions,
-            &promoted_spatial_actions,
+            &promoted_actions,
             branch_cap,
         ) {
             let admitted = admit_strategy_challengers(
@@ -2795,12 +2979,19 @@ fn belief_search_backend(
             .all(|(other, _)| other != action)
     }));
     for family in DEVELOPMENT_EXACT_FAMILIES {
+        // Only RoadBuilding may retain two representatives (endpoint plus
+        // road-race challenger); every other family keeps one.
+        let limit = if family == ExactActionFamily::RoadBuilding {
+            2
+        } else {
+            1
+        };
         debug_assert!(
             root_actions
                 .iter()
                 .filter(|(action, _)| exact_family_for_action(action) == Some(family))
                 .count()
-                <= 1
+                <= limit
         );
     }
     let mut safe_root_actions = root_actions
@@ -3191,6 +3382,11 @@ fn belief_search_backend(
                         particle_state: particle.state.clone(),
                         action: action.clone(),
                         completed_turn,
+                        maritime_received: if legal {
+                            child_maritime_mask(0, action, completed_turn)
+                        } else {
+                            0
+                        },
                         allowance,
                         target_depth: wave_root_target_depths[action_index],
                         policy_override,
@@ -4412,6 +4608,7 @@ impl CudaDeferredSearcher<'_> {
         state: &GameState,
         depth: u8,
         actions_in_turn: u8,
+        maritime_received: u8,
         remaining_subtree_allowance: u32,
     ) -> Option<TranspositionIdentity> {
         self.transposition_table.as_ref()?;
@@ -4420,6 +4617,7 @@ impl CudaDeferredSearcher<'_> {
             self.algorithm,
             depth,
             actions_in_turn,
+            maritime_received,
             0.0,
             1.0,
             remaining_subtree_allowance,
@@ -4482,12 +4680,20 @@ impl CudaDeferredSearcher<'_> {
         self.cutoff_depth_counts[depth as usize] += 1;
     }
 
-    fn record_controlled_ambiguity(&mut self, state: &GameState, actor: u8, _depth: u8) {
+    fn record_controlled_ambiguity(
+        &mut self,
+        state: &GameState,
+        actor: u8,
+        _depth: u8,
+        maritime_received: u8,
+    ) {
         if actor != self.controlled_player {
             return;
         }
         let actions = actor_proposal_actions(state);
-        if let Some(hit) = controlled_ambiguity_hit_from_observation(state, &actions, actor) {
+        let filtered = without_maritime_churn(&actions, maritime_received);
+        let actions = filtered.as_ref();
+        if let Some(hit) = controlled_ambiguity_hit_from_observation(state, actions, actor) {
             self.controlled_ambiguity_hits.push(hit);
         }
     }
@@ -4511,6 +4717,7 @@ impl CudaDeferredSearcher<'_> {
         state: &GameState,
         depth: u8,
         actions_in_turn: u8,
+        maritime_received: u8,
         subtree_limit: u32,
         should_stop: &dyn Fn() -> Option<DepthBeliefError>,
     ) -> Result<usize, DepthBeliefError> {
@@ -4535,7 +4742,7 @@ impl CudaDeferredSearcher<'_> {
             && depth > 0
         {
             self.controlled_next_decision_reached = true;
-            self.record_controlled_ambiguity(state, actor, depth);
+            self.record_controlled_ambiguity(state, actor, depth, maritime_received);
         }
         if depth >= self.maximum_depth || actions_in_turn >= 18 {
             self.mark_cutoff(depth);
@@ -4545,8 +4752,13 @@ impl CudaDeferredSearcher<'_> {
         if actions.is_empty() {
             return Ok(self.tree.leaf(state));
         }
-        let transposition_key =
-            self.transposition_key(state, depth, actions_in_turn, remaining_subtree_allowance);
+        let transposition_key = self.transposition_key(
+            state,
+            depth,
+            actions_in_turn,
+            maritime_received,
+            remaining_subtree_allowance,
+        );
         if let Some(key) = transposition_key.as_ref()
             && let Some(node) = self.lookup_transposition(key, state)
         {
@@ -4587,11 +4799,13 @@ impl CudaDeferredSearcher<'_> {
                     let mut next = state.clone();
                     next.apply(&action)
                         .expect("legal chance action must transition");
+                    let child_mask = next_maritime_mask(maritime_received, &action);
                     let node = if allowance > 0 && self.nodes < child_limit {
                         self.visit(
                             &next,
                             depth,
                             actions_in_turn.saturating_add(1),
+                            child_mask,
                             child_limit,
                             should_stop,
                         )?
@@ -4615,13 +4829,15 @@ impl CudaDeferredSearcher<'_> {
                     return Ok(self.tree.leaf(state));
                 }
                 let proposal_actions = actor_proposal_actions(state);
+                let churn_filtered = without_maritime_churn(&proposal_actions, maritime_received);
+                let proposal_actions = churn_filtered.as_ref();
                 if proposal_actions.is_empty() {
                     return Ok(self.tree.leaf(state));
                 }
                 let mut ranked = if actor == self.controlled_player {
-                    self.controlled_policy_action(state, &proposal_actions, actor)
+                    self.controlled_policy_action(state, proposal_actions, actor)
                 } else {
-                    recursive_observation_policy(state, &proposal_actions, actor, self.branch_cap)
+                    recursive_observation_policy(state, proposal_actions, actor, self.branch_cap)
                 };
                 ranked.truncate(ranked.len().min(remaining as usize));
                 if actor != self.controlled_player {
@@ -4646,6 +4862,8 @@ impl CudaDeferredSearcher<'_> {
                         .expect("observation-policy action must transition");
                     let completed_turn =
                         next.turn != state.turn || next.current_player != state.current_player;
+                    let child_mask =
+                        child_maritime_mask(maritime_received, &action, completed_turn);
                     let node = if allowance > 0 && self.nodes < child_limit {
                         self.visit(
                             &next,
@@ -4655,6 +4873,7 @@ impl CudaDeferredSearcher<'_> {
                             } else {
                                 actions_in_turn.saturating_add(1)
                             },
+                            child_mask,
                             child_limit,
                             should_stop,
                         )?
@@ -4860,6 +5079,7 @@ mod tests {
         realized_root_evidence_strengthened, search_belief_maxn, search_belief_maxn_bounded,
         search_maxn, search_paranoid, search_weighted_belief_maxn_bounded,
         search_weighted_belief_maxn_bounded_timed,
+        search_weighted_belief_maxn_bounded_timed_excluding,
         search_weighted_belief_maxn_iterative_timed_excluding,
         should_escalate_binary_root_evidence,
     };
@@ -5495,6 +5715,7 @@ mod tests {
             super::Algorithm::MaxN,
             1,
             0,
+            0,
             0.0,
             1.0,
             32,
@@ -5508,6 +5729,7 @@ mod tests {
             &state,
             super::Algorithm::MaxN,
             1,
+            0,
             0,
             0.0,
             1.0,
@@ -6281,6 +6503,7 @@ mod tests {
         let context = || super::DecisionVisitContext {
             depth: 0,
             actions_in_turn: 0,
+            maritime_received: 0,
             alpha: 0.0,
             beta: 1.0,
             subtree_limit: 400,
@@ -6909,5 +7132,735 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Synthetic Main-phase position with a deep hand, so consecutive bank
+    /// trades stay legal and receive-then-resell paths can be exercised.
+    fn deep_maritime_stock_fixture() -> GameState {
+        let mut state = GameState::standard(4242, 4);
+        while matches!(
+            state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        ) {
+            let action = state.legal_actions()[0].clone();
+            state.apply(&action).unwrap();
+        }
+        state.phase = Phase::Main;
+        state.current_player = 0;
+        state.turn = 42;
+        state.bank_is_public = true;
+        for player in &mut state.players {
+            for resource in 0..5 {
+                let count = player.resources[resource];
+                player.resources[resource] = 0;
+                state.bank[resource] = state.bank[resource].saturating_add(count);
+            }
+        }
+        for resource in 0..5 {
+            state.players[0].resources[resource] = 8;
+            state.bank[resource] -= 8;
+        }
+        state.validate().unwrap();
+        state
+    }
+
+    fn find_maritime(legal: &[Action], give: Resource, receive: Resource) -> Action {
+        legal
+            .iter()
+            .find(|action| {
+                let action = *action;
+                matches!(
+                    action,
+                    Action::MaritimeTrade {
+                        give: actual_give,
+                        receive: actual_receive,
+                        ..
+                    } if *actual_give == give && *actual_receive == receive
+                )
+            })
+            .unwrap_or_else(|| panic!("expected {give:?}->{receive:?} bank trade"))
+            .clone()
+    }
+
+    #[test]
+    fn deep_maritime_received_mask_accumulates_across_bank_trades() {
+        let first = Action::MaritimeTrade {
+            give: Resource::Grain,
+            receive: Resource::Brick,
+            ratio: 4,
+        };
+        let second = Action::MaritimeTrade {
+            give: Resource::Ore,
+            receive: Resource::Lumber,
+            ratio: 4,
+        };
+        let mask = crate::planner::next_maritime_mask(0, &first);
+        assert_eq!(mask, 1 << Resource::Brick.index());
+        let mask = crate::planner::next_maritime_mask(mask, &second);
+        assert_eq!(
+            mask,
+            (1 << Resource::Brick.index()) | (1 << Resource::Lumber.index())
+        );
+        // Giving any previously received resource is churn; other gives stay.
+        let resell = Action::MaritimeTrade {
+            give: Resource::Brick,
+            receive: Resource::Ore,
+            ratio: 4,
+        };
+        assert!(super::maritime_churns_received(&resell, mask));
+        let fresh = Action::MaritimeTrade {
+            give: Resource::Wool,
+            receive: Resource::Ore,
+            ratio: 4,
+        };
+        assert!(!super::maritime_churns_received(&fresh, mask));
+    }
+
+    #[test]
+    fn deep_maritime_segment_clears_on_build_and_chance_gain() {
+        let trade = Action::MaritimeTrade {
+            give: Resource::Grain,
+            receive: Resource::Brick,
+            ratio: 4,
+        };
+        let mask = crate::planner::next_maritime_mask(0, &trade);
+        assert_ne!(mask, 0);
+        // Planner semantics: any non-maritime action resets the segment, so a
+        // useful later trade giving the same resource remains available.
+        for action in [
+            Action::BuyDevelopment,
+            Action::BuildRoad { edge: 0 },
+            Action::EndTurn,
+            Action::ResolveRoll { value: 8 },
+            Action::ResolveDevelopment {
+                card: DevCard::Knight,
+            },
+        ] {
+            assert_eq!(
+                crate::planner::next_maritime_mask(mask, &action),
+                0,
+                "expected {action:?} to clear the segment"
+            );
+            assert_eq!(super::child_maritime_mask(mask, &action, false), 0);
+        }
+        // A turn/actor boundary also resets, even defensively for maritime.
+        assert_eq!(super::child_maritime_mask(mask, &trade, true), 0);
+        assert_eq!(
+            super::child_maritime_mask(0, &trade, false),
+            1 << Resource::Brick.index()
+        );
+    }
+
+    #[test]
+    fn deep_receive_then_resell_pruned_before_control_policy() {
+        let state = deep_maritime_stock_fixture();
+        let first = find_maritime(&state.legal_actions(), Resource::Grain, Resource::Brick);
+        let mask = crate::planner::next_maritime_mask(0, &first);
+        assert_eq!(mask, 1 << Resource::Brick.index());
+
+        let mut next = state.clone();
+        next.apply(&first).unwrap();
+        let legal = next.legal_actions();
+        // The resell stays legal at the core layer: strategy prunes it, the
+        // rules do not forbid it.
+        let resell = find_maritime(&legal, Resource::Brick, Resource::Ore);
+        assert!(super::maritime_churns_received(&resell, mask));
+
+        let filtered = super::without_maritime_churn(&legal, mask);
+        assert!(
+            !filtered.contains(&resell),
+            "receive-then-resell must be pruned before ranking"
+        );
+        // Useful non-churn conversions in the same segment remain.
+        let fresh = find_maritime(&legal, Resource::Grain, Resource::Ore);
+        assert!(
+            filtered.contains(&fresh),
+            "unreceived gives must survive the churn filter"
+        );
+
+        // The pruned list is what policy selection sees: the blocked trade
+        // cannot win rank 0 nor starve alternatives.
+        let policy_actions = filtered.as_ref();
+        let ranked = super::recursive_observation_ranked_policy_actions(&next, policy_actions, 0);
+        assert!(!ranked.iter().any(|(action, _)| *action == resell));
+        let selected = super::controlled_policy_action(&next, policy_actions, 0, None);
+        assert_eq!(selected.len(), 1);
+        assert_ne!(selected[0].0, resell);
+    }
+
+    #[test]
+    fn deep_transposition_identity_separates_maritime_segments() {
+        let state = deep_maritime_stock_fixture();
+        let key = |mask| {
+            super::transposition_identity(
+                &state,
+                super::Algorithm::MaxN,
+                1,
+                0,
+                mask,
+                0.0,
+                1.0,
+                32,
+                3,
+                8,
+                true,
+                Some(0),
+                None,
+            )
+        };
+        let plain = key(0);
+        let traded = key(1 << Resource::Brick.index());
+        assert_ne!(
+            plain, traded,
+            "identical board with different segments must not share cached tails"
+        );
+        assert_eq!(plain, key(0));
+    }
+
+    #[test]
+    fn deep_root_without_prefix_keeps_bank_recovery_available() {
+        // D222-style recovery: no modeled path prefix at the root, so the
+        // Lumber->Grain bank trade remains available rather than banned.
+        let state = deep_maritime_stock_fixture();
+        let legal = state.legal_actions();
+        let recovery = find_maritime(&legal, Resource::Lumber, Resource::Grain);
+        let filtered = super::without_maritime_churn(&legal, 0);
+        assert!(
+            filtered.contains(&recovery),
+            "root with no prefix must keep bank recovery available"
+        );
+        // A root bank trade seeds the received bit only for its continuation.
+        assert_eq!(
+            super::child_maritime_mask(0, &recovery, false),
+            1 << Resource::Grain.index()
+        );
+        assert_eq!(
+            super::child_maritime_mask(0, &Action::BuyDevelopment, false),
+            0
+        );
+    }
+
+    #[test]
+    fn deep_maritime_mask_isolates_cached_tails_through_search() {
+        // Genuine path-propagation check through real Searcher::visit: the
+        // same physical state searched under two masks must not reuse an
+        // incompatible cached tail. The masked visit shares the plain visit's
+        // table; a mask collision would hit at the root (exactly 1 node),
+        // while isolation misses and recomputes the subtree.
+        let state = deep_maritime_stock_fixture();
+        let mask = 1 << Resource::Brick.index();
+        let make_searcher = || super::Searcher {
+            algorithm: super::Algorithm::MaxN,
+            maximum_depth: 3,
+            maximum_nodes: 256,
+            node_limit: 256,
+            branch_cap: 8,
+            nodes: 0,
+            cutoffs: 0,
+            deepest_depth: 0,
+            deadline: crate::deadline::CooperativeDeadline::start(0),
+            deadline_reached: false,
+            observation_safe_recursive: false,
+            controlled_player: None,
+            controlled_policy_override: None,
+            controlled_ambiguity_hits: Vec::new(),
+            controlled_next_decision_reached: false,
+            terminal_reached: false,
+            cutoff_depth_counts: Vec::new(),
+            evaluation_cache: std::collections::HashMap::new(),
+            transposition_table: Some(super::TranspositionTable::default()),
+        };
+        let mut plain = make_searcher();
+        let plain_value = plain.visit(&state, 0, 0, 0, 0.0, 1.0, 256);
+        assert!(plain.nodes > 1, "baseline visit must expand a real subtree");
+        assert!(plain_value.iter().all(|value| value.is_finite()));
+
+        let mut traded = make_searcher();
+        traded.transposition_table = plain.transposition_table.take();
+        let traded_value = traded.visit(&state, 0, 0, mask, 0.0, 1.0, 256);
+        assert!(
+            traded.nodes > 1,
+            "masked visit must miss the plain-mask root entry and recompute"
+        );
+        assert!(traded_value.iter().all(|value| value.is_finite()));
+
+        // Both root tails are cached under their own mask identity: depth and
+        // actions-in-turn only grow along a path (a turn boundary increments
+        // depth), so (0, 0) identifies the root node itself.
+        let table = traded.transposition_table.expect("shared table retained");
+        let root_hash = state.state_hash();
+        let root_masks: Vec<u8> = table
+            .entries
+            .keys()
+            .filter(|key| key.state_hash == root_hash && key.depth == 0 && key.actions_in_turn == 0)
+            .map(|key| key.maritime_received)
+            .collect();
+        assert!(
+            root_masks.contains(&0),
+            "plain-mask root tail must be cached"
+        );
+        assert!(
+            root_masks.contains(&mask),
+            "masked root tail must be cached separately"
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
+    fn deep_cuda_deferred_transposition_matches_cpu_on_maritime_mask() {
+        let state = deep_maritime_stock_fixture();
+        let mut tree = super::CudaDeferredTree::new();
+        let cuda = super::CudaDeferredSearcher {
+            tree: &mut tree,
+            algorithm: super::Algorithm::MaxN,
+            maximum_depth: 3,
+            maximum_nodes: 64,
+            node_limit: 64,
+            branch_cap: 8,
+            controlled_player: 0,
+            controlled_policy_override: None,
+            controlled_ambiguity_hits: Vec::new(),
+            nodes: 0,
+            deepest_depth: 0,
+            controlled_next_decision_reached: false,
+            terminal_reached: false,
+            cutoff_depth_counts: Vec::new(),
+            transposition_table: Some(super::TranspositionTable::default()),
+            local_transpositions: std::collections::HashMap::new(),
+            pending_transpositions: Vec::new(),
+        };
+        let mask = 1 << Resource::Brick.index();
+        let cuda_plain = cuda
+            .transposition_key(&state, 1, 0, 0, 32)
+            .expect("deferred key must exist with a table");
+        let cuda_traded = cuda
+            .transposition_key(&state, 1, 0, mask, 32)
+            .expect("deferred key must exist with a table");
+        assert_ne!(
+            cuda_plain, cuda_traded,
+            "CUDA cache identity must separate maritime segments"
+        );
+
+        let cpu = super::Searcher {
+            algorithm: super::Algorithm::MaxN,
+            maximum_depth: 3,
+            maximum_nodes: 64,
+            node_limit: 64,
+            branch_cap: 8,
+            nodes: 0,
+            cutoffs: 0,
+            deepest_depth: 0,
+            deadline: crate::deadline::CooperativeDeadline::start(0),
+            deadline_reached: false,
+            observation_safe_recursive: true,
+            controlled_player: Some(0),
+            controlled_policy_override: None,
+            controlled_ambiguity_hits: Vec::new(),
+            controlled_next_decision_reached: false,
+            terminal_reached: false,
+            cutoff_depth_counts: Vec::new(),
+            evaluation_cache: std::collections::HashMap::new(),
+            transposition_table: Some(super::TranspositionTable::default()),
+        };
+        let cpu_traded = cpu
+            .transposition_key(&state, 1, 0, mask, 0.0, 1.0, 32)
+            .expect("CPU key must exist with a table");
+        assert_eq!(
+            cpu_traded, cuda_traded,
+            "CPU and CUDA deferred keys must agree for the same mask"
+        );
+    }
+
+    /// Single construction site for synthetic exact values, so the
+    /// `road_race_bonus` contract has one test-side touchpoint.
+    fn exact_race_value(action: Action, bonus: f32) -> crate::exact::ExactActionValue {
+        crate::exact::ExactActionValue {
+            action,
+            value: [0.0; 4],
+            lower_bound: [0.0; 4],
+            legal_weight: 1.0,
+            decision_score: 0.0,
+            lower_score: 0.0,
+            road_race_bonus: bonus,
+        }
+    }
+
+    fn exact_race_result(
+        chosen: Action,
+        pairs: Vec<(Action, f32)>,
+    ) -> crate::exact::ExactDecisionResult {
+        crate::exact::ExactDecisionResult {
+            applicable: true,
+            chosen: Some(chosen),
+            actions: pairs
+                .into_iter()
+                .map(|(action, bonus)| exact_race_value(action, bonus))
+                .collect(),
+            worlds: 1,
+        }
+    }
+
+    fn road_building_pair(first: u8, second: u8) -> Action {
+        Action::PlayRoadBuilding {
+            first,
+            second: Some(second),
+        }
+    }
+
+    #[test]
+    fn road_race_challenger_selects_max_positive_distinct_bonus() {
+        let endpoint = road_building_pair(1, 2);
+        let low = road_building_pair(3, 4);
+        let high = road_building_pair(5, 6);
+        let tied = road_building_pair(7, 8);
+        let exact = exact_race_result(
+            endpoint.clone(),
+            vec![
+                // The endpoint's own bonus never qualifies it as its own
+                // challenger, even when it is the maximum.
+                (endpoint, 9.9),
+                // Swapping free-road order does not create a distinct plan.
+                (road_building_pair(2, 1), 9.9),
+                (low, 0.5),
+                (tied.clone(), 1.2),
+                (high.clone(), 1.2),
+            ],
+        );
+        // Tied bonuses resolve in canonical Debug order: {5, 6} before {7, 8}.
+        assert_eq!(super::road_race_challenger(&exact), Some(high));
+        assert_ne!(super::road_race_challenger(&exact), Some(tied));
+    }
+
+    #[test]
+    fn road_race_challenger_requires_distinct_positive_bonus() {
+        let endpoint = road_building_pair(1, 2);
+        let other = road_building_pair(3, 4);
+        // All-zero bonuses: no race parameterization is worth a second slot.
+        let flat = exact_race_result(
+            endpoint.clone(),
+            vec![(endpoint.clone(), 0.0), (other.clone(), 0.0)],
+        );
+        assert_eq!(super::road_race_challenger(&flat), None);
+        // Only the endpoint is positive: nothing distinct to retain.
+        let endpoint_only = exact_race_result(
+            endpoint.clone(),
+            vec![(endpoint.clone(), 1.2), (other.clone(), 0.0)],
+        );
+        assert_eq!(super::road_race_challenger(&endpoint_only), None);
+        let reversed_only = exact_race_result(
+            endpoint.clone(),
+            vec![(endpoint.clone(), 1.2), (road_building_pair(2, 1), 1.2)],
+        );
+        assert_eq!(super::road_race_challenger(&reversed_only), None);
+        // Empty action lists retain nothing.
+        let empty = crate::exact::ExactDecisionResult {
+            applicable: true,
+            chosen: Some(endpoint),
+            actions: Vec::new(),
+            worlds: 1,
+        };
+        assert_eq!(super::road_race_challenger(&empty), None);
+    }
+
+    #[test]
+    fn exact_rep_retained_keeps_both_road_building_reps() {
+        let endpoint = road_building_pair(1, 2);
+        let challenger = road_building_pair(5, 6);
+        let collapsed = road_building_pair(3, 4);
+        let exact = exact_race_result(
+            endpoint.clone(),
+            vec![
+                (endpoint.clone(), 9.9),
+                (collapsed.clone(), 0.0),
+                (challenger.clone(), 1.2),
+            ],
+        );
+        use crate::exact::ExactActionFamily;
+        assert!(super::exact_rep_retained(
+            &endpoint,
+            ExactActionFamily::RoadBuilding,
+            &exact
+        ));
+        assert!(super::exact_rep_retained(
+            &challenger,
+            ExactActionFamily::RoadBuilding,
+            &exact
+        ));
+        assert!(!super::exact_rep_retained(
+            &collapsed,
+            ExactActionFamily::RoadBuilding,
+            &exact
+        ));
+        // Other families never admit a second representative, even when a
+        // positive bonus is present on the same result shape.
+        assert!(!super::exact_rep_retained(
+            &challenger,
+            ExactActionFamily::Knight,
+            &exact
+        ));
+    }
+
+    #[test]
+    fn family_representative_diagnostic_falls_back_without_blocking() {
+        let diagnostic = |action: Action, rank: usize| RankedRootDiagnostic {
+            action,
+            rank,
+            prior: 0.1,
+            planner_value: None,
+            planner_completion_mass: None,
+            planner_decisive_completion_mass: None,
+            planner_response_windows: None,
+            quota_score: 0.5,
+        };
+        let first = road_building_pair(1, 2);
+        let second = road_building_pair(3, 4);
+        let members = vec![diagnostic(first.clone(), 1), diagnostic(second.clone(), 2)];
+        // A present selection resolves to its own diagnostic.
+        assert_eq!(
+            super::family_representative_diagnostic(&members, &second).rank,
+            2
+        );
+        // A missing selection (never proposed in a positive-weight world)
+        // falls back to the first member rather than blocking admission.
+        let missing = road_building_pair(9, 10);
+        assert_eq!(
+            super::family_representative_diagnostic(&members, &missing).rank,
+            1
+        );
+    }
+
+    /// Mid-game race position: an established road route plus a playable Road
+    /// Building card, so multiple extension pairs are legal and the
+    /// topology/funding bonus has a real race to price.
+    fn deep_road_building_race_fixture() -> GameState {
+        fn path(
+            state: &GameState,
+            vertex: u8,
+            used: &mut Vec<u8>,
+            target: usize,
+        ) -> Option<Vec<u8>> {
+            if used.len() == target {
+                return Some(used.clone());
+            }
+            for edge in &state.board.vertices[vertex as usize].adjacent_edges {
+                if used.contains(edge) {
+                    continue;
+                }
+                let [left, right] = state.board.edges[*edge as usize].vertices;
+                let next = if left == vertex { right } else { left };
+                used.push(*edge);
+                if let Some(found) = path(state, next, used, target) {
+                    return Some(found);
+                }
+                used.pop();
+            }
+            None
+        }
+
+        let mut state = GameState::standard(47, 4);
+        state.phase = Phase::Main;
+        state.current_player = 0;
+        state.turn = 60;
+        state.buildings.fill(None);
+        state.roads.fill(None);
+        let route = (0..state.board.vertices.len() as u8)
+            .find_map(|vertex| {
+                path(&state, vertex, &mut Vec::new(), 5).map(|route| (vertex, route))
+            })
+            .expect("the standard board contains a five-edge route");
+        state.buildings[route.0 as usize] = Some(colonist_catan_core::Building::Settlement(0));
+        for edge in &route.1[..3] {
+            state.roads[*edge as usize] = Some(0);
+        }
+        state.players[0].roads_left = 12;
+        state.players[0].settlements_left = 4;
+        let road_building = DevCard::RoadBuilding.index();
+        state.development_deck[road_building] -= 1;
+        state.players[0].development[road_building] += 1;
+        state.players[0].bought_development[road_building] = 0;
+        assert!(
+            state
+                .legal_actions()
+                .iter()
+                .filter(|action| matches!(action, Action::PlayRoadBuilding { .. }))
+                .count()
+                >= 2,
+            "race fixture must expose at least two road pairs"
+        );
+        state
+    }
+
+    #[test]
+    fn deep_road_building_narrow_width_preserves_endpoint() {
+        let particles = vec![BeliefParticle {
+            state: deep_road_building_race_fixture(),
+            weight: 1.0,
+        }];
+        let exact = crate::exact::solve_exact_belief_excluding_controlled(
+            &particles,
+            crate::exact::ExactActionFamily::RoadBuilding,
+            &[],
+            || false,
+        )
+        .expect("exact RoadBuilding family must resolve");
+        let endpoint = exact.chosen.clone().expect("endpoint representative");
+        assert!(super::road_race_challenger(&exact).is_some());
+        let report = search_weighted_belief_maxn_bounded(&particles, 2, 2, 4_000).unwrap();
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|candidate| candidate.action == endpoint),
+            "a race challenger must not evict the endpoint at width two"
+        );
+        assert!(
+            report
+                .actions
+                .iter()
+                .any(|candidate| candidate.action == Action::EndTurn)
+        );
+        assert!(report.actions.len() <= 2);
+    }
+
+    #[test]
+    fn deep_road_building_endpoint_and_challenger_survive_belief_search() {
+        let state = deep_road_building_race_fixture();
+        let particles = vec![BeliefParticle { state, weight: 1.0 }];
+        // The fixture must exercise the race path: the exact solver must yield
+        // a distinct positive-bonus challenger. This asserts consideration of
+        // the race pair through root preparation and deep search — not which
+        // parameterization the search finally prefers.
+        let exact = crate::exact::solve_exact_belief_excluding_controlled(
+            &particles,
+            crate::exact::ExactActionFamily::RoadBuilding,
+            &[],
+            || false,
+        )
+        .expect("exact RoadBuilding family must resolve");
+        let endpoint = exact.chosen.clone().expect("endpoint representative");
+        let challenger = super::road_race_challenger(&exact)
+            .expect("race fixture must yield a positive-bonus challenger");
+        assert_ne!(endpoint, challenger);
+
+        let report = search_weighted_belief_maxn_bounded(&particles, 4, 8, 4_000).unwrap();
+        let ranked: Vec<&Action> = report
+            .provenance
+            .ranked_roots
+            .iter()
+            .map(|candidate| &candidate.action)
+            .filter(|action| matches!(action, Action::PlayRoadBuilding { .. }))
+            .collect();
+        assert!(
+            ranked.contains(&&endpoint),
+            "endpoint rep must survive family retention"
+        );
+        assert!(
+            ranked.contains(&&challenger),
+            "race challenger must survive family retention"
+        );
+        let searched: Vec<&Action> = report
+            .actions
+            .iter()
+            .map(|candidate| &candidate.action)
+            .filter(|action| matches!(action, Action::PlayRoadBuilding { .. }))
+            .collect();
+        assert!(
+            searched.contains(&&endpoint),
+            "endpoint rep must survive to deep branch competition"
+        );
+        assert!(
+            searched.contains(&&challenger),
+            "race challenger must survive to deep branch competition"
+        );
+        assert!(
+            searched.len() <= 2,
+            "RoadBuilding keeps at most two representatives"
+        );
+    }
+
+    #[test]
+    fn deep_road_race_respects_root_exclusions() {
+        let state = deep_road_building_race_fixture();
+        let particles = vec![BeliefParticle { state, weight: 1.0 }];
+        let exact = crate::exact::solve_exact_belief_excluding_controlled(
+            &particles,
+            crate::exact::ExactActionFamily::RoadBuilding,
+            &[],
+            || false,
+        )
+        .expect("exact RoadBuilding family must resolve");
+        let endpoint = exact.chosen.clone().expect("endpoint representative");
+
+        // Solver-level guarantee the challenger path relies on: excluded
+        // actions never appear in the exact candidate set.
+        let excluded = crate::exact::solve_exact_belief_excluding_controlled(
+            &particles,
+            crate::exact::ExactActionFamily::RoadBuilding,
+            std::slice::from_ref(&endpoint),
+            || false,
+        )
+        .expect("excluded solve must resolve");
+        assert!(
+            !excluded
+                .actions
+                .iter()
+                .any(|candidate| candidate.action == endpoint),
+            "excluded endpoint must leave the exact candidate set"
+        );
+
+        let report = search_weighted_belief_maxn_bounded_timed_excluding(
+            &particles,
+            4,
+            8,
+            4_000,
+            10_000,
+            std::slice::from_ref(&endpoint),
+        )
+        .unwrap();
+        assert!(
+            !report
+                .actions
+                .iter()
+                .any(|candidate| candidate.action == endpoint),
+            "excluded endpoint must not reach deep branch competition"
+        );
+        assert!(
+            !report
+                .provenance
+                .ranked_roots
+                .iter()
+                .any(|candidate| candidate.action == endpoint),
+            "excluded endpoint must not survive root preparation"
+        );
+    }
+
+    #[test]
+    fn deep_non_road_building_families_keep_single_rep() {
+        // The Knight card in this Main-phase fixture exposes several
+        // parameterizations; the family must still collapse to one root.
+        let state = controlled_city_settlement_fixture();
+        assert!(
+            state
+                .legal_actions()
+                .iter()
+                .any(|action| matches!(action, Action::PlayKnight { .. })),
+            "fixture must expose a playable Knight"
+        );
+        let report = search_weighted_belief_maxn_bounded(
+            &[BeliefParticle { state, weight: 1.0 }],
+            4,
+            8,
+            4_000,
+        )
+        .unwrap();
+        let knights = report
+            .actions
+            .iter()
+            .filter(|candidate| matches!(candidate.action, Action::PlayKnight { .. }))
+            .count();
+        assert!(
+            knights <= 1,
+            "Knight family must keep at most one representative"
+        );
     }
 }

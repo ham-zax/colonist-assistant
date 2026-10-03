@@ -10,6 +10,7 @@ mod economy;
 mod eval;
 mod exact;
 mod features;
+mod knight_insurance;
 mod mcts;
 #[cfg(test)]
 #[path = "midgame_save_spend_tests.rs"]
@@ -23,8 +24,11 @@ mod resilience;
 #[cfg(test)]
 #[path = "road4311_d14_tests.rs"]
 mod road4311_d14_tests;
+mod road_race;
 mod rollout_cutoff;
 mod root_impact;
+#[cfg(test)]
+mod sea8653_fixture;
 mod shared;
 mod strategy;
 mod tactical;
@@ -53,8 +57,8 @@ pub use eval::{
 };
 pub use exact::{
     DEVELOPMENT_EXACT_FAMILIES, ExactActionFamily, ExactActionValue, ExactDecisionResult,
-    exact_action_comparator_score, exact_family_for_action, solve_exact_belief,
-    solve_exact_belief_excluding, solve_exact_belief_excluding_controlled,
+    exact_action_comparator_score, exact_family_for_action, road_race_challenger,
+    solve_exact_belief, solve_exact_belief_excluding, solve_exact_belief_excluding_controlled,
 };
 pub use features::{
     ACTION_FEATURES, BASE_ACTION_FEATURES, EDGE_FEATURES, GLOBAL_FEATURES, HEX_FEATURES,

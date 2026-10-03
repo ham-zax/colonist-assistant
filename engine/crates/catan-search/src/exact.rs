@@ -4,6 +4,7 @@ use crate::eval::{evaluate, public_strategic_utility, robber_denial, strategic_u
 use crate::mcts::BeliefParticle;
 use crate::planner::{TurnPlanConfig, plan_current_turn};
 use crate::policy::{actor_proposal_actions, trade_acceptance_probability};
+use crate::road_race;
 use crate::trade_safety::belief_domestic_trade_assessment_controlled;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +41,9 @@ pub struct ExactActionValue {
     pub legal_weight: f32,
     pub decision_score: f32,
     pub lower_score: f32,
+    /// Posterior-weighted witnessed future road-award value, in raw utility
+    /// units. Used to retain a distinct road-race contender before deep search.
+    pub road_race_bonus: f32,
 }
 
 pub fn exact_action_comparator_score(decision_score: f32, lower_score: f32) -> f32 {
@@ -52,6 +56,49 @@ pub struct ExactDecisionResult {
     pub chosen: Option<Action>,
     pub actions: Vec<ExactActionValue>,
     pub worlds: usize,
+}
+
+fn same_road_pair(left: &Action, right: &Action) -> bool {
+    match (left, right) {
+        (
+            Action::PlayRoadBuilding {
+                first: a,
+                second: b,
+            },
+            Action::PlayRoadBuilding {
+                first: c,
+                second: d,
+            },
+        ) => (a == c && b == d) || (*b == Some(*c) && *d == Some(*a)),
+        _ => false,
+    }
+}
+
+/// Best witnessed future-road contender using a different set of free roads
+/// from the endpoint winner. Reversed placement order is the same contender.
+/// This only reads completed exact scores; it does not expand road routes.
+pub fn road_race_challenger(exact: &ExactDecisionResult) -> Option<Action> {
+    let endpoint = exact.chosen.as_ref()?;
+    exact
+        .actions
+        .iter()
+        .filter(|candidate| {
+            matches!(candidate.action, Action::PlayRoadBuilding { .. })
+                && candidate.road_race_bonus.is_finite()
+                && candidate.road_race_bonus > 0.0
+                && !same_road_pair(endpoint, &candidate.action)
+        })
+        .max_by(|left, right| {
+            left.road_race_bonus
+                .total_cmp(&right.road_race_bonus)
+                .then_with(|| {
+                    exact_action_comparator_score(left.decision_score, left.lower_score).total_cmp(
+                        &exact_action_comparator_score(right.decision_score, right.lower_score),
+                    )
+                })
+                .then_with(|| format!("{:?}", right.action).cmp(&format!("{:?}", left.action)))
+        })
+        .map(|candidate| candidate.action.clone())
 }
 
 fn matches_family(state: &GameState, action: &Action, family: ExactActionFamily) -> bool {
@@ -311,6 +358,7 @@ fn family_score(
     action: &Action,
     family: ExactActionFamily,
     actor: usize,
+    should_stop: &mut dyn FnMut() -> bool,
 ) -> f32 {
     if matches!(
         action,
@@ -374,7 +422,7 @@ fn family_score(
         }
         return forced_tail_value(&next, 0)[actor];
     }
-    if let Some(score) = post_action_development_score(state, &next, family, actor) {
+    if let Some(score) = post_action_development_score(state, &next, family, actor, should_stop) {
         return score;
     }
     evaluate(&next)[actor]
@@ -402,6 +450,7 @@ fn post_action_development_score(
     next: &GameState,
     family: ExactActionFamily,
     actor: usize,
+    should_stop: &mut dyn FnMut() -> bool,
 ) -> Option<f32> {
     if !matches!(
         family,
@@ -436,6 +485,17 @@ fn post_action_development_score(
             .resource_total()
             .saturating_sub(state.players[actor].resource_total());
         Some(endpoint + gained as f32 * 1.4 + immediate_completion_gain)
+    } else if family == ExactActionFamily::RoadBuilding {
+        // The endpoint already prices the immediate +2VP exactly once. The
+        // race term below only values a *future* award witnessed as a concrete
+        // paid-road completion, discounted by funding ETA and rival response.
+        let race = road_race::future_award_bonus(
+            next,
+            actor as u8,
+            &road_race::RaceConfig::live(),
+            should_stop,
+        );
+        Some(endpoint + immediate_completion_gain + race)
     } else {
         Some(endpoint + immediate_completion_gain)
     }
@@ -533,6 +593,7 @@ where
         let mut lower = [1.0_f32; 4];
         let mut legal_mass = 0.0;
         let mut decision_score = 0.0;
+        let mut road_race_bonus = 0.0;
         let mut lower_score = f32::INFINITY;
         for (particle_index, particle) in particles.iter().enumerate() {
             if should_stop() {
@@ -551,13 +612,33 @@ where
                         | ExactActionFamily::RoadBuilding
                 ) {
                 let mut next = particle.state.clone();
-                next.apply(&action).ok().and_then(|_| {
-                    post_action_development_score(&particle.state, &next, family, actor)
-                        .map(|score| (next, score))
-                })
+                if next.apply(&action).is_err() {
+                    None
+                } else {
+                    post_action_development_score(
+                        &particle.state,
+                        &next,
+                        family,
+                        actor,
+                        &mut should_stop,
+                    )
+                    .map(|score| (next, score))
+                }
             } else {
                 None
             };
+            if family == ExactActionFamily::RoadBuilding
+                && let Some((next, _)) = reused_development.as_ref()
+            {
+                // The exact score has already memoized this topology. Read its
+                // separately priced race value without another route expansion.
+                road_race_bonus += road_race::future_award_bonus(
+                    next,
+                    actor as u8,
+                    &road_race::RaceConfig::live(),
+                    &mut should_stop,
+                ) * weight;
+            }
             let value = if legal {
                 legal_mass += weight;
                 reused_development.as_ref().map_or_else(
@@ -580,7 +661,7 @@ where
                 {
                     value[actor]
                 } else {
-                    family_score(&particle.state, &action, family, actor)
+                    family_score(&particle.state, &action, family, actor, &mut should_stop)
                 }
             } else {
                 evaluate(&particle.state)[actor]
@@ -625,6 +706,7 @@ where
             } else {
                 lower_score
             },
+            road_race_bonus,
         });
     }
     values.sort_by(|left, right| {

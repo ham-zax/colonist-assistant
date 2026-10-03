@@ -31,7 +31,8 @@ typedef unsigned long long uint64_t;
 #define STATE_PLAYERS 242u
 #define PLAYER_STRIDE 22u
 #define STATE_DOMESTIC_TRADE_DISABLED 330u
-#define STATE_WORDS 331u
+#define STATE_FRIENDLY_ROBBER 331u
+#define STATE_WORDS 332u
 
 #define TOPO_VERTEX_HEX_COUNTS 0u
 #define TOPO_VERTEX_HEXES 54u
@@ -1380,11 +1381,91 @@ static inline __device__ float progress_card_utility(
         + fmaxf(held - 1.0f, 0.0f) * base * 0.28f * congestion;
 }
 
+// Mirrored in knight_insurance.rs: one productive tile, one future actor roll.
+static inline __device__ float held_knight_insurance(
+    const uint32_t *state, const uint32_t *topology, uint32_t player,
+    const float resource_weights[5]
+) {
+    const uint32_t held_knights = development_count(state, player, 0u);
+    if (held_knights == 0u) {
+        return 0.0f;
+    }
+    float multipliers[HEX_COUNT] = {0.0f};
+    uint32_t protected_tiles = 0u;
+    for (uint32_t vertex = 0u; vertex < VERTEX_COUNT; ++vertex) {
+        const uint32_t building = state[STATE_BUILDINGS + vertex];
+        const int owner = building_player(building);
+        if (owner < 0) { continue; }
+        for (uint32_t slot = 0u; slot < topo_vertex_hex_count(topology, vertex); ++slot) {
+            const uint32_t hex = topo_vertex_hex(topology, vertex, slot);
+            if (state[STATE_FRIENDLY_ROBBER] != 0u
+                && player_public_victory_points(state, (uint32_t)owner) < 3u) {
+                protected_tiles |= 1u << hex;
+            }
+            if ((uint32_t)owner == player) {
+                multipliers[hex] += (float)building_multiplier(building);
+            }
+        }
+    }
+    const uint32_t robber = state[STATE_ROBBER_HEX];
+    if (multipliers[robber] > 0.0f && state[STATE_HEX_RESOURCES + robber] != 0u
+        && state[STATE_HEX_NUMBERS + robber] > 0u) {
+        return 0.0f;
+    }
+    float exposure = 0.0f;
+    for (uint32_t hex = 0u; hex < HEX_COUNT; ++hex) {
+        const uint32_t encoded_resource = state[STATE_HEX_RESOURCES + hex];
+        if (hex == robber || encoded_resource == 0u || (protected_tiles & (1u << hex)) != 0u) {
+            continue;
+        }
+        const uint32_t resource = encoded_resource - 1u;
+        if (state[STATE_BANK_PUBLIC] != 0u && state[STATE_BANK + resource] == 0u) {
+            continue;
+        }
+        exposure = fmaxf(exposure, multipliers[hex]
+            * PIPS[state[STATE_HEX_NUMBERS + hex]] / 36.0f * resource_weights[resource]);
+    }
+    if (exposure == 0.0f) { return 0.0f; }
+    uint32_t played = 0u;
+    uint32_t held = 0u;
+    uint32_t draws = 0u;
+    for (uint32_t card = 0u; card < 5u; ++card) {
+        played += state[STATE_PLAYED_DEVELOPMENT + card];
+        held += development_count(state, player, card);
+    }
+    const uint32_t known_knights = state[STATE_PLAYED_DEVELOPMENT] + held_knights;
+    const uint32_t population = played + held < 25u ? 25u - played - held : 0u;
+    uint32_t knights = known_knights < 14u ? 14u - known_knights : 0u;
+    knights = knights < population ? knights : population;
+    float no_seven = 1.0f;
+    for (uint32_t other = 0u; other < state[STATE_NUM_PLAYERS]; ++other) {
+        if (other == player) { continue; }
+        no_seven *= 5.0f / 6.0f;
+        for (uint32_t card = 0u; card < 5u; ++card) {
+            const uint32_t cards = development_count(state, other, card);
+            const uint32_t bought = bought_development_count(state, other, card);
+            draws += cards > bought ? cards - bought : 0u;
+        }
+    }
+    draws = draws < population ? draws : population;
+    const uint32_t non_knights = population - knights;
+    float no_knight = 1.0f;
+    if (draws > non_knights) {
+        no_knight = 0.0f;
+    } else {
+        for (uint32_t draw = 0u; draw < draws; ++draw) {
+            no_knight *= (float)(non_knights - draw) / (float)(population - draw);
+        }
+    }
+    return exposure * (1.0f - no_seven * no_knight) * 0.12f;
+}
+
 static inline __device__ float development_utility(
     const uint32_t *state,
     const uint32_t *topology,
     uint32_t player,
-    float expansion_value
+    float expansion_value,
+    const float resource_weights[5]
 ) {
     float army_acquire;
     float army_retain;
@@ -1403,6 +1484,7 @@ static inline __device__ float development_utility(
         * (0.28f + army_acquire * 1.15f)
         + fmaxf(knights - 1.0f, 0.0f) * (0.12f + army_acquire * 0.24f);
     const float raw = knight_utility
+        + held_knight_insurance(state, topology, player, resource_weights)
         + progress_card_utility(state, topology, player, 2u, expansion_value)
         + progress_card_utility(state, topology, player, 3u, expansion_value)
         + progress_card_utility(state, topology, player, 4u, expansion_value);
@@ -1629,7 +1711,7 @@ static inline __device__ float strategic_utility(
         + expansion_portfolio * 0.22f
         + (road_acquire * road_retain) * 3.2f * race_urgency
         + (army_acquire * army_retain) * 3.2f * race_urgency
-        + development_utility(state, topology, player, expansion_value) * 0.72f
+        + development_utility(state, topology, player, expansion_value, weights) * 0.72f
         + port_flexibility * 0.07f
         - expected_discard_loss(state, topology, player) * 2.4f
         - speculative_road_penalty(state, player, road_acquire, road_retain)

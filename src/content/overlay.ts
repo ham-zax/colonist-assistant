@@ -20,6 +20,11 @@ import {
   type DecisionActionSource,
 } from "../core/decision-trace";
 import { DevelopmentSnapshotSync } from "../core/development-sync";
+import { MaritimeCycleMemory } from "../core/maritime-cycle";
+import {
+  maritimeCycleObservation,
+  maritimeCycleRootExclusions,
+} from "../core/maritime-cycle-board";
 import {
   downloadRecordedGame,
   GameRecordRecorder,
@@ -377,6 +382,7 @@ const extensionBuildInfo = (): {
 };
 
 export class AssistantOverlay {
+  private readonly maritimeCycleMemory = new MaritimeCycleMemory();
   private readonly buildInfo = extensionBuildInfo();
   private readonly host: HTMLDivElement;
   private readonly shadow: ShadowRoot;
@@ -832,6 +838,12 @@ export class AssistantOverlay {
         this.clearPendingPlacement();
         this.confirmedPlacementSpend = undefined;
       }
+    }
+    const maritimeObservation = maritimeCycleObservation(nextBoard);
+    if (maritimeObservation) {
+      this.maritimeCycleMemory.observe(maritimeObservation);
+    } else {
+      this.maritimeCycleMemory.clear();
     }
     this.board = nextBoard;
     this.decisionTraces.reconcileExecutions();
@@ -2895,6 +2907,10 @@ export class AssistantOverlay {
   }
 
   private decisionSearchConstraints(): DecisionSearchConstraints {
+    const rootExclusions = [
+      ...this.rootTradeActionExclusions,
+      ...maritimeCycleRootExclusions(this.maritimeCycleMemory, this.board),
+    ];
     return {
       ...(this.lastRejectedDomesticTrade
         ? {
@@ -2904,9 +2920,9 @@ export class AssistantOverlay {
             },
           }
         : {}),
-      ...(this.rootTradeActionExclusions.length
+      ...(rootExclusions.length
         ? {
-            rootExclusions: this.rootTradeActionExclusions.map((exclusion) => ({
+            rootExclusions: rootExclusions.map((exclusion) => ({
               kind: exclusion.kind,
               give: { ...exclusion.give },
               receive: { ...exclusion.receive },

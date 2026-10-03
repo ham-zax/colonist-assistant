@@ -8,8 +8,8 @@ use colonist_catan_search::{
     apply_closeout_root_impacts, belief_domestic_trade_assessment,
     belief_road_cut_continuation_assessment, belief_root_closeout_plans,
     compute_spatial_root_impacts, exact_family_for_action, forced_loss_weight,
-    posterior_immediate_threat_weight, safer_end_turn_alternative, shadow_strategy_diagnostics,
-    shared_root_candidates, solve_belief_current_turn_timed,
+    posterior_immediate_threat_weight, road_race_challenger, safer_end_turn_alternative,
+    shadow_strategy_diagnostics, shared_root_candidates, solve_belief_current_turn_timed,
     solve_exact_belief_excluding_controlled,
 };
 use colonist_catan_search::{road_intent, rollout_cutoff_margin};
@@ -23,8 +23,8 @@ use super::{
     basic_response_diagnostics, domestic_trade_threat_label, effective_particle_count,
     exact_family_label, exact_mandatory_report_controlled, game_states,
     introduced_road_fragility_output, resolve_stochastic, response, road_cut_continuation_output,
-    root_exclusion_actions, root_promotion_reason, strategy_shadow_output,
-    weighted_policy_report_for_actions_controlled,
+    root_exclusion_actions, root_promotion_reason, searched_road_pair_is_resolved,
+    strategy_shadow_output, weighted_policy_report_for_actions_controlled,
 };
 
 pub const NATIVE_GPU_ROLLOUT_ALGORITHM: &str = "gpu-root-rollout";
@@ -151,6 +151,23 @@ struct RankedGpuRoot {
     action: Action,
     prior: f32,
     legal_weight: f32,
+}
+
+fn retain_resolved_development_roots(
+    ranked: &mut Vec<RankedGpuRoot>,
+    resolved: &[(ExactActionFamily, ExactDecisionResult)],
+) {
+    ranked.retain(|candidate| {
+        let Some(family) = exact_family_for_action(&candidate.action) else {
+            return true;
+        };
+        resolved.iter().any(|(resolved_family, exact)| {
+            *resolved_family == family
+                && (exact.chosen.as_ref() == Some(&candidate.action)
+                    || (family == ExactActionFamily::RoadBuilding
+                        && road_race_challenger(exact).as_ref() == Some(&candidate.action)))
+        })
+    });
 }
 
 fn actor_gpu_root_candidates(
@@ -975,6 +992,7 @@ impl NativeGpuSearchEngine {
         });
         let mut pruned_roots = Vec::<PrunedRootOutput>::new();
         let mut exact_family_results = Vec::<(ExactActionFamily, ExactDecisionResult)>::new();
+        let mut protected_road_endpoints = Vec::new();
         for family in DEVELOPMENT_EXACT_FAMILIES {
             if should_cancel() {
                 return Err("GPU native search cancelled".into());
@@ -1005,6 +1023,9 @@ impl NativeGpuSearchEngine {
             let Some(representative) = exact.chosen.clone() else {
                 continue;
             };
+            let challenger = (family == ExactActionFamily::RoadBuilding)
+                .then(|| road_race_challenger(&exact))
+                .flatten();
             let family_prior = family_members
                 .iter()
                 .map(|(_, candidate)| candidate.prior.max(0.0))
@@ -1023,7 +1044,9 @@ impl NativeGpuSearchEngine {
                     |candidate| candidate.legal_weight,
                 );
             for (rank, candidate) in &family_members {
-                if candidate.action != representative {
+                if candidate.action != representative
+                    && challenger.as_ref() != Some(&candidate.action)
+                {
                     pruned_roots.push(PrunedRootOutput {
                         action: action(candidate.action.clone()),
                         pre_truncation_rank: Some(*rank + 1),
@@ -1033,12 +1056,32 @@ impl NativeGpuSearchEngine {
             }
             ranked.retain(|candidate| exact_family_for_action(&candidate.action) != Some(family));
             ranked.push(RankedGpuRoot {
-                action: representative,
-                prior: family_prior,
+                action: representative.clone(),
+                prior: if challenger.is_some() {
+                    family_prior / 2.0
+                } else {
+                    family_prior
+                },
                 legal_weight,
             });
+            if let Some(challenger) = challenger {
+                let legal_weight = exact
+                    .actions
+                    .iter()
+                    .find(|candidate| candidate.action == challenger)
+                    .map_or(0.0, |candidate| candidate.legal_weight);
+                ranked.push(RankedGpuRoot {
+                    action: challenger.clone(),
+                    prior: family_prior / 2.0,
+                    legal_weight,
+                });
+                protected_road_endpoints.push(representative);
+            }
             exact_family_results.push((family, exact));
         }
+        // Family preparation is atomic. A deadline may interrupt the loop;
+        // only completely resolved representatives may enter root competition.
+        retain_resolved_development_roots(&mut ranked, &exact_family_results);
         ranked.sort_by(|left, right| {
             right
                 .prior
@@ -1101,10 +1144,12 @@ impl NativeGpuSearchEngine {
             .unwrap_or_default();
         let admitted_without_promotions =
             admit_promoted_roots(&ranked_tuples, &verified_blockers, &[], root_cap);
+        let mut promoted_actions = promoted_spatial_actions.clone();
+        promoted_actions.extend(protected_road_endpoints);
         let admitted = admit_promoted_roots(
             &ranked_tuples,
             &verified_blockers,
-            &promoted_spatial_actions,
+            &promoted_actions,
             root_cap,
         );
         let trade_assessments = admitted
@@ -1682,9 +1727,19 @@ impl NativeGpuSearchEngine {
                 .find(|(cached_family, _)| *cached_family == family)
             {
                 exact = cached.clone();
+            } else {
+                exact = solve_exact_belief_excluding_controlled(
+                    &particles,
+                    family,
+                    &root_exclusions,
+                    || should_cancel() || decision_clock.remaining_ms() == 0,
+                )
+                .ok_or_else(|| "GPU native exact-family finalization interrupted".to_string())?;
             }
             let before = chosen.clone();
-            if let Some(exact_chosen) = exact.chosen.clone() {
+            if searched_road_pair_is_resolved(chosen.as_ref(), &exact, &actions) {
+                exact.applicable = false;
+            } else if let Some(exact_chosen) = exact.chosen.clone() {
                 if before.as_ref() != Some(&exact_chosen)
                     && let Some(previous) = before
                 {
@@ -1909,6 +1964,59 @@ impl NativeGpuSearchEngine {
 mod hidden_bank_tests {
     use super::*;
     use colonist_catan_core::{DevCard, Phase, Resource};
+
+    #[test]
+    fn interrupted_family_preparation_keeps_only_resolved_roots() {
+        let endpoint = Action::PlayRoadBuilding {
+            first: 1,
+            second: Some(2),
+        };
+        let challenger = Action::PlayRoadBuilding {
+            first: 3,
+            second: Some(4),
+        };
+        let unresolved = Action::PlayMonopoly {
+            resource: Resource::Ore,
+        };
+        let mut ranked = [
+            endpoint.clone(),
+            challenger.clone(),
+            unresolved,
+            Action::EndTurn,
+        ]
+        .into_iter()
+        .map(|action| RankedGpuRoot {
+            action,
+            prior: 0.25,
+            legal_weight: 1.0,
+        })
+        .collect();
+        let exact = ExactDecisionResult {
+            chosen: Some(endpoint.clone()),
+            actions: vec![colonist_catan_search::ExactActionValue {
+                action: challenger.clone(),
+                value: [0.0; 4],
+                lower_bound: [0.0; 4],
+                legal_weight: 1.0,
+                decision_score: 0.0,
+                lower_score: 0.0,
+                road_race_bonus: 1.0,
+            }],
+            applicable: true,
+            worlds: 1,
+        };
+        retain_resolved_development_roots(&mut ranked, &[(ExactActionFamily::RoadBuilding, exact)]);
+        assert_eq!(
+            ranked
+                .iter()
+                .map(|root| root.action.clone())
+                .collect::<Vec<_>>(),
+            vec![endpoint, challenger, Action::EndTurn]
+        );
+        retain_resolved_development_roots(&mut ranked, &[]);
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].action, Action::EndTurn);
+    }
 
     fn hidden_bank_observation_pair() -> (GameState, GameState) {
         let mut left = GameState::standard(431, 3);

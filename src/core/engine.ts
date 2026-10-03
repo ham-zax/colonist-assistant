@@ -436,7 +436,7 @@ export interface DomesticTradeState {
 }
 
 export interface RootTradeActionExclusion extends DomesticTradeState {
-  kind: "offer-trade" | "counter-trade";
+  kind: "offer-trade" | "counter-trade" | "maritime-trade";
 }
 
 export interface DecisionSearchConstraints {

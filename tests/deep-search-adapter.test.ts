@@ -1632,6 +1632,34 @@ describe("deep-search state adapter", () => {
       ),
     ).toBe(true);
 
+    const constrainedBank = buildDeepSearchRequest(
+      disabledState,
+      disabledBoard,
+      "You",
+      {
+        rootExclusions: [{
+          kind: "maritime-trade",
+          give: resources(0, 0, 0, 2, 0),
+          receive: resources(1, 0, 0, 0, 0),
+        }],
+      },
+      false,
+    );
+    expect(constrainedBank.request.rootExclusions).toEqual([{
+      kind: "maritime-trade",
+      give: [0, 0, 0, 2, 0],
+      receive: [1, 0, 0, 0, 0],
+    }]);
+    constrainedBank.request.branchCap = 32;
+    const constrainedBankResponse = analyzeWasm(constrainedBank.request);
+    expect(constrainedBankResponse.actions.some((candidate) =>
+      candidate.action.kind === "maritime-trade" &&
+      candidate.action.resource === 3 && candidate.action.otherResource === 0,
+    )).toBe(false);
+    expect(constrainedBankResponse.actions.some((candidate) =>
+      candidate.action.kind === "maritime-trade",
+    )).toBe(true);
+
     const incomingBoard: BoardSnapshot = {
       ...disabledBoard,
       isMyTurn: false,

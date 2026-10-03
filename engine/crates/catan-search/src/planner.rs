@@ -427,7 +427,7 @@ impl Planner {
     }
 }
 
-fn next_maritime_mask(previous: u8, action: &Action) -> u8 {
+pub(crate) fn next_maritime_mask(previous: u8, action: &Action) -> u8 {
     match action {
         Action::MaritimeTrade { receive, .. } => previous | (1 << receive.index()),
         _ => 0,

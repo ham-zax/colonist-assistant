@@ -38,7 +38,8 @@ const STATE_ROADS: usize = STATE_BUILDINGS + VERTEX_COUNT;
 const STATE_PLAYERS: usize = STATE_ROADS + EDGE_COUNT;
 const PLAYER_STRIDE: usize = 22;
 const STATE_DOMESTIC_TRADE_DISABLED: usize = STATE_PLAYERS + MAX_PLAYERS * PLAYER_STRIDE;
-const STATE_WORDS: usize = STATE_DOMESTIC_TRADE_DISABLED + 1;
+const STATE_FRIENDLY_ROBBER: usize = STATE_DOMESTIC_TRADE_DISABLED + 1;
+const STATE_WORDS: usize = STATE_FRIENDLY_ROBBER + 1;
 
 const TOPO_VERTEX_HEX_COUNTS: usize = 0;
 const TOPO_VERTEX_HEXES: usize = TOPO_VERTEX_HEX_COUNTS + VERTEX_COUNT;
@@ -52,6 +53,49 @@ const TOPOLOGY_WORDS: usize = TOPO_EDGE_VERTICES + EDGE_COUNT * 2;
 const BACKEND_NAME: &str = "cuda-exact";
 
 const CUDA_SOURCE: &str = include_str!("cuda/exact_eval.cu");
+
+#[cfg(test)]
+mod knight_parity_tests {
+    #[test]
+    #[ignore = "requires a CUDA device and NVRTC"]
+    fn contextual_knight_insurance_matches_cpu_on_recorded_positions() {
+        let mut evaluator = super::CudaExactEvaluator::new_on_device(0).unwrap();
+        let mut states = Vec::new();
+        for decision in ["D180", "D194", "D217", "D228", "D245"] {
+            let state = crate::sea8653_fixture::state(decision);
+            states.push(state.clone());
+            let mut without_knight = state.clone();
+            without_knight.players[0].development[0] = 0;
+            without_knight.players[0].bought_development[0] = 0;
+            states.push(without_knight);
+            let mut friendly = state;
+            friendly.players[0].public_victory_points = 2;
+            friendly.friendly_robber = true;
+            states.push(friendly);
+        }
+        let mut with_public_draws = crate::sea8653_fixture::state("D180");
+        with_public_draws.players[1].development = [0, 2, 0, 0, 0];
+        states.push(with_public_draws.clone());
+        with_public_draws.players[0].bought_development[0] = 1;
+        states.push(with_public_draws);
+        let mut empty_bank = crate::sea8653_fixture::state("D180");
+        empty_bank.bank_is_public = true;
+        empty_bank.bank = [0; 5];
+        states.push(empty_bank);
+        let actual = evaluator.evaluate_batch(&states).unwrap();
+        for (state, actual) in states.iter().zip(actual) {
+            let expected = crate::eval::evaluate(state);
+            for player in 0..state.board.num_players as usize {
+                assert!(
+                    (actual[player] - expected[player]).abs() < 2e-5,
+                    "CPU/GPU mismatch for player {player}: {} vs {}",
+                    expected[player],
+                    actual[player]
+                );
+            }
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct CudaDeviceIdentity {
@@ -490,6 +534,7 @@ fn pack_state_words(
     words[STATE_VICTORY_TARGET] = state.victory_target as u32;
     words[STATE_DISCARD_LIMIT] = state.card_discard_limit as u32;
     words[STATE_BANK_PUBLIC] = u32::from(state.bank_is_public);
+    words[STATE_FRIENDLY_ROBBER] = u32::from(state.friendly_robber);
     words[STATE_DOMESTIC_TRADE_DISABLED] = if state.player_trades_enabled {
         u32::from(state.domestic_trade_disabled)
     } else {

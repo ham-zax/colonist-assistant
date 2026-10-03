@@ -67,7 +67,7 @@ export interface DecisionTraceSearchConstraints {
     receive: [number, number, number, number, number];
   };
   rootExclusions: Array<{
-    kind: "offer-trade" | "counter-trade";
+    kind: "offer-trade" | "counter-trade" | "maritime-trade";
     give: [number, number, number, number, number];
     receive: [number, number, number, number, number];
   }>;

@@ -838,7 +838,12 @@ fn progress_card_utility(
     held.min(1.0) * base + (held - 1.0).max(0.0) * base * 0.28 * congestion
 }
 
-fn development_utility(state: &GameState, player: u8, expansion: ExpansionOption) -> f32 {
+fn development_utility(
+    state: &GameState,
+    player: u8,
+    expansion: ExpansionOption,
+    resource_weights: &[f32; 5],
+) -> f32 {
     let player_state = &state.players[player as usize];
     let cards = &player_state.development;
     let army = largest_army_outlook(state, player);
@@ -848,6 +853,7 @@ fn development_utility(state: &GameState, player: u8, expansion: ExpansionOption
     // Victory-point cards are already included exactly once by
     // PlayerState::victory_points and must not receive another inventory term.
     let raw = knight_utility
+        + crate::knight_insurance::held_knight_insurance(state, player, resource_weights)
         + progress_card_utility(state, player, 2, expansion)
         + progress_card_utility(state, player, 3, expansion)
         + progress_card_utility(state, player, 4, expansion);
@@ -1081,7 +1087,7 @@ pub fn strategic_utility_breakdown(state: &GameState, player: u8) -> StrategicUt
         expansion_portfolio: expansion.portfolio_value * 0.22,
         longest_road: (road.acquire * road.retain) * 3.2 * race_urgency,
         largest_army: (army.acquire * army.retain) * 3.2 * race_urgency,
-        development: development_utility(state, player, expansion) * 0.72,
+        development: development_utility(state, player, expansion, &resource_weights) * 0.72,
         port_flexibility: port_flexibility_raw * 0.07,
         discard_penalty: -expected_discard_loss(state, player) * 2.4,
         speculative_road_penalty: -speculative_road_penalty(state, player, road),
@@ -1172,7 +1178,7 @@ fn strategic_utility_with_routes_and_knowledge(
         + expansion.portfolio_value * 0.22
         + (road.acquire * road.retain) * 3.2 * race_urgency
         + (army.acquire * army.retain) * 3.2 * race_urgency
-        + development_utility(state, player, expansion) * 0.72
+        + development_utility(state, player, expansion, &weights) * 0.72
         + port_flexibility * 0.07
         - expected_discard_loss(state, player) * 2.4
         - speculative_road_penalty(state, player, road)

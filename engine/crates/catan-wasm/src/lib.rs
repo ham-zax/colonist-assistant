@@ -1883,6 +1883,21 @@ fn basic_response_diagnostics(
     }
 }
 
+fn searched_road_pair_is_resolved(
+    chosen: Option<&Action>,
+    exact: &ExactDecisionResult,
+    searched: &[ActionStats],
+) -> bool {
+    let Some(chosen @ Action::PlayRoadBuilding { .. }) = chosen else {
+        return false;
+    };
+    searched.iter().any(|candidate| &candidate.action == chosen)
+        && exact
+            .actions
+            .iter()
+            .any(|candidate| &candidate.action == chosen && candidate.legal_weight >= 1.0 - 1e-6)
+}
+
 fn finalize_maxn_depth_report_controlled<F>(
     particles: &[BeliefParticle],
     root_exclusions: &[Action],
@@ -1950,7 +1965,14 @@ where
         }?;
         exact_family = Some(exact_family_label(family));
         exact = resolved;
-        if let Some(exact_chosen) = exact.chosen.clone() {
+        if searched_road_pair_is_resolved(chosen.as_ref(), &exact, &actions) {
+            // Road Building can retain an expansion pair and a distinct race
+            // pair. Deep search compared their continuations; replacing its
+            // winner here would silently restore the shallow family collapse.
+            // Keep exact scores as diagnostics, without claiming exact policy
+            // authority over the searched parameter choice.
+            exact.applicable = false;
+        } else if let Some(exact_chosen) = exact.chosen.clone() {
             chosen = Some(exact_chosen);
             authority = DecisionAuthority::ExactFamily;
         }
@@ -2186,6 +2208,7 @@ fn exact_single_action(
             legal_weight: 1.0,
             decision_score: value[actor],
             lower_score: lower_bound[actor],
+            road_race_bonus: 0.0,
         }],
         worlds: particles.len(),
     })
@@ -2300,6 +2323,35 @@ fn root_exclusion_actions(
                 give: input.give,
                 receive: input.receive,
             }),
+            "maritime-trade" => {
+                let give = Resource::ALL
+                    .into_iter()
+                    .filter(|resource| input.give[resource.index()] > 0)
+                    .collect::<Vec<_>>();
+                let receive = Resource::ALL
+                    .into_iter()
+                    .filter(|resource| input.receive[resource.index()] > 0)
+                    .collect::<Vec<_>>();
+                let ([give], [receive]) = (give.as_slice(), receive.as_slice()) else {
+                    return Err(
+                        "maritime root exclusion requires one give and one receive resource".into(),
+                    );
+                };
+                let ratio = state.trade_ratios(actor)[give.index()];
+                if give == receive
+                    || input.give[give.index()] != ratio
+                    || input.receive[receive.index()] != 1
+                {
+                    return Err(
+                        "maritime root exclusion does not match the current bank ratio".into(),
+                    );
+                }
+                Ok(Action::MaritimeTrade {
+                    give: *give,
+                    receive: *receive,
+                    ratio,
+                })
+            }
             other => Err(format!("unsupported root exclusion kind: {other}")),
         })
         .collect()
@@ -3017,6 +3069,153 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{DiceModeInput, StateInput};
+
+    #[test]
+    fn searched_road_pair_keeps_its_parameter_choice_at_the_wasm_boundary() {
+        use colonist_catan_core::{Action, GameState, Phase};
+        use colonist_catan_search::{ActionStats, ExactActionValue, ExactDecisionResult};
+        let mut state = GameState::standard(17, 2);
+        while matches!(
+            state.phase,
+            Phase::SetupSettlement | Phase::SetupRoad { .. }
+        ) {
+            state.apply(&state.legal_actions()[0]).unwrap();
+        }
+        state.phase = Phase::Main;
+        state.players[0].development[2] = 1;
+        state.development_deck[2] -= 1;
+        let pairs = state
+            .legal_actions()
+            .into_iter()
+            .filter(|action| matches!(action, Action::PlayRoadBuilding { .. }))
+            .take(2)
+            .collect::<Vec<_>>();
+        let expansion = pairs[0].clone();
+        let race = pairs[1].clone();
+        let value = |action: Action| ExactActionValue {
+            action,
+            value: [0.5; 4],
+            lower_bound: [0.5; 4],
+            legal_weight: 1.0,
+            decision_score: 1.0,
+            lower_score: 1.0,
+            road_race_bonus: 0.0,
+        };
+        let mut exact = ExactDecisionResult {
+            applicable: true,
+            chosen: Some(expansion.clone()),
+            actions: vec![value(expansion), value(race.clone())],
+            worlds: 1,
+        };
+        let searched = vec![ActionStats {
+            action: race.clone(),
+            visits: 1,
+            availability: 1,
+            availability_weight: 1.0,
+            legal_weight: 1.0,
+            prior: 0.5,
+            value: [0.6; 4],
+            lower_confidence_value: [0.6; 4],
+        }];
+        assert!(super::searched_road_pair_is_resolved(
+            Some(&race),
+            &exact,
+            &searched
+        ));
+        assert!(!super::searched_road_pair_is_resolved(
+            Some(&race),
+            &exact,
+            &[]
+        ));
+        let request: super::Request = serde_json::from_value(json!({
+            "state": legacy_state_json(), "timeBudgetMs": 0,
+        }))
+        .unwrap();
+        let provenance = colonist_catan_search::BeliefSearchProvenance {
+            exact_family_results: vec![(
+                colonist_catan_search::ExactActionFamily::RoadBuilding,
+                exact.clone(),
+            )],
+            ..Default::default()
+        };
+        let depth = colonist_catan_search::BeliefDepthResult {
+            chosen: Some(race.clone()),
+            value: [0.6; 4],
+            actions: vec![colonist_catan_search::DepthActionValue {
+                action: race.clone(),
+                value: [0.6; 4],
+                legal_weight: 1.0,
+                lower_confidence_value: [0.6; 4],
+            }],
+            nodes: 10,
+            cutoffs: 0,
+            depth: 2,
+            particles: 1,
+            posterior_particles: 1,
+            deadline_reached: false,
+            stage_timings: None,
+            provenance,
+        };
+        let tactical = colonist_catan_search::TacticalResult {
+            win_probability: 0.0,
+            lower_bound: 0.0,
+            principal_line: vec![],
+            nodes: 0,
+            proven: false,
+        };
+        let (report, authority, _) = super::finalize_maxn_depth_report(
+            &[colonist_catan_search::BeliefParticle { state, weight: 1.0 }],
+            &[],
+            tactical,
+            request.resolved_effort(true),
+            colonist_catan_search::StrategyPolicy::Baseline,
+            depth,
+        );
+        assert_eq!(report.chosen, Some(race.clone()));
+        assert!(matches!(authority, super::DecisionAuthority::DeepMaxn));
+        assert!(!report.exact.applicable);
+        exact.actions[1].legal_weight = 0.5;
+        assert!(!super::searched_road_pair_is_resolved(
+            Some(&race),
+            &exact,
+            &searched
+        ));
+        assert!(!super::searched_road_pair_is_resolved(
+            Some(&Action::EndTurn),
+            &exact,
+            &searched
+        ));
+    }
+
+    #[test]
+    fn bank_root_exclusions_require_the_current_ratio_and_single_resources() {
+        use colonist_catan_core::{Action, GameState, Resource};
+        let state = GameState::standard(17, 2);
+        let input = |give, receive| super::RootExclusionInput {
+            kind: "maritime-trade".into(),
+            give,
+            receive,
+        };
+        let parsed =
+            super::root_exclusion_actions(&[input([4, 0, 0, 0, 0], [0, 0, 0, 1, 0])], &state)
+                .unwrap();
+        assert_eq!(
+            parsed,
+            vec![Action::MaritimeTrade {
+                give: Resource::Lumber,
+                receive: Resource::Grain,
+                ratio: 4,
+            }]
+        );
+        for invalid in [
+            input([3, 0, 0, 0, 0], [0, 0, 0, 1, 0]),
+            input([4, 1, 0, 0, 0], [0, 0, 0, 1, 0]),
+            input([4, 0, 0, 0, 0], [1, 0, 0, 0, 0]),
+            input([4, 0, 0, 0, 0], [0, 0, 0, 2, 0]),
+        ] {
+            assert!(super::root_exclusion_actions(&[invalid], &state).is_err());
+        }
+    }
 
     fn legacy_state_json() -> Value {
         json!({

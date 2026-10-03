@@ -189,6 +189,15 @@ certify it; the recorded v13 GPU smoke reached 1.370× (3P) and 1.272× (4P), be
 the required 2×. See [the acceptance report](docs/ENGINE_STABILIZATION_ACCEPTANCE_2026-09-07.md)
 for verification scope and remaining promotion gates.
 Structured action priors and the strategic evaluator remain authoritative.
+Road Building compares bounded legal routes to a future Longest Road award,
+including the roads still needed, funding, and public rival pressure. The best
+expansion pair and a distinct road-race pair can both enter deeper search.
+Unfinished route exploration remains uncertain. A retained knight also carries
+a small reserve value for protecting the next roll's exposed production;
+clearing an already blocked productive tile remains available.
+Bank-trade history prunes wasteful conversion cycles during simulated turns
+and live replanning, while preserving conversions that restore a legal build
+or avoid a discard.
 Experimental belief PUCT, UCT, and paranoid AlphaBeta are native-arena
 comparisons only. The public build-time estimate remains display-only and
 cannot choose or execute an action. Current Strategist strength is still being

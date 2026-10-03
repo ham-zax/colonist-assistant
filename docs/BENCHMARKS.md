@@ -1,6 +1,6 @@
 # Benchmarks
 
-Last updated: July 30, 2026.
+Last updated: October 3, 2026.
 
 ## Current method
 
@@ -37,6 +37,13 @@ alias are the closest comparison. `puct` selects experimental belief PUCT, and
 `strategist` remains a compatibility alias for `puct`. Results must name the
 actual arena policy instead of transferring the user-facing Strategist brand
 to it.
+
+The `sea8653` regression fixture checks recorded public road geometry, the
+local hand, bank-conversion waste, and contextual knight reserves. Opponent
+development identities in those tests are explicit hypotheses. These checks
+and CPU/GPU parity validate behavior and implementation; they are not a full
+balanced-dice replay, held-out strength evidence, or proof of a counterfactual
+win. No new win-rate benchmark is claimed for the road-race and reserve fixes.
 
 ## Historical experimental belief-PUCT behavioral smoke
 
