@@ -4,6 +4,11 @@ This file holds the text for the Chrome Web Store dashboard.
 
 ## Build the file to upload
 
+Before a new release, bump the version in `package.json` and
+`static/manifest.json` together (patch for fixes, minor for new features).
+Builds preserve that release version; the commit ID and timestamp in
+`version_name` identify individual development builds.
+
 Run:
 
 ```bash
