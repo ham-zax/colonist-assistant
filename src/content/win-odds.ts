@@ -177,7 +177,7 @@ const renderCurrentWinOdds = (
     const panel = findPlayerPanel(estimate.player, claimed);
     const existingBadge = badgeFor(root, estimate.player);
     if (existingBadge) {
-      existingBadge.textContent = `${Math.round(estimate.probability * 100)}% WIN`;
+      existingBadge.textContent = `${Math.round(estimate.probability * 100)}% EST`;
       existingBadge.title = `${estimate.player}: ${Math.round(estimate.probability * 100)}% stabilized model estimate, not yet calibrated · ${estimate.etaTurns} turn ETA · ${estimate.confidence} hand-evidence confidence · ${analysis.model}`;
     }
     // Colonist briefly unmounts or empties player panels during React commits.
@@ -188,7 +188,7 @@ const renderCurrentWinOdds = (
     const badge = existingBadge ?? document.createElement("span");
     badge.dataset.player = estimate.player;
     if (!existingBadge) {
-      badge.textContent = `${Math.round(estimate.probability * 100)}% WIN`;
+      badge.textContent = `${Math.round(estimate.probability * 100)}% EST`;
       badge.title = `${estimate.player}: ${Math.round(estimate.probability * 100)}% stabilized model estimate, not yet calibrated · ${estimate.etaTurns} turn ETA · ${estimate.confidence} hand-evidence confidence · ${analysis.model}`;
     }
     const left = Math.max(4, Math.min(window.innerWidth - 72, rect.right - 72));

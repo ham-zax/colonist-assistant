@@ -1044,10 +1044,16 @@ const boardSignature = (
   JSON.stringify({
     estimator: "strategist-public-prior",
     game: board.gameKey,
+    seat: board.myPlayer,
+    target: board.victoryTarget,
     turn: state.currentTurn.sequence,
     event: state.eventCount,
     action: board.action,
     hand: board.ownHand,
+    ownVictoryPoints:
+      board.myPlayer && board.ownDevelopmentCards
+        ? (board.ownDevelopmentCards.cards["victory-point"] ?? 0)
+        : undefined,
     bank: board.bankVisible ? board.bank : undefined,
     pieces: [
       ...board.vertices.flatMap((vertex) =>
@@ -1159,7 +1165,21 @@ const deterministicEta = (
   const hand = getPlayerEstimate(state, player).average;
   const profile = playerBoardProfile(board, player);
   const publicDevs = board.players?.[player]?.developmentCards ?? 0;
-  const hiddenPointPrior = Math.min(1.8, publicDevs * 0.2);
+  // The local seat's held Victory Points are exact adapter state (hidden cards
+  // are excluded from visiblePoints), so credit them directly instead of the
+  // generic unplayed-card prior. Opponents keep the weighted unknown prior:
+  // their exact hidden cards must not be invented.
+  const exactHeldVictoryPoints =
+    player === board.myPlayer && board.ownDevelopmentCards
+      ? Math.max(
+          0,
+          Math.floor(
+            board.ownDevelopmentCards.cards["victory-point"] ?? 0,
+          ),
+        )
+      : undefined;
+  const hiddenPointPrior =
+    exactHeldVictoryPoints ?? Math.min(1.8, publicDevs * 0.2);
   let pointsNeeded = Math.max(
     0.25,
     profile.victoryTarget - profile.visiblePoints - hiddenPointPrior,
@@ -1219,6 +1239,9 @@ const deterministicEta = (
     actionScores,
     reasons: [
       `${profile.visiblePoints}/${profile.victoryTarget} visible points`,
+      ...(exactHeldVictoryPoints
+        ? [`${exactHeldVictoryPoints} exact held VP toward the target`]
+        : []),
       `${Math.round(profile.metrics.activeWeightedPips)} weighted active pips`,
       bestAction
         ? `${bestAction.kind === "development" ? "Development card" : bestAction.kind} is the fastest modeled conversion`

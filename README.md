@@ -164,6 +164,11 @@ choices. Comparisons describe modeled value, and the details retain any search
 time-limit caveat. Hand evidence is described as read from the game or estimated
 from public observations; the tracked scenarios represent current card beliefs.
 
+Player badges label uncalibrated win estimates as `EST`. Display estimates count
+your exact held Victory Point cards alongside your visible points; opponents'
+hidden cards remain uncertain. Changes to your held points refresh the estimate
+and its smoothing. Only a confirmed winner produces a 100% result.
+
 ## Decision engine
 
 **Strategist** is the only live engine. Complete local enumeration handles

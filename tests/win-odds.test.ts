@@ -135,7 +135,7 @@ describe("live win odds", () => {
     expect(
       document.querySelector<HTMLElement>("[data-player='Leckie']"),
     ).toBe(original);
-    expect(original.textContent).toBe("44% WIN");
+    expect(original.textContent).toBe("44% EST");
 
     document.body.append(panel("Leckie", 320));
     await vi.advanceTimersByTimeAsync(100);

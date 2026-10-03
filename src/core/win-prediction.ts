@@ -18,6 +18,29 @@ const normalizedProbabilities = (
   );
 };
 
+/**
+ * Effective display points: public visible points plus the local seat's exact
+ * held Victory Points (hidden cards are excluded from visiblePoints, so this
+ * does not double count). Opponents stay visible-only; their exact hidden
+ * cards must not be invented.
+ */
+const effectivePoints = (
+  board: BoardSnapshot | undefined,
+  player: string,
+): number => {
+  const visible = board?.players?.[player]?.visiblePoints ?? 0;
+  const exactHeld =
+    player === board?.myPlayer
+      ? Math.max(
+          0,
+          Math.floor(
+            board?.ownDevelopmentCards?.cards["victory-point"] ?? 0,
+          ),
+        )
+      : 0;
+  return visible + exactHeld;
+};
+
 const materialSignature = (
   board: BoardSnapshot | undefined,
   players: string[],
@@ -40,6 +63,7 @@ const materialSignature = (
       return [
         player,
         publicState?.visiblePoints ?? 0,
+        effectivePoints(board, player),
         settlements,
         cities,
         publicState?.hasLongestRoad ? 1 : 0,
@@ -55,8 +79,8 @@ const evidenceWeight = (
   const target = Math.max(1, board?.victoryTarget ?? 10);
   const furthest = Math.max(
     0,
-    ...analysis.players.map(
-      (estimate) => board?.players?.[estimate.player]?.visiblePoints ?? 0,
+    ...analysis.players.map((estimate) =>
+      effectivePoints(board, estimate.player),
     ),
   );
   const phase = Math.min(1, furthest / target);
@@ -118,17 +142,22 @@ export class WinPredictionStabilizer {
       analysis.engine,
       analysis.model,
       material,
+      `winner:${board?.winner ?? ""}`,
+      `gameOver:${board?.gameOver ? 1 : 0}`,
       ...players.map((player) => raw.get(player)?.toFixed(6) ?? "0"),
     ].join("|");
     if (input === this.previousInput && this.displayed.size) {
       return this.withDisplayedProbabilities(analysis);
     }
 
-    const victoryTarget = Math.max(1, board?.victoryTarget ?? 10);
-    const winner = players.find(
-      (player) =>
-        (board?.players?.[player]?.visiblePoints ?? 0) >= victoryTarget,
-    );
+    // A hard 1/0 requires the adapter's validated winner identity. Points
+    // alone cannot confirm a win: an award gained on another player's turn
+    // can push total points to target before the holder is eligible to win,
+    // and gameOver without a roster-mapped winner leaves the winner unknown.
+    const winner =
+      board?.winner && players.includes(board.winner)
+        ? board.winner
+        : undefined;
     const equal = 1 / players.length;
     const weight = evidenceWeight(analysis, board);
     const target = new Map(
