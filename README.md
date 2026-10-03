@@ -124,6 +124,19 @@ npm ci
 npm run verify
 ```
 
+Optional size optimization (off by default; requires Binaryen's `wasm-opt`
+on `PATH`, tested with official Binaryen version 133). It runs `wasm-opt -O3`
+with explicit feature flags over both packaged WASM artifacts after
+`wasm-bindgen` (threaded build additionally enables threads; no
+`--all-features`, fast-math, or trap assumptions). The tool is preflighted
+before any Rust build starts, and the default build never invokes it:
+
+```bash
+npm run build -- --wasm-opt
+npm run build:wasm -- --wasm-opt
+WASM_OPT_BIN=/path/to/wasm-opt npm run build -- --wasm-opt
+```
+
 The unpacked extension is written to `dist/`. Load that directory from
 `chrome://extensions` with Developer mode enabled. After loading or updating
 the unpacked build, refresh every already-open Colonist tab; Chrome does not

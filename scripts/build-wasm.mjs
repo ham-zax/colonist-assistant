@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
+import { optimizeWasmFile, preflightWasmOpt, resolveWasmOpt } from "./wasm-opt.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cargoHome = process.env.CARGO_HOME ?? join(process.env.HOME ?? "", ".cargo");
@@ -33,6 +34,15 @@ const wasmBindgen = await executable(
 );
 const engine = join(root, "engine");
 const output = join(root, "src", "generated", "wasm");
+
+// Explicit opt-in only: preflight the Binaryen executable before any
+// cargo/build writes so a missing tool fails fast instead of mid-build.
+// The default build never spawns Binaryen.
+const { enabled: wasmOptEnabled, bin: wasmOptBin } = resolveWasmOpt();
+let wasmOptVersion = "";
+if (wasmOptEnabled) {
+  wasmOptVersion = await preflightWasmOpt(wasmOptBin);
+}
 
 await run(
   cargo,
@@ -68,6 +78,12 @@ await run(
   ],
   root,
 );
+if (wasmOptEnabled) {
+  await optimizeWasmFile(wasmOptBin, join(output, "colonist_search_bg.wasm"), {
+    threaded: false,
+    version: wasmOptVersion,
+  });
+}
 
 console.log("Built packaged Rust/WASM search engine");
 
@@ -149,5 +165,11 @@ for (const entry of await readdir(snippets)) {
 }
 if (adaptedWorkers !== 1) {
   throw new Error(`Expected one wasm-bindgen-rayon helper, found ${adaptedWorkers}`);
+}
+if (wasmOptEnabled) {
+  await optimizeWasmFile(wasmOptBin, join(threadedOutput, "colonist_search_bg.wasm"), {
+    threaded: true,
+    version: wasmOptVersion,
+  });
 }
 console.log("Built packaged threaded Rust/WASM search engine");
