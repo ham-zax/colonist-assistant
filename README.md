@@ -159,6 +159,11 @@ With player trades disabled, automation declines incoming offers and cancels
 your outgoing offers as soon as their validated controls are available. These
 responses bypass strategic search and the optional automation delay.
 
+The action explanations distinguish settings-driven responses from searched
+choices. Comparisons describe modeled value, and the details retain any search
+time-limit caveat. Hand evidence is described as read from the game or estimated
+from public observations; the tracked scenarios represent current card beliefs.
+
 ## Decision engine
 
 **Strategist** is the only live engine. Complete local enumeration handles

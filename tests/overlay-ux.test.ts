@@ -8,6 +8,11 @@ import { DEFAULT_SETTINGS } from "../src/content/settings";
 import { createTrackerState } from "../src/core/tracker";
 import type { PlayerMeta, TrackerState } from "../src/core/types";
 import { emptyResources, type ResourceVector } from "../src/core/resources";
+import type { NextClick } from "../src/content/action-guide";
+import type { DecisionRationale } from "../src/core/engine";
+import type { BoardSnapshot } from "../src/core/placement";
+import { createCoachReport, type CoachReport } from "../src/core/coach";
+import { actionStats, makeDeepSearch } from "../scripts/ui-preview/fixtures";
 
 beforeEach(() => {
   vi.stubGlobal("chrome", {
@@ -153,6 +158,10 @@ type Internals = {
   renderCards: (state: TrackerState, analysis: unknown) => string;
   renderAlternativesPanel: () => string;
   currentDecisionRationale: () => unknown;
+  renderIncomingTradeAdvice(next: Extract<NextClick, { kind: "trade" }>): string;
+  renderTradeCancelAdvice(next: Extract<NextClick, { kind: "trade-cancel" }>): string;
+  decisionRationaleForNext(next: NextClick): DecisionRationale | undefined;
+  renderBuildAdvice(state: TrackerState, report: CoachReport): string;
 };
 
 const create = (settings = DEFAULT_SETTINGS) => {
@@ -167,6 +176,53 @@ const parse = (html: string): HTMLElement => {
 };
 
 describe("overlay UX upgrade", () => {
+  it.each(["incoming", "outgoing"] as const)("explains disabled %s trades as a setting rather than a strategic judgment", (kind) => {
+    const { overlay, internals } = create({ ...DEFAULT_SETTINGS, disablePlayerTrades: true });
+    const chosen = kind === "incoming"
+      ? { kind: "respond-trade", tradeId: "offer", accept: false }
+      : { kind: "cancel-trade", tradeId: "offer" };
+    internals.board = boardFixture();
+    internals.decisionAnalysis = { deepSearch: makeDeepSearch(chosen, [actionStats(chosen, 0.6)]) };
+    const base = { offerIndex: 0, tradeId: "offer", signature: "disabled-offer", label: "Cancel player trade", confidence: 1 };
+    const root = parse(kind === "incoming"
+      ? internals.renderIncomingTradeAdvice({ ...base, kind: "trade", verdict: "decline" })
+      : internals.renderTradeCancelAdvice({ ...base, kind: "trade-cancel" }));
+    expect(root.querySelector(".why")?.textContent).toContain("Player trades are disabled in settings");
+    expect(root.textContent).not.toMatch(/helps the opponent|no useful live response|same bundle stays blocked|completed root value/);
+    expect(root.querySelector("details")).toBeNull();
+    overlay.destroy();
+  });
+
+  it("does not borrow a rationale from another action kind or bank-trade bundle", () => {
+    const { overlay, internals } = create();
+    internals.board = boardFixture();
+    const city = { kind: "build-city", targetId: "v1" };
+    internals.decisionAnalysis = { deepSearch: makeDeepSearch(city, [actionStats(city, 0.6)]) };
+    const board: NextClick = { kind: "board", boardAction: "settlement", targetId: "v1", point: { x: 1, y: 1 }, label: "Build here", signature: "target", confidence: 1 };
+    expect(internals.decisionRationaleForNext(board)).toBeUndefined();
+    expect(internals.decisionRationaleForNext({ ...board, boardAction: "city" })).toBeDefined();
+    const trade = { kind: "maritime-trade", resource: "lumber" as const, otherResource: "ore" as const, ratio: 4 };
+    internals.decisionAnalysis = { deepSearch: makeDeepSearch(trade, [actionStats(trade, 0.6)]) };
+    const bank: NextClick = { kind: "trade-builder", mode: "bank", give: hand({ lumber: 4 }), receive: hand({ grain: 1 }), label: "Bank trade", signature: "bundle", confidence: 1 };
+    expect(internals.decisionRationaleForNext(bank)).toBeUndefined();
+    expect(internals.decisionRationaleForNext({ ...bank, receive: hand({ ore: 1 }) })).toBeDefined();
+    overlay.destroy();
+  });
+
+  it("describes observed hand evidence without presenting a heuristic as a confidence percentage", () => {
+    const { overlay, internals } = create();
+    const state = trackerFixture();
+    const board = boardFixture() as unknown as BoardSnapshot;
+    internals.board = board;
+    const report = createCoachReport(state, "Me", board)!;
+    const root = parse(internals.renderBuildAdvice(state, report));
+    expect(root.textContent).toContain("Your resource hand is read directly from the game");
+    expect(root.textContent).not.toContain("% hand certainty");
+    internals.board = { ...board, ownHand: undefined };
+    expect(parse(internals.renderBuildAdvice(state, report)).textContent).toContain("Your resource hand is estimated from public evidence");
+    overlay.destroy();
+  });
+
   it("renders threats, dice coverage and seven risk on an opponent turn", () => {
     const { overlay, internals } = create();
     internals.board = boardFixture();

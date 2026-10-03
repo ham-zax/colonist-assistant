@@ -5480,7 +5480,7 @@ export class AssistantOverlay {
     const matches = (() => {
       switch (next.kind) {
         case "board":
-          return chosen.targetId === next.targetId;
+          return this.nextClickMatchesDeepAction(next);
         case "build":
           return Boolean(this.deepRationaleForBuild(next.build));
         case "development":
@@ -5492,9 +5492,7 @@ export class AssistantOverlay {
                 chosen.tradeId === next.tradeId &&
                 Boolean(chosen.accept) === (next.verdict === "accept");
         case "trade-builder":
-          return next.mode === "bank"
-            ? chosen.kind === "maritime-trade"
-            : chosen.kind === "offer-trade";
+          return this.nextClickMatchesDeepAction(next);
         case "trade-partner":
           return chosen.kind === "confirm-trade" && chosen.player === next.player;
         case "trade-cancel":
@@ -5522,7 +5520,7 @@ export class AssistantOverlay {
     const rationale = this.decisionRationaleForNext(next);
     const fallbackWhy = roll
       ? "Roll before the engine evaluates spend, trade, and development-card lines from the resulting hand"
-      : "No remaining legal conversion beats passing; the highlighted control ends this turn";
+      : "No further move is currently recommended; the highlighted control ends this turn";
     const why = rationale
       ? (rationale.plain ?? `${rationale.summary}. ${rationale.reasons[0] ?? "The final authority selected this action from the legal choices"}`)
       : fallbackWhy;
@@ -5548,7 +5546,8 @@ export class AssistantOverlay {
       (candidate) => candidate.id === next.tradeId,
     );
     const creator = trade?.creator ?? "this player";
-    const rationale = this.decisionRationaleForNext(next);
+    const policyDecline = this.settings.disablePlayerTrades && next.verdict === "decline";
+    const rationale = policyDecline ? undefined : this.decisionRationaleForNext(next);
     const title =
       next.verdict === "accept"
         ? "Accept this offer"
@@ -5561,7 +5560,9 @@ export class AssistantOverlay {
         : next.verdict === "counter"
           ? "The original offer is close, but the highlighted counter sequence improves your conversion"
           : "The offer helps the opponent more than it advances your best reachable build";
-    const detail = rationale
+    const detail = policyDecline
+      ? "Player trades are disabled in settings, so this offer is declined without strategic evaluation"
+      : rationale
       ? (rationale.plain ?? `${rationale.summary}. ${rationale.reasons[0] ?? fallbackDetail}`)
       : fallbackDetail;
     return `<section class="decision trade-decision" aria-live="polite">
@@ -5580,10 +5581,12 @@ export class AssistantOverlay {
   private renderTradeCancelAdvice(
     next: Extract<NextClick, { kind: "trade-cancel" }>,
   ): string {
-    const rationale = this.decisionRationaleForNext(next);
-    const why = rationale
+    const rationale = this.settings.disablePlayerTrades ? undefined : this.decisionRationaleForNext(next);
+    const why = this.settings.disablePlayerTrades
+      ? "Player trades are disabled in settings, so your outgoing offer is being cancelled"
+      : rationale
       ? (rationale.plain ?? `${rationale.summary}. ${rationale.reasons[0] ?? "The final authority preferred closing this trade state"}`)
-      : "This offer has no useful live response. Closing it releases Colonist's trade state; the same bundle stays blocked for this turn";
+      : "Close this offer and return to the turn's other actions";
     return `<section class="decision trade-decision" aria-live="polite">
       <div class="decision-meta"><span>OUTGOING TRADE · RECOVERY</span>${this.renderEngineMetaChip()}</div>
       <div class="decision-command">
@@ -5859,7 +5862,7 @@ export class AssistantOverlay {
           .join(" · ")
       : "";
     const alternatives = `<details class="more"${this.moreOpenAttr()}>
-      <summary>Why this target wins</summary>
+      <summary>Why this target</summary>
       ${this.decisionAnalysis?.deepSearch ? `<p>${escapeHtml(this.decisionAnalysis.model)}.</p>` : ""}
       ${metricLine ? `<p>${escapeHtml(metricLine)}.</p>` : ""}
       ${spatial.recommendation.reasons
@@ -6089,7 +6092,7 @@ export class AssistantOverlay {
         <summary>Why this recommendation</summary>
         ${this.decisionAnalysis?.deepSearch ? `<p>${escapeHtml(this.decisionAnalysis.model)}.</p>` : ""}
         ${buildRationale ? this.rationaleEvidenceHtml(buildRationale) : ""}
-        <p>${primary.confidence}% hand certainty across ${state.worlds.length} legal tracked state${state.worlds.length === 1 ? "" : "s"}.</p>
+        <p>${this.board?.ownHand ? "Your resource hand is read directly from the game" : "Your resource hand is estimated from public evidence"}. ${state.worlds.length} tracked card scenario${state.worlds.length === 1 ? "" : "s"}.</p>
         ${primary.reasons.map((reason) => `<p>${escapeHtml(reason)}.</p>`).join("")}
         ${report.trade ? `<p>Trade model: ${escapeHtml(report.trade.reason)}.</p>` : ""}
         <p>${report.developmentDeck.remainingCards} development cards remain by public evidence; next-card prior is ${Math.round(report.developmentDeck.next.knight * 100)}% knight and ${Math.round(report.developmentDeck.next.victoryPoint * 100)}% victory point.</p>

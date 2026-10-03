@@ -620,6 +620,7 @@ export const explainDeepSearchDecision = (
   const chosenLabel = describeDeepSearchAction(chosen);
   const reasons: string[] = [];
   const evidence: string[] = [];
+  const limitations: string[] = [];
   let summary = `Strategist chose to ${chosenLabel}`;
 
   const replacement =
@@ -826,16 +827,18 @@ export const explainDeepSearchDecision = (
   if (search.searchStages) {
     const stages = search.searchStages;
     if (search.deadlineReached && !stages.floorComplete) {
-      evidence.push(
+      limitations.push(
         "The deadline was reached before the complete one-ply floor finished, so this recommendation has weaker fallback evidence",
       );
     } else if (
       search.deadlineReached &&
       stages.attemptedDepth > search.deepestDecisionDepth
     ) {
-      evidence.push(
+      limitations.push(
         `The deadline arrived while attempting depth ${stages.attemptedDepth}; the returned recommendation uses the last completed decision depth ${search.deepestDecisionDepth}`,
       );
+    } else if (search.deadlineReached) {
+      limitations.push("Search stopped at its time limit; this is a model estimate from the completed search");
     }
     if (stages.evidenceEscalationTriggered) {
       const escalationOutcome = !stages.evidenceEscalationCompleted
@@ -851,7 +854,7 @@ export const explainDeepSearchDecision = (
       `Stage time: particle prep ${stages.particlePreparationMs} ms, root scoring ${stages.rootScoringMs} ms, exact families ${stages.exactFamiliesMs} ms, threat/safety ${stages.threatSafetyMs} ms, one-ply ${stages.onePlyFloorMs} ms, deep waves ${stages.deepWavesMs} ms`,
     );
   } else if (search.deadlineReached) {
-    evidence.push("The backend reached its decision deadline before returning");
+    limitations.push("Search stopped at its time limit; this is a model estimate from the completed search");
   }
 
   if (search.tacticalProven) {
@@ -883,7 +886,8 @@ export const explainDeepSearchDecision = (
         : undefined,
     }),
     reasons: reasons.slice(0, 4),
-    evidence: evidence.slice(0, 6),
+    // Evidence volume must not hide a weaker or interrupted search.
+    evidence: [...limitations, ...evidence].slice(0, 6),
   };
 };
 
@@ -917,14 +921,14 @@ const plainDeepSearchReason = (
     if (context.gap < 0) return `Chosen over ${other} by the engine's final checks`;
     if (gap < 0.01) return `A close call over ${other}`;
     if (gap < 0.04) return `Better than the next option, ${other}`;
-    return `Clearly better than the next option, ${other}`;
+    return `Higher modeled value than ${other}`;
   })();
   if (road && comparison) return `${road}. ${comparison}`;
   if (road) return road;
   if (comparison) return comparison;
   return search.authority === "exact-mandatory"
     ? "Every legal choice was compared exactly"
-    : "The strongest option the engine found this turn";
+    : "The best modeled option among the moves searched";
 };
 
 export interface PlayerWinEstimate {
