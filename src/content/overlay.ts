@@ -1808,12 +1808,26 @@ export class AssistantOverlay {
         this.pendingPlacement,
         this.board,
       );
-    const spatial = awaitingPlacement || !localIdentityResolved
-      ? undefined
-      : this.spatialRecommendation(state);
+    const spatialRan = !awaitingPlacement && localIdentityResolved;
+    let spatial = spatialRan ? this.spatialRecommendation(state) : undefined;
     this.activeSpatial = spatial;
     const user = localIdentityResolved ? this.userPlayer(state) : undefined;
+    const runtimeErrorBeforeSchedule = this.decisionRuntimeError;
+    const pendingBeforeSchedule = this.decisionPendingKey;
     this.scheduleDecisionAnalysis(state, user);
+    if (
+      spatial === undefined &&
+      spatialRan &&
+      ((runtimeErrorBeforeSchedule && !this.decisionRuntimeError) ||
+        (pendingBeforeSchedule && !this.decisionPendingKey))
+    ) {
+      // The scheduler cleared the condition that suppressed the spatial read
+      // (for example a transient hand-sync error resolved by this board).
+      // Recompute in the same pass; otherwise the clicker receives a stale
+      // undefined and idles until an unrelated board change re-renders.
+      spatial = this.spatialRecommendation(state);
+      this.activeSpatial = spatial;
+    }
     const report =
       spatial?.report ??
       (state && user

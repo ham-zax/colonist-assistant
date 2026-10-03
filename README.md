@@ -153,7 +153,9 @@ After your development-card play, `Hand sync` pauses recommendations until the
 public play and exact local hand agree. Snapshot refreshes are bounded to five
 seconds; a persistent mismatch asks you to refresh the game tab. Confirmed Road
 Building prompts can still search a free placement after the card leaves your
-hand. Execution records distinguish snapshot-confirmed commits from
+hand. When that synchronization clears, the overlay immediately resumes the
+retained Road Building placements, including card plays before the dice roll.
+Execution records distinguish snapshot-confirmed commits from
 `execution-unconfirmed` outcomes after interruption or a fifteen-second timeout.
 With player trades disabled, automation declines incoming offers and cancels
 your outgoing offers as soon as their validated controls are available. These
