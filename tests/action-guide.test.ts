@@ -2043,9 +2043,10 @@ describe("action guide autopilot", () => {
     if (confirmation === "delayed") {
       expect(hasPendingTradeOutcome()).toBe(true);
       expect(activeWorkflowAction("none")?.kind).toBe("trade-builder");
-      // A rerender and disabling autopilot must retain the original observer.
+      // A rerender and disabling autopilot must retain the original observer
+      // while the bounded observation window is still open.
       renderActionGuide(undefined, { highlight: false, autonomous: false });
-      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.advanceTimersByTimeAsync(8_000);
       expect(onExecution).not.toHaveBeenCalled();
       expect(onExecutionPending).toHaveBeenCalledTimes(1);
       expect(hasPendingTradeOutcome()).toBe(true);
@@ -2068,6 +2069,9 @@ describe("action guide autopilot", () => {
         succeeded: false,
         reason: "Colonist rejected the trade workflow: Not enough resources for this trade",
       }));
+      // A visible authoritative rejection is a KNOWN failure, not ambiguity:
+      // it must stay definitive so the owner records the root trade failure.
+      expect(onExecution.mock.calls[0]![0]).not.toHaveProperty("unconfirmed");
       expect(onExecution).toHaveBeenCalledTimes(1);
       return;
     }
@@ -2362,6 +2366,9 @@ describe("action guide autopilot", () => {
         ),
       }),
     );
+    // Pre-submit rejection is definitive: nothing was submitted, so the owner
+    // may record the root failure and replan without ambiguity handling.
+    expect(executions.mock.calls[0]![0]).not.toHaveProperty("unconfirmed");
     expect(document.querySelector("#player-card-inventory")).toBeNull();
   });
 
@@ -2664,5 +2671,194 @@ describe("action guide autopilot", () => {
     expect(
       document.getElementById("colonist-assistant-action-guide"),
     ).toBeNull();
+  });
+
+  it("reports a pre-submit draft stall as definitive, never ambiguous", async () => {
+    // Draft clicks are not a transaction: when Colonist swallows a resource
+    // click before any submit dispatch, the failure is definitive and the
+    // owner may replan (and retry the draft) without ambiguity handling.
+    const open = document.createElement("button");
+    open.id = "action-button-trade";
+    const clicks: string[] = [];
+    open.addEventListener("click", () => {
+      if (document.querySelector(".bankTradePanel-fixture")) return;
+      clicks.push("open");
+      const modal = document.createElement("div");
+      modal.className = "bankTradePanel-fixture";
+      const available = document.createElement("div");
+      available.className = "bankTradeAvailableCards-fixture";
+      const wool = document.createElement("button");
+      wool.innerHTML = '<img src="card_wool.svg">';
+      const offeredProposal = document.createElement("div");
+      offeredProposal.className = "proposalOfferedHalfContainer-fixture";
+      wool.addEventListener("click", () => {
+        // Swallowed: the proposal never reflects the click.
+        clicks.push("give-wool-swallowed");
+      });
+      available.append(wool);
+      const submit = document.createElement("button");
+      submit.id = "action-button-trade-bank";
+      submit.addEventListener("click", () => {
+        clicks.push("submit-bank");
+      });
+      modal.append(available, offeredProposal, submit);
+      document.body.append(modal);
+    });
+    document.body.append(open);
+
+    const give = emptyResources();
+    give.wool = 4;
+    const receive = emptyResources();
+    receive.grain = 1;
+    const onExecution = vi.fn();
+    renderActionGuide(
+      {
+        kind: "trade-builder",
+        mode: "bank",
+        give,
+        receive,
+        label: "Trade 4 wool for grain",
+        signature: "bank-trade-presubmit-stall",
+        confidence: 1,
+      },
+      {
+        highlight: true,
+        autonomous: true,
+        validateTransactionCommit: () => false,
+        validateTransactionContinuation: () => true,
+        onExecution,
+      },
+    );
+
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(onExecution).toHaveBeenCalledTimes(1);
+    expect(onExecution).toHaveBeenCalledWith(
+      expect.objectContaining({
+        succeeded: false,
+        signature: "bank-trade-presubmit-stall",
+        reason: expect.stringContaining("Colonist did not commit workflow step"),
+      }),
+    );
+    expect(onExecution.mock.calls[0]![0]).not.toHaveProperty("unconfirmed");
+    expect(clicks).not.toContain("submit-bank");
+    expect(hasPendingTradeOutcome()).toBe(false);
+  });
+
+  it("releases a submitted bank trade that never commits without resubmitting it", async () => {
+    // D114/D116 shape: wool 4->grain submits but no hand delta ever arrives.
+    // The executor must bound its observation, report the ambiguous outcome
+    // with the submit-time diagnostic, and release the latch exactly once.
+    const open = document.createElement("button");
+    open.id = "action-button-trade";
+    const clicks: string[] = [];
+    open.addEventListener("click", () => {
+      if (document.querySelector(".bankTradePanel-fixture")) return;
+      clicks.push("open");
+      const modal = document.createElement("div");
+      modal.className = "bankTradePanel-fixture";
+      const available = document.createElement("div");
+      available.className = "bankTradeAvailableCards-fixture";
+      const wool = document.createElement("button");
+      wool.innerHTML = '<img src="card_wool.svg">';
+      const offeredProposal = document.createElement("div");
+      offeredProposal.className = "proposalOfferedHalfContainer-fixture";
+      let woolCount = 0;
+      wool.addEventListener("click", () => {
+        woolCount += 1;
+        clicks.push(`give-wool-${woolCount}`);
+        offeredProposal.innerHTML = Array.from(
+          { length: woolCount },
+          () => '<button data-card-enum="3"><img src="card_wool.svg"></button>',
+        ).join("");
+      });
+      available.append(wool);
+
+      const bankChoices = document.createElement("div");
+      bankChoices.className = "bankTradeReceiveCards-fixture";
+      const grain = document.createElement("button");
+      grain.innerHTML = '<img src="card_grain.svg">';
+      const wantedProposal = document.createElement("div");
+      wantedProposal.className = "proposalWantedHalfContainer-fixture";
+      grain.addEventListener("click", () => {
+        clicks.push("get-grain");
+        wantedProposal.innerHTML =
+          '<button data-card-enum="4"><img src="card_grain.svg"></button>';
+      });
+      bankChoices.append(grain);
+
+      const submit = document.createElement("button");
+      submit.id = "action-button-trade-bank";
+      submit.addEventListener("click", () => {
+        // Colonist swallows the submit: no hand delta, no rejection, the
+        // panel stays mounted exactly like the stalled live game.
+        clicks.push("submit-bank");
+      });
+      modal.append(
+        available,
+        bankChoices,
+        offeredProposal,
+        wantedProposal,
+        submit,
+      );
+      document.body.append(modal);
+    });
+    document.body.append(open);
+
+    const give = emptyResources();
+    give.wool = 4;
+    const receive = emptyResources();
+    receive.grain = 1;
+    const onExecution = vi.fn();
+    const onExecutionPending = vi.fn();
+    renderActionGuide(
+      {
+        kind: "trade-builder",
+        mode: "bank",
+        give,
+        receive,
+        label: "Trade 4 wool for grain",
+        signature: "bank-trade-never-commits",
+        confidence: 1,
+      },
+      {
+        highlight: true,
+        autonomous: true,
+        validateTransactionCommit: () => false,
+        validateTransactionContinuation: () => true,
+        onExecutionPending,
+        onExecution,
+      },
+    );
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(clicks).toEqual([
+      "open",
+      "give-wool-1",
+      "give-wool-2",
+      "give-wool-3",
+      "give-wool-4",
+      "get-grain",
+      "submit-bank",
+    ]);
+    expect(hasPendingTradeOutcome()).toBe(true);
+    expect(onExecutionPending).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(onExecution).toHaveBeenCalledTimes(1);
+    expect(onExecution).toHaveBeenCalledWith(
+      expect.objectContaining({
+        succeeded: false,
+        unconfirmed: true,
+        signature: "bank-trade-never-commits",
+        reason: expect.stringContaining("Colonist did not commit"),
+        diagnostic: expect.objectContaining({ actionKind: "trade-builder" }),
+      }),
+    );
+    expect(hasPendingTradeOutcome()).toBe(false);
+    expect(activeWorkflowAction("none")).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(onExecution).toHaveBeenCalledTimes(1);
+    expect(clicks.filter((click) => click === "submit-bank")).toHaveLength(1);
   });
 });

@@ -1,0 +1,4111 @@
+{
+ "meta": {
+  "source": "colonist-evidence-crop6309-1-2026-10-03T08-27-06-752Z.txt via /tmp/crop6309-parsed.json (schema catan-evidence/2)",
+  "game": "2-player, balanced dice, player trades disabled, discard limit 9, friendly robber; autopilot on",
+  "victory_target": "NOT exported; inferred 15 for 2p (Colonist default). Fixture default 15; use state_with_target for 10/14/15 sensitivity.",
+  "dice": "M0 (StochasticState::m0). Balanced-dice provenance exists in the recording but the exact model is not reconstructed here; NOT an exact historical replay.",
+  "snapshot_rule": "pieces from section rows with f <= snapshot frame (cumulative frame ms <= decision ms).",
+  "proven_inclusions": [
+   "D4 includes P1 road e:-1,0,1 (section f=6, published +141ms after decision start at frame 6 which depicts the pre-decision turn-3 P0-settlement board). Setup rules require it: D4 is P0's second setup settlement and is otherwise unreachable.",
+   "D66 includes P0 road e:1,1,1 (section f=107, published +133ms after decision start). Hand conservation proves it predates D66: D66 hand [1,1,1,0,1] = D63 hand [2,2,1,0,1] minus one road."
+  ],
+  "hidden_dev": "Opponent dev identities never observed; fixture stores dev_total counts only and the helper takes an explicit hypothesis (default all-VP).",
+  "limits": [
+   "Compact export: no full canonical requests, values rounded to 4 decimals upstream; no counterfactual replay.",
+   "last_roll is exported (decisionContexts.roll / frames.roll); stored per position, 0 when unrolled (D2/D4).",
+   "Public event gain totals are incomplete; fixture uses authoritative at-decision hands, not gain sums."
+  ]
+ },
+ "board": {
+  "hexes": [
+   {
+    "resource": 1,
+    "number": 10,
+    "coord": [
+     0,
+     -2
+    ]
+   },
+   {
+    "resource": 4,
+    "number": 8,
+    "coord": [
+     -1,
+     -1
+    ]
+   },
+   {
+    "resource": 3,
+    "number": 3,
+    "coord": [
+     -2,
+     0
+    ]
+   },
+   {
+    "resource": 2,
+    "number": 6,
+    "coord": [
+     -2,
+     1
+    ]
+   },
+   {
+    "resource": 1,
+    "number": 2,
+    "coord": [
+     -2,
+     2
+    ]
+   },
+   {
+    "resource": 4,
+    "number": 5,
+    "coord": [
+     -1,
+     2
+    ]
+   },
+   {
+    "resource": null,
+    "number": 0,
+    "coord": [
+     0,
+     2
+    ]
+   },
+   {
+    "resource": 0,
+    "number": 8,
+    "coord": [
+     1,
+     1
+    ]
+   },
+   {
+    "resource": 3,
+    "number": 4,
+    "coord": [
+     2,
+     0
+    ]
+   },
+   {
+    "resource": 3,
+    "number": 11,
+    "coord": [
+     2,
+     -1
+    ]
+   },
+   {
+    "resource": 3,
+    "number": 12,
+    "coord": [
+     2,
+     -2
+    ]
+   },
+   {
+    "resource": 2,
+    "number": 9,
+    "coord": [
+     1,
+     -2
+    ]
+   },
+   {
+    "resource": 2,
+    "number": 5,
+    "coord": [
+     0,
+     -1
+    ]
+   },
+   {
+    "resource": 0,
+    "number": 4,
+    "coord": [
+     -1,
+     0
+    ]
+   },
+   {
+    "resource": 2,
+    "number": 9,
+    "coord": [
+     -1,
+     1
+    ]
+   },
+   {
+    "resource": 4,
+    "number": 10,
+    "coord": [
+     0,
+     1
+    ]
+   },
+   {
+    "resource": 0,
+    "number": 3,
+    "coord": [
+     1,
+     0
+    ]
+   },
+   {
+    "resource": 0,
+    "number": 6,
+    "coord": [
+     1,
+     -1
+    ]
+   },
+   {
+    "resource": 1,
+    "number": 11,
+    "coord": [
+     0,
+     0
+    ]
+   }
+  ],
+  "vertices": [
+   {
+    "hexes": [
+     0
+    ],
+    "port": "generic"
+   },
+   {
+    "hexes": [
+     11,
+     0
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     11,
+     12,
+     0
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     0,
+     12,
+     1
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     0,
+     1
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     0
+    ],
+    "port": "generic"
+   },
+   {
+    "hexes": [
+     12,
+     13,
+     1
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     1,
+     13,
+     2
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     1,
+     2
+    ],
+    "port": "wool"
+   },
+   {
+    "hexes": [
+     1
+    ],
+    "port": "wool"
+   },
+   {
+    "hexes": [
+     13,
+     3,
+     2
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     2,
+     3
+    ],
+    "port": "brick"
+   },
+   {
+    "hexes": [
+     2
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     2
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     13,
+     14,
+     3
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     14,
+     4,
+     3
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     3,
+     4
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     3
+    ],
+    "port": "brick"
+   },
+   {
+    "hexes": [
+     14,
+     5,
+     4
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     5,
+     4
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     4
+    ],
+    "port": "lumber"
+   },
+   {
+    "hexes": [
+     4
+    ],
+    "port": "lumber"
+   },
+   {
+    "hexes": [
+     15,
+     5,
+     14
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     15,
+     6,
+     5
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     6,
+     5
+    ],
+    "port": "ore"
+   },
+   {
+    "hexes": [
+     5
+    ],
+    "port": "ore"
+   },
+   {
+    "hexes": [
+     7,
+     6,
+     15
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     7,
+     6
+    ],
+    "port": "grain"
+   },
+   {
+    "hexes": [
+     6
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     6
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     8,
+     7,
+     16
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     8,
+     7
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     7
+    ],
+    "port": "grain"
+   },
+   {
+    "hexes": [
+     16,
+     7,
+     15
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     8,
+     9
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     8
+    ],
+    "port": "generic"
+   },
+   {
+    "hexes": [
+     8
+    ],
+    "port": "generic"
+   },
+   {
+    "hexes": [
+     9,
+     8,
+     16
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     9,
+     10
+    ],
+    "port": "generic"
+   },
+   {
+    "hexes": [
+     9
+    ],
+    "port": "generic"
+   },
+   {
+    "hexes": [
+     9,
+     16,
+     17
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     10,
+     9,
+     17
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     10
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     10
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     10,
+     17,
+     11
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     10,
+     11
+    ],
+    "port": "generic"
+   },
+   {
+    "hexes": [
+     11
+    ],
+    "port": "generic"
+   },
+   {
+    "hexes": [
+     11,
+     17,
+     12
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     17,
+     18,
+     12
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     12,
+     18,
+     13
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     18,
+     14,
+     13
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     18,
+     15,
+     14
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     16,
+     15,
+     18
+    ],
+    "port": null
+   },
+   {
+    "hexes": [
+     17,
+     16,
+     18
+    ],
+    "port": null
+   }
+  ],
+  "edges": [
+   [
+    1,
+    0
+   ],
+   [
+    2,
+    1
+   ],
+   [
+    3,
+    2
+   ],
+   [
+    3,
+    4
+   ],
+   [
+    4,
+    5
+   ],
+   [
+    5,
+    0
+   ],
+   [
+    6,
+    3
+   ],
+   [
+    7,
+    6
+   ],
+   [
+    7,
+    8
+   ],
+   [
+    8,
+    9
+   ],
+   [
+    9,
+    4
+   ],
+   [
+    10,
+    7
+   ],
+   [
+    11,
+    10
+   ],
+   [
+    11,
+    12
+   ],
+   [
+    12,
+    13
+   ],
+   [
+    13,
+    8
+   ],
+   [
+    14,
+    10
+   ],
+   [
+    15,
+    14
+   ],
+   [
+    16,
+    15
+   ],
+   [
+    16,
+    17
+   ],
+   [
+    17,
+    11
+   ],
+   [
+    18,
+    15
+   ],
+   [
+    19,
+    18
+   ],
+   [
+    20,
+    19
+   ],
+   [
+    20,
+    21
+   ],
+   [
+    21,
+    16
+   ],
+   [
+    23,
+    22
+   ],
+   [
+    24,
+    23
+   ],
+   [
+    25,
+    24
+   ],
+   [
+    25,
+    19
+   ],
+   [
+    18,
+    22
+   ],
+   [
+    27,
+    26
+   ],
+   [
+    28,
+    27
+   ],
+   [
+    29,
+    28
+   ],
+   [
+    29,
+    24
+   ],
+   [
+    23,
+    26
+   ],
+   [
+    31,
+    30
+   ],
+   [
+    32,
+    31
+   ],
+   [
+    27,
+    32
+   ],
+   [
+    26,
+    33
+   ],
+   [
+    33,
+    30
+   ],
+   [
+    35,
+    34
+   ],
+   [
+    36,
+    35
+   ],
+   [
+    31,
+    36
+   ],
+   [
+    30,
+    37
+   ],
+   [
+    37,
+    34
+   ],
+   [
+    39,
+    38
+   ],
+   [
+    34,
+    39
+   ],
+   [
+    37,
+    40
+   ],
+   [
+    40,
+    41
+   ],
+   [
+    41,
+    38
+   ],
+   [
+    43,
+    42
+   ],
+   [
+    38,
+    43
+   ],
+   [
+    41,
+    44
+   ],
+   [
+    44,
+    45
+   ],
+   [
+    45,
+    42
+   ],
+   [
+    45,
+    46
+   ],
+   [
+    47,
+    44
+   ],
+   [
+    47,
+    2
+   ],
+   [
+    1,
+    46
+   ],
+   [
+    48,
+    47
+   ],
+   [
+    49,
+    48
+   ],
+   [
+    49,
+    6
+   ],
+   [
+    50,
+    49
+   ],
+   [
+    14,
+    50
+   ],
+   [
+    51,
+    50
+   ],
+   [
+    22,
+    51
+   ],
+   [
+    33,
+    52
+   ],
+   [
+    51,
+    52
+   ],
+   [
+    52,
+    53
+   ],
+   [
+    53,
+    40
+   ],
+   [
+    53,
+    48
+   ]
+  ],
+  "edge_ids": [
+   "e:1,-3,2",
+   "e:1,-2,1",
+   "e:0,-1,0",
+   "e:0,-2,2",
+   "e:0,-2,1",
+   "e:0,-2,0",
+   "e:0,-1,1",
+   "e:-1,0,0",
+   "e:-1,-1,2",
+   "e:-1,-1,1",
+   "e:-1,-1,0",
+   "e:-1,0,1",
+   "e:-2,1,0",
+   "e:-2,0,2",
+   "e:-2,0,1",
+   "e:-2,0,0",
+   "e:-1,0,2",
+   "e:-1,1,1",
+   "e:-2,2,0",
+   "e:-2,1,2",
+   "e:-2,1,1",
+   "e:-1,1,2",
+   "e:-1,2,1",
+   "e:-2,3,0",
+   "e:-2,2,2",
+   "e:-2,2,1",
+   "e:0,1,2",
+   "e:0,2,1",
+   "e:-1,3,0",
+   "e:-1,2,2",
+   "e:-1,2,0",
+   "e:1,1,2",
+   "e:1,2,1",
+   "e:0,3,0",
+   "e:0,2,2",
+   "e:0,2,0",
+   "e:2,0,2",
+   "e:2,1,1",
+   "e:1,2,0",
+   "e:1,1,1",
+   "e:1,1,0",
+   "e:3,-1,2",
+   "e:3,0,1",
+   "e:2,1,0",
+   "e:2,0,1",
+   "e:2,0,0",
+   "e:3,-2,2",
+   "e:3,-1,1",
+   "e:2,-1,2",
+   "e:2,-1,1",
+   "e:2,-1,0",
+   "e:3,-3,2",
+   "e:3,-2,1",
+   "e:2,-2,2",
+   "e:2,-2,1",
+   "e:2,-2,0",
+   "e:2,-3,2",
+   "e:1,-1,0",
+   "e:1,-2,2",
+   "e:1,-2,0",
+   "e:1,-1,1",
+   "e:0,0,0",
+   "e:0,-1,2",
+   "e:0,0,1",
+   "e:-1,1,0",
+   "e:0,0,2",
+   "e:0,1,1",
+   "e:1,0,2",
+   "e:0,1,0",
+   "e:1,0,1",
+   "e:1,0,0",
+   "e:1,-1,2"
+  ],
+  "hex_ids": [
+   "h:0,-2",
+   "h:-1,-1",
+   "h:-2,0",
+   "h:-2,1",
+   "h:-2,2",
+   "h:-1,2",
+   "h:0,2",
+   "h:1,1",
+   "h:2,0",
+   "h:2,-1",
+   "h:2,-2",
+   "h:1,-2",
+   "h:0,-1",
+   "h:-1,0",
+   "h:-1,1",
+   "h:0,1",
+   "h:1,0",
+   "h:1,-1",
+   "h:0,0"
+  ],
+  "vertex_ids": [
+   "v:0,-2,0",
+   "v:1,-3,1",
+   "v:0,-1,0",
+   "v:0,-2,1",
+   "v:-1,-1,0",
+   "v:0,-3,1",
+   "v:-1,0,0",
+   "v:-1,-1,1",
+   "v:-2,0,0",
+   "v:-1,-2,1",
+   "v:-2,1,0",
+   "v:-2,0,1",
+   "v:-3,1,0",
+   "v:-2,-1,1",
+   "v:-1,0,1",
+   "v:-2,2,0",
+   "v:-2,1,1",
+   "v:-3,2,0",
+   "v:-1,1,1",
+   "v:-2,3,0",
+   "v:-2,2,1",
+   "v:-3,3,0",
+   "v:-1,2,0",
+   "v:0,1,1",
+   "v:-1,3,0",
+   "v:-1,2,1",
+   "v:0,2,0",
+   "v:1,1,1",
+   "v:0,3,0",
+   "v:0,2,1",
+   "v:1,1,0",
+   "v:2,0,1",
+   "v:1,2,0",
+   "v:1,0,1",
+   "v:2,0,0",
+   "v:3,-1,1",
+   "v:2,1,0",
+   "v:2,-1,1",
+   "v:2,-1,0",
+   "v:3,-2,1",
+   "v:1,0,0",
+   "v:2,-2,1",
+   "v:2,-2,0",
+   "v:3,-3,1",
+   "v:1,-1,0",
+   "v:2,-3,1",
+   "v:1,-2,0",
+   "v:1,-2,1",
+   "v:0,0,0",
+   "v:0,-1,1",
+   "v:-1,1,0",
+   "v:0,0,1",
+   "v:0,1,0",
+   "v:1,-1,1"
+  ]
+ },
+ "positions": {
+  "D2": {
+   "turn": 0,
+   "setup": true,
+   "pre_roll": false,
+   "hand": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "public_vp": [
+    0,
+    0
+   ],
+   "dev": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "bought": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "dev_played": false,
+   "robber": 6,
+   "last_roll": 0,
+   "buildings": [],
+   "roads": [],
+   "players": [
+    {
+     "knights": 0,
+     "dev_total": 0,
+     "longest": false,
+     "largest": false
+    },
+    {
+     "knights": 0,
+     "dev_total": 0,
+     "longest": false,
+     "largest": false
+    }
+   ],
+   "played_dev": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "worlds": [
+    {
+     "weight": 1,
+     "hand": [
+      0,
+      0,
+      0,
+      0,
+      0
+     ]
+    }
+   ],
+   "frame": 0,
+   "frame_ms": 0,
+   "decision_ms": 27,
+   "belief": "B1"
+  },
+  "D4": {
+   "turn": 3,
+   "setup": true,
+   "pre_roll": false,
+   "hand": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "public_vp": [
+    1,
+    2
+   ],
+   "dev": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "bought": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "dev_played": false,
+   "robber": 6,
+   "last_roll": 0,
+   "buildings": [
+    [
+     2,
+     0,
+     false
+    ],
+    [
+     7,
+     1,
+     false
+    ],
+    [
+     48,
+     1,
+     false
+    ]
+   ],
+   "roads": [
+    [
+     2,
+     0
+    ],
+    [
+     11,
+     1
+    ],
+    [
+     61,
+     1
+    ]
+   ],
+   "players": [
+    {
+     "knights": 0,
+     "dev_total": 0,
+     "longest": false,
+     "largest": false
+    },
+    {
+     "knights": 0,
+     "dev_total": 0,
+     "longest": false,
+     "largest": false
+    }
+   ],
+   "played_dev": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "worlds": [
+    {
+     "weight": 1,
+     "hand": [
+      1,
+      0,
+      0,
+      1,
+      1
+     ]
+    }
+   ],
+   "frame": 5,
+   "frame_ms": 53161,
+   "decision_ms": 54407,
+   "belief": "B2"
+  },
+  "D34": {
+   "turn": 18,
+   "setup": false,
+   "pre_roll": false,
+   "hand": [
+    1,
+    1,
+    2,
+    1,
+    0
+   ],
+   "public_vp": [
+    2,
+    3
+   ],
+   "dev": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "bought": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "dev_played": false,
+   "robber": 17,
+   "last_roll": 7,
+   "buildings": [
+    [
+     2,
+     0,
+     false
+    ],
+    [
+     7,
+     1,
+     false
+    ],
+    [
+     48,
+     1,
+     true
+    ],
+    [
+     50,
+     0,
+     false
+    ]
+   ],
+   "roads": [
+    [
+     2,
+     0
+    ],
+    [
+     11,
+     1
+    ],
+    [
+     26,
+     0
+    ],
+    [
+     61,
+     1
+    ],
+    [
+     65,
+     0
+    ],
+    [
+     66,
+     0
+    ]
+   ],
+   "players": [
+    {
+     "knights": 0,
+     "dev_total": 0,
+     "longest": false,
+     "largest": false
+    },
+    {
+     "knights": 0,
+     "dev_total": 0,
+     "longest": false,
+     "largest": false
+    }
+   ],
+   "played_dev": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "worlds": [
+    {
+     "weight": 0.1875,
+     "hand": [
+      0,
+      1,
+      1,
+      1,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      1,
+      1,
+      0,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      1,
+      1,
+      1,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      0,
+      1,
+      2,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      0,
+      0,
+      0,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      0,
+      1,
+      0,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      3,
+      0,
+      1,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      0,
+      2,
+      1,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      0,
+      0,
+      3,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      2,
+      0,
+      0,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      0,
+      0,
+      2,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      1,
+      0,
+      0,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      1,
+      2,
+      0,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      1,
+      2,
+      0,
+      1
+     ]
+    }
+   ],
+   "frame": 45,
+   "frame_ms": 94809,
+   "decision_ms": 95105,
+   "belief": "B19"
+  },
+  "D36": {
+   "turn": 20,
+   "setup": false,
+   "pre_roll": false,
+   "hand": [
+    1,
+    1,
+    3,
+    1,
+    0
+   ],
+   "public_vp": [
+    2,
+    3
+   ],
+   "dev": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "bought": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "dev_played": false,
+   "robber": 17,
+   "last_roll": 8,
+   "buildings": [
+    [
+     2,
+     0,
+     false
+    ],
+    [
+     7,
+     1,
+     false
+    ],
+    [
+     48,
+     1,
+     true
+    ],
+    [
+     50,
+     0,
+     false
+    ]
+   ],
+   "roads": [
+    [
+     2,
+     0
+    ],
+    [
+     11,
+     1
+    ],
+    [
+     26,
+     0
+    ],
+    [
+     61,
+     1
+    ],
+    [
+     65,
+     0
+    ],
+    [
+     66,
+     0
+    ]
+   ],
+   "players": [
+    {
+     "knights": 0,
+     "dev_total": 0,
+     "longest": false,
+     "largest": false
+    },
+    {
+     "knights": 0,
+     "dev_total": 0,
+     "longest": false,
+     "largest": false
+    }
+   ],
+   "played_dev": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "worlds": [
+    {
+     "weight": 0.125,
+     "hand": [
+      1,
+      2,
+      0,
+      2,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      3,
+      1,
+      0,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      2,
+      2,
+      1,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      0,
+      3,
+      2,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      1,
+      1,
+      1,
+      3
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      2,
+      0,
+      1,
+      4
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      3,
+      0,
+      3,
+      1,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      2,
+      1,
+      2,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      3,
+      0,
+      1,
+      2,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      2,
+      1,
+      1,
+      3
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      2,
+      0,
+      1,
+      3
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      1,
+      3,
+      0,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      4,
+      0,
+      1,
+      1,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      2,
+      1,
+      1,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      2,
+      1,
+      3,
+      0
+     ]
+    }
+   ],
+   "frame": 49,
+   "frame_ms": 99360,
+   "decision_ms": 99559,
+   "belief": "B21"
+  },
+  "D38": {
+   "turn": 22,
+   "setup": false,
+   "pre_roll": false,
+   "hand": [
+    1,
+    1,
+    3,
+    1,
+    0
+   ],
+   "public_vp": [
+    2,
+    3
+   ],
+   "dev": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "bought": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "dev_played": false,
+   "robber": 17,
+   "last_roll": 3,
+   "buildings": [
+    [
+     2,
+     0,
+     false
+    ],
+    [
+     7,
+     1,
+     false
+    ],
+    [
+     48,
+     1,
+     true
+    ],
+    [
+     50,
+     0,
+     false
+    ]
+   ],
+   "roads": [
+    [
+     2,
+     0
+    ],
+    [
+     11,
+     1
+    ],
+    [
+     26,
+     0
+    ],
+    [
+     61,
+     1
+    ],
+    [
+     65,
+     0
+    ],
+    [
+     66,
+     0
+    ]
+   ],
+   "players": [
+    {
+     "knights": 0,
+     "dev_total": 0,
+     "longest": false,
+     "largest": false
+    },
+    {
+     "knights": 0,
+     "dev_total": 0,
+     "longest": false,
+     "largest": false
+    }
+   ],
+   "played_dev": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "worlds": [
+    {
+     "weight": 0.0625,
+     "hand": [
+      3,
+      3,
+      1,
+      1,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      3,
+      1,
+      2,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      1,
+      2,
+      3,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      1,
+      1,
+      3,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      1,
+      2,
+      2,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      2,
+      0,
+      2,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      3,
+      1,
+      1,
+      3
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      0,
+      3,
+      1,
+      4
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      0,
+      2,
+      3,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      5,
+      0,
+      0,
+      2,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      4,
+      0,
+      1,
+      2,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      3,
+      3,
+      0,
+      1,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      5,
+      2,
+      0,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      4,
+      2,
+      1,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      1,
+      3,
+      0,
+      4
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      2,
+      1,
+      2,
+      2
+     ]
+    }
+   ],
+   "frame": 53,
+   "frame_ms": 103560,
+   "decision_ms": 103758,
+   "belief": "B23"
+  },
+  "D40": {
+   "turn": 24,
+   "setup": false,
+   "pre_roll": false,
+   "hand": [
+    1,
+    1,
+    5,
+    1,
+    0
+   ],
+   "public_vp": [
+    2,
+    3
+   ],
+   "dev": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "bought": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "dev_played": false,
+   "robber": 17,
+   "last_roll": 6,
+   "buildings": [
+    [
+     2,
+     0,
+     false
+    ],
+    [
+     7,
+     1,
+     false
+    ],
+    [
+     48,
+     1,
+     true
+    ],
+    [
+     50,
+     0,
+     false
+    ]
+   ],
+   "roads": [
+    [
+     2,
+     0
+    ],
+    [
+     11,
+     1
+    ],
+    [
+     26,
+     0
+    ],
+    [
+     61,
+     1
+    ],
+    [
+     65,
+     0
+    ],
+    [
+     66,
+     0
+    ]
+   ],
+   "players": [
+    {
+     "knights": 0,
+     "dev_total": 0,
+     "longest": false,
+     "largest": false
+    },
+    {
+     "knights": 0,
+     "dev_total": 0,
+     "longest": false,
+     "largest": false
+    }
+   ],
+   "played_dev": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "worlds": [
+    {
+     "weight": 0.0625,
+     "hand": [
+      5,
+      0,
+      1,
+      0,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      3,
+      3,
+      1,
+      0,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      5,
+      0,
+      1,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      4,
+      2,
+      0,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      2,
+      2,
+      3,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      1,
+      3,
+      0,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      2,
+      2,
+      1,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      2,
+      1,
+      3,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      2,
+      2,
+      2,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      3,
+      0,
+      2,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      0,
+      3,
+      2,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      3,
+      0,
+      1,
+      1,
+      3
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      2,
+      1,
+      1,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      2,
+      0,
+      3,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      3,
+      1,
+      0,
+      1,
+      3
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      3,
+      1,
+      1,
+      1
+     ]
+    }
+   ],
+   "frame": 57,
+   "frame_ms": 107056,
+   "decision_ms": 107255,
+   "belief": "B24"
+  },
+  "D42": {
+   "turn": 26,
+   "setup": false,
+   "pre_roll": false,
+   "hand": [
+    1,
+    2,
+    5,
+    1,
+    0
+   ],
+   "public_vp": [
+    2,
+    3
+   ],
+   "dev": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "bought": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "dev_played": false,
+   "robber": 17,
+   "last_roll": 11,
+   "buildings": [
+    [
+     2,
+     0,
+     false
+    ],
+    [
+     7,
+     1,
+     false
+    ],
+    [
+     48,
+     1,
+     true
+    ],
+    [
+     50,
+     0,
+     false
+    ]
+   ],
+   "roads": [
+    [
+     2,
+     0
+    ],
+    [
+     11,
+     1
+    ],
+    [
+     26,
+     0
+    ],
+    [
+     61,
+     1
+    ],
+    [
+     65,
+     0
+    ],
+    [
+     66,
+     0
+    ]
+   ],
+   "players": [
+    {
+     "knights": 0,
+     "dev_total": 0,
+     "longest": false,
+     "largest": false
+    },
+    {
+     "knights": 0,
+     "dev_total": 0,
+     "longest": false,
+     "largest": false
+    }
+   ],
+   "played_dev": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "worlds": [
+    {
+     "weight": 0.125,
+     "hand": [
+      2,
+      2,
+      2,
+      2,
+      2
+     ]
+    },
+    {
+     "weight": 0.125,
+     "hand": [
+      1,
+      1,
+      1,
+      2,
+      5
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      3,
+      4,
+      0,
+      1,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      4,
+      2,
+      2,
+      1,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      3,
+      3,
+      1,
+      2,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      4,
+      1,
+      3,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      4,
+      2,
+      2,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      2,
+      4,
+      1,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      2,
+      3,
+      4,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      1,
+      3,
+      4,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      0,
+      1,
+      3,
+      5
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      3,
+      1,
+      2,
+      1,
+      3
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      4,
+      1,
+      0,
+      3,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      5,
+      1,
+      1,
+      1,
+      2
+     ]
+    }
+   ],
+   "frame": 61,
+   "frame_ms": 110560,
+   "decision_ms": 110770,
+   "belief": "B26"
+  },
+  "D63": {
+   "turn": 40,
+   "setup": false,
+   "pre_roll": false,
+   "hand": [
+    2,
+    2,
+    1,
+    0,
+    1
+   ],
+   "public_vp": [
+    3,
+    6
+   ],
+   "dev": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "bought": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "dev_played": false,
+   "robber": 14,
+   "last_roll": 4,
+   "buildings": [
+    [
+     2,
+     0,
+     false
+    ],
+    [
+     7,
+     1,
+     true
+    ],
+    [
+     9,
+     1,
+     false
+    ],
+    [
+     11,
+     1,
+     false
+    ],
+    [
+     22,
+     0,
+     false
+    ],
+    [
+     48,
+     1,
+     true
+    ],
+    [
+     50,
+     0,
+     false
+    ]
+   ],
+   "roads": [
+    [
+     2,
+     0
+    ],
+    [
+     8,
+     1
+    ],
+    [
+     9,
+     1
+    ],
+    [
+     11,
+     1
+    ],
+    [
+     12,
+     1
+    ],
+    [
+     26,
+     0
+    ],
+    [
+     35,
+     0
+    ],
+    [
+     57,
+     1
+    ],
+    [
+     60,
+     1
+    ],
+    [
+     61,
+     1
+    ],
+    [
+     65,
+     0
+    ],
+    [
+     66,
+     0
+    ]
+   ],
+   "players": [
+    {
+     "knights": 0,
+     "dev_total": 0,
+     "longest": false,
+     "largest": false
+    },
+    {
+     "knights": 0,
+     "dev_total": 0,
+     "longest": false,
+     "largest": false
+    }
+   ],
+   "played_dev": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "worlds": [
+    {
+     "weight": 0.125,
+     "hand": [
+      1,
+      2,
+      0,
+      1,
+      1
+     ]
+    },
+    {
+     "weight": 0.125,
+     "hand": [
+      1,
+      2,
+      0,
+      2,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      1,
+      1,
+      1,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      3,
+      0,
+      0,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      1,
+      1,
+      2,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      0,
+      3,
+      0,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      0,
+      1,
+      4,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      0,
+      1,
+      2,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      0,
+      0,
+      1,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      1,
+      1,
+      0,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      0,
+      2,
+      1,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      1,
+      1,
+      0,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      0,
+      4,
+      0,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      0,
+      1,
+      1,
+      2
+     ]
+    }
+   ],
+   "frame": 104,
+   "frame_ms": 193856,
+   "decision_ms": 194180,
+   "belief": "B43"
+  },
+  "D66": {
+   "turn": 40,
+   "setup": false,
+   "pre_roll": false,
+   "hand": [
+    1,
+    1,
+    1,
+    0,
+    1
+   ],
+   "public_vp": [
+    5,
+    6
+   ],
+   "dev": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "bought": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "dev_played": false,
+   "robber": 14,
+   "last_roll": 4,
+   "buildings": [
+    [
+     2,
+     0,
+     false
+    ],
+    [
+     7,
+     1,
+     true
+    ],
+    [
+     9,
+     1,
+     false
+    ],
+    [
+     11,
+     1,
+     false
+    ],
+    [
+     22,
+     0,
+     false
+    ],
+    [
+     48,
+     1,
+     true
+    ],
+    [
+     50,
+     0,
+     false
+    ]
+   ],
+   "roads": [
+    [
+     2,
+     0
+    ],
+    [
+     8,
+     1
+    ],
+    [
+     9,
+     1
+    ],
+    [
+     11,
+     1
+    ],
+    [
+     12,
+     1
+    ],
+    [
+     26,
+     0
+    ],
+    [
+     35,
+     0
+    ],
+    [
+     39,
+     0
+    ],
+    [
+     57,
+     1
+    ],
+    [
+     60,
+     1
+    ],
+    [
+     61,
+     1
+    ],
+    [
+     65,
+     0
+    ],
+    [
+     66,
+     0
+    ]
+   ],
+   "players": [
+    {
+     "knights": 0,
+     "dev_total": 0,
+     "longest": true,
+     "largest": false
+    },
+    {
+     "knights": 0,
+     "dev_total": 0,
+     "longest": false,
+     "largest": false
+    }
+   ],
+   "played_dev": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "worlds": [
+    {
+     "weight": 0.125,
+     "hand": [
+      1,
+      2,
+      0,
+      1,
+      1
+     ]
+    },
+    {
+     "weight": 0.125,
+     "hand": [
+      1,
+      0,
+      2,
+      1,
+      1
+     ]
+    },
+    {
+     "weight": 0.125,
+     "hand": [
+      1,
+      1,
+      1,
+      1,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      3,
+      0,
+      1,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      0,
+      2,
+      0,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      3,
+      0,
+      2,
+      0,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      1,
+      3,
+      0,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      1,
+      2,
+      1,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      0,
+      0,
+      5,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      0,
+      0,
+      0,
+      3
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      1,
+      1,
+      0,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      2,
+      0,
+      1,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      1,
+      0,
+      2,
+      0
+     ]
+    }
+   ],
+   "frame": 106,
+   "frame_ms": 195334,
+   "decision_ms": 195757,
+   "belief": "B44"
+  },
+  "D97": {
+   "turn": 60,
+   "setup": false,
+   "pre_roll": false,
+   "hand": [
+    3,
+    2,
+    1,
+    0,
+    4
+   ],
+   "public_vp": [
+    3,
+    12
+   ],
+   "dev": [
+    0,
+    1,
+    0,
+    0,
+    0
+   ],
+   "bought": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "dev_played": false,
+   "robber": 1,
+   "last_roll": 10,
+   "buildings": [
+    [
+     2,
+     0,
+     false
+    ],
+    [
+     7,
+     1,
+     true
+    ],
+    [
+     9,
+     1,
+     false
+    ],
+    [
+     11,
+     1,
+     true
+    ],
+    [
+     15,
+     1,
+     false
+    ],
+    [
+     22,
+     0,
+     false
+    ],
+    [
+     40,
+     1,
+     false
+    ],
+    [
+     44,
+     1,
+     false
+    ],
+    [
+     48,
+     1,
+     true
+    ],
+    [
+     50,
+     0,
+     false
+    ]
+   ],
+   "roads": [
+    [
+     2,
+     0
+    ],
+    [
+     7,
+     1
+    ],
+    [
+     8,
+     1
+    ],
+    [
+     9,
+     1
+    ],
+    [
+     11,
+     1
+    ],
+    [
+     12,
+     1
+    ],
+    [
+     16,
+     1
+    ],
+    [
+     17,
+     1
+    ],
+    [
+     26,
+     0
+    ],
+    [
+     35,
+     0
+    ],
+    [
+     39,
+     0
+    ],
+    [
+     40,
+     0
+    ],
+    [
+     49,
+     1
+    ],
+    [
+     53,
+     1
+    ],
+    [
+     57,
+     1
+    ],
+    [
+     60,
+     1
+    ],
+    [
+     61,
+     1
+    ],
+    [
+     62,
+     1
+    ],
+    [
+     65,
+     0
+    ],
+    [
+     66,
+     0
+    ]
+   ],
+   "players": [
+    {
+     "knights": 0,
+     "dev_total": 1,
+     "longest": false,
+     "largest": false
+    },
+    {
+     "knights": 0,
+     "dev_total": 0,
+     "longest": true,
+     "largest": false
+    }
+   ],
+   "played_dev": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "worlds": [
+    {
+     "weight": 0.1875,
+     "hand": [
+      0,
+      2,
+      1,
+      1,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      2,
+      0,
+      0,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      3,
+      0,
+      2,
+      0,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      0,
+      4,
+      0,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      1,
+      1,
+      2,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      0,
+      0,
+      3,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      1,
+      0,
+      2,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      3,
+      1,
+      0,
+      0,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      1,
+      2,
+      1,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      0,
+      2,
+      0,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      1,
+      1,
+      2,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      2,
+      1,
+      0,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      3,
+      1,
+      0,
+      1,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      2,
+      1,
+      0,
+      1
+     ]
+    }
+   ],
+   "frame": 170,
+   "frame_ms": 368861,
+   "decision_ms": 369117,
+   "belief": "B65"
+  },
+  "D114": {
+   "turn": 66,
+   "setup": false,
+   "pre_roll": false,
+   "hand": [
+    1,
+    0,
+    5,
+    0,
+    2
+   ],
+   "public_vp": [
+    4,
+    12
+   ],
+   "dev": [
+    0,
+    1,
+    0,
+    0,
+    0
+   ],
+   "bought": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "dev_played": false,
+   "robber": 15,
+   "last_roll": 5,
+   "buildings": [
+    [
+     2,
+     0,
+     false
+    ],
+    [
+     7,
+     1,
+     true
+    ],
+    [
+     9,
+     1,
+     false
+    ],
+    [
+     11,
+     1,
+     true
+    ],
+    [
+     15,
+     1,
+     false
+    ],
+    [
+     22,
+     0,
+     false
+    ],
+    [
+     33,
+     0,
+     false
+    ],
+    [
+     40,
+     1,
+     false
+    ],
+    [
+     44,
+     1,
+     false
+    ],
+    [
+     48,
+     1,
+     true
+    ],
+    [
+     50,
+     0,
+     false
+    ]
+   ],
+   "roads": [
+    [
+     2,
+     0
+    ],
+    [
+     7,
+     1
+    ],
+    [
+     8,
+     1
+    ],
+    [
+     9,
+     1
+    ],
+    [
+     11,
+     1
+    ],
+    [
+     12,
+     1
+    ],
+    [
+     16,
+     1
+    ],
+    [
+     17,
+     1
+    ],
+    [
+     26,
+     0
+    ],
+    [
+     35,
+     0
+    ],
+    [
+     36,
+     0
+    ],
+    [
+     39,
+     0
+    ],
+    [
+     40,
+     0
+    ],
+    [
+     45,
+     1
+    ],
+    [
+     48,
+     1
+    ],
+    [
+     49,
+     1
+    ],
+    [
+     53,
+     1
+    ],
+    [
+     57,
+     1
+    ],
+    [
+     60,
+     1
+    ],
+    [
+     61,
+     1
+    ],
+    [
+     62,
+     1
+    ],
+    [
+     65,
+     0
+    ],
+    [
+     66,
+     0
+    ]
+   ],
+   "players": [
+    {
+     "knights": 0,
+     "dev_total": 1,
+     "longest": false,
+     "largest": false
+    },
+    {
+     "knights": 0,
+     "dev_total": 1,
+     "longest": true,
+     "largest": false
+    }
+   ],
+   "played_dev": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "worlds": [
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      2,
+      3,
+      2,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      3,
+      2,
+      3,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      2,
+      2,
+      2,
+      4
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      5,
+      1,
+      1,
+      2,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      2,
+      2,
+      3,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      4,
+      1,
+      3,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      2,
+      3,
+      2,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      3,
+      0,
+      2,
+      4,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      3,
+      0,
+      3,
+      4,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      2,
+      1,
+      3,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      2,
+      0,
+      4,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      3,
+      0,
+      3,
+      3
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      2,
+      1,
+      2,
+      3
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      2,
+      4,
+      0,
+      4
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      0,
+      3,
+      1,
+      5
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      3,
+      1,
+      1,
+      3,
+      2
+     ]
+    }
+   ],
+   "frame": 191,
+   "frame_ms": 413660,
+   "decision_ms": 413875,
+   "belief": "B75"
+  },
+  "D116": {
+   "turn": 68,
+   "setup": false,
+   "pre_roll": false,
+   "hand": [
+    2,
+    0,
+    5,
+    0,
+    3
+   ],
+   "public_vp": [
+    4,
+    13
+   ],
+   "dev": [
+    0,
+    1,
+    0,
+    0,
+    0
+   ],
+   "bought": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "dev_played": false,
+   "robber": 17,
+   "last_roll": 7,
+   "buildings": [
+    [
+     2,
+     0,
+     false
+    ],
+    [
+     7,
+     1,
+     true
+    ],
+    [
+     9,
+     1,
+     false
+    ],
+    [
+     11,
+     1,
+     true
+    ],
+    [
+     15,
+     1,
+     false
+    ],
+    [
+     22,
+     0,
+     false
+    ],
+    [
+     33,
+     0,
+     false
+    ],
+    [
+     40,
+     1,
+     false
+    ],
+    [
+     44,
+     1,
+     true
+    ],
+    [
+     48,
+     1,
+     true
+    ],
+    [
+     50,
+     0,
+     false
+    ]
+   ],
+   "roads": [
+    [
+     2,
+     0
+    ],
+    [
+     7,
+     1
+    ],
+    [
+     8,
+     1
+    ],
+    [
+     9,
+     1
+    ],
+    [
+     11,
+     1
+    ],
+    [
+     12,
+     1
+    ],
+    [
+     16,
+     1
+    ],
+    [
+     17,
+     1
+    ],
+    [
+     26,
+     0
+    ],
+    [
+     35,
+     0
+    ],
+    [
+     36,
+     0
+    ],
+    [
+     39,
+     0
+    ],
+    [
+     40,
+     0
+    ],
+    [
+     45,
+     1
+    ],
+    [
+     48,
+     1
+    ],
+    [
+     49,
+     1
+    ],
+    [
+     53,
+     1
+    ],
+    [
+     57,
+     1
+    ],
+    [
+     60,
+     1
+    ],
+    [
+     61,
+     1
+    ],
+    [
+     62,
+     1
+    ],
+    [
+     65,
+     0
+    ],
+    [
+     66,
+     0
+    ]
+   ],
+   "players": [
+    {
+     "knights": 0,
+     "dev_total": 1,
+     "longest": false,
+     "largest": false
+    },
+    {
+     "knights": 0,
+     "dev_total": 1,
+     "longest": true,
+     "largest": false
+    }
+   ],
+   "played_dev": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "worlds": [
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      1,
+      1,
+      1,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      1,
+      0,
+      2,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      0,
+      1,
+      1,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      3,
+      1,
+      0,
+      0,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      3,
+      1,
+      0,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      2,
+      1,
+      0,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      0,
+      2,
+      2,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      0,
+      2,
+      1,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      1,
+      0,
+      3,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      1,
+      0,
+      1,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      1,
+      1,
+      1,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      1,
+      0,
+      0,
+      2,
+      2
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      1,
+      1,
+      0,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      2,
+      1,
+      2,
+      0,
+      0
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      2,
+      0,
+      2,
+      1
+     ]
+    },
+    {
+     "weight": 0.0625,
+     "hand": [
+      0,
+      2,
+      1,
+      1,
+      1
+     ]
+    }
+   ],
+   "frame": 198,
+   "frame_ms": 458094,
+   "decision_ms": 458579,
+   "belief": "B77"
+  }
+ }
+}

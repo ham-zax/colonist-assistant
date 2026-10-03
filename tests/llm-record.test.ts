@@ -704,4 +704,83 @@ describe("compact LLM game record", () => {
     expect(legacyRoot?.[rootActionColumn]).toBe("end-turn");
     expect(legacyRoot?.[finalRankColumn]).toBeNull();
   });
+
+  it("preserves tiny strategic values instead of flattening them to an exact zero", () => {
+    const tinyTrace: DecisionTrace = {
+      ...trace("tiny-values", { kind: "turn-control", control: "end" }),
+      deepCandidates: [
+        {
+          action: { kind: "build-road", targetId: "e:1,1,1" },
+          value: 0.0000123,
+          source: "strategic",
+        },
+        {
+          action: { kind: "build-road", targetId: "e:0,0,1" },
+          value: 0.00000456,
+          source: "strategic",
+        },
+        {
+          action: { kind: "end-turn" },
+          value: 0,
+          source: "strategic",
+        },
+      ],
+    };
+    const record = new CompactGameBuilder().apply(
+      { ...captureBase, decisions: [tinyTrace] },
+      false,
+    );
+    const valueColumn = record.contracts.candidateColumns.indexOf("value");
+    const values = record.candidates.map((row) => row[valueColumn]);
+    // Tiny meaningful values stay distinct and non-zero; a true zero stays zero.
+    expect(values[0]).not.toBe(0);
+    expect(values[1]).not.toBe(0);
+    expect(values[2]).toBe(0);
+    expect(values[0]).not.toBe(values[1]);
+    expect(Number(values[0])).toBeGreaterThan(Number(values[1]));
+  });
+
+  it("exports captured before-target reachability on road evidence rows", () => {
+    const roadTrace: DecisionTrace = {
+      ...trace("road-reachable", { kind: "build-road", targetId: "e0" }),
+      rootProvenance: {
+        rankedRootCount: 0,
+        rankedRoots: [],
+        retainedRoots: [],
+        prunedRootCount: 0,
+        prunedRoots: [],
+        rootEvidence: [
+          {
+            action: { kind: "build-road", targetId: "e0" },
+            roadIntent: {
+              targetVertexId: "v1",
+              roadsRemaining: 0,
+              survivalProbability: 1,
+              targetValue: 7.196,
+              portfolioValue: 3.499,
+              frontierGain: 3.5168,
+              orderingScore: 6.731,
+              targetAlreadyReachable: true,
+            },
+            admittedByPromotion: false,
+            closeoutGain: 0,
+            decisiveCompletionMass: 0,
+            tradeRiskPosterior: 0,
+            dirtyMonopolyPosterior: 0,
+            tradeHardVetoPosterior: 0,
+            tradeHardVeto: false,
+          },
+        ],
+      },
+    };
+    const record = new CompactGameBuilder().apply(
+      { ...captureBase, decisions: [roadTrace] },
+      false,
+    );
+    const columns = record.contracts.rootColumns;
+    expect(columns).toContain("roadTargetAlreadyReachable");
+    const row = record.roots.find((entry) => entry[columns.indexOf("action")] === "build-road|t=e0");
+    expect(row?.[columns.indexOf("roadTargetVertex")]).toBe("v1");
+    expect(row?.[columns.indexOf("roadTargetAlreadyReachable")]).toBe(true);
+  });
 });

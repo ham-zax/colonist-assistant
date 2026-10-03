@@ -23,14 +23,15 @@ import {
 } from "../core/resources";
 import type { TrackerState } from "../core/types";
 import { hasPendingFreeRoad } from "../core/development-sync";
-import type {
-  DeepSearchAction,
-  DeepSearchResult,
-  DeepSearchStrategyPolicy,
-  DecisionAnalysis,
-  DecisionBudget,
-  DecisionEngine,
-  DecisionSearchConstraints,
+import {
+  roadTargetReachableBefore,
+  type DeepSearchAction,
+  type DeepSearchResult,
+  type DeepSearchStrategyPolicy,
+  type DecisionAnalysis,
+  type DecisionBudget,
+  type DecisionEngine,
+  type DecisionSearchConstraints,
 } from "../core/engine";
 import { isFullySpecifiedTrade } from "../core/trade-guard";
 import {
@@ -774,6 +775,11 @@ const mapRootProvenance = (
       ...(evidence.promotionReason
         ? { promotionReason: evidence.promotionReason }
         : {}),
+      // RoadIntent is the best overall post-move expansion, not proof this
+      // edge unlocks a new site. Capture before-target reachability from the
+      // immutable request board while it is still available; renderers no
+      // longer see this board. Preserve every numeric field at full precision
+      // and never synthesize a target.
       ...(evidence.roadIntent
         ? {
             roadIntent: {
@@ -785,7 +791,8 @@ const mapRootProvenance = (
                   }
                 : {}),
               roadsRemaining: evidence.roadIntent.roadsRemaining,
-              ...(typeof evidence.roadIntent.expectedRolls === "number"
+              ...(typeof evidence.roadIntent.expectedRolls === "number" &&
+              Number.isFinite(evidence.roadIntent.expectedRolls)
                 ? { expectedRolls: evidence.roadIntent.expectedRolls }
                 : {}),
               survivalProbability: evidence.roadIntent.survivalProbability,
@@ -793,6 +800,18 @@ const mapRootProvenance = (
               portfolioValue: evidence.roadIntent.portfolioValue,
               frontierGain: evidence.roadIntent.frontierGain,
               orderingScore: evidence.roadIntent.orderingScore,
+              ...(typeof evidence.roadIntent.targetVertex === "number"
+                ? (() => {
+                    const reachable = roadTargetReachableBefore(
+                      board,
+                      board.vertices[evidence.roadIntent.targetVertex]?.id ??
+                        `vertex:${evidence.roadIntent.targetVertex}`,
+                    );
+                    return reachable === undefined
+                      ? {}
+                      : { targetAlreadyReachable: reachable };
+                  })()
+                : {}),
             },
           }
         : {}),

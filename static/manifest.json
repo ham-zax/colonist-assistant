@@ -3,7 +3,7 @@
   "name": "Colonist Ally",
   "short_name": "Colonist Ally",
   "description": "Local card tracking and board-aware advice for friendly Colonist games.",
-  "version": "0.9.6",
+  "version": "0.9.7",
   "permissions": [
     "storage",
     "offscreen"

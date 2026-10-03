@@ -118,6 +118,37 @@ describe("decision trace recorder", () => {
     expect(recorder.snapshot(false)[0]).toMatchObject({
       lifecycleStatus: "execution-unconfirmed", executionSucceeded: undefined,
       executionFinishedAt: expect.any(Number),
+      executionFailureReason:
+        "Execution outcome was not confirmed by a board snapshot within 15 seconds",
+    });
+    expect(vi.getTimerCount()).toBeLessThanOrEqual(1); // Pending storage flush only.
+    await recorder.reset();
+  });
+
+  it("preserves owner-recorded unconfirmed evidence when the observer expires", async () => {
+    const recorder = observingRecorder();
+    recorder.executionStarted("original", { committed: () => false, inScope: () => true });
+    recorder.execution(
+      "original",
+      undefined,
+      "Colonist did not commit the submitted trade after bounded observation",
+      {
+        actionKind: "trade-builder",
+        visibleTradeControlFingerprints: ["0:button|active=1|text=trade"],
+      },
+    );
+    await vi.advanceTimersByTimeAsync(15_000);
+    // The expired observer ends ownership but must not overwrite the specific
+    // bounded-failure evidence with its generic reconciliation message.
+    expect(recorder.snapshot(false)[0]).toMatchObject({
+      lifecycleStatus: "execution-unconfirmed",
+      executionSucceeded: undefined,
+      executionFailureReason:
+        "Colonist did not commit the submitted trade after bounded observation",
+      executionDiagnostic: {
+        actionKind: "trade-builder",
+        visibleTradeControlFingerprints: ["0:button|active=1|text=trade"],
+      },
     });
     expect(vi.getTimerCount()).toBeLessThanOrEqual(1); // Pending storage flush only.
     await recorder.reset();

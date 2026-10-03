@@ -961,6 +961,14 @@ static inline __device__ float prospective_port_option_value(
         return 0.0f;
     }
 
+    int ratios_changed = 0;
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        ratios_changed |= after[resource] != before[resource];
+    }
+    if (!ratios_changed) {
+        return 0.0f;
+    }
+
     float prospective_production[5];
     float total_production = 0.0f;
     for (uint32_t resource = 0u; resource < 5u; ++resource) {
@@ -979,17 +987,12 @@ static inline __device__ float prospective_port_option_value(
     float value = 0.0f;
     uint32_t build_families_advanced = 0u;
     for (uint32_t kind = 0u; kind < 4u; ++kind) {
-        const float horizons[3] = {0.0f, 18.0f, 36.0f};
-        float before_access = 0.0f;
-        float after_access = 0.0f;
-        for (uint32_t horizon = 0u; horizon < 3u; ++horizon) {
-            before_access += build_fundable_at_rolls(
-                prospective_production, hand, before, BUILD_COSTS[kind], horizons[horizon]
-            ) ? (1.0f / 3.0f) : 0.0f;
-            after_access += build_fundable_at_rolls(
-                prospective_production, hand, after, BUILD_COSTS[kind], horizons[horizon]
-            ) ? (1.0f / 3.0f) : 0.0f;
-        }
+        const float before_access = 1.0f / (1.0f + build_eta_rolls(
+            prospective_production, hand, before, BUILD_COSTS[kind]
+        ) / 18.0f);
+        const float after_access = 1.0f / (1.0f + build_eta_rolls(
+            prospective_production, hand, after, BUILD_COSTS[kind]
+        ) / 18.0f);
         const float access_gain = fmaxf(after_access - before_access, 0.0f);
         const float build_gain = access_gain * conversion_efficiency(
             prospective_production, after, BUILD_COSTS[kind]
@@ -1057,6 +1060,15 @@ static inline __device__ void expansion_option_value(
         return;
     }
     const uint32_t own_roads_left = player_roads_left(state, player);
+    uint32_t hand[5];
+    uint32_t ratios[5];
+    for (uint32_t resource = 0u; resource < 5u; ++resource) {
+        hand[resource] = resource_count(state, player, resource);
+    }
+    trade_ratios(state, player, ratios);
+    const int settlement_affordable_now = build_fundable_at_rolls(
+        current_production, hand, ratios, BUILD_COSTS[1], 0.0f
+    );
     const uint32_t *distances = routes[player];
     float top[3] = {0.0f, 0.0f, 0.0f};
     const uint32_t arrival_count = state[STATE_NUM_PLAYERS];
@@ -1080,7 +1092,7 @@ static inline __device__ void expansion_option_value(
             state,
             topology,
             vertex,
-            weights,
+            distance == 0u && settlement_affordable_now ? BASE_RESOURCE_WEIGHTS : weights,
             player,
             current_production
         );

@@ -681,6 +681,14 @@ fn expansion_option_value_with_routes_and_weights(
     };
     let production = production_pips(state, player);
     let ratios = state.trade_ratios(player);
+    let settlement_affordable_now = (exact_rival_hands || observer == Some(player))
+        && build_fundable_at_rolls(
+            &production,
+            &state.players[player as usize].resources,
+            &ratios,
+            &SETTLEMENT_COST,
+            0.0,
+        );
     let mut best = ExpansionOption::default();
     let mut top = [0.0_f32; 3];
     let mut option_count = 0u8;
@@ -697,10 +705,19 @@ fn expansion_option_value_with_routes_and_weights(
         }
         let survival = expansion_site_survival(state, player, vertex, route_maps, arrival_scores);
         let exact_hand_visible = exact_rival_hands || observer == Some(player);
+        // An affordable connected site is an imminent realization, not a
+        // speculative bottleneck repair. Value it at persistent weights
+        // matching realized production to avoid transient scarcity inflation
+        // vetoing the option's own realization.
+        let site_weights = if distance == 0 && settlement_affordable_now {
+            &BASE_RESOURCE_WEIGHTS
+        } else {
+            resource_weights
+        };
         let site = vertex_value_with_weights_and_knowledge(
             state,
             vertex as u8,
-            resource_weights,
+            site_weights,
             player,
             &production,
             exact_hand_visible,
@@ -1407,6 +1424,9 @@ fn prospective_port_option_value(
             after[resource.index()] = after[resource.index()].min(2);
         }
     }
+    if after == *before {
+        return 0.0;
+    }
     let prospective_production: [f32; 5] =
         std::array::from_fn(|resource| current_production[resource] + site_production[resource]);
     if prospective_production.iter().sum::<f32>() <= f32::EPSILON {
@@ -1422,26 +1442,22 @@ fn prospective_port_option_value(
         &hidden_hand
     };
     let complete_build_access = |ratios: &ResourceHand, cost: &ResourceHand| {
-        // Sample whole-build access at the same 18-roll scale used by the
-        // strategic economy. A ratio change earns no access credit unless it
-        // completes the entire cost at one of these horizons.
-        [0.0, 18.0, 36.0]
-            .into_iter()
-            .filter(|rolls| {
-                build_fundable_at_rolls(&prospective_production, hand, ratios, cost, *rolls)
-            })
-            .count() as f32
-            / 3.0
+        // Price the time to fund the entire cost, including whole maritime
+        // batches. Sparse horizon samples hid real tempo improvements within
+        // a bucket. The shared cached ETA uses the same 18-roll discount as
+        // the strategic economy; an unchanged ETA still earns no credit.
+        1.0 / (1.0 + build_eta_rolls(&prospective_production, hand, ratios, cost) / 18.0)
     };
-    let gains = BUILD_COSTS
-        .iter()
-        .map(|cost| {
-            (complete_build_access(&after, cost) - complete_build_access(before, cost)).max(0.0)
-                * build_conversion_efficiency(&prospective_production, &after, cost)
-        })
-        .collect::<Vec<_>>();
-    let build_families_advanced = gains.iter().filter(|gain| **gain > f32::EPSILON).count() as f32;
-    gains.iter().sum::<f32>() * build_families_advanced / BUILD_COSTS.len() as f32
+    let mut value = 0.0;
+    let mut build_families_advanced = 0;
+    for cost in &BUILD_COSTS {
+        let gain = (complete_build_access(&after, cost) - complete_build_access(before, cost))
+            .max(0.0)
+            * build_conversion_efficiency(&prospective_production, &after, cost);
+        value += gain;
+        build_families_advanced += usize::from(gain > f32::EPSILON);
+    }
+    value * build_families_advanced as f32 / BUILD_COSTS.len() as f32
 }
 
 fn vertex_value_with_weights(
@@ -2064,10 +2080,57 @@ mod tests {
 
         assert!((mismatched - plain).abs() < 1e-5);
         assert!(
-            (generic - plain).abs() < 1e-5,
-            "a printed ratio improvement gets no value until it advances a complete build"
+            generic > plain,
+            "3:1 conversion shortens whole-build funding"
         );
         assert!(matched > generic);
+    }
+
+    #[test]
+    fn prospective_port_credit_ignores_hidden_hands_and_redundant_ratios() {
+        let mut state = crate::crop6309_fixture::state("D63");
+        let vertex = crate::crop6309_fixture::vertex("v:-1,3,0");
+        let production = super::production_pips(&state, 0);
+        let mut occupied = state.clone();
+        occupied.buildings[vertex as usize] = Some(Building::Settlement(0));
+        let expanded = super::production_pips(&occupied, 0);
+        let site = std::array::from_fn(|resource| expanded[resource] - production[resource]);
+        let before = super::prospective_port_option_value(
+            &state,
+            vertex,
+            0,
+            &production,
+            &site,
+            false,
+            &[4; 5],
+        );
+        state.players[0].resources = [0, 0, 0, 0, 8];
+        let after = super::prospective_port_option_value(
+            &state,
+            vertex,
+            0,
+            &production,
+            &site,
+            false,
+            &[4; 5],
+        );
+        assert_eq!(
+            before, after,
+            "unobserved hand identities must not affect public port credit"
+        );
+        assert_eq!(
+            super::prospective_port_option_value(
+                &state,
+                vertex,
+                0,
+                &production,
+                &site,
+                true,
+                &[4, 4, 4, 4, 2],
+            ),
+            0.0,
+            "an already-held equivalent port adds no conversion credit"
+        );
     }
 
     #[test]

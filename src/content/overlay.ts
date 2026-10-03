@@ -233,6 +233,31 @@ const publicResourceSeed = (value: string): number => {
 export const autonomousExecutionAllowed = (enabled: boolean): boolean =>
   enabled;
 
+type UnconfirmedBankTrade = {
+  gameScope: string;
+  turn: number;
+  player: string;
+  hand: ResourceVector;
+  signature: string;
+  exclusion: RootTradeActionExclusion;
+};
+
+// Missing public evidence does not establish a change. Retain the original
+// scope until a known hand/turn/game change, but only search with an exclusion
+// when the exact hand is available again.
+const bankTradeScopeChanged = (
+  trade: UnconfirmedBankTrade,
+  board: BoardSnapshot | undefined,
+): boolean => Boolean(board && (
+  (board.gameKey ?? location.pathname) !== trade.gameScope ||
+  (board.turn !== undefined && board.turn !== trade.turn) ||
+  (board.myPlayer !== undefined && board.myPlayer !== trade.player) ||
+  board.isMyTurn === false ||
+  (board.currentPlayer !== undefined && board.currentPlayer !== trade.player) ||
+  (board.ownHand && RESOURCE_ORDER.some((resource) =>
+    board.ownHand![resource] !== trade.hand[resource]))
+));
+
 const escapeHtml = (value: string): string =>
   value.replace(/[&<>"']/g, (character) => {
     const entities: Record<string, string> = {
@@ -457,6 +482,7 @@ export class AssistantOverlay {
   private lastRejectedDomesticTrade?: DomesticTradeState;
   private readonly rootTradeActionExclusions: RootTradeActionExclusion[] = [];
   private readonly failedTradeActions = new Set<string>();
+  private readonly unconfirmedBankTrades: UnconfirmedBankTrade[] = [];
   private readonly unavailableTradeControls = new Set<string>();
   private readonly completedIncomingTradeIds = new Set<string>();
   private readonly outgoingTradeSeenAt = new Map<string, number>();
@@ -846,6 +872,7 @@ export class AssistantOverlay {
       this.maritimeCycleMemory.clear();
     }
     this.board = nextBoard;
+    this.pruneUnconfirmedBankTrades();
     this.decisionTraces.reconcileExecutions();
     if (nextBoard && !identityResolved) {
       this.decisionAnalysis = undefined;
@@ -1098,6 +1125,7 @@ export class AssistantOverlay {
     this.confirmedPlacementSpend = undefined;
     this.lastRejectedDomesticTrade = undefined;
     this.rootTradeActionExclusions.length = 0;
+    this.unconfirmedBankTrades.length = 0;
     this.failedTradeActions.clear();
     this.unavailableTradeControls.clear();
     this.completedIncomingTradeIds.clear();
@@ -1888,6 +1916,8 @@ export class AssistantOverlay {
       ? '<p class="why" role="status">Trade submitted; awaiting confirmation. Automatic actions are paused. Do not submit the trade again.</p>'
       : next && this.unavailableTradeControls.has(next.signature)
       ? '<p class="why" role="status">Automatic trade paused: the required Colonist control was not found. You can complete this step manually.</p>'
+      : next && this.failedTradeActions.has(next.signature)
+      ? '<p class="why" role="status">Automatic trade paused: the last submission was not confirmed. You can complete this step manually.</p>'
       : "";
     const previewMarker = this.renderAlternativePreviewMarker();
     const advice =
@@ -1937,6 +1967,23 @@ export class AssistantOverlay {
     const guideGameScope = this.board?.gameKey ?? location.pathname;
     const stillInGuideGame = (): boolean =>
       (this.board?.gameKey ?? location.pathname) === guideGameScope;
+    const bankTradeScope: UnconfirmedBankTrade | undefined =
+      next?.kind === "trade-builder" && next.mode === "bank" &&
+      this.board?.ownHand && this.board.turn !== undefined &&
+      this.board.myPlayer && this.board.isMyTurn
+        ? {
+            gameScope: guideGameScope,
+            turn: this.board.turn,
+            player: this.board.myPlayer,
+            hand: { ...this.board.ownHand },
+            signature: next.signature,
+            exclusion: {
+              kind: "maritime-trade",
+              give: { ...next.give },
+              receive: { ...next.receive },
+            },
+          }
+        : undefined;
     const controlCommit = (() => {
       if (!next) return undefined;
       if (next.kind === "turn-control" && next.control === "roll") {
@@ -2145,7 +2192,8 @@ export class AssistantOverlay {
       highlight: this.settings.highlightNextAction,
       autonomous: autonomousExecutionAllowed(
         this.settings.autonomousPrivateGames,
-      ) && !this.unavailableTradeControls.has(nextSignature),
+      ) && !this.unavailableTradeControls.has(nextSignature) &&
+        !this.failedTradeActions.has(nextSignature),
       // Closing disabled trades is a deterministic policy response. Waiting
       // for strategic search or the optional thinking delay serves no purpose.
       autopilotDelayMs: disabledTradeResponse ? 0 : this.settings.autopilotDelaySeconds * 1_000,
@@ -2225,6 +2273,30 @@ export class AssistantOverlay {
                 }
               : undefined,
           );
+        }
+        if (
+          unconfirmed && next &&
+          (next.kind === "trade-builder" ||
+            (next.kind === "trade" && next.verdict === "counter"))
+        ) {
+          if (next.kind === "trade-builder" && next.mode === "bank") {
+            // Bind the uncertainty to the hand that actually submitted this
+            // bundle. A callback arriving after a commit or turn advance must
+            // not suppress a new position's legal trade.
+            if (bankTradeScope && !bankTradeScopeChanged(bankTradeScope, this.board)) {
+              this.unconfirmedBankTrades.push(bankTradeScope);
+              this.failedTradeActions.add(next.signature);
+            }
+          } else {
+            // Preserve the counter-trade protocol's safe decline fallback.
+            this.failedTradeActions.add(next.signature);
+          }
+          this.decisionAnalysis = undefined;
+          this.decisionKey = "";
+          this.decisionPendingKey = "";
+          this.decisionWorker.reset();
+          this.render();
+          return;
         }
         if (unconfirmed) return;
         if (
@@ -2906,9 +2978,24 @@ export class AssistantOverlay {
     });
   }
 
+  private pruneUnconfirmedBankTrades(): void {
+    for (let index = this.unconfirmedBankTrades.length - 1; index >= 0; index -= 1) {
+      const trade = this.unconfirmedBankTrades[index]!;
+      if (bankTradeScopeChanged(trade, this.board)) {
+        this.failedTradeActions.delete(trade.signature);
+        this.unconfirmedBankTrades.splice(index, 1);
+      }
+    }
+  }
+
   private decisionSearchConstraints(): DecisionSearchConstraints {
+    this.pruneUnconfirmedBankTrades();
     const rootExclusions = [
       ...this.rootTradeActionExclusions,
+      ...this.unconfirmedBankTrades.flatMap((trade) =>
+        this.board?.ownHand && this.board.turn === trade.turn &&
+        this.board.myPlayer === trade.player && this.board.isMyTurn
+          ? [trade.exclusion] : []),
       ...maritimeCycleRootExclusions(this.maritimeCycleMemory, this.board),
     ];
     return {

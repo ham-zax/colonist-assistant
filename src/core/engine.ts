@@ -254,6 +254,15 @@ export interface DeepSearchRoadIntent {
   portfolioValue: number;
   frontierGain: number;
   orderingScore: number;
+  /**
+   * Whether the target was already reachable before this road, captured from
+   * the immutable request board during result mapping. True means proven
+   * reachable (explicit buildable/legal hit, or complete-geometry own-road
+   * touch); false means proven not reachable via complete geometry; absent
+   * means unknown (insufficient coverage — never infer from empty gated
+   * lists alone).
+   */
+  targetAlreadyReachable?: boolean;
 }
 
 export interface DeepSearchRootSearchWork {
@@ -547,8 +556,72 @@ const sameDeepSearchAction = (
   right: DeepSearchAction | undefined,
 ): boolean => deepSearchActionKey(left) === deepSearchActionKey(right);
 
-const fixedScore = (value: number | undefined): string =>
-  Number.isFinite(value) ? (value as number).toFixed(3) : "n/a";
+const fixedScore = (value: number | undefined): string => {
+  if (!Number.isFinite(value)) return "n/a";
+  const numeric = value as number;
+  // Preserve tiny meaningful model values instead of flattening them to
+  // an exact-looking zero. Normal magnitudes keep 3 decimals for compact UI.
+  if (numeric !== 0 && Math.abs(numeric) < 0.0005) {
+    return String(Number(numeric.toPrecision(3)));
+  }
+  return numeric.toFixed(3);
+};
+
+/**
+ * Before-board context used to judge what a road actually changes.
+ * buildableSettlementIds is reachability (open + own-road touch, no cost
+ * check); legalVertexIds is the exact currently-legal set (cost/action
+ * gated). An explicit hit in either list proves the site was already
+ * reachable. Absence proves nothing on its own: legal lists are phase/cost
+ * gated, so false requires complete board geometry plus the acting player.
+ */
+export type RoadBeforeBoard = Pick<
+  BoardSnapshot,
+  "vertices" | "edges" | "buildableSettlementIds" | "legalVertexIds" | "myPlayer"
+>;
+
+/**
+ * Whether a road target was already reachable before the road, from the
+ * immutable request board. True on an explicit buildable/legal hit or a
+ * target-local complete-geometry own-road touch; false only on target-local
+ * complete geometry proving the site blocked or unconnected; otherwise
+ * undefined (unknown — never infer from empty gated lists alone).
+ */
+export const roadTargetReachableBefore = (
+  board: RoadBeforeBoard | null | undefined,
+  targetVertexId: string,
+): boolean | undefined => {
+  if (!board || !targetVertexId) return undefined;
+  if (board.buildableSettlementIds?.includes(targetVertexId)) return true;
+  if (board.legalVertexIds?.includes(targetVertexId)) return true;
+  const vertices = board.vertices;
+  const edges = board.edges;
+  const me = board.myPlayer;
+  if (!vertices?.length || !Array.isArray(edges) || !me) return undefined;
+  const byId = new Map(vertices.map((vertex) => [vertex.id, vertex]));
+  const target = byId.get(targetVertexId);
+  if (!target) return undefined;
+  if (target.building) return false;
+  // Target-local coverage: every listed neighbor must be present (a missing
+  // neighbor would read as open), and every listed adjacency must be
+  // represented by an incident edge (a missing incident edge could be the
+  // own-road touch). Incomplete local coverage stays unknown.
+  const neighbors = target.adjacentVertices ?? [];
+  if (!neighbors.every((neighbor) => byId.has(neighbor))) return undefined;
+  const incident = edges.filter((edge) =>
+    edge.vertices.includes(targetVertexId),
+  );
+  if (
+    !neighbors.every((neighbor) =>
+      incident.some((edge) => edge.vertices.includes(neighbor)),
+    )
+  ) {
+    return undefined;
+  }
+  const open = neighbors.every((neighbor) => !byId.get(neighbor)?.building);
+  if (!open) return false;
+  return incident.some((edge) => edge.player === me);
+};
 
 const percentWeight = (value: number | undefined): string =>
   `${Math.round(Math.max(0, Math.min(1, value ?? 0)) * 100)}%`;
@@ -614,6 +687,7 @@ export const describeDeepSearchAction = (action: DeepSearchAction): string => {
 
 export const explainDeepSearchDecision = (
   search: DeepSearchResult,
+  beforeBoard?: RoadBeforeBoard | null,
 ): DecisionRationale | undefined => {
   const chosen = search.chosen;
   if (!chosen) return undefined;
@@ -710,11 +784,17 @@ export const explainDeepSearchDecision = (
     if (Number.isFinite(chosenValue)) {
       if (strategicRunnerUp && Number.isFinite(runnerValue)) {
         const delta = (chosenValue ?? 0) - (runnerValue ?? 0);
-        reasons.push(
-          `Its completed root value was ${fixedScore(chosenValue)}, ${fixedScore(Math.abs(delta))} ${delta >= 0 ? "ahead of" : "behind"} ${describeDeepSearchAction(strategicRunnerUp.action)}`,
-        );
+        if (delta === 0) {
+          reasons.push(
+            `Its completed root value was ${fixedScore(chosenValue)}, tied on modeled value with ${describeDeepSearchAction(strategicRunnerUp.action)}`,
+          );
+        } else {
+          reasons.push(
+            `Its completed root value was ${fixedScore(chosenValue)}, ${fixedScore(Math.abs(delta))} ${delta > 0 ? "ahead of" : "behind"} ${describeDeepSearchAction(strategicRunnerUp.action)} on modeled value`,
+          );
+        }
       } else {
-        reasons.push(`Its completed root value was ${fixedScore(chosenValue)}`);
+        reasons.push(`Its completed root value was ${fixedScore(chosenValue)} on modeled value`);
       }
     }
   }
@@ -735,14 +815,45 @@ export const explainDeepSearchDecision = (
     sameDeepSearchAction(candidate.action, chosen),
   );
   const roadIntent = causalEvidence?.roadIntent;
+  // Prefer the immutable reachability captured at mapping time (the request
+  // board is gone by render time); the optional board arg remains for tests
+  // and backward-compatible callers.
+  const roadAccessBefore =
+    roadIntent?.targetVertexId !== undefined
+      ? (roadIntent.targetAlreadyReachable ??
+        roadTargetReachableBefore(beforeBoard, roadIntent.targetVertexId))
+      : undefined;
   if (roadIntent?.targetVertexId) {
+    const roadTarget = roadIntent.targetVertexId;
     const roadCount = roadIntent.roadsRemaining;
     const eta = Number.isFinite(roadIntent.expectedRolls)
       ? `; expected self-funded access in ${fixedScore(roadIntent.expectedRolls)} rolls`
       : "";
-    reasons.push(
-      `This road targets ${roadIntent.targetVertexId}, leaving ${roadCount} additional road${roadCount === 1 ? "" : "s"} before settlement access${eta}`,
-    );
+    // RoadIntent names the best overall post-move expansion, not necessarily
+    // a site this edge unlocks. Describe an already-reachable highlight
+    // without claiming what the edge did or did not unlock elsewhere; fall
+    // back to factual post-move wording when reachability is unknown.
+    if (roadAccessBefore === true) {
+      reasons.push(
+        `The highlighted expansion at ${roadTarget} was already reachable before this road${eta}`,
+      );
+    } else if (roadAccessBefore === false) {
+      if (roadCount === 0) {
+        reasons.push(`This road opens settlement access at ${roadTarget}${eta}`);
+      } else {
+        reasons.push(
+          `After this road, ${roadTarget} is ${roadCount} more road${roadCount === 1 ? "" : "s"} away from settlement access${eta}`,
+        );
+      }
+    } else if (roadCount === 0) {
+      reasons.push(
+        `After this road, the best remaining expansion is ${roadTarget} with settlement access${eta}`,
+      );
+    } else {
+      reasons.push(
+        `After this road, the best remaining expansion is ${roadTarget}, ${roadCount} more road${roadCount === 1 ? "" : "s"} away from settlement access${eta}`,
+      );
+    }
     evidence.push(
       `Road intent: frontier gain ${fixedScore(roadIntent.frontierGain)}, target value ${fixedScore(roadIntent.targetValue)}, fallback portfolio ${fixedScore(roadIntent.portfolioValue)}, survival ${percentWeight(roadIntent.survivalProbability)}, ordering score ${fixedScore(roadIntent.orderingScore)}`,
     );
@@ -884,6 +995,7 @@ export const explainDeepSearchDecision = (
       roadsRemaining: roadIntent?.targetVertexId
         ? roadIntent.roadsRemaining
         : undefined,
+      roadAccessBefore,
     }),
     reasons: reasons.slice(0, 4),
     // Evidence volume must not hide a weaker or interrupted search.
@@ -898,6 +1010,7 @@ const plainDeepSearchReason = (
     runnerUp?: DeepSearchAction;
     gap?: number;
     roadsRemaining?: number;
+    roadAccessBefore?: boolean | undefined;
   },
 ): string => {
   if (search.authority === "safety-override" && context.replacement) {
@@ -906,12 +1019,25 @@ const plainDeepSearchReason = (
   if (search.authority === "tactical-proven") {
     return "Starts a forcing line the engine checked to the end of this turn";
   }
-  const road =
-    context.roadsRemaining !== undefined
-      ? context.roadsRemaining === 0
+  // RoadIntent is the best overall post-move expansion, not proof this edge
+  // unlocks a new site. Describe an already-reachable highlight without
+  // implying the road helped it, and avoid "new" entirely when reachability
+  // is unknown.
+  const road = (() => {
+    if (context.roadsRemaining === undefined) return undefined;
+    const count = context.roadsRemaining;
+    if (context.roadAccessBefore === true) {
+      return "The highlighted expansion was already reachable";
+    }
+    if (context.roadAccessBefore === false) {
+      return count === 0
         ? "Reaches a new settlement spot"
-        : `Heads for a new settlement spot, ${context.roadsRemaining} more road${context.roadsRemaining === 1 ? "" : "s"} away`
-      : undefined;
+        : `Heads toward a settlement spot, ${count} more road${count === 1 ? "" : "s"} away`;
+    }
+    return count === 0
+      ? "Keeps a settlement site within reach after this road"
+      : `Leaves a settlement site ${count} more road${count === 1 ? "" : "s"} away after this road`;
+  })();
   const comparison = (() => {
     if (!context.runnerUp || context.gap === undefined || !Number.isFinite(context.gap)) {
       return undefined;
@@ -919,8 +1045,11 @@ const plainDeepSearchReason = (
     const other = describeDeepSearchAction(context.runnerUp);
     const gap = Math.abs(context.gap);
     if (context.gap < 0) return `Chosen over ${other} by the engine's final checks`;
-    if (gap < 0.01) return `A close call over ${other}`;
-    if (gap < 0.04) return `Better than the next option, ${other}`;
+    // Small normalized gaps are modeled-value differences, never calibrated
+    // win probabilities.
+    if (gap === 0) return `Tied on modeled value with ${other}`;
+    if (gap < 0.01) return `A close call on modeled value over ${other}`;
+    if (gap < 0.04) return `Better modeled value than ${other}`;
     return `Higher modeled value than ${other}`;
   })();
   if (road && comparison) return `${road}. ${comparison}`;

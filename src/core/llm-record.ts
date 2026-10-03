@@ -296,10 +296,17 @@ const developmentVector = (
   value?: Partial<Record<(typeof RECORD_DEVELOPMENT_ORDER)[number], number>>,
 ): number[] => RECORD_DEVELOPMENT_ORDER.map((card) => value?.[card] ?? 0);
 
-const compactNumber = (value: number | undefined, digits = 4): number | null =>
-  value === undefined || !Number.isFinite(value)
-    ? null
-    : Number(value.toFixed(digits));
+const compactNumber = (value: number | undefined, digits = 4): number | null => {
+  if (value === undefined || !Number.isFinite(value)) return null;
+  const rounded = Number(value.toFixed(digits));
+  // A tiny non-zero that rounds to zero at this width is still meaningful
+  // search evidence (ordering, small edges). Keep 3 significant digits so a
+  // reader never mistakes a rounded export zero for an exact engine zero.
+  // Bounded and compact: e.g. 0.0000123 instead of 0, 1e-7 stays 1e-7.
+  if (rounded !== 0 || value === 0) return rounded;
+  const significant = Number(value.toPrecision(3));
+  return Number.isFinite(significant) ? significant : rounded;
+};
 
 const compactTradeTuple = (
   trade?: { give: number[]; receive: number[] },
@@ -1029,6 +1036,7 @@ const contracts = (): CompactRecordContracts => ({
     "strategicMarginLcb",
     "strategicMarginUcb",
     "roadTargetVertex",
+    "roadTargetAlreadyReachable",
     "roadRemaining",
     "roadExpectedRolls",
     "roadSurvival",
@@ -2180,6 +2188,8 @@ export class CompactGameBuilder {
           ),
           roadCutContinuations,
           roadTargetVertex: evidence.roadIntent?.targetVertexId ?? null,
+          roadTargetAlreadyReachable:
+            evidence.roadIntent?.targetAlreadyReachable ?? null,
           roadRemaining: evidence.roadIntent?.roadsRemaining ?? null,
           roadExpectedRolls: compactNumber(evidence.roadIntent?.expectedRolls),
           roadSurvival: compactNumber(evidence.roadIntent?.survivalProbability),

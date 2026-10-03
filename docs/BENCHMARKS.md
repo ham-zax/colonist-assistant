@@ -45,6 +45,20 @@ and CPU/GPU parity validate behavior and implementation; they are not a full
 balanced-dice replay, held-out strength evidence, or proof of a counterfactual
 win. No new win-rate benchmark is claimed for the road-race and reserve fixes.
 
+The `crop6309` fixture validates 12 recorded positions and 150 weighted
+resource worlds. It uses IID dice for regression checks, an inferred victory
+target of 15 (with 10/14/15 sensitivity), and explicit opponent-development
+hypotheses. It is not an exact balanced-dice replay or held-out strength test.
+The evaluator repair removes transient scarcity inflation from affordable,
+connected settlement options and prices prospective ports through discounted
+whole-build funding time, including integer maritime batches. Ports receive
+no conversion credit when their ratios or funding time do not improve.
+In the D34 first-world diagnostic, both 1,500-node and 12,000-node searches
+choose the ore settlement; the previous evaluator chose End Turn. D36–D42
+also rank that productive settlement above passing, although deeper searches
+can prefer another action. These are fixed-work regression results, not proof
+that a different opening or port route would have won the recorded game.
+
 ## Historical experimental belief-PUCT behavioral smoke
 
 The following runs used the native arena's experimental belief-PUCT policy.

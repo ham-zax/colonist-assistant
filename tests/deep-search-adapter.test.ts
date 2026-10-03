@@ -1813,6 +1813,220 @@ describe("deep-search state adapter", () => {
     expect(elapsed).toBeLessThan(100);
   });
 
+  it("maps RoadIntent without inventing a new-site claim and drops non-finite ETAs", async () => {
+    const roadAction = { kind: "build-road", first: 0 };
+    const response: any = {
+      engineRevision: "test-road-intent",
+      authority: "deep-maxn",
+      algorithm: "maxn",
+      learnedModelVersion: "test",
+      tradeModelVersion: "test",
+      rootValue: [0.5, 0.2, 0, 0],
+      tacticalWinProbability: 0.3,
+      tacticalLowerBound: 0.2,
+      tacticalProven: false,
+      tacticalLine: [roadAction],
+      exactDecision: false,
+      exactWorlds: 1,
+      exactActions: [],
+      actions: [
+        {
+          action: roadAction,
+          visits: 10,
+          availability: 1,
+          availabilityWeight: 1,
+          legalWeight: 1,
+          prior: 0.5,
+          value: [0.5, 0.2, 0, 0],
+          lowerConfidenceValue: [0.4, 0.1, 0, 0],
+        },
+      ],
+      iterations: 10,
+      nodes: 100,
+      deepestDecisionDepth: 2,
+      rollouts: 0,
+      particles: 1,
+      wasmParticles: 1,
+      rustPosteriorParticles: 1,
+      rustSearchParticles: 1,
+      effectiveEffort: {
+        decisionTimeMs: 100,
+        tactical: { maxDepth: 2, nodeBudget: 100 },
+        cpu: { maxDepth: 3, rootCap: 4, nodesPerDepthWave: 1000 },
+        gpu: { rootCap: 4, rolloutBudget: 100, rolloutSteps: 4 },
+      },
+      rootProvenance: {
+        rankedRootCount: 1,
+        rankedRoots: [],
+        retainedRoots: [],
+        prunedRootCount: 0,
+        prunedRoots: [],
+        rootEvidence: [
+          {
+            action: roadAction,
+            roadIntent: {
+              targetVertex: 1,
+              roadsRemaining: 0,
+              expectedRolls: Number.POSITIVE_INFINITY,
+              survivalProbability: 1,
+              targetValue: 7.196,
+              portfolioValue: 3.499,
+              frontierGain: 3.5168,
+              orderingScore: 6.731,
+            },
+            admittedByPromotion: false,
+            closeoutGain: 0,
+            decisiveCompletionMass: 0,
+            tradeRiskPosterior: 0,
+            dirtyMonopolyPosterior: 0,
+            tradeHardVetoPosterior: 0,
+            tradeHardVeto: false,
+          },
+          {
+            action: roadAction,
+            admittedByPromotion: false,
+            closeoutGain: 0,
+            decisiveCompletionMass: 0,
+            tradeRiskPosterior: 0,
+            dirtyMonopolyPosterior: 0,
+            tradeHardVetoPosterior: 0,
+            tradeHardVeto: false,
+          },
+        ],
+        rootSearchWork: [],
+        tradeHardVetoThreshold: 0.9,
+      },
+      authorityTrace: { initialAuthority: "deep-maxn" },
+      effectiveParticleCount: 1,
+      deadlineReached: false,
+    };
+    const fallback: any = {
+      engine: "deep-search",
+      players: [
+        { player: "You", probability: 0.5, etaTurns: 10, samples: 10, confidence: "medium", reasons: [] },
+        { player: "Rival", probability: 0.5, etaTurns: 10, samples: 10, confidence: "medium", reasons: [] },
+      ],
+      actionScores: { road: 0, settlement: 0, city: 0, development: 0 },
+      simulations: 0,
+      model: "fallback",
+    };
+    const analysis = await analyzeDeepSearch(state, board, "You", fallback, {}, true, "deep-search", async () => response);
+    const withTarget = analysis.deepSearch?.rootProvenance.rootEvidence?.find((entry) => entry.roadIntent?.targetVertexId);
+    expect(withTarget?.roadIntent?.targetVertexId).toBe("v1");
+    expect(withTarget?.roadIntent?.roadsRemaining).toBe(0);
+    // Non-finite ETAs are omitted so explanations never render Infinity rolls.
+    expect(withTarget?.roadIntent).not.toHaveProperty("expectedRolls");
+    expect(withTarget?.roadIntent?.targetValue).toBeCloseTo(7.196, 6);
+    expect(withTarget?.roadIntent?.frontierGain).toBeCloseTo(3.5168, 6);
+    const withoutTarget = analysis.deepSearch?.rootProvenance.rootEvidence?.find((entry) => !entry.roadIntent);
+    expect(withoutTarget).toBeDefined();
+  });
+
+  it("captures before-target reachability at mapping time so explanations stay honest without a board arg", async () => {
+    const { explainDeepSearchDecision } = await import("../src/core/engine");
+    const roadAction = { kind: "build-road", first: 0 };
+    const response: any = {
+      engineRevision: "test-road-intent-reachable",
+      authority: "deep-maxn",
+      chosen: roadAction,
+      algorithm: "maxn",
+      learnedModelVersion: "test",
+      tradeModelVersion: "test",
+      rootValue: [0.5, 0.2, 0, 0],
+      tacticalWinProbability: 0.3,
+      tacticalLowerBound: 0.2,
+      tacticalProven: false,
+      tacticalLine: [roadAction],
+      exactDecision: false,
+      exactWorlds: 1,
+      exactActions: [],
+      actions: [
+        {
+          action: roadAction,
+          visits: 10,
+          availability: 1,
+          availabilityWeight: 1,
+          legalWeight: 1,
+          prior: 0.5,
+          value: [0.5, 0.2, 0, 0],
+          lowerConfidenceValue: [0.4, 0.1, 0, 0],
+        },
+      ],
+      iterations: 10,
+      nodes: 100,
+      deepestDecisionDepth: 2,
+      rollouts: 0,
+      particles: 1,
+      wasmParticles: 1,
+      rustPosteriorParticles: 1,
+      rustSearchParticles: 1,
+      effectiveEffort: {
+        decisionTimeMs: 100,
+        tactical: { maxDepth: 2, nodeBudget: 100 },
+        cpu: { maxDepth: 3, rootCap: 4, nodesPerDepthWave: 1000 },
+        gpu: { rootCap: 4, rolloutBudget: 100, rolloutSteps: 4 },
+      },
+      rootProvenance: {
+        rankedRootCount: 1,
+        rankedRoots: [],
+        retainedRoots: [],
+        prunedRootCount: 0,
+        prunedRoots: [],
+        rootEvidence: [
+          {
+            action: roadAction,
+            roadIntent: {
+              targetVertex: 1,
+              roadsRemaining: 0,
+              expectedRolls: 12,
+              survivalProbability: 1,
+              targetValue: 7.196,
+              portfolioValue: 3.499,
+              frontierGain: 3.5168,
+              orderingScore: 6.731,
+            },
+            admittedByPromotion: false,
+            closeoutGain: 0,
+            decisiveCompletionMass: 0,
+            tradeRiskPosterior: 0,
+            dirtyMonopolyPosterior: 0,
+            tradeHardVetoPosterior: 0,
+            tradeHardVeto: false,
+          },
+        ],
+        rootSearchWork: [],
+        tradeHardVetoThreshold: 0.9,
+      },
+      authorityTrace: { initialAuthority: "deep-maxn" },
+      effectiveParticleCount: 1,
+      deadlineReached: false,
+    };
+    const fallback: any = {
+      engine: "deep-search",
+      players: [
+        { player: "You", probability: 0.5, etaTurns: 10, samples: 10, confidence: "medium", reasons: [] },
+        { player: "Rival", probability: 0.5, etaTurns: 10, samples: 10, confidence: "medium", reasons: [] },
+      ],
+      actionScores: { road: 0, settlement: 0, city: 0, development: 0 },
+      simulations: 0,
+      model: "fallback",
+    };
+    const reachableBoard: BoardSnapshot = {
+      ...board,
+      buildableSettlementIds: ["v1"],
+    };
+    const analysis = await analyzeDeepSearch(state, reachableBoard, "You", fallback, {}, true, "deep-search", async () => response);
+    const intent = analysis.deepSearch?.rootProvenance.rootEvidence?.find(
+      (entry) => entry.roadIntent?.targetVertexId,
+    )?.roadIntent;
+    expect(intent?.targetAlreadyReachable).toBe(true);
+    // Production renderers call explain with no board arg: captured metadata
+    // alone must produce the already-reachable wording.
+    const rationale = explainDeepSearchDecision(analysis.deepSearch!);
+    expect(rationale?.reasons.join(" ")).toContain("was already reachable before this road");
+    expect(rationale?.plain).toContain("The highlighted expansion was already reachable");
+  });
+
   it("keeps experimental PUCT bounded outside the live default", async () => {
     const bytes = await readFile(
       new URL(

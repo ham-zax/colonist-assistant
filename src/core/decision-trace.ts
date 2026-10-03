@@ -733,6 +733,12 @@ export class DecisionTraceRecorder {
         this.execution(stateHash, true);
       } else if (!inScope || Date.now() >= observation.deadline) {
         this.executions.delete(stateHash);
+        if (this.traces.get(stateHash)?.executionFinishedAt !== undefined) {
+          // The owner already recorded its specific unconfirmed outcome and
+          // diagnostic. The expired observer only ends ownership; it must not
+          // overwrite that evidence with the generic reconciliation message.
+          continue;
+        }
         this.execution(stateHash, undefined, inScope
           ? "Execution outcome was not confirmed by a board snapshot within 15 seconds"
           : "Execution observation ended because the game changed");

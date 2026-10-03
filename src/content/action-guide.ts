@@ -1692,6 +1692,17 @@ const later = (callback: () => void, delay: number): void => {
   followupTimers.add(timer);
 };
 
+/**
+ * A submitted trade is observed read-only until Colonist proves the commit,
+ * rejects it, or this bound expires. The bound is owned entirely by the
+ * executor and independent of the decision-trace observer duration: the
+ * trace preserves owner-recorded unconfirmed evidence at its own expiry, so
+ * this report stays truthful however the observer is configured. The
+ * observation never resubmits: expiry releases the workflow latch and
+ * reports the ambiguous outcome exactly once.
+ */
+const SUBMITTED_TRADE_OBSERVE_MS = 12_000;
+
 interface WorkflowStep {
   label: string;
   submitsTrade?: boolean;
@@ -2208,6 +2219,21 @@ const startWorkflow = (
   const tradeTransaction =
     action.kind === "trade-builder" ||
     (action.kind === "trade" && action.verdict === "counter");
+  let firstDispatchAt: number | undefined;
+  let submittedAt: number | undefined;
+  let submittedDiagnostic: ActionExecutionDiagnostic | undefined;
+  const markSubmitted = (): void => {
+    workflowTradeSubmitted = true;
+    submittedAt ??= Date.now();
+    // Capture DOM evidence at dispatch time: by the observation bound the
+    // panel is usually gone and a fresh capture would be empty.
+    submittedDiagnostic ??= tradeExecutionDiagnostic(action);
+  };
+  const markDispatched = (submits: boolean): void => {
+    firstDispatchAt ??= Date.now();
+    workflowHasDispatchedStep = true;
+    if (submits) markSubmitted();
+  };
   const ignoredTradeFailureLogKeys = tradeTransaction
     ? tradeFailureLogKeys()
     : new Set<string>();
@@ -2217,19 +2243,29 @@ const startWorkflow = (
       )
     : new Map<HTMLElement, string>();
 
-  const fail = (reason: string): void => {
+  const fail = (reason: string, diagnostic?: ActionExecutionDiagnostic): void => {
     const activeOptions = workflowOptions ?? options;
-    activeOptions.onExecution?.({
-      succeeded: false,
-      ...(workflowHasDispatchedStep && reason.startsWith("Colonist did not commit")
-        ? { unconfirmed: true }
-        : {}),
-      signature: action.signature,
-      reason,
-      diagnostic: tradeExecutionDiagnostic(action),
-    });
+    // Only an actual submit dispatch is ambiguous: draft and panel clicks are
+    // idempotent, and a visible authoritative rejection is a KNOWN failure
+    // that must stay definitive so the owner records the root trade failure.
+    const rejectedTrade = reason.startsWith("Colonist rejected the trade workflow:");
+    const ambiguousTradeOutcome =
+      tradeTransaction &&
+      workflowTradeSubmitted &&
+      !rejectedTrade;
+    const ambiguousNonTradeOutcome = !tradeTransaction &&
+      workflowHasDispatchedStep && reason.startsWith("Colonist did not commit");
+    const executionDiagnostic = diagnostic ?? tradeExecutionDiagnostic(action);
+    // Release the old owner before the overlay replans synchronously. A
+    // callback may install a new guide, which must survive this failure.
+    cancelWorkflow();
+    document.getElementById(ROOT_ID)?.remove();
+    const cleanupGeneration = workflowGeneration;
     if (tradeTransaction) {
       const closeTradePanel = (attempt = 0): void => {
+        // Never close a fresh panel opened by the replacement workflow.
+        if (cleanupGeneration !== workflowGeneration ||
+          currentGuideAction?.signature !== action.signature) return;
         if (!tradePanelIsOpen()) {
           requestBoardRefresh();
           return;
@@ -2242,10 +2278,17 @@ const startWorkflow = (
           requestBoardRefresh();
         }
       };
-      later(() => closeTradePanel(), 120);
+      closeTradePanel();
     }
-    cancelWorkflow();
-    document.getElementById(ROOT_ID)?.remove();
+    activeOptions.onExecution?.({
+      succeeded: false,
+      ...(ambiguousTradeOutcome || ambiguousNonTradeOutcome
+        ? { unconfirmed: true }
+        : {}),
+      signature: action.signature,
+      reason,
+      diagnostic: executionDiagnostic,
+    });
     requestBoardRefresh();
   };
 
@@ -2271,6 +2314,14 @@ const startWorkflow = (
     const rejection = visibleTradeFailure(ignoredTradeFailureLogKeys, ignoredTradeFailures);
     if (rejection) {
       fail(`Colonist rejected the trade workflow: ${rejection}`);
+      return true;
+    }
+    const submittedAtMs = submittedAt ?? firstDispatchAt ?? Date.now();
+    if (Date.now() - submittedAtMs >= SUBMITTED_TRADE_OBSERVE_MS) {
+      fail(
+        "Colonist did not commit the submitted trade after bounded observation",
+        submittedDiagnostic,
+      );
       return true;
     }
     workflowCurrentElement = undefined;
@@ -2336,12 +2387,13 @@ const startWorkflow = (
         completedOptions.validateTransactionCommit &&
         !completedOptions.validateTransactionCommit()
       ) {
-        if (attempts < 24) {
-          requestBoardRefresh();
-          later(() => run(index, attempts + 1), 140);
-        } else {
-          fail("Colonist did not commit the submitted trade");
+        if (workflowTradeSubmitted) {
+          observeSubmittedTrade();
+          return;
         }
+        // No submit was dispatched, so no ambiguous transaction exists: draft
+        // clicks are idempotent and safe to replan. Report definitively.
+        fail("Colonist did not commit the submitted trade");
         return;
       }
       lastClickSignature = action.signature;
@@ -2482,8 +2534,7 @@ const startWorkflow = (
     // verify draft/card changes only after its click handler has run.
     element.addEventListener("click", () => {
       if (generation === workflowGeneration && workflowSignature === action.signature) {
-        workflowHasDispatchedStep = true;
-        if (step.submitsTrade) workflowTradeSubmitted = true;
+        markDispatched(step.submitsTrade ?? false);
       }
     }, { once: true, capture: true });
     element.addEventListener(
@@ -2549,7 +2600,7 @@ const startWorkflow = (
                 ? currentOptions.validate
                 : currentOptions.validateContinuation,
               onExecutionStart: (result) => {
-                workflowHasDispatchedStep = true;
+                markDispatched(false);
                 currentOptions.onExecutionStart?.(result);
               },
             },
@@ -2559,6 +2610,13 @@ const startWorkflow = (
         ) {
           cancelWorkflow();
           return;
+        }
+        if (step.submitsTrade) {
+          // Attribute the submit after a successful dispatch even when
+          // Colonist replaced the node between resolve and click: the click
+          // was accepted somewhere, so the commit observer owns it rather
+          // than the step verifier. A thrown dispatch never reaches here.
+          markSubmitted();
         }
         // React can replace the clicked card/control while handling the same
         // event. In that case a listener attached to the old node is not a

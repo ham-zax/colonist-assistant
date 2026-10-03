@@ -4,6 +4,10 @@
 //! acting player's component, while dice, development draws, and steals are
 //! sampled from explicit chance nodes in `colonist-catan-core`.
 
+#[cfg(test)]
+mod crop6309_fixture;
+#[cfg(test)]
+mod crop6309_strategy_tests;
 mod deadline;
 mod depth;
 mod economy;

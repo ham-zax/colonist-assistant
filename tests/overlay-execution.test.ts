@@ -4,6 +4,7 @@ import { AssistantOverlay } from "../src/content/overlay";
 import * as guide from "../src/content/action-guide";
 import type { NextClick } from "../src/content/action-guide";
 import { DEFAULT_SETTINGS } from "../src/content/settings";
+import type { DecisionSearchConstraints } from "../src/core/engine";
 import type { DecisionTraceRecorder } from "../src/core/decision-trace";
 import type { BoardSnapshot } from "../src/core/placement";
 import { emptyResources } from "../src/core/resources";
@@ -12,16 +13,21 @@ import type { TrackerState } from "../src/core/types";
 
 type Internals = {
   board?: BoardSnapshot;
+  decisionAnalysis: unknown;
   decisionKey: string;
+  decisionPendingKey: string;
   decisionContextInvalidated: boolean;
   decisionRuntimeError: string;
   developmentSnapshotWait?: { startedAt: number; refreshes: number };
   decisionTraces: DecisionTraceRecorder;
+  decisionWorker: { reset: () => void };
+  decisionSearchConstraints(): DecisionSearchConstraints;
   warmDecisionEngine(): void;
   reconciledState(): TrackerState | undefined;
   spatialRecommendation(): undefined;
   scheduleDecisionAnalysis(state?: TrackerState, player?: string): void;
   coachReport(): undefined;
+  currentDecisionRationale(): undefined;
   nextClick(): NextClick | undefined;
   render(): void;
   runtimePresentation(): { label: string; state: string };
@@ -148,6 +154,162 @@ describe("overlay execution reconciliation", () => {
     } finally {
       window.removeEventListener("colonist-assistant-board-refresh", refresh);
     }
+  });
+
+  const bankAction: NextClick = {
+    kind: "trade-builder", mode: "bank",
+    give: { ...emptyResources(), wool: 4 },
+    receive: { ...emptyResources(), grain: 1 },
+    label: "Open recommended bank trade", signature: "bank-trade-guard", confidence: 1,
+  };
+  const endAction: NextClick = {
+    kind: "turn-control", control: "end", label: "End turn", signature: "alternative-end", confidence: 1,
+  };
+  const recoveryFixture = () => {
+    const overlay = new AssistantOverlay(
+      { ...DEFAULT_SETTINGS, recordGame: false, autonomousPrivateGames: true, autopilotDelaySeconds: 0 },
+      { reset: vi.fn() },
+    );
+    overlays.push(overlay);
+    const view = overlay as unknown as Internals;
+    const reset = vi.spyOn(view.decisionWorker, "reset");
+    let state = reduceTracker(createTrackerState(), { type: "discover", player: "You" });
+    state = reduceTracker(state, { type: "discover", player: "Rival" });
+    vi.spyOn(view, "reconciledState").mockReturnValue(state);
+    vi.spyOn(view, "spatialRecommendation").mockReturnValue(undefined);
+    vi.spyOn(view, "coachReport").mockReturnValue(undefined);
+    vi.spyOn(view, "currentDecisionRationale").mockReturnValue(undefined);
+    let chosen: NextClick = bankAction;
+    // Model the search seam: the engine chooses an alternative legal root only
+    // when the production overlay supplies the dispatched bank bundle constraint.
+    const search = vi.spyOn(view, "scheduleDecisionAnalysis").mockImplementation(() => {
+      const exclusions = view.decisionSearchConstraints().rootExclusions ?? [];
+      chosen = exclusions.some((action) => action.kind === "maritime-trade" &&
+        action.give.wool === 4 && action.receive.grain === 1) ? endAction : bankAction;
+      view.decisionAnalysis = { deepSearch: { chosen: chosen === bankAction
+        ? { kind: "maritime-trade", cards: [0, 0, 4, 0, 0], receiveCards: [0, 0, 0, 1, 0] }
+        : { kind: "end-turn" } } };
+    });
+    vi.spyOn(view, "nextClick").mockImplementation(() => chosen);
+    const before = { ...baseline(), ownHand: { ...emptyResources(), wool: 4 } };
+    overlay.updateBoard(before);
+    view.render();
+    const options = vi.mocked(guide.renderActionGuide).mock.calls.at(-1)![1];
+    const unconfirmed = () => options.onExecution?.({
+      succeeded: false, unconfirmed: true, signature: bankAction.signature,
+      reason: "Colonist did not commit the submitted trade after bounded observation",
+      diagnostic: { actionKind: "trade-builder" },
+    });
+    return { overlay, view, reset, before, unconfirmed, search };
+  };
+
+  it("replans an unconfirmed bank bundle to another autonomous legal root", () => {
+    const { view, reset, unconfirmed } = recoveryFixture();
+    unconfirmed();
+    expect(reset).toHaveBeenCalled();
+    expect(view.decisionSearchConstraints().rootExclusions).toEqual([{
+      kind: "maritime-trade", give: bankAction.kind === "trade-builder" ? bankAction.give : {},
+      receive: bankAction.kind === "trade-builder" ? bankAction.receive : {},
+    }]);
+    const next = vi.mocked(guide.renderActionGuide).mock.calls.at(-1)!;
+    expect(next[0]).toEqual(endAction);
+    expect(next[1].autonomous).toBe(true);
+  });
+
+  it("releases the real submitted workflow before replanning and clicking End Turn", async () => {
+    vi.mocked(guide.renderActionGuide).mockRestore();
+    const rendered = vi.spyOn(guide, "renderActionGuide");
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      x: 20, y: 20, left: 20, top: 20, right: 100, bottom: 60,
+      width: 80, height: 40, toJSON: () => ({}),
+    });
+    const open = document.createElement("button");
+    open.id = "action-button-trade";
+    const submitted = vi.fn();
+    open.addEventListener("click", () => {
+      const existing = document.querySelector(".bankTradePanel-fixture");
+      if (existing) { existing.remove(); return; }
+      const panel = document.createElement("div");
+      panel.className = "bankTradePanel-fixture";
+      panel.innerHTML = `
+        <div class="bankTradeAvailableCards-fixture"><button><img src="card_wool.svg"></button></div>
+        <div class="bankTradeReceiveCards-fixture"><button><img src="card_grain.svg"></button></div>
+        <div class="proposalOfferedHalfContainer-fixture"></div>
+        <div class="proposalWantedHalfContainer-fixture"></div>
+        <button id="action-button-trade-bank">Trade with bank</button>`;
+      panel.querySelector(".bankTradeAvailableCards-fixture button")!.addEventListener("click", () => {
+        panel.querySelector(".proposalOfferedHalfContainer-fixture")!.insertAdjacentHTML("beforeend",
+          '<button data-card-enum="3"><img src="card_wool.svg"></button>');
+      });
+      panel.querySelector(".bankTradeReceiveCards-fixture button")!.addEventListener("click", () => {
+        panel.querySelector(".proposalWantedHalfContainer-fixture")!.innerHTML =
+          '<button data-card-enum="4"><img src="card_grain.svg"></button>';
+      });
+      panel.querySelector("#action-button-trade-bank")!.addEventListener("click", submitted);
+      document.body.append(panel);
+    });
+    const end = document.createElement("button");
+    end.textContent = "End turn";
+    const ended = vi.fn();
+    end.addEventListener("click", ended);
+    document.body.append(open, end);
+    const { view } = recoveryFixture();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(submitted).toHaveBeenCalledOnce();
+    expect(guide.hasPendingTradeOutcome()).toBe(true);
+    expect(ended).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(guide.hasPendingTradeOutcome()).toBe(false);
+    expect(view.decisionSearchConstraints().rootExclusions).toHaveLength(1);
+    expect(rendered.mock.calls.at(-1)![0]).toEqual(endAction);
+    expect(rendered.mock.calls.at(-1)![1].autonomous).toBe(true);
+    expect(ended).toHaveBeenCalledOnce();
+    expect(submitted).toHaveBeenCalledOnce();
+    expect(document.querySelector(".bankTradePanel-fixture")).toBeNull();
+  });
+
+  it.each(["hand", "turn", "game", "out-of-turn"] as const)(
+    "releases an ambiguous bank exclusion after a meaningful %s change",
+    (change) => {
+      const { overlay, view, before, unconfirmed } = recoveryFixture();
+      unconfirmed();
+      expect(view.decisionSearchConstraints().rootExclusions).toHaveLength(1);
+      const after = structuredClone(before);
+      if (change === "hand") after.ownHand = { ...emptyResources(), grain: 1 };
+      if (change === "turn") after.turn! += 1;
+      if (change === "game") after.gameKey = "new-game";
+      if (change === "out-of-turn") { after.isMyTurn = false; after.currentPlayer = "Rival"; }
+      overlay.updateBoard(after);
+      expect(view.decisionSearchConstraints().rootExclusions).toBeUndefined();
+      overlay.updateBoard(before);
+      const next = vi.mocked(guide.renderActionGuide).mock.calls.at(-1)!;
+      expect(next[0]).toEqual(bankAction);
+      expect(next[1].autonomous).toBe(true);
+    },
+  );
+
+  it.each(["hand", "turn", "game", "out-of-turn"] as const)(
+    "does not attach a late callback to the replacement %s scope",
+    (change) => {
+      const { overlay, view, before, unconfirmed } = recoveryFixture();
+      const after = structuredClone(before);
+      if (change === "hand") after.ownHand = { ...emptyResources(), grain: 1 };
+      if (change === "turn") after.turn! += 1;
+      if (change === "game") after.gameKey = "new-game";
+      if (change === "out-of-turn") { after.isMyTurn = false; after.currentPlayer = "Rival"; }
+      overlay.updateBoard(after);
+      unconfirmed();
+      expect(view.decisionSearchConstraints().rootExclusions).toBeUndefined();
+    },
+  );
+
+  it("retains the original exclusion across a temporarily missing exact hand", () => {
+    const { overlay, view, before, unconfirmed } = recoveryFixture();
+    unconfirmed();
+    overlay.updateBoard({ ...before, ownHand: undefined });
+    expect(view.decisionSearchConstraints().rootExclusions).toBeUndefined();
+    overlay.updateBoard(before);
+    expect(view.decisionSearchConstraints().rootExclusions).toHaveLength(1);
   });
 
   it.each(["end", "monopoly", "road", "city"] as const)(

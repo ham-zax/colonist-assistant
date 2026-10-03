@@ -85,6 +85,13 @@ Before each automatic step, the extension checks that the board still matches
 the state used to pick the move. It stops and plans again when the state has
 changed.
 
+Road explanations distinguish a newly connected settlement site from an
+expansion that was already reachable before the move. Close comparisons are
+reported as differences in modeled value; they are not calibrated win odds.
+An unconfirmed submitted bank trade has a bounded observation window. After
+that window, autopilot replans without repeating the same bundle in the same
+turn and hand; a changed hand or turn allows a fresh evaluation.
+
 ## What it reads
 
 On `colonist.io`, the extension may read player display names, the public game
