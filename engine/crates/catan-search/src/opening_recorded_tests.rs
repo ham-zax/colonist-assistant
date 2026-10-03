@@ -676,6 +676,7 @@ fn hand2325_d1_does_not_sacrifice_half_the_production_for_a_generic_port() {
 }
 
 #[test]
+#[ignore = "slow budget-stability sweep; run explicitly with --ignored hand2325_d1_is_stable"]
 fn hand2325_d1_is_stable_across_live_and_reference_node_budgets() {
     let state = hand2325_d1();
     let weak_port = settlement_action(&state, "v:2,-1,0");
@@ -1584,6 +1585,7 @@ fn grain8695_opponent_uses_completed_portfolio_with_either_trade_policy() {
 }
 
 #[test]
+#[ignore = "slow 20-solve portfolio sweep; run explicitly with --ignored recorded_two_player_portfolios"]
 fn recorded_two_player_portfolios_keep_completed_choices_inside_live_work() {
     for (name, initial) in [
         ("grain8695", grain8695_state()),
