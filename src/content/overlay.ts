@@ -19,6 +19,7 @@ import {
   DecisionTraceRecorder,
   type DecisionActionSource,
 } from "../core/decision-trace";
+import { DevelopmentSnapshotSync } from "../core/development-sync";
 import {
   downloadRecordedGame,
   GameRecordRecorder,
@@ -431,6 +432,9 @@ export class AssistantOverlay {
     this.captureGameRecord(),
   );
   private readonly winPredictions = new WinPredictionStabilizer();
+  private readonly developmentSync = new DevelopmentSnapshotSync();
+  private developmentSnapshotWait?: { startedAt: number; refreshes: number };
+  private developmentSnapshotRefreshTimer?: number;
   private decisionAnalysis?: DecisionAnalysis;
   private decisionKey = "";
   private decisionPendingKey = "";
@@ -530,6 +534,7 @@ export class AssistantOverlay {
     this.session = session;
     if (session?.events?.length) this.resetGameScope = undefined;
     this.confirmPendingPlacementFromLog();
+    this.decisionTraces.reconcileExecutions();
     this.captureGameRecord();
     this.render();
   }
@@ -598,6 +603,8 @@ export class AssistantOverlay {
         this.board.turn !== nextBoard.turn,
     );
     if (gameChanged) {
+      this.developmentSync.reset();
+      this.clearDevelopmentSnapshotWait();
       this.lastRejectedDomesticTrade = undefined;
       this.rootTradeActionExclusions.length = 0;
       this.failedTradeActions.clear();
@@ -827,6 +834,7 @@ export class AssistantOverlay {
       }
     }
     this.board = nextBoard;
+    this.decisionTraces.reconcileExecutions();
     if (nextBoard && !identityResolved) {
       this.decisionAnalysis = undefined;
       this.decisionKey = "";
@@ -1066,6 +1074,8 @@ export class AssistantOverlay {
     this.lastDecisionRuntimeError = "";
     this.decisionWorker.reset();
     this.winPredictions.reset();
+    this.developmentSync.reset();
+    this.clearDevelopmentSnapshotWait();
     this.activeSpatial = undefined;
     this.roadPlan = undefined;
     this.freeRoadPlan = undefined;
@@ -1096,11 +1106,13 @@ export class AssistantOverlay {
   }
 
   destroy(): void {
+    this.clearDevelopmentSnapshotWait();
     if (this.tradeRenderFrame !== undefined) {
       window.cancelAnimationFrame(this.tradeRenderFrame);
     }
     destroyTradeVerdicts();
     destroyActionGuide();
+    this.decisionTraces.stopExecutionObservation();
     destroyWinOdds();
     this.decisionWorker.destroy();
     if (this.settings.recordGame) void this.gameRecorder.flush();
@@ -1817,8 +1829,22 @@ export class AssistantOverlay {
           this.board?.action,
           this.board?.robberVictimSelection,
         );
-    const next = localIdentityResolved && !this.decisionRuntimeError && !this.decisionContextInvalidated
+    const canResolveDisabledTrade = this.settings.disablePlayerTrades && this.board?.activeTrades?.some(
+      (trade) => !trade.incoming || (
+        !this.completedIncomingTradeIds.has(trade.id) &&
+        (!trade.myResponse || trade.myResponse === "pending")
+      ),
+    );
+    const candidate = localIdentityResolved && !this.decisionContextInvalidated &&
+      (!this.decisionRuntimeError || canResolveDisabledTrade)
       ? workflow ?? this.nextClick(state, spatial, report)
+      : undefined;
+    const disabledTradeResponse = this.settings.disablePlayerTrades && (
+      candidate?.kind === "trade-cancel" ||
+      (candidate?.kind === "trade" && candidate.verdict === "decline")
+    );
+    const next = localIdentityResolved && (!this.decisionRuntimeError || disabledTradeResponse) && !this.decisionContextInvalidated
+      ? candidate
       : undefined;
     const marker =
       spatial &&
@@ -2078,6 +2104,9 @@ export class AssistantOverlay {
         );
       };
     })();
+    const executionCommit = next?.kind === "board"
+      ? (): boolean => stillInGuideGame() && this.boardActionCommitted(next)
+      : controlCommit ?? developmentCommit ?? transactionCommit;
     if (next && traceKey) {
       this.decisionTraces.final(
         traceKey,
@@ -2091,7 +2120,9 @@ export class AssistantOverlay {
       autonomous: autonomousExecutionAllowed(
         this.settings.autonomousPrivateGames,
       ) && !this.unavailableTradeControls.has(nextSignature),
-      autopilotDelayMs: this.settings.autopilotDelaySeconds * 1_000,
+      // Closing disabled trades is a deterministic policy response. Waiting
+      // for strategic search or the optional thinking delay serves no purpose.
+      autopilotDelayMs: disabledTradeResponse ? 0 : this.settings.autopilotDelaySeconds * 1_000,
       validate: () =>
         Boolean(next && nextSignature) &&
         stillInGuideGame() &&
@@ -2123,10 +2154,15 @@ export class AssistantOverlay {
           }
         : {}),
       onExecutionStart: () => {
-        if (traceKey) this.decisionTraces.executionStarted(traceKey);
+        if (traceKey) this.decisionTraces.executionStarted(traceKey,
+          executionCommit ? {
+            committed: executionCommit,
+            inScope: () => this.board ? stillInGuideGame() : undefined,
+          } : undefined,
+        );
       },
       onExecutionPending: () => this.render(),
-      onExecution: ({ succeeded, reason, diagnostic }) => {
+      onExecution: ({ succeeded, unconfirmed, reason, diagnostic }) => {
         const strategicTradeFailure = Boolean(
           !succeeded &&
             reason?.startsWith("Colonist rejected the trade workflow:"),
@@ -2144,7 +2180,7 @@ export class AssistantOverlay {
           const boardTradeIds = this.board?.activeTrades?.map((trade) => trade.id);
           this.decisionTraces.execution(
             traceKey,
-            succeeded,
+            unconfirmed ? undefined : succeeded,
             reason,
             !succeeded
               ? {
@@ -2164,6 +2200,7 @@ export class AssistantOverlay {
               : undefined,
           );
         }
+        if (unconfirmed) return;
         if (
           !succeeded && next &&
           (next.kind === "trade" || next.kind === "trade-builder" ||
@@ -2657,6 +2694,13 @@ export class AssistantOverlay {
         state: "error",
       };
     }
+    if (this.developmentSnapshotWait) {
+      return {
+        label: Date.now() - this.developmentSnapshotWait.startedAt >= 5_000 ? "Reload tab" : "Hand sync",
+        detail: this.decisionRuntimeError,
+        state: Date.now() - this.developmentSnapshotWait.startedAt >= 5_000 ? "error" : "searching",
+      };
+    }
     if (this.decisionRuntimeError) {
       return {
         // Validation failures also reach this path; never label missing
@@ -3126,16 +3170,25 @@ export class AssistantOverlay {
     }
   }
 
+  private clearDevelopmentSnapshotWait(): void {
+    if (this.developmentSnapshotRefreshTimer !== undefined) {
+      window.clearTimeout(this.developmentSnapshotRefreshTimer);
+      this.developmentSnapshotRefreshTimer = undefined;
+    }
+    this.developmentSnapshotWait = undefined;
+  }
+
   private scheduleDecisionAnalysis(
     state: TrackerState | undefined,
     player: string | undefined,
   ): void {
     if (hasPendingTradeOutcome()) return;
     const board = this.board;
-    const hasPendingIncomingTrade = unansweredIncomingTrades(
+    const pendingIncomingTrades = unansweredIncomingTrades(
       board?.activeTrades,
       this.completedIncomingTradeIds,
-    ).some(isFullySpecifiedTrade);
+    );
+    const hasPendingIncomingTrade = pendingIncomingTrades.some(isFullySpecifiedTrade);
     if (
       !state ||
       !player ||
@@ -3143,6 +3196,7 @@ export class AssistantOverlay {
       board.localSeatDiagnostics?.identity.status !== "resolved" ||
       board.gameOver
     ) {
+      this.clearDevelopmentSnapshotWait();
       this.decisionTraces.supersedePending();
       this.decisionAnalysis = undefined;
       this.decisionKey = "";
@@ -3151,6 +3205,58 @@ export class AssistantOverlay {
       this.decisionWaitingForPreviousSearch = false;
       this.decisionWorker.reset();
       return;
+    }
+    if (this.settings.disablePlayerTrades && board.action === "none" &&
+      !board.initialPlacement && !board.robberVictimSelection && (
+      pendingIncomingTrades.length > 0 || board.activeTrades?.some((trade) => !trade.incoming)
+    )) {
+      // Decline/cancel needs the validated offer, not resources, dice evidence,
+      // development inventory, or a completed strategic search.
+      this.clearDevelopmentSnapshotWait();
+      this.decisionAnalysis = undefined;
+      this.decisionKey = "";
+      this.decisionPendingKey = "";
+      this.decisionSlowKey = "";
+      this.decisionWaitingForPreviousSearch = false;
+      this.decisionRuntimeError = "";
+      this.decisionEvidenceWait = undefined;
+      this.decisionTraces.supersedePending();
+      this.decisionWorker.reset();
+      return;
+    }
+    if (this.developmentSync.isWaiting(state, board)) {
+      if (!this.developmentSnapshotWait) {
+        this.developmentSnapshotWait = { startedAt: Date.now(), refreshes: 0 };
+        this.decisionWorker.reset();
+        this.decisionAnalysis = undefined;
+        this.decisionKey = "";
+        this.decisionPendingKey = "";
+        this.decisionSlowKey = "";
+        this.decisionTraces.supersedePending();
+        window.dispatchEvent(new CustomEvent("colonist-assistant-board-refresh"));
+      }
+      const wait = this.developmentSnapshotWait;
+      const expired = Date.now() - wait.startedAt >= 5_000;
+      if (!expired && wait.refreshes < 10 && this.developmentSnapshotRefreshTimer === undefined) {
+        this.developmentSnapshotRefreshTimer = window.setTimeout(() => {
+          this.developmentSnapshotRefreshTimer = undefined;
+          if (this.developmentSnapshotWait !== wait) return;
+          wait.refreshes++;
+          window.dispatchEvent(new CustomEvent("colonist-assistant-board-refresh"));
+          this.render();
+        }, 500);
+      }
+      // Persistent disagreement remains fail-closed. A deadline must never
+      // turn stale exact holdings into an invented hand or an executable move.
+      this.decisionRuntimeError = expired
+        ? "Development-card hand is still out of sync. Refresh the game tab to recover."
+        : "Waiting for your development-card hand to catch up with the public play";
+      this.decisionRuntimeDetail = this.decisionRuntimeError;
+      return;
+    }
+    if (this.developmentSnapshotWait) {
+      this.clearDevelopmentSnapshotWait();
+      this.decisionRuntimeError = "";
     }
     const decisionBoardBase = board.activeTrades
       ? {
@@ -3163,21 +3269,6 @@ export class AssistantOverlay {
         }
       : board;
     const decisionBoard = decisionBoardBase;
-    if (this.settings.disablePlayerTrades && hasPendingIncomingTrade) {
-      // This policy makes the only executable local response deterministic.
-      // Do not spend search budget searching a trade that nextClick() must
-      // decline regardless of strategic value.
-      this.decisionAnalysis = undefined;
-      this.decisionKey = "";
-      this.decisionPendingKey = "";
-      this.decisionSlowKey = "";
-      this.decisionWaitingForPreviousSearch = false;
-      this.decisionRuntimeError = "";
-      this.decisionEvidenceWait = undefined;
-      this.decisionTraces.supersedePending();
-      this.decisionWorker.reset();
-      return;
-    }
     if (this.awaitingLocalSevenProtocol()) {
       this.decisionAnalysis = undefined;
       this.decisionKey = "";
@@ -4176,7 +4267,7 @@ export class AssistantOverlay {
       return undefined;
     }
 
-    if (state && board.activeTrades?.length) {
+    if ((state || this.settings.disablePlayerTrades) && board.activeTrades?.length) {
       for (let index = 0; index < board.activeTrades.length; index += 1) {
         const trade = board.activeTrades[index]!;
         if (
@@ -4200,11 +4291,11 @@ export class AssistantOverlay {
             tradeCreatorReceive: { ...trade.creatorReceive },
             verdict: "decline",
             label: "Decline this trade",
-            signature: `${signatureBase}|trade|${trade.id}|decline|player-trades-disabled`,
+            signature: `${board.gameKey ?? location.pathname}|trade|${trade.id}|decline|player-trades-disabled`,
             confidence: 1,
           };
         }
-        if (!report) continue;
+        if (!state || !report) continue;
         const deepAction = this.preferredDeepAction(
           state,
           report.player,
@@ -4313,7 +4404,7 @@ export class AssistantOverlay {
           tradeCreatorGive: { ...trade.creatorGive },
           tradeCreatorReceive: { ...trade.creatorReceive },
           label: "Cancel player trade",
-          signature: `${signatureBase}|cancel-trade|${trade.id}|player-trades-disabled`,
+          signature: `${board.gameKey ?? location.pathname}|cancel-trade|${trade.id}|player-trades-disabled`,
           confidence: 1,
         };
       }

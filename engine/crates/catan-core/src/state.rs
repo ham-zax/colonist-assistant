@@ -689,6 +689,12 @@ impl GameState {
         if self.phase == Phase::Finished {
             return Vec::new();
         }
+        if self.has_pending_free_road() {
+            return (0..self.board.edges.len() as u8)
+                .filter(|edge| self.can_build_road(*edge))
+                .map(|edge| Action::BuildRoad { edge })
+                .collect();
+        }
         match self.phase {
             Phase::SetupSettlement => self
                 .board
@@ -764,6 +770,9 @@ impl GameState {
     fn apply_in_place(&mut self, action: &Action) -> Result<(), RuleError> {
         if self.phase == Phase::Finished {
             return Err(RuleError::GameFinished);
+        }
+        if !matches!(action, Action::BuildRoad { .. }) && self.has_pending_free_road() {
+            return Err(RuleError::WrongPhase);
         }
         match action {
             Action::PlaceSettlement { vertex } => self.place_setup_settlement(*vertex),
@@ -891,6 +900,7 @@ impl GameState {
             .prepare_roll(self.current_player)
             .map_err(|_| RuleError::InvalidStochasticState)?;
         self.phase = Phase::RollChance;
+        self.free_roads = 0;
         Ok(())
     }
 
@@ -1523,7 +1533,14 @@ impl GameState {
         })
     }
 
+    fn has_pending_free_road(&self) -> bool {
+        self.free_roads > 0
+            && matches!(self.phase, Phase::Main | Phase::PreRoll)
+            && (0..self.board.edges.len() as u8).any(|edge| self.can_build_road(edge))
+    }
+
     fn build_road(&mut self, edge: u8, free: bool) -> Result<(), RuleError> {
+        let free = free || self.free_roads > 0;
         if self.phase != Phase::Main && !(free && self.phase == Phase::PreRoll) {
             return Err(RuleError::WrongPhase);
         }
@@ -1534,6 +1551,7 @@ impl GameState {
             self.pay_current(&ROAD_COST)?;
         }
         self.place_road_piece(edge)?;
+        self.free_roads = self.free_roads.saturating_sub(1);
         self.update_longest_road();
         Ok(())
     }
@@ -2115,6 +2133,7 @@ impl GameState {
         player.bought_development = [0; 5];
         player.played_development_this_turn = false;
         self.domestic_trade_used = false;
+        self.free_roads = 0;
         self.domestic_trade_count = 0;
         self.last_rejected_trade = None;
         self.trade_negotiation_round = 0;
@@ -3105,6 +3124,60 @@ mod tests {
         );
         state.apply(&actions[0]).unwrap();
         assert_eq!(state.players[0].roads_left, 0);
+    }
+
+    #[test]
+    fn pending_free_road_is_mandatory_and_does_not_charge_resources() {
+        for phase in [Phase::Main, Phase::PreRoll] {
+            let mut state = GameState::standard(91, 4);
+            play_setup(&mut state);
+            state.phase = phase;
+            state.current_player = 0;
+            state.free_roads = 2;
+            // An empty hand must still place both owed roads.
+            for resource in 0..5 {
+                state.bank[resource] += state.players[0].resources[resource];
+                state.players[0].resources[resource] = 0;
+            }
+            let bank = state.bank;
+            let pieces = state.players[0].roads_left;
+            let before = state.clone();
+            assert!(state.apply(&Action::EndTurn).is_err());
+            assert!(state.apply(&Action::Roll).is_err());
+            assert_eq!(state, before);
+            for remaining in [2, 1] {
+                let actions = state.legal_actions();
+                assert!(!actions.is_empty());
+                assert!(
+                    actions
+                        .iter()
+                        .all(|action| matches!(action, Action::BuildRoad { .. }))
+                );
+                state.apply(&actions[0]).unwrap();
+                assert_eq!(state.free_roads, remaining - 1);
+                assert_eq!(state.players[0].resources, [0; 5]);
+                assert_eq!(state.bank, bank);
+                assert_eq!(state.phase, phase);
+                state.validate().unwrap();
+            }
+            assert_eq!(state.players[0].roads_left, pieces - 2);
+            assert!(state.legal_actions().contains(if phase == Phase::Main {
+                &Action::EndTurn
+            } else {
+                &Action::Roll
+            }));
+        }
+    }
+
+    #[test]
+    fn unusable_free_road_credit_does_not_block_the_turn() {
+        let mut state = GameState::standard(91, 4);
+        state.phase = Phase::Main;
+        state.free_roads = 1;
+        // No owned building or road means there is nowhere to connect a road.
+        assert_eq!(state.legal_actions(), vec![Action::EndTurn]);
+        state.apply(&Action::EndTurn).unwrap();
+        assert_eq!(state.free_roads, 0);
     }
 
     #[test]

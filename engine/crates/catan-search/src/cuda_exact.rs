@@ -461,6 +461,11 @@ fn pack_state_words(
     words: &mut [u32; STATE_WORDS],
 ) -> Result<(), CudaExactError> {
     let board = state.board.as_ref();
+    if state.free_roads > 0 {
+        return Err(CudaExactError::UnsupportedState(
+            "pending free road placements require the CPU rules path",
+        ));
+    }
     let players = board.num_players as usize;
     if !(2..=MAX_PLAYERS).contains(&players) || state.players.len() != players {
         return Err(CudaExactError::UnsupportedState(

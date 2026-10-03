@@ -2139,6 +2139,11 @@ fn pack_trade_words(trade: Option<TradeOffer>, words: &mut [u32; STATE_WORDS], b
 }
 
 fn pack_state_words(state: &GameState, words: &mut [u32; STATE_WORDS]) -> Result<(), CudaSimError> {
+    if state.free_roads > 0 {
+        return Err(CudaSimError::UnsupportedState(
+            "pending free road placements require the CPU rules path",
+        ));
+    }
     let board = state.board.as_ref();
     let players = board.num_players as usize;
     if !(2..=MAX_PLAYERS).contains(&players) || state.players.len() != players {

@@ -168,6 +168,8 @@ export interface ActionGuideOptions {
   onExecutionStart?: (result: { signature: string }) => void;
   onExecution?: (result: {
     succeeded: boolean;
+    /** Observation expired or was interrupted; this does not prove rejection. */
+    unconfirmed?: boolean;
     signature: string;
     reason?: string;
     diagnostic?: ActionExecutionDiagnostic;
@@ -1317,6 +1319,7 @@ const scheduleBoardCommandRetry = (
           signature: action.signature,
           ...(!committed
             ? {
+                unconfirmed: true,
                 reason:
                   "Board state changed without the expected placement commit",
               }
@@ -1331,6 +1334,7 @@ const scheduleBoardCommandRetry = (
       options.onExecution?.({
         succeeded: false,
         signature: action.signature,
+        unconfirmed: true,
         reason:
           "Colonist did not commit board placement after bounded validated retries",
       });
@@ -1390,7 +1394,7 @@ const validatedClick = (
 const awaitControlCommit = (
   action: NextClick,
   options: ActionGuideOptions,
-  attempt = 0,
+  startedAt = Date.now(),
 ): void => {
   const committed = options.validateControlCommit;
   if (!committed) return;
@@ -1411,16 +1415,22 @@ const awaitControlCommit = (
       if (lastClickSignature === action.signature) lastClickSignature = "";
       options.onExecution?.({
         succeeded: false,
+        unconfirmed: true,
         signature: action.signature,
         reason: "Colonist state changed without the expected control commit",
       });
       requestBoardRefresh();
       return;
     }
-    if (attempt >= 23) {
-      if (lastClickSignature === action.signature) lastClickSignature = "";
+    if (Date.now() - startedAt >= 15_000) {
+      // Roll/end controls can be re-resolved against a refreshed legal state.
+      // An uncertain trade response must stay latched to avoid resubmission.
+      if (action.kind === "turn-control" && lastClickSignature === action.signature) {
+        lastClickSignature = "";
+      }
       options.onExecution?.({
         succeeded: false,
+        unconfirmed: true,
         signature: action.signature,
         reason: "Colonist did not commit the recommended control",
       });
@@ -1428,7 +1438,7 @@ const awaitControlCommit = (
       return;
     }
     requestBoardRefresh();
-    awaitControlCommit(action, options, attempt + 1);
+    awaitControlCommit(action, options, startedAt);
   }, 140);
 };
 
@@ -2137,6 +2147,11 @@ export const activeWorkflowAction = (
 ): NextClick | undefined => {
   if (!workflowSignature || !workflowAction) return undefined;
   if (hasPendingTradeOutcome()) return workflowAction;
+  if (workflowOptions?.validateContinuation?.() === false) {
+    cancelWorkflow();
+    document.getElementById(ROOT_ID)?.remove();
+    return undefined;
+  }
   if (
     workflowAction.kind === "development" &&
     workflowHasDispatchedStep &&
@@ -2206,6 +2221,9 @@ const startWorkflow = (
     const activeOptions = workflowOptions ?? options;
     activeOptions.onExecution?.({
       succeeded: false,
+      ...(workflowHasDispatchedStep && reason.startsWith("Colonist did not commit")
+        ? { unconfirmed: true }
+        : {}),
       signature: action.signature,
       reason,
       diagnostic: tradeExecutionDiagnostic(action),
@@ -2849,6 +2867,7 @@ export const renderActionGuide = (
             signature: command.action.signature,
             ...(!committed
               ? {
+                  unconfirmed: true,
                   reason:
                     "Board state changed without the expected placement commit",
                 }

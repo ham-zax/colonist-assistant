@@ -22,6 +22,7 @@ import {
   type ResourceVector,
 } from "../core/resources";
 import type { TrackerState } from "../core/types";
+import { hasPendingFreeRoad } from "../core/development-sync";
 import type {
   DeepSearchAction,
   DeepSearchResult,
@@ -1227,7 +1228,10 @@ export const buildDeepSearchRequest = (
       `Deep Search requires exactly one robber location; found ${blockedHexes.length}`,
     );
   }
-  const phase = inferPhase(board, players[current] ?? rootPlayer);
+  const freeRoads = hasPendingFreeRoad(state, board) ? 1 : 0;
+  const phase = freeRoads
+    ? { phase: board.hasRolled === false ? "pre-roll" : "main" }
+    : inferPhase(board, players[current] ?? rootPlayer);
   const activeTrade = board.activeTrades?.find(isProtocolActiveTrade);
   const requirePlayerIndex = (name: string, context: string): number => {
     const index = playerIndex.get(name);
@@ -1591,6 +1595,9 @@ export const buildDeepSearchRequest = (
         robberHex,
         currentPlayer: current,
         phase: phase.phase,
+        // The current live road prompt is authoritative. Replan one owed free
+        // placement at a time when no retained two-road plan is available.
+        freeRoads,
         ...(phase.parameter !== undefined && phase.parameter >= 0
           ? { phaseParameter: phase.parameter }
           : {}),

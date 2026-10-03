@@ -724,7 +724,8 @@ const migrateCompactRecordContracts = (record: CompactGameRecord): void => {
       const executionFinishedAt = previousCell(row, "executionFinishedAtMs");
       const executionOk = previousCell(row, "executionOk");
       if (typeof executionFinishedAt === "number") {
-        return executionOk === true ? "execution-complete" : "execution-failed";
+        return executionOk === true ? "execution-complete"
+          : executionOk === false ? "execution-failed" : "execution-unconfirmed";
       }
       if (status === "superseded") return "superseded";
       if (typeof executionStartedAt === "number") return "execution-pending";

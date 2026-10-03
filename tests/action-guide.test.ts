@@ -61,6 +61,59 @@ afterEach(() => {
 });
 
 describe("action guide autopilot", () => {
+  it("waits for a delayed end-turn commit beyond the old 24-poll limit", async () => {
+    const end = document.createElement("button");
+    end.textContent = "End turn";
+    const clicked = vi.fn();
+    end.addEventListener("click", clicked);
+    document.body.append(end);
+    let committed = false;
+    const executed = vi.fn();
+    renderActionGuide({
+      kind: "turn-control", control: "end", signature: "delayed-end", label: "End turn", confidence: 1,
+    }, {
+      highlight: true, autonomous: true, validate: () => true,
+      validateControlCommit: () => committed, validateControlContinuation: () => true,
+      onExecution: executed,
+    });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(clicked).toHaveBeenCalledOnce();
+    expect(executed).not.toHaveBeenCalled();
+    committed = true;
+    await vi.advanceTimersByTimeAsync(140);
+    expect(executed).toHaveBeenCalledExactlyOnceWith({ succeeded: true, signature: "delayed-end" });
+  });
+
+  it("ends an inconclusive control observation with an explicit unconfirmed result", async () => {
+    const end = document.createElement("button");
+    end.textContent = "End turn";
+    document.body.append(end);
+    const executed = vi.fn();
+    renderActionGuide({
+      kind: "turn-control", control: "end", signature: "unconfirmed-end", label: "End turn", confidence: 1,
+    }, {
+      highlight: true, autonomous: true, validate: () => true,
+      validateControlCommit: () => false, validateControlContinuation: () => true,
+      onExecution: executed,
+    });
+    await vi.advanceTimersByTimeAsync(15_200);
+    expect(executed).toHaveBeenCalledExactlyOnceWith({
+      succeeded: false, unconfirmed: true, signature: "unconfirmed-end",
+      reason: "Colonist did not commit the recommended control",
+    });
+  });
+
+  it("releases an unsubmitted player-trade workflow immediately when policy invalidates it", () => {
+    let allowed = true;
+    renderActionGuide({
+      kind: "trade-builder", mode: "player", give: { ...emptyResources(), lumber: 1 },
+      receive: { ...emptyResources(), ore: 1 }, signature: "disabled-before-submit", label: "Offer trade", confidence: 1,
+    }, { highlight: false, autonomous: false, validateContinuation: () => allowed });
+    expect(activeWorkflowAction("none")?.kind).toBe("trade-builder");
+    allowed = false;
+    expect(activeWorkflowAction("none")).toBeUndefined();
+  });
+
   it("clicks a recommended action without a private-room gate", async () => {
     const roll = document.createElement("button");
     roll.textContent = "Roll dice";
@@ -751,6 +804,7 @@ describe("action guide autopilot", () => {
       succeeded: false,
       signature: "monopoly-no-semantic-commit",
       reason: "Colonist did not commit the development card workflow",
+      unconfirmed: true,
       diagnostic: { actionKind: "development" },
     });
   });
@@ -820,6 +874,7 @@ describe("action guide autopilot", () => {
       succeeded: false,
       signature: "yop-no-semantic-commit",
       reason: "Colonist did not commit the development card workflow",
+      unconfirmed: true,
       diagnostic: { actionKind: "development" },
     });
   });
@@ -1086,6 +1141,7 @@ describe("action guide autopilot", () => {
     expect(executions).toHaveBeenCalledWith({
       succeeded: false,
       signature: "ignored-board-settlement",
+      unconfirmed: true,
       reason:
         "Colonist did not commit board placement after bounded validated retries",
     });
@@ -1205,6 +1261,7 @@ describe("action guide autopilot", () => {
     expect(executions).toHaveBeenCalledWith({
       succeeded: false,
       signature: "ignored-board-road-rerender",
+      unconfirmed: true,
       reason:
         "Colonist did not commit board placement after bounded validated retries",
     });
@@ -1287,6 +1344,7 @@ describe("action guide autopilot", () => {
     expect(executions).toHaveBeenCalledWith({
       succeeded: false,
       signature: "uncommitted-board-road",
+      unconfirmed: true,
       reason:
         "Board state changed without the expected placement commit",
     });

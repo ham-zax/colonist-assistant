@@ -199,6 +199,8 @@ struct StateInput {
     current_player: u8,
     phase: String,
     phase_parameter: Option<u8>,
+    #[serde(default)]
+    free_roads: u8,
     turn: u16,
     last_roll: u8,
     #[serde(default)]
@@ -1335,6 +1337,11 @@ fn game_states(
         .collect::<Vec<_>>();
     let players = input.players.into_iter().map(player).collect::<Vec<_>>();
     let game_phase = phase(&input.phase, input.phase_parameter)?;
+    if input.free_roads > 2
+        || (input.free_roads > 0 && !matches!(game_phase, Phase::Main | Phase::PreRoll))
+    {
+        return Err("free road placement requires 1-2 roads in main or pre-roll phase".into());
+    }
     let robber_return_phase = phase(&input.robber_return_phase, None)?;
     let trade = input.trade.map(|trade| TradeOffer {
         creator: trade.creator,
@@ -1407,7 +1414,7 @@ fn game_states(
             discard_remaining: input.discard_remaining,
             discard_cursor: input.discard_cursor,
             robber_return_phase,
-            free_roads: 0,
+            free_roads: input.free_roads,
             domestic_trade_used: input.domestic_trade_used,
             // The live adapter's boolean means this turn's offer budget is
             // exhausted. Mapping it to one left the simulator's second

@@ -606,6 +606,12 @@ describe("compact LLM game record", () => {
         executionFinishedAt: 1_300,
         executionSucceeded: false,
       },
+      {
+        ...trace("execution-unconfirmed-state", { kind: "turn-control", control: "end" }),
+        finalActionSelectedAt: 1_100,
+        executionStartedAt: 1_200,
+        executionFinishedAt: 1_300,
+      },
     ];
     const initial = new CompactGameBuilder().apply(
       {
@@ -690,6 +696,7 @@ describe("compact LLM game record", () => {
       "execution-pending-state": "execution-pending",
       "execution-complete-state": "execution-complete",
       "execution-failed-state": "execution-failed",
+      "execution-unconfirmed-state": "execution-unconfirmed",
     });
     const rootActionColumn = resumed.contracts.rootColumns.indexOf("action");
     const finalRankColumn = resumed.contracts.rootColumns.indexOf("finalRank");

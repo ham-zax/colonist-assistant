@@ -1,5 +1,5 @@
 import { resolveLocalBoardAction } from "../core/forced-action";
-import { isTerminalGameHeading } from "../core/game-over";
+import { hasWonTheGamePhrase, isTerminalGameHeading, resolveWonTheGameWinner } from "../core/game-over";
 import { isSetupTurn } from "../core/game-progress";
 import { resolveLocalIdentity } from "../core/local-identity";
 import {
@@ -1217,16 +1217,22 @@ import {
         isTerminalGameHeading(element.textContent)
       );
     });
-    const winnerText = (document.body.textContent ?? "").match(
-      /([^\n]{1,80}?)\s+won the game/iu,
-    )?.[1]?.trim();
-    const gameOver = Boolean(visibleWinner || endgameHeading || winnerText);
+    const roster = playOrder.map((color) =>
+      playerName(gameController, color),
+    );
+    // Map the banner to a canonical observed roster name. Never surface raw
+    // preceding body text as the winner: flattened DOM prefixes the banner
+    // with award chatter, trophy glyphs, or adjacent panels. The raw phrase
+    // remains an independent terminal signal, so an unmatched outsider name
+    // still ends the game while leaving the winner unknown.
+    const bodyText = document.body.textContent ?? "";
+    const winnerText = resolveWonTheGameWinner(bodyText, roster);
+    const gameOver = Boolean(
+      visibleWinner || endgameHeading || hasWonTheGamePhrase(bodyText),
+    );
     const winner = visibleWinner ?? winnerText;
 
-    const playerRosterKey = playOrder
-      .map((color) => playerName(gameController, color))
-      .sort()
-      .join(",");
+    const playerRosterKey = [...roster].sort().join(",");
     const snapshotProgressInput = {
       completedTurns,
       placedPieces,

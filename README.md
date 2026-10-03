@@ -149,6 +149,16 @@ failure-containment limit. At that cutoff the request is reported as an engine
 error and autopilot remains paused. A service-worker or WASM failure is also
 shown as `WASM error`; no JavaScript action policy substitutes for Strategist.
 
+After your development-card play, `Hand sync` pauses recommendations until the
+public play and exact local hand agree. Snapshot refreshes are bounded to five
+seconds; a persistent mismatch asks you to refresh the game tab. Confirmed Road
+Building prompts can still search a free placement after the card leaves your
+hand. Execution records distinguish snapshot-confirmed commits from
+`execution-unconfirmed` outcomes after interruption or a fifteen-second timeout.
+With player trades disabled, automation declines incoming offers and cancels
+your outgoing offers as soon as their validated controls are available. These
+responses bypass strategic search and the optional automation delay.
+
 ## Decision engine
 
 **Strategist** is the only live engine. Complete local enumeration handles

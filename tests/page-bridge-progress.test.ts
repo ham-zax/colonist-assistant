@@ -135,6 +135,29 @@ describe("page bridge progress boundaries", () => {
     expect(page.snapshot()?.robberVictimSelection).toBeUndefined();
   });
 
+  it("maps the won-the-game banner to the canonical roster name", () => {
+    const page = openPage();
+    page.window.document.body.insertAdjacentHTML(
+      "beforeend",
+      "<div>Longest Road passed from Alice to Bob (+2 VPs)</div>" +
+        "<div>🏆Bob won the game!</div>",
+    );
+    page.refresh();
+    expect(page.snapshot()).toMatchObject({ winner: "Bob", gameOver: true });
+  });
+
+  it("keeps the terminal signal while leaving an outsider winner unknown", () => {
+    const page = openPage();
+    page.window.document.body.insertAdjacentHTML(
+      "beforeend",
+      "<div>Longest Road passed from Alice to Stranger (+2 VPs)</div>" +
+        "<div>🏆Stranger won the game!</div>",
+    );
+    page.refresh();
+    expect(page.snapshot()).toMatchObject({ gameOver: true });
+    expect(page.snapshot()?.winner).toBeUndefined();
+  });
+
   it("rejects midgame setup hydration before publishing or overwriting persisted progress", () => {
     const page = openPage();
     const before = page.snapshot();

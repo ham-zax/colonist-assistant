@@ -114,6 +114,7 @@ export type DecisionLifecycleStatus =
   | "superseded"
   | "action-selected"
   | "execution-pending"
+  | "execution-unconfirmed"
   | "execution-complete"
   | "execution-failed";
 
@@ -297,13 +298,13 @@ const summarizeBeliefs = (
 
 const refreshLifecycleStatus = (trace: DecisionTrace): void => {
   if (trace.executionFinishedAt !== undefined) {
-    trace.lifecycleStatus = trace.executionSucceeded
-      ? "execution-complete"
-      : "execution-failed";
-  } else if (trace.deepStatus === "superseded") {
-    trace.lifecycleStatus = "superseded";
+    trace.lifecycleStatus = trace.executionSucceeded === undefined
+      ? "execution-unconfirmed"
+      : trace.executionSucceeded ? "execution-complete" : "execution-failed";
   } else if (trace.executionStartedAt !== undefined) {
     trace.lifecycleStatus = "execution-pending";
+  } else if (trace.deepStatus === "superseded") {
+    trace.lifecycleStatus = "superseded";
   } else if (trace.finalAction !== undefined) {
     trace.lifecycleStatus = "action-selected";
   } else if (trace.deepStatus === "complete") {
@@ -317,6 +318,12 @@ const refreshLifecycleStatus = (trace: DecisionTrace): void => {
 
 export class DecisionTraceRecorder {
   private readonly traces = new Map<string, DecisionTrace>();
+  private readonly executions = new Map<string, {
+    committed?: () => boolean;
+    inScope?: () => boolean | undefined;
+    deadline: number;
+  }>();
+  private executionTimer?: ReturnType<typeof globalThis.setTimeout>;
   private persistTimer?: ReturnType<typeof globalThis.setTimeout>;
   private storageOperations: Promise<void> = Promise.resolve();
   private legacyStorageEnabled = true;
@@ -669,31 +676,86 @@ export class DecisionTraceRecorder {
     this.schedulePersist();
   }
 
-  executionStarted(stateHash: string): void {
+  executionStarted(
+    stateHash: string,
+    observation?: { committed: () => boolean; inScope: () => boolean | undefined },
+  ): void {
     const trace = this.traces.get(stateHash);
-    if (!trace || trace.executionStartedAt !== undefined) return;
+    if (!trace || trace.executionSucceeded === true || this.executions.has(stateHash) ||
+      (trace.executionStartedAt !== undefined && trace.executionFinishedAt === undefined)) return;
     trace.executionStartedAt = Date.now();
+    trace.executionFinishedAt = undefined;
+    trace.executionSucceeded = undefined;
+    trace.executionFailureReason = undefined;
+    trace.executionDiagnostic = undefined;
     trace.executedBeforeDeepResult = trace.deepRequestFinishedAt === undefined;
+    // Dispatch ownership survives overlay rerenders and workflow cancellation.
+    // This observer only reads evidence; it never clicks or retries an action.
+    this.executions.set(stateHash, { ...observation, deadline: Date.now() + 15_000 });
+    this.scheduleExecutionObservation();
     refreshLifecycleStatus(trace);
     this.schedulePersist();
   }
 
   execution(
     stateHash: string,
-    succeeded: boolean,
+    succeeded: boolean | undefined,
     failureReason?: string,
     diagnostic?: DecisionExecutionDiagnostic,
   ): void {
     const trace = this.traces.get(stateHash);
     if (!trace) return;
+    // A late timer/cancellation cannot overwrite an authoritative commit.
+    if (trace.executionSucceeded === true) return;
+    const observation = this.executions.get(stateHash);
+    const inScope = observation?.inScope?.() !== false;
+    if (inScope && observation?.committed?.()) succeeded = true;
+    else if (succeeded === true && observation?.committed) {
+      // A UI callback can mean only that a confirmation click dispatched.
+      // The snapshot predicate remains the authority for this action.
+      return;
+    }
+    if (succeeded !== undefined) this.executions.delete(stateHash);
     trace.executionFinishedAt = Date.now();
     trace.executionSucceeded = succeeded;
-    trace.executionFailureReason = failureReason;
+    trace.executionFailureReason = succeeded === true ? undefined : failureReason;
     trace.executionDiagnostic = diagnostic
       ? structuredClone(diagnostic)
       : undefined;
     refreshLifecycleStatus(trace);
     this.schedulePersist();
+  }
+
+  reconcileExecutions(): void {
+    for (const [stateHash, observation] of this.executions) {
+      const inScope = observation.inScope?.() !== false;
+      if (inScope && observation.committed?.()) {
+        this.execution(stateHash, true);
+      } else if (!inScope || Date.now() >= observation.deadline) {
+        this.executions.delete(stateHash);
+        this.execution(stateHash, undefined, inScope
+          ? "Execution outcome was not confirmed by a board snapshot within 15 seconds"
+          : "Execution observation ended because the game changed");
+      }
+    }
+    this.scheduleExecutionObservation();
+  }
+
+  stopExecutionObservation(): void {
+    if (this.executionTimer !== undefined) globalThis.clearTimeout(this.executionTimer);
+    this.executionTimer = undefined;
+    for (const stateHash of this.executions.keys()) {
+      this.executions.delete(stateHash);
+      this.execution(stateHash, undefined, "Execution observation ended before confirmation");
+    }
+  }
+
+  private scheduleExecutionObservation(): void {
+    if (!this.executions.size || this.executionTimer !== undefined) return;
+    this.executionTimer = globalThis.setTimeout(() => {
+      this.executionTimer = undefined;
+      this.reconcileExecutions();
+    }, 150);
   }
 
   snapshot(includeReplayState = true): DecisionTrace[] {
@@ -742,6 +804,7 @@ export class DecisionTraceRecorder {
   }
 
   async reset(): Promise<void> {
+    this.stopExecutionObservation();
     if (this.persistTimer !== undefined) {
       globalThis.clearTimeout(this.persistTimer);
       this.persistTimer = undefined;

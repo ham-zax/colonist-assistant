@@ -57,6 +57,9 @@ pub struct ExactDecisionResult {
 fn matches_family(state: &GameState, action: &Action, family: ExactActionFamily) -> bool {
     match family {
         ExactActionFamily::Mandatory => match state.phase {
+            Phase::Main | Phase::PreRoll if state.free_roads > 0 => {
+                matches!(action, Action::BuildRoad { .. })
+            }
             Phase::Discard => matches!(action, Action::Discard { .. }),
             Phase::MoveRobber => matches!(action, Action::MoveRobber { .. }),
             // Pending responses stay in strategic search because generated

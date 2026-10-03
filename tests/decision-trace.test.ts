@@ -51,6 +51,97 @@ const board = (): BoardSnapshot => ({
 });
 
 describe("decision trace recorder", () => {
+  const observingRecorder = () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("chrome", { storage: { local: {
+      set: vi.fn(async () => undefined), remove: vi.fn(async () => undefined),
+    } } });
+    const recorder = new DecisionTraceRecorder();
+    recorder.begin("original", createTrackerState(), board());
+    return recorder;
+  };
+
+  it(
+    "reconciles the original trace after its guide callback disappears",
+    async () => {
+      const recorder = observingRecorder();
+      let committed = false;
+      recorder.executionStarted("original", { committed: () => committed, inScope: () => true });
+      recorder.begin("new-recommendation", createTrackerState(), { ...board(), turn: 18 });
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(recorder.snapshot(false)[0]?.lifecycleStatus).toBe("execution-pending");
+      committed = true;
+      await vi.advanceTimersByTimeAsync(150);
+      expect(recorder.snapshot(false)[0]).toMatchObject({
+        lifecycleStatus: "execution-complete", executionSucceeded: true,
+      });
+      expect(recorder.snapshot(false)[1]?.executionFinishedAt).toBeUndefined();
+      // A cancelled guide's late failure must not reverse the proven result.
+      recorder.execution("original", false, "old timer expired");
+      expect(recorder.snapshot(false)[0]?.lifecycleStatus).toBe("execution-complete");
+    },
+  );
+
+  it("allows delayed authoritative evidence to resolve an unconfirmed control timeout", async () => {
+    const recorder = observingRecorder();
+    let committed = false;
+    recorder.executionStarted("original", { committed: () => committed, inScope: () => true });
+    recorder.execution("original", undefined, "control observer timed out");
+    expect(recorder.snapshot(false)[0]?.lifecycleStatus).toBe("execution-unconfirmed");
+    committed = true;
+    recorder.reconcileExecutions();
+    expect(recorder.snapshot(false)[0]).toMatchObject({
+      lifecycleStatus: "execution-complete", executionFailureReason: undefined,
+    });
+    await recorder.reset();
+  });
+
+  it("requires the snapshot predicate even when a UI callback reports success", async () => {
+    const recorder = observingRecorder();
+    let committed = false;
+    let inScope: boolean | undefined = undefined; // Temporary board hydration gap.
+    recorder.executionStarted("original", { committed: () => committed, inScope: () => inScope });
+    recorder.execution("original", true);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(recorder.snapshot(false)[0]?.lifecycleStatus).toBe("execution-pending");
+    inScope = true;
+    committed = true;
+    recorder.reconcileExecutions();
+    expect(recorder.snapshot(false)[0]?.lifecycleStatus).toBe("execution-complete");
+    await recorder.reset();
+  });
+
+  it("bounds missing callbacks without inventing a gameplay failure", async () => {
+    const recorder = observingRecorder();
+    recorder.executionStarted("original");
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(recorder.snapshot(false)[0]).toMatchObject({
+      lifecycleStatus: "execution-unconfirmed", executionSucceeded: undefined,
+      executionFinishedAt: expect.any(Number),
+    });
+    expect(vi.getTimerCount()).toBeLessThanOrEqual(1); // Pending storage flush only.
+    await recorder.reset();
+  });
+
+  it("does not treat another game's matching board mutation as a commit", async () => {
+    const recorder = observingRecorder();
+    recorder.executionStarted("original", { committed: () => true, inScope: () => false });
+    recorder.reconcileExecutions();
+    expect(recorder.snapshot(false)[0]?.lifecycleStatus).toBe("execution-unconfirmed");
+    await recorder.reset();
+  });
+
+  it("cancels execution observation when traces are reset", async () => {
+    const recorder = observingRecorder();
+    const committed = vi.fn(() => false);
+    recorder.executionStarted("original", { committed, inScope: () => true });
+    await recorder.reset();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(committed).not.toHaveBeenCalled();
+    expect(recorder.snapshot()).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("records the actual root player's candidate value and execution source", async () => {
     vi.useFakeTimers();
     const set = vi.fn(async (_value: Record<string, unknown>) => undefined);

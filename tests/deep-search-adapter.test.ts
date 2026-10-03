@@ -814,6 +814,39 @@ describe("deep-search state adapter", () => {
     expect(discard.state.discardRemaining).toEqual([2, 0, 0, 0]);
   });
 
+  it("searches an owed Road Building placement with no road card or road-cost resources left", async () => {
+    const zero = development();
+    const freeState: TrackerState = {
+      ...state,
+      worlds: [{ hands: { You: emptyResources(), Rival: resources(0, 1, 1, 2, 1) }, weight: 1 }],
+      recentEvents: [{
+        type: "play-dev", player: "You", card: "road-building", id: "played-road-building",
+        timestamp: 1_000, raw: "You played Road Building",
+      }],
+    };
+    const freeBoard: BoardSnapshot = {
+      ...board, action: "road", legalEdgeIds: ["e0"], ownHand: emptyResources(),
+      ownDevelopmentCards: { cards: zero, playable: zero, boughtThisTurn: zero, hasPlayedThisTurn: true },
+      players: { ...board.players, You: {
+        ...board.players!.You!, handSize: 0, developmentCards: 0,
+        playedDevelopmentCards: development({ "road-building": 1 }),
+      } },
+    };
+    const built = buildDeepSearchRequest(freeState, freeBoard, "You");
+    expect(built.request.state.freeRoads).toBe(1);
+    const bytes = await readFile(new URL("../src/generated/wasm/colonist_search_bg.wasm", import.meta.url));
+    await initWasm({ module_or_path: bytes });
+    const result = await analyzeDeepSearch(freeState, freeBoard, "You", {
+      engine: "deep-search", players: [],
+      actionScores: { road: 0, settlement: 0, city: 0, development: 0 },
+      simulations: 0, model: "free-road-regression",
+    }, {}, false, "deep-search", async (request) => analyzeWasm(request));
+    expect(result.deepSearch?.chosen).toMatchObject({ kind: "build-road", targetId: "e0" });
+    expect(result.deepSearch?.mappingFailureReason).toBeUndefined();
+    expect(result.deepSearch?.authority).toBe("exact-mandatory");
+    expect(result.deepSearch?.actions.every((candidate) => candidate.action.kind === "build-road")).toBe(true);
+  });
+
   it("anchors an opponent setup road to the acting player without making the root omniscient", () => {
     const opponentRoad = buildDeepSearchRequest(
       {

@@ -513,3 +513,53 @@ Final verification:
 - Native/browser fixed-work comparisons and browser geometry checks above
   passed. Raw recovered fixtures and temporary profiling/browser artifacts
   remain outside versioned source. `git diff --check` passed.
+
+## 9. Recording-driven reliability repairs (2026-10-03)
+
+A bounded audit of the two October 2 recordings confirmed execution rows left
+pending after successful plays, premature control timeouts, winner names lost
+in flattened banner text, and a Monopoly search started 21 ms after its public
+play while the exact hand still held the consumed card. The later recording is
+two-player; these failures are not evidence about four-player search throughput.
+
+- Original execution predicates now survive guide replacement and reconcile
+  against later snapshots. Observation never dispatches clicks. Proven commits
+  are latched; interruption and the fifteen-second deadline end as
+  `execution-unconfirmed`, rather than claiming rejection or remaining pending.
+- Winner extraction matches canonical roster names beside the win phrase,
+  tolerating trophy glyphs and flattened award chatter. Terminal detection
+  remains independent of whether a known winner name can be resolved.
+- A post-play hand mismatch cancels stale analysis and pauses execution until
+  public tallies and exact holdings agree. Refresh attempts stop after five
+  seconds with a recovery message; the integrity guard stays enabled. Coherent
+  evidence automatically resumes analysis, including after a turn change.
+- D225–D228 had a Road Building play followed by legal road prompts, but search
+  offered only EndTurn and the adapter discarded it. Live requests now carry
+  one owed free placement at a time. CPU rules require a legal connected road,
+  charge no resources, and consume the credit; unplaceable credit cannot block
+  a turn. Dedicated bridge road states 30/31 require public Road Building
+  corroboration; ordinary paid states and unfamiliar values receive no credit.
+  The recordings do not retain those raw intermediate state numbers, so their
+  current Colonist mapping still needs the user's live confirmation. CUDA
+  backends explicitly reject pending credit and preserve the CPU rules path.
+- With player trades disabled, outgoing offers no longer start strategic search
+  and incoming declines no longer require log state. Validated cancel/decline
+  actions bypass stale strategic evidence errors and the configured thinking
+  delay; their identity stays stable across unrelated offer/hand changes.
+  Unsubmitted workflows release immediately when policy invalidates them;
+  submitted transactions retain commit observation. Mandatory phases, resolved
+  identity, extension-context validity, and automation-off settings remain gates.
+
+Both recordings' `@partial=1` flags reflect incomplete card-history prefixes;
+winning does not recover that history. The recovered dice ordering warnings
+still fail safe and retain the existing reconciliation guards. Unknown robber
+transfers remain honestly uncertain. No live game was started for validation.
+
+Local verification passed: 51 TypeScript files / 576 tests, strict TypeScript,
+formatting, optimized Rust workspace tests, fixed-work parallel identity, and
+strict workspace/parallel Clippy. CUDA exact/sim library Clippy also passed.
+Regression fixtures cover delayed control commits, missing callbacks, retained
+road/city/Monopoly predicates, winner banners, stale hands, bounded refreshes,
+an actual packaged-WASM owed-road decision, and immediate disabled-trade clicks
+through the real executor. Both WASM variants and the unpacked
+extension are rebuilt for the user to reload and test in a live game.
