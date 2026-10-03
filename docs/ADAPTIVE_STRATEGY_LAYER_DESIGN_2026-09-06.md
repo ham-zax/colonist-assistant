@@ -442,6 +442,15 @@ competing for the same grain/ore. Regressions live in
 | 2p road materials (seed 3) | EndTurn +0.0035 | Road | Disagree inside noise: ignored diagnostic. |
 | EndTurn ranked + retained | all 7 shapes (2p/3p) | — | Coverage invariant regression. |
 
+Current-artifact correction (2026-10-02): these rows describe the original
+study. The September 19 persistent-production valuation repair (`35815e3`)
+changed the two-player comparison: production still saves, but the 40k-node
+reference spends by 0.0049; at 120k nodes it saves by 0.0021. Those bounded
+preferences are budget-sensitive, not strategic ground truth. The active test
+keeps the production save assertion and verifies EndTurn coverage at both
+budgets. No development-card penalty was added to force this fixture to agree.
+
+
 Classification per the Section 2.3 taxonomy:
 
 - **Coverage: ruled out.** EndTurn is ranked (~#5–6 of 8–9) and never pruned
@@ -548,7 +557,7 @@ question, out of scope for save-vs-spend, with acceptance uncertainty on the
 offer side.
 
 Fidelity (committed regression): the starved replay reproduces the live
-choice AND its values exactly (dev 0.4444, runner-up gap 0.095), so the
+choice and its historical values (dev 0.4444, runner-up gap 0.095), so the
 reconstruction captures the live depth-0 mechanism; dice differences do not
 move these floor values. The Mref digest gap therefore does not block the
 floor finding, but it means the full-search counterfactual is established
@@ -711,3 +720,13 @@ which no local record supplies.
 - [Milestone 0/1 empirical screen](MILESTONE_0_1_EMPIRICAL_SCREEN_2026-09-06.md)
 
 Source navigation used Codebase Memory with direct-source verification. Satori's earlier publication reported pending source changes, so stale publication line ranges were not treated as current source authority. Recorded graph coverage had no reported gaps for the relied-on engine paths; that is a best-effort signal, not proof of complete behavioral verification.
+
+
+2026-10-02 D14 regression correction: the numeric historical floor pin passes
+at the original study commit `a70bbc6`, then fails at `35815e3` (current dev
+value 0.37219888) after persistent production valuation became independent of
+transient hand scarcity. The active regression now independently enumerates
+the development draw law in all 22 weighted worlds, checks the acting seat's
+complete one-ply floor and retains BuyDevelopment. It does not claim that the
+current evaluator or reconstructed dice posterior reproduces the historical
+live value or calibrated live win odds.

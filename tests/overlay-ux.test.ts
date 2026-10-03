@@ -314,6 +314,11 @@ describe("overlay UX upgrade", () => {
     it("uses plain language and hides raw search values from visible text", () => {
       const { overlay, internals } = setup({ "v:one": 3, "v:two": 2.995, "v:three": 2.5 });
       const root = parse(internals.renderAlternativesPanel());
+      const panel = root.querySelector<HTMLDetailsElement>("details.alternatives-panel")!;
+      expect(panel).not.toBeNull();
+      expect(panel.open).toBe(false);
+      expect(panel.querySelector("summary")?.textContent).toContain("TOP MOVES");
+      expect(panel.querySelector("summary")?.textContent).toContain("Tap to preview on board");
       const text = root.textContent ?? "";
       expect(text).toContain("Engine pick");
       expect(text).toContain("Near tie");

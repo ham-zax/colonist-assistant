@@ -42,7 +42,7 @@ pub use cuda_exact::*;
 #[cfg(all(feature = "cuda-sim", not(target_arch = "wasm32")))]
 pub use cuda_sim::*;
 
-pub use deadline::CooperativeDeadline;
+pub use deadline::{CooperativeDeadline, search_cancel_requested, search_cancel_word_address};
 #[cfg(feature = "benchmark-profile")]
 pub use eval::{EvaluateProfile, evaluate_profiled};
 pub use eval::{

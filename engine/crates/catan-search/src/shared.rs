@@ -206,11 +206,12 @@ pub fn admit_promoted_roots(
         )
     };
     let ordinary_len = admitted.len().saturating_sub(ordinary_start);
-    if ordinary_len > 0 && !admitted.iter().any(|(action, _)| is_development(action)) {
-        if let Some((action, prior)) = ranked.iter().find(|(action, _)| is_development(action)) {
-            admitted.pop();
-            admitted.push((action.clone(), *prior));
-        }
+    if ordinary_len > 0
+        && !admitted.iter().any(|(action, _)| is_development(action))
+        && let Some((action, prior)) = ranked.iter().find(|(action, _)| is_development(action))
+    {
+        admitted.pop();
+        admitted.push((action.clone(), *prior));
     }
 
     // Tier 3: preserve EndTurn only after mandatory safety coverage is satisfied.

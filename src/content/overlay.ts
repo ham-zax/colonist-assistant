@@ -385,6 +385,8 @@ export class AssistantOverlay {
   private advancedSettingsOpen = false;
   /** "Why" sections stay open only for the decision they were opened on. */
   private whyOpenKey?: string;
+  /** The top-moves list stays collapsed until opened, per decision. */
+  private alternativesOpenKey?: string;
   private collapsed: boolean;
   private session?: GameSession;
   private board?: BoardSnapshot;
@@ -1209,6 +1211,8 @@ export class AssistantOverlay {
           this.advancedSettingsOpen = opening;
         } else if (details.classList.contains("more")) {
           this.whyOpenKey = opening ? this.decisionKey : undefined;
+        } else if (details.classList.contains("alternatives-panel")) {
+          this.alternativesOpenKey = opening ? this.decisionKey : undefined;
         }
       },
       true,
@@ -2625,14 +2629,17 @@ export class AssistantOverlay {
   }
 
   private renderEngineMetaChip(): string {
+    // The chip is always present so the decision-meta row keeps its height
+    // across thinking, ready, slow, and error states.
     const runtime = this.runtimePresentation();
-    if (runtime.state === "healthy") return "";
     const statusText =
-      runtime.state === "slow"
-        ? "SLOW"
-        : runtime.state === "connecting"
-          ? "QUEUED"
-          : runtime.label.toUpperCase();
+      runtime.state === "healthy"
+        ? "READY"
+        : runtime.state === "slow"
+          ? "SLOW"
+          : runtime.state === "connecting"
+            ? "QUEUED"
+            : runtime.label.toUpperCase();
     return `<span class="meta-engine-chip ${runtime.state}" role="status" title="${escapeHtml(runtime.detail)}" aria-label="Strategist status: ${escapeHtml(runtime.label)}"><i></i><span>${escapeHtml(statusText)}</span></span>`;
   }
 
@@ -5320,10 +5327,16 @@ export class AssistantOverlay {
       })
       .join("");
 
-    return `<section class="alternatives-panel" aria-label="Alternative moves">
-      <header><span>TOP MOVES</span><small>Tap to preview on board</small></header>
+    // Collapsed by default: the collapsed summary strip is a fixed-height
+    // line, so the ready state no longer jumps taller than the thinking
+    // state when the search resolves. Preview buttons keep working inside.
+    const open =
+      this.alternativesOpenKey !== undefined &&
+      this.alternativesOpenKey === this.decisionKey;
+    return `<details class="alternatives-panel"${open ? " open" : ""} aria-label="Alternative moves">
+      <summary><span>TOP MOVES</span><small>Tap to preview on board</small></summary>
       <div class="alternatives-list">${rows}</div>
-    </section>`;
+    </details>`;
   }
 
   private currentDecisionRationale(): DecisionRationale | undefined {
@@ -5963,7 +5976,7 @@ export class AssistantOverlay {
         ? `<div class="single-tactic"><span>DEV</span><strong>${escapeHtml(heldDevelopmentCard.title)} — ${escapeHtml(heldDevelopmentCard.reason)}</strong></div>`
       : report.trade
       ? `<div class="single-tactic">
-          <span>NEXT</span>
+          <span>TRADE OPTION</span>
           <strong>Offer ${tradeVectorLabel(report.trade.give)} for ${tradeVectorLabel(report.trade.receive)} to ${escapeHtml(report.trade.partner)} · ${Math.round(report.trade.acceptanceProbability * 100)}% modeled acceptance</strong>
         </div>`
       : primary.reasons[2]
@@ -5971,7 +5984,7 @@ export class AssistantOverlay {
         : "";
     return `<section class="decision">
       <div class="decision-meta">
-        <span>YOUR NEXT MOVE</span>
+        <span>${affordable ? "YOUR NEXT MOVE" : "BUILD GOAL"}</span>
         ${this.renderEngineMetaChip()}
       </div>
       <div class="decision-command">

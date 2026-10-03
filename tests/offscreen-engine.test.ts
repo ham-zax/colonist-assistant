@@ -63,6 +63,21 @@ describe("offscreen engine lifecycle", () => {
     worker.onmessage?.({ data: { token: "two", result: {} as never } });
     expect(second).toHaveBeenCalledWith({ token: "two", result: {} });
   });
+  it("raises the shared cancel word for active stale work and clears it for the next job", async () => {
+    const { dispatch, worker } = await setup();
+    const buffer = new SharedArrayBuffer(16);
+    const word = new Int32Array(buffer, 8, 1);
+    worker.onmessage?.({ data: { token: "ready", status: { threadCount: 4, engineRevision: "test", initializationMs: 3 }, cancelWord: { buffer, index: 2 } } });
+    dispatch({ token: "one", operation: "analyze", request: { timeBudgetMs: 2000 } } as OffscreenRequest);
+    dispatch({ token: "two", operation: "analyze", request: { timeBudgetMs: 2000 } } as OffscreenRequest);
+    await vi.waitFor(() => expect(worker.postMessage).toHaveBeenCalledOnce());
+    expect(Atomics.load(word, 0)).toBe(0);
+    dispatch({ token: "one", operation: "cancel" });
+    expect(Atomics.load(word, 0)).toBe(1);
+    worker.onmessage?.({ data: { token: "one", result: {} as never } });
+    expect(worker.postMessage).toHaveBeenCalledTimes(2);
+    expect(Atomics.load(word, 0)).toBe(0);
+  });
   it("fails readiness, active work, and queued work on worker failure", async () => {
     const { dispatch, ready, worker } = await setup();
     ready();

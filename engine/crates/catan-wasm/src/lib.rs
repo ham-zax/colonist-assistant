@@ -10,17 +10,18 @@ use colonist_catan_core::{
     MREF_COLONIST_LINKED_2024_V1, MissingRollGap, PUBLIC_HISTORY_BELIEF_V1, Phase, PlayerState,
     Port, PublicRollObservation, Resource, StochasticBelief, StochasticState, TradeOffer, Vertex,
 };
+#[cfg(all(feature = "native-gpu", not(target_arch = "wasm32")))]
+use colonist_catan_search::DepthBeliefError;
 use colonist_catan_search::{
     ActionStats, BeliefDepthResult, BeliefParticle, BeliefSearchProvenance,
-    BeliefSearchStageTimings, CooperativeDeadline, DecisionFailureClass, DepthBeliefError,
-    DomesticTradeThreat, ENGINE_REVISION, ExactActionFamily, ExactActionValue, ExactDecisionResult,
-    HARD_VETO_POSTERIOR, IntroducedRoadFragility, Mcts, ReachabilityDiagnostic,
-    RoadCutContinuationAssessment, RootPromotionReason, RootPruneReason, SearchConfig, SearchMode,
-    SearchReport, SearchStatistics, StrategyAdmissionDiagnostic, StrategyEvidenceTier, StrategyId,
-    StrategyOmissionReason, StrategyPolicy, StrategyProposalReason, StrategyProposalStatus,
-    StrategyShadowDiagnostics, TacticalResult, action_prior, evaluate,
-    exact_action_comparator_score, exact_family_for_action, learned_model_version,
-    learned_trade_model_version, safer_end_turn_alternative,
+    BeliefSearchStageTimings, CooperativeDeadline, DecisionFailureClass, DomesticTradeThreat,
+    ENGINE_REVISION, ExactActionFamily, ExactActionValue, ExactDecisionResult, HARD_VETO_POSTERIOR,
+    IntroducedRoadFragility, Mcts, ReachabilityDiagnostic, RoadCutContinuationAssessment,
+    RootPromotionReason, RootPruneReason, SearchConfig, SearchMode, SearchReport, SearchStatistics,
+    StrategyAdmissionDiagnostic, StrategyEvidenceTier, StrategyId, StrategyOmissionReason,
+    StrategyPolicy, StrategyProposalReason, StrategyProposalStatus, StrategyShadowDiagnostics,
+    TacticalResult, action_prior, evaluate, exact_action_comparator_score, exact_family_for_action,
+    learned_model_version, learned_trade_model_version, safer_end_turn_alternative,
     search_weighted_belief_maxn_iterative_timed_excluding_with_strategy_policy,
     search_weighted_belief_paranoid_iterative_timed_excluding_with_strategy_policy,
     solve_belief_current_turn, solve_belief_current_turn_timed, solve_exact_belief_excluding,
@@ -31,6 +32,18 @@ use wasm_bindgen::prelude::*;
 
 #[cfg(all(feature = "wasm-threads", target_arch = "wasm32"))]
 pub use wasm_bindgen_rayon::init_thread_pool;
+
+// Built on every target so native tests exercise it; installed only where the
+// shared heap sits behind one lock (threaded WASM).
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_feature = "atomics")),
+    allow(dead_code)
+)]
+mod thread_cache;
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+#[global_allocator]
+static ALLOCATOR: thread_cache::ThreadCache<std::alloc::System> =
+    thread_cache::ThreadCache(std::alloc::System);
 
 #[cfg(all(feature = "native-gpu", not(target_arch = "wasm32")))]
 mod native_gpu;
@@ -1549,6 +1562,7 @@ fn root_prune_reason(reason: RootPruneReason) -> &'static str {
         RootPruneReason::RootExcluded => "root-excluded",
         RootPruneReason::BranchTruncated => "branch-truncated",
         RootPruneReason::TradeSafety => "trade-safety",
+        RootPruneReason::TradeSafetyIncomplete => "trade-safety-incomplete",
         RootPruneReason::ExactFamilyCollapsed => "exact-family-collapsed",
     }
 }
@@ -2288,15 +2302,16 @@ fn root_exclusion_actions(
 enum MaxnRequestError {
     Semantic(String),
     Cancelled(String),
+    #[cfg(all(feature = "native-gpu", not(target_arch = "wasm32")))]
     BackendUnavailable(String),
 }
 
 impl std::fmt::Display for MaxnRequestError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Semantic(message)
-            | Self::Cancelled(message)
-            | Self::BackendUnavailable(message) => formatter.write_str(message),
+            Self::Semantic(message) | Self::Cancelled(message) => formatter.write_str(message),
+            #[cfg(all(feature = "native-gpu", not(target_arch = "wasm32")))]
+            Self::BackendUnavailable(message) => formatter.write_str(message),
         }
     }
 }
@@ -2564,14 +2579,27 @@ pub fn analyze_benchmark_request(request: serde_json::Value) -> Result<serde_jso
     serde_json::to_value(report).map_err(|error| error.to_string())
 }
 
+/// Linear-memory byte address of the engine's cancellation word. The threaded
+/// host writes 1 there to stop the running search and 0 before the next one.
+#[cfg(feature = "wasm-threads")]
+#[wasm_bindgen]
+pub fn cancel_word_address() -> u32 {
+    colonist_catan_search::search_cancel_word_address() as u32
+}
+
 #[wasm_bindgen]
 pub fn analyze(request: JsValue) -> Result<JsValue, JsValue> {
     let request: Request = serde_wasm_bindgen::from_value(request)
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let mode = RequestedMode::parse(request.mode.as_deref())?;
     if mode == RequestedMode::Maxn {
-        let report = analyze_maxn_request(request, MaxnBackend::Cpu, "maxn", &|| false)
-            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let report = analyze_maxn_request(
+            request,
+            MaxnBackend::Cpu,
+            "maxn",
+            &colonist_catan_search::search_cancel_requested,
+        )
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
         return serde_wasm_bindgen::to_value(&report)
             .map_err(|error| JsValue::from_str(&error.to_string()));
     }

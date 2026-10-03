@@ -832,7 +832,7 @@ describe("overlay settings interaction", () => {
     overlay.destroy();
   });
 
-  it("does not render a healthy engine control beside advice", () => {
+  it("renders a healthy engine as passive ready status beside advice", () => {
     const overlay = new AssistantOverlay(
       { ...DEFAULT_SETTINGS },
       { reset: vi.fn() },
@@ -847,7 +847,11 @@ describe("overlay settings interaction", () => {
     internals.decisionRuntimeError = "";
     internals.decisionPendingKey = "";
 
-    expect(internals.renderEngineMetaChip()).toBe("");
+    const status = internals.renderEngineMetaChip();
+    expect(status).toContain('role="status"');
+    expect(status).toContain("READY");
+    expect(status).toContain("meta-engine-chip healthy");
+    expect(status).not.toContain("<button");
     overlay.destroy();
   });
 

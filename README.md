@@ -40,6 +40,10 @@ Install from the
 Advice and the live card table share one screen with one scroll area. Open
 **Dice & details** (or **Details · N notes**) for roll statistics and history
 diagnostics, then use **Back to table** to return; settings remain separate.
+The expanded overlay keeps a fixed viewport-aware height while advice changes.
+The primary action and urgent responses stay visible; **Top moves** expands on
+request. **Build goal** marks saving advice, and **Trade option** marks a
+possible negotiation rather than a selected action.
 Turn on **Record game** before
 playing, then use **Export compact LLM record (.txt)** even during an unfinished
 game. The export includes the extension build, dice history and uncertainty,
@@ -132,9 +136,12 @@ see [docs/CHROME_WEB_STORE.md](docs/CHROME_WEB_STORE.md).
 `WASM threads` reports the active pool size; `Background WASM` reports the
 single-threaded fallback. Both use the packaged Rust Strategist. A
 normal live request uses depth 5, a branch cap of 10, up to 8,000 strategic
-nodes per depth wave, and a cooperative 2,000 ms strategic-search budget. That
-larger live budget is intentional quality headroom; the normal slow-decision
-warning starts at three seconds. Separately, the generated-WASM cold-package
+nodes per depth wave, and a cooperative 2,000 ms strategic-search budget.
+Four-player decisions use the existing 10,000 ms / 48,000-node-per-wave profile;
+trade, setup, and pondering have separate bounded profiles. These are work
+limits, not promised node throughput. The live budgets provide intentional
+quality headroom; the client slow-decision warning starts at ten seconds.
+Separately, the generated-WASM cold-package
 smoke uses a short cooperative deadline and must still return a legal action in
 less than one second, so startup/bridge regressions remain visible without
 capping live search quality. The twelve-second client cutoff is an outer

@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 
 use colonist_catan_core::{Action, GameState, Phase, Resource};
@@ -33,6 +34,30 @@ pub struct DomesticTradeAssessment {
 pub const HARD_VETO_POSTERIOR: f32 = 0.99;
 
 const TACTICAL_ACTION_DEPTH: u8 = 3;
+
+/// Interruption is sticky: an incomplete probe must never become safe evidence.
+struct ProbeControl<'a> {
+    stop: &'a dyn Fn() -> bool,
+    interrupted: Cell<bool>,
+}
+
+impl<'a> ProbeControl<'a> {
+    fn new(stop: &'a dyn Fn() -> bool) -> Self {
+        Self {
+            stop,
+            interrupted: Cell::new(false),
+        }
+    }
+
+    fn stopped(&self) -> bool {
+        if self.interrupted.get() || (self.stop)() {
+            self.interrupted.set(true);
+            true
+        } else {
+            false
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum ThreatKey {
@@ -163,7 +188,18 @@ fn resolve_without_exchange(state: &GameState) -> Option<GameState> {
     (resolved.phase == Phase::Main).then_some(resolved)
 }
 
+#[cfg(test)]
 fn resolved_exchange_states(state: &GameState, action: &Action, protected: u8) -> Vec<GameState> {
+    resolved_exchange_states_controlled(state, action, protected, &ProbeControl::new(&|| false))
+}
+
+fn resolved_exchange_states_controlled(
+    state: &GameState,
+    action: &Action,
+    protected: u8,
+    control: &ProbeControl<'_>,
+) -> Vec<GameState> {
+    #[allow(clippy::too_many_arguments)]
     fn visit(
         original: &GameState,
         state: &GameState,
@@ -172,7 +208,11 @@ fn resolved_exchange_states(state: &GameState, action: &Action, protected: u8) -
         exchanged: bool,
         outcomes: &mut Vec<GameState>,
         seen: &mut HashSet<(u64, u8, bool)>,
+        control: &ProbeControl<'_>,
     ) {
+        if control.stopped() {
+            return;
+        }
         if !seen.insert((state.state_hash(), remaining, exchanged)) {
             return;
         }
@@ -204,6 +244,7 @@ fn resolved_exchange_states(state: &GameState, action: &Action, protected: u8) -
                     exchanged || confirmed,
                     outcomes,
                     seen,
+                    control,
                 );
             }
         }
@@ -225,6 +266,7 @@ fn resolved_exchange_states(state: &GameState, action: &Action, protected: u8) -
         confirmed,
         &mut outcomes,
         &mut seen,
+        control,
     );
     outcomes
 }
@@ -341,12 +383,60 @@ fn record_threats(
     }
 }
 
-fn reachable_tactical_threats(
+type TacticalMemoKey = (u64, u8, Option<ProgressPath>);
+
+/// Completed tactical subtrees for one `reachable_tactical_threats` probe.
+/// Without `reuse`, entries only guard the current path (the unmemoized
+/// reference behaviour that tests compare against).
+struct TacticalMemo {
+    reuse: bool,
+    visit: HashMap<TacticalMemoKey, TacticalThreats>,
+    chance: HashMap<TacticalMemoKey, TacticalThreats>,
+    #[cfg(test)]
+    hits: usize,
+}
+
+impl TacticalMemo {
+    fn new(reuse: bool) -> Self {
+        Self {
+            reuse,
+            visit: HashMap::new(),
+            chance: HashMap::new(),
+            #[cfg(test)]
+            hits: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+fn reachable_tactical_threats_with(
     root: &GameState,
     public_baseline: &GameState,
     protected: u8,
     attacker: u8,
     monopoly_gain_penalty: Option<(Resource, u8)>,
+    memo: &mut TacticalMemo,
+) -> TacticalThreats {
+    reachable_tactical_threats_controlled(
+        root,
+        public_baseline,
+        protected,
+        attacker,
+        monopoly_gain_penalty,
+        memo,
+        &ProbeControl::new(&|| false),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reachable_tactical_threats_controlled(
+    root: &GameState,
+    public_baseline: &GameState,
+    protected: u8,
+    attacker: u8,
+    monopoly_gain_penalty: Option<(Resource, u8)>,
+    memo: &mut TacticalMemo,
+    control: &ProbeControl<'_>,
 ) -> TacticalThreats {
     #[allow(clippy::too_many_arguments)]
     fn chance_tail(
@@ -357,8 +447,22 @@ fn reachable_tactical_threats(
         depth: u8,
         origin: Option<ProgressPath>,
         monopoly_gain_penalty: Option<(Resource, u8)>,
-        seen: &mut HashSet<(u64, u8, Option<ProgressPath>)>,
+        memo: &mut TacticalMemo,
+        control: &ProbeControl<'_>,
     ) -> TacticalThreats {
+        if control.stopped() {
+            return TacticalThreats::default();
+        }
+        let memo_key = (state.state_hash(), depth, origin);
+        if memo.reuse
+            && let Some(threats) = memo.chance.get(&memo_key)
+        {
+            #[cfg(test)]
+            {
+                memo.hits += 1;
+            }
+            return threats.clone();
+        }
         let actions = state.legal_actions();
         let total_weight = actions
             .iter()
@@ -370,6 +474,9 @@ fn reachable_tactical_threats(
 
         let mut threats = TacticalThreats::default();
         for action in actions {
+            if control.stopped() {
+                return TacticalThreats::default();
+            }
             let weight = state.chance_weight(&action);
             if weight == 0 {
                 continue;
@@ -399,7 +506,8 @@ fn reachable_tactical_threats(
                         depth,
                         origin,
                         monopoly_gain_penalty,
-                        seen,
+                        memo,
+                        control,
                     ),
                     Phase::DevelopmentChance | Phase::ResolveSteal { .. } => chance_tail(
                         &next,
@@ -409,13 +517,20 @@ fn reachable_tactical_threats(
                         depth,
                         origin,
                         monopoly_gain_penalty,
-                        seen,
+                        memo,
+                        control,
                     ),
                     _ => TacticalThreats::default(),
                 };
                 branch.merge_max(&continuation);
             }
             threats.add_weighted(&branch, weight as f32 / total_weight as f32);
+        }
+        if control.interrupted.get() {
+            return TacticalThreats::default();
+        }
+        if memo.reuse {
+            memo.chance.insert(memo_key, threats.clone());
         }
         threats
     }
@@ -429,21 +544,35 @@ fn reachable_tactical_threats(
         depth: u8,
         origin: Option<ProgressPath>,
         monopoly_gain_penalty: Option<(Resource, u8)>,
-        seen: &mut HashSet<(u64, u8, Option<ProgressPath>)>,
+        memo: &mut TacticalMemo,
+        control: &ProbeControl<'_>,
     ) -> TacticalThreats {
+        if control.stopped() {
+            return TacticalThreats::default();
+        }
         if depth >= TACTICAL_ACTION_DEPTH
             || state.phase != Phase::Main
             || state.current_player != attacker
         {
             return TacticalThreats::default();
         }
-        let seen_key = (state.state_hash(), depth, origin);
-        if !seen.insert(seen_key) {
-            return TacticalThreats::default();
+        // Results depend only on this key, so transposed build/progress orders
+        // share one expansion. The empty placeholder keeps the old cycle guard.
+        let memo_key = (state.state_hash(), depth, origin);
+        if let Some(threats) = memo.visit.get(&memo_key) {
+            #[cfg(test)]
+            {
+                memo.hits += 1;
+            }
+            return threats.clone();
         }
+        memo.visit.insert(memo_key, TacticalThreats::default());
 
         let mut threats = TacticalThreats::default();
         for action in state.legal_actions() {
+            if control.stopped() {
+                return TacticalThreats::default();
+            }
             let action_origin = progress_origin(&action);
             if !is_build(&action) && action_origin.is_none() {
                 continue;
@@ -484,7 +613,8 @@ fn reachable_tactical_threats(
                         depth + 1,
                         path_origin,
                         monopoly_gain_penalty,
-                        seen,
+                        memo,
+                        control,
                     ),
                     Phase::DevelopmentChance | Phase::ResolveSteal { .. } => chance_tail(
                         &next,
@@ -494,7 +624,8 @@ fn reachable_tactical_threats(
                         depth + 1,
                         path_origin,
                         monopoly_gain_penalty,
-                        seen,
+                        memo,
+                        control,
                     ),
                     _ => TacticalThreats::default(),
                 };
@@ -502,7 +633,14 @@ fn reachable_tactical_threats(
             }
             threats.merge_max(&branch);
         }
-        seen.remove(&seen_key);
+        if control.interrupted.get() {
+            return TacticalThreats::default();
+        }
+        if memo.reuse {
+            memo.visit.insert(memo_key, threats.clone());
+        } else {
+            memo.visit.remove(&memo_key);
+        }
         threats
     }
 
@@ -514,7 +652,8 @@ fn reachable_tactical_threats(
         0,
         None,
         monopoly_gain_penalty,
-        &mut HashSet::new(),
+        memo,
+        control,
     )
 }
 
@@ -626,8 +765,15 @@ struct WorldTradeEvidence {
     hard_choice: Option<HardChoiceEvidence>,
 }
 
-fn domestic_trade_evidence(state: &GameState, action: &Action) -> WorldTradeEvidence {
+fn domestic_trade_evidence(
+    state: &GameState,
+    action: &Action,
+    control: &ProbeControl<'_>,
+) -> WorldTradeEvidence {
     if !is_trade_candidate(action) {
+        return WorldTradeEvidence::default();
+    }
+    if control.stopped() {
         return WorldTradeEvidence::default();
     }
     let protected = state.actor();
@@ -637,18 +783,42 @@ fn domestic_trade_evidence(state: &GameState, action: &Action) -> WorldTradeEvid
     let mut newly_enabled = HashMap::<ThreatKey, f32>::new();
     let mut dirty_monopoly_probability = 0.0_f32;
     let mut hard_contexts = Vec::<HardChoiceEvidence>::new();
+    // Every retained outcome keeps `before.current_player` as the attacker, so
+    // the no-exchange baseline is shared by all of them.
+    let attacker = before.current_player;
+    let mut before_threats = None;
 
-    for after in resolved_exchange_states(state, action, protected) {
+    for after in resolved_exchange_states_controlled(state, action, protected, control) {
         if after.phase != Phase::Main
             || after.current_player == protected
             || before.current_player != after.current_player
         {
             continue;
         }
-        let attacker = after.current_player;
-        let before_threats =
-            reachable_tactical_threats(&before, &before, protected, attacker, None);
-        let after_threats = reachable_tactical_threats(&after, &before, protected, attacker, None);
+        if control.stopped() {
+            return WorldTradeEvidence::default();
+        }
+        debug_assert_eq!(after.current_player, attacker);
+        let before_threats = before_threats.get_or_insert_with(|| {
+            reachable_tactical_threats_controlled(
+                &before,
+                &before,
+                protected,
+                attacker,
+                None,
+                &mut TacticalMemo::new(true),
+                control,
+            )
+        });
+        let after_threats = reachable_tactical_threats_controlled(
+            &after,
+            &before,
+            protected,
+            attacker,
+            None,
+            &mut TacticalMemo::new(true),
+            control,
+        );
         let mut monopoly_counterfactuals = HashMap::<Resource, TacticalThreats>::new();
         for resource in Resource::ALL {
             let appears_in_path = after_threats.progress_paths.keys().any(|(_, path)| {
@@ -671,12 +841,14 @@ fn domestic_trade_evidence(state: &GameState, action: &Action) -> WorldTradeEvid
             let penalty = gain.min(u8::MAX as u16) as u8;
             monopoly_counterfactuals.insert(
                 resource,
-                reachable_tactical_threats(
+                reachable_tactical_threats_controlled(
                     &after,
                     &before,
                     protected,
                     attacker,
                     Some((resource, penalty)),
+                    &mut TacticalMemo::new(true),
+                    control,
                 ),
             );
         }
@@ -800,7 +972,7 @@ fn domestic_trade_evidence(state: &GameState, action: &Action) -> WorldTradeEvid
 /// the real response/confirmation protocol with `GameState::apply()`. Only the
 /// actual post-resolution `current_player` receives a same-turn tactical probe.
 pub fn domestic_trade_threat(state: &GameState, action: &Action) -> Option<DomesticTradeThreat> {
-    domestic_trade_evidence(state, action).threat
+    domestic_trade_evidence(state, action, &ProbeControl::new(&|| false)).threat
 }
 
 /// Aggregate the safety evidence over a weighted hidden-state belief without
@@ -812,8 +984,20 @@ pub fn belief_domestic_trade_assessment<'a>(
     worlds: impl IntoIterator<Item = (&'a GameState, f32)>,
     action: &Action,
 ) -> DomesticTradeAssessment {
+    belief_domestic_trade_assessment_controlled(worlds, action, &|| false)
+        .expect("an unbounded safety probe cannot be interrupted")
+}
+
+/// `None` means incomplete, never a zero-risk assessment. Callers must exclude
+/// the candidate or retry with more time before selecting it.
+pub(crate) fn belief_domestic_trade_assessment_controlled<'a>(
+    worlds: impl IntoIterator<Item = (&'a GameState, f32)>,
+    action: &Action,
+    stop: &dyn Fn() -> bool,
+) -> Option<DomesticTradeAssessment> {
+    let control = ProbeControl::new(stop);
     if !is_trade_candidate(action) {
-        return DomesticTradeAssessment::default();
+        return Some(DomesticTradeAssessment::default());
     }
     let worlds = worlds.into_iter().collect::<Vec<_>>();
     let total = worlds
@@ -821,7 +1005,17 @@ pub fn belief_domestic_trade_assessment<'a>(
         .map(|(_, weight)| weight.max(0.0))
         .sum::<f32>();
     if total <= f32::EPSILON {
-        return DomesticTradeAssessment::default();
+        return Some(DomesticTradeAssessment::default());
+    }
+
+    // Negotiation tails preserve the turn owner. When every world has that
+    // owner acting, no opponent receives the same-turn probe this guard checks.
+    if worlds
+        .iter()
+        .filter(|(_, weight)| *weight > 0.0)
+        .all(|(state, _)| state.actor() == state.current_player)
+    {
+        return Some(DomesticTradeAssessment::default());
     }
 
     struct ObservationHardMass {
@@ -838,7 +1032,13 @@ pub fn belief_domestic_trade_assessment<'a>(
         if weight <= f32::EPSILON {
             continue;
         }
-        let evidence = domestic_trade_evidence(state, action);
+        if control.stopped() {
+            return None;
+        }
+        let evidence = domestic_trade_evidence(state, action, &control);
+        if control.stopped() {
+            return None;
+        }
         if let Some(threat) = evidence.threat {
             let index = match threat {
                 DomesticTradeThreat::DirtyMonopoly => 0,
@@ -887,13 +1087,13 @@ pub fn belief_domestic_trade_assessment<'a>(
         .map(|group| group.choice_mass.values().copied().fold(0.0_f32, f32::max))
         .sum::<f32>()
         .clamp(0.0, 1.0);
-    DomesticTradeAssessment {
+    Some(DomesticTradeAssessment {
         threat,
         posterior,
         dirty_monopoly_posterior: dirty_monopoly_posterior.clamp(0.0, 1.0),
         hard_veto_posterior,
         hard_veto: hard_veto_posterior + 1e-6 >= HARD_VETO_POSTERIOR,
-    }
+    })
 }
 
 /// Compatibility seam for existing exact/search safety callers. Only the
@@ -911,10 +1111,82 @@ pub fn belief_domestic_trade_threat<'a>(
 mod tests {
     use colonist_catan_core::{Action, Building, DevCard, GameState, Phase};
 
+    use colonist_catan_core::SplitMix64;
+
     use super::{
-        DomesticTradeThreat, belief_domestic_trade_assessment, belief_domestic_trade_threat,
-        domestic_trade_threat,
+        DomesticTradeThreat, TacticalMemo, belief_domestic_trade_assessment,
+        belief_domestic_trade_threat, domestic_trade_threat, reachable_tactical_threats_with,
     };
+
+    #[test]
+    fn memoized_tactical_probe_matches_unmemoized_reference() {
+        let mut compared = 0;
+        let mut cache_hits = 0;
+        let mut nonempty = 0;
+        let mut rich_compared = 0;
+        for seed in 0..6_u64 {
+            let mut state = GameState::standard(9_300_001 + seed, 4);
+            let mut rng = SplitMix64::new(seed);
+            for step in 0..400 {
+                if state.is_terminal() {
+                    break;
+                }
+                if state.phase == Phase::Main && step % 7 == 0 {
+                    let attacker = state.current_player;
+                    let protected = (attacker + 1) % 4;
+                    // Also probe a copy where the attacker holds spare bank cards and
+                    // unplayed progress cards, so transpositions actually occur.
+                    let mut rich = state.clone();
+                    for resource in 0..5 {
+                        let moved = rich.bank[resource].min(3);
+                        rich.bank[resource] -= moved;
+                        rich.players[attacker as usize].resources[resource] += moved;
+                    }
+                    let hand = &mut rich.players[attacker as usize];
+                    hand.played_development_this_turn = false;
+                    for card in [DevCard::Knight, DevCard::RoadBuilding, DevCard::Monopoly] {
+                        hand.development[card.index()] += 1;
+                    }
+                    // A few rich states cover cache reuse without making the
+                    // regression suite expand hundreds of expensive subtrees.
+                    let probes =
+                        std::iter::once(&state).chain((rich_compared < 3).then_some(&rich));
+                    for probe in probes {
+                        if std::ptr::eq(probe, &rich) {
+                            rich_compared += 1;
+                        }
+                        let mut memo = TacticalMemo::new(true);
+                        let fast = reachable_tactical_threats_with(
+                            probe, &state, protected, attacker, None, &mut memo,
+                        );
+                        let reference = reachable_tactical_threats_with(
+                            probe,
+                            &state,
+                            protected,
+                            attacker,
+                            None,
+                            &mut TacticalMemo::new(false),
+                        );
+                        assert_eq!(fast.keys, reference.keys, "seed {seed} step {step}");
+                        assert_eq!(fast.non_progress_paths, reference.non_progress_paths);
+                        assert_eq!(fast.progress_paths, reference.progress_paths);
+                        cache_hits += memo.hits;
+                        nonempty += usize::from(!fast.keys.is_empty());
+                        compared += 1;
+                    }
+                }
+                let actions = state.legal_actions();
+                let action = actions[rng.range(actions.len())].clone();
+                state.apply(&action).unwrap();
+            }
+        }
+        assert!(compared >= 20, "only {compared} states compared");
+        assert!(
+            cache_hits > 0,
+            "fixture must exercise completed subtree reuse"
+        );
+        assert!(nonempty > 0, "fixture must preserve real tactical threats");
+    }
 
     fn dirty_monopoly_response_state() -> (GameState, Action) {
         let mut state = GameState::standard(401, 3);
@@ -938,6 +1210,187 @@ mod tests {
         assert_eq!(state.current_player, 1);
         assert_eq!(state.actor(), 0);
         (state, Action::RespondTrade { accept: true })
+    }
+
+    #[test]
+    fn timed_belief_search_rejects_an_unverified_trade() {
+        let (mut state, accept) = dirty_monopoly_response_state();
+        state.players[1].public_victory_points = 2;
+        state.players[1].resources = [4; 5];
+        state.players[1].development = [1, 0, 1, 1, 1];
+        let report = crate::depth::search_weighted_belief_maxn_bounded_timed(
+            &[crate::BeliefParticle { state, weight: 1.0 }],
+            3,
+            12,
+            8_000,
+            1,
+        )
+        .unwrap();
+        assert!(report.deadline_reached);
+        assert_eq!(report.chosen, Some(Action::RespondTrade { accept: false }));
+        assert!(
+            report
+                .provenance
+                .pruned_roots
+                .iter()
+                .any(|root| root.action == accept
+                    && root.reason == crate::depth::RootPruneReason::TradeSafetyIncomplete)
+        );
+        assert!(!report.actions.iter().any(|root| root.action == accept));
+    }
+
+    #[test]
+    fn interrupted_safety_probe_never_returns_partial_safe_evidence() {
+        use std::cell::Cell;
+        let (state, accept) = dirty_monopoly_response_state();
+        let checkpoints = Cell::new(0);
+        let full =
+            super::belief_domestic_trade_assessment_controlled([(&state, 1.0)], &accept, &|| {
+                checkpoints.set(checkpoints.get() + 1);
+                false
+            })
+            .unwrap();
+        assert!(full.hard_veto);
+        assert_eq!(full.threat, Some(super::DomesticTradeThreat::DirtyMonopoly));
+        let total = checkpoints.get();
+        assert!(total > 10, "fixture must exercise recursive checkpoints");
+        for stop_at in [1, 5, total / 2, total - 1] {
+            let calls = Cell::new(0);
+            let partial = super::belief_domestic_trade_assessment_controlled(
+                [(&state, 1.0), (&state, 1.0)],
+                &accept,
+                &|| {
+                    calls.set(calls.get() + 1);
+                    // A one-shot cancellation remains sticky through unwinding.
+                    calls.get() == stop_at
+                },
+            );
+            assert!(
+                partial.is_none(),
+                "checkpoint {stop_at} leaked partial evidence"
+            );
+            assert_eq!(calls.get(), stop_at, "interrupted work must not resume");
+        }
+        let reject = super::belief_domestic_trade_assessment_controlled(
+            [(&state, 1.0)],
+            &Action::RespondTrade { accept: false },
+            &|| true,
+        )
+        .expect("rejecting a trade needs no tactical probe");
+        assert!(!reject.hard_veto);
+        assert_eq!(reject.threat, None);
+    }
+
+    #[test]
+    fn memoized_probe_preserves_distinct_road_building_origins() {
+        let mut state = GameState::standard(401, 3);
+        state.phase = Phase::Main;
+        state.buildings[0] = Some(Building::Settlement(0));
+        state.players[0].resources = [0, 0, 0, 2, 3];
+        state.players[0].development[DevCard::RoadBuilding.index()] = 1;
+        let actions = state.legal_actions();
+        let (first, second) = actions
+            .iter()
+            .find_map(|action| {
+                if let Action::PlayRoadBuilding {
+                    first,
+                    second: Some(second),
+                } = action
+                {
+                    actions
+                        .contains(&Action::PlayRoadBuilding {
+                            first: *second,
+                            second: Some(*first),
+                        })
+                        .then_some((*first, *second))
+                } else {
+                    None
+                }
+            })
+            .expect("two independently legal roads");
+        let mut forward = state.clone();
+        forward
+            .apply(&Action::PlayRoadBuilding {
+                first,
+                second: Some(second),
+            })
+            .unwrap();
+        let mut reverse = state.clone();
+        reverse
+            .apply(&Action::PlayRoadBuilding {
+                first: second,
+                second: Some(first),
+            })
+            .unwrap();
+        assert_eq!(forward.state_hash(), reverse.state_hash());
+
+        let fast = reachable_tactical_threats_with(
+            &state,
+            &state,
+            1,
+            0,
+            None,
+            &mut TacticalMemo::new(true),
+        );
+        let reference = reachable_tactical_threats_with(
+            &state,
+            &state,
+            1,
+            0,
+            None,
+            &mut TacticalMemo::new(false),
+        );
+        assert_eq!(fast.keys, reference.keys);
+        assert_eq!(fast.non_progress_paths, reference.non_progress_paths);
+        assert_eq!(fast.progress_paths, reference.progress_paths);
+        for (first, second) in [(first, second), (second, first)] {
+            assert_eq!(
+                fast.progress_paths.get(&(
+                    super::ThreatKey::CityBuild(0),
+                    super::ProgressPath::Single(super::ProgressChoice::RoadBuilding {
+                        first,
+                        second: Some(second)
+                    }),
+                )),
+                Some(&1.0)
+            );
+        }
+    }
+
+    #[test]
+    fn memoized_probe_preserves_monopoly_counterfactual_against_pre_trade_baseline() {
+        let (state, accept) = dirty_monopoly_response_state();
+        let baseline = super::resolve_without_exchange(&state).unwrap();
+        let after = super::resolved_exchange_states(&state, &accept, 0)
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_ne!(after.state_hash(), baseline.state_hash());
+        for penalty in [None, Some((colonist_catan_core::Resource::Ore, 1))] {
+            let fast = reachable_tactical_threats_with(
+                &after,
+                &baseline,
+                0,
+                1,
+                penalty,
+                &mut TacticalMemo::new(true),
+            );
+            let reference = reachable_tactical_threats_with(
+                &after,
+                &baseline,
+                0,
+                1,
+                penalty,
+                &mut TacticalMemo::new(false),
+            );
+            assert_eq!(fast.keys, reference.keys);
+            assert_eq!(fast.non_progress_paths, reference.non_progress_paths);
+            assert_eq!(fast.progress_paths, reference.progress_paths);
+            assert_eq!(
+                fast.keys.contains_key(&super::ThreatKey::ImmediateWin),
+                penalty.is_none()
+            );
+        }
     }
 
     #[test]

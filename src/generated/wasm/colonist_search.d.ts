@@ -120,6 +120,7 @@ export interface WasmPrunedRoot {
     | "root-excluded"
     | "branch-truncated"
     | "trade-safety"
+    | "trade-safety-incomplete"
     | "exact-family-collapsed";
 }
 

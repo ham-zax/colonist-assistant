@@ -342,6 +342,7 @@ function disagreementProvenance(baselineRoot, candidateRoot, baseline, candidate
     authorityTrace?.safetyReplacement ||
     provenance.safetyReplacement ||
     prunedBaseline?.reason === "trade-safety" ||
+    prunedBaseline?.reason === "trade-safety-incomplete" ||
     baselineEvidence?.tradeHardVeto
   ) {
     return {

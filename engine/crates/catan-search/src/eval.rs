@@ -1,5 +1,4 @@
-use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::VecDeque;
 
 use colonist_catan_core::{
     Action, Building, CITY_COST, DEVELOPMENT_COST, GameState, Phase, Port, ROAD_COST, ResourceHand,
@@ -62,35 +61,6 @@ pub struct TrophyOutlook {
     pub acquire: f32,
     pub retain: f32,
     pub additional_cost: f32,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct QueueEntry {
-    cost: u8,
-    vertex: u8,
-}
-
-impl PartialEq for QueueEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.cost == other.cost && self.vertex == other.vertex
-    }
-}
-
-impl Eq for QueueEntry {}
-
-impl PartialOrd for QueueEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for QueueEntry {
-    fn cmp(&self, other: &Self) -> Ordering {
-        other
-            .cost
-            .cmp(&self.cost)
-            .then_with(|| other.vertex.cmp(&self.vertex))
-    }
 }
 
 fn sigmoid(value: f32) -> f32 {
@@ -166,27 +136,30 @@ fn acquisition_rate(production: &[f32; 5], ratios: &ResourceHand, target: usize)
 
 pub(crate) fn build_target_mask(state: &GameState, player: u8) -> [bool; 4] {
     let player_state = &state.players[player as usize];
+    // Start at our occupied network, rather than testing every empty edge and
+    // walking its neighbours. Opponent buildings still block road extension.
     let road = player_state.roads_left > 0
-        && state
-            .board
-            .edges
+        && (state
+            .buildings
             .iter()
             .enumerate()
-            .any(|(edge, candidate)| {
-                state.roads[edge].is_none()
-                    && candidate.vertices.iter().any(|vertex| {
-                        match state.buildings[*vertex as usize] {
-                            Some(building) => building.player() == player,
-                            None => state.board.vertices[*vertex as usize]
+            .any(|(vertex, building)| {
+                building.is_some_and(|building| building.player() == player)
+                    && state.board.vertices[vertex]
+                        .adjacent_edges
+                        .iter()
+                        .any(|edge| state.roads[*edge as usize].is_none())
+            })
+            || state.roads.iter().enumerate().any(|(edge, owner)| {
+                *owner == Some(player)
+                    && state.board.edges[edge].vertices.iter().any(|vertex| {
+                        state.buildings[*vertex as usize].is_none()
+                            && state.board.vertices[*vertex as usize]
                                 .adjacent_edges
                                 .iter()
-                                .any(|neighbor| {
-                                    *neighbor as usize != edge
-                                        && state.roads[*neighbor as usize] == Some(player)
-                                }),
-                        }
+                                .any(|neighbor| state.roads[*neighbor as usize].is_none())
                     })
-            });
+            }));
     let settlement = player_state.settlements_left > 0
         && state
             .board
@@ -465,14 +438,13 @@ pub(crate) fn settlement_vertex_open(state: &GameState, vertex: usize) -> bool {
 
 pub(crate) fn road_distances(state: &GameState, player: u8) -> Vec<u8> {
     let mut distances = vec![u8::MAX; state.board.vertices.len()];
-    let mut queue = BinaryHeap::new();
+    // Existing roads cost zero; empty roads cost one. A 0–1 BFS gives the
+    // same shortest paths without a heap comparison for every frontier step.
+    let mut queue = VecDeque::with_capacity(state.board.vertices.len());
     for (vertex, building) in state.buildings.iter().enumerate() {
         if building.is_some_and(|piece| piece.player() == player) {
             distances[vertex] = 0;
-            queue.push(QueueEntry {
-                cost: 0,
-                vertex: vertex as u8,
-            });
+            queue.push_back((0, vertex as u8));
         }
     }
     for (edge, owner) in state.roads.iter().enumerate() {
@@ -482,11 +454,11 @@ pub(crate) fn road_distances(state: &GameState, player: u8) -> Vec<u8> {
         for vertex in state.board.edges[edge].vertices {
             if distances[vertex as usize] > 0 {
                 distances[vertex as usize] = 0;
-                queue.push(QueueEntry { cost: 0, vertex });
+                queue.push_back((0, vertex));
             }
         }
     }
-    while let Some(QueueEntry { cost, vertex }) = queue.pop() {
+    while let Some((cost, vertex)) = queue.pop_front() {
         if cost != distances[vertex as usize] {
             continue;
         }
@@ -504,10 +476,11 @@ pub(crate) fn road_distances(state: &GameState, player: u8) -> Vec<u8> {
             let next = if a == vertex { b } else { a };
             if next_cost < distances[next as usize] {
                 distances[next as usize] = next_cost;
-                queue.push(QueueEntry {
-                    cost: next_cost,
-                    vertex: next,
-                });
+                if edge_owner.is_none() {
+                    queue.push_back((next_cost, next));
+                } else {
+                    queue.push_front((next_cost, next));
+                }
             }
         }
     }
@@ -1776,6 +1749,113 @@ mod tests {
             state.apply(&action).unwrap();
         }
         state
+    }
+
+    #[test]
+    fn build_targets_match_legal_builds_on_growing_and_blocked_networks() {
+        use colonist_catan_core::SplitMix64;
+        for players in 2..=4 {
+            for seed in 0..8 {
+                let mut state = after_setup(730 + seed, players);
+                let mut rng = SplitMix64::new(seed);
+                state.phase = Phase::Main;
+                state.domestic_trade_disabled = u8::MAX;
+                for step in 0..16 {
+                    if state.is_terminal() {
+                        break;
+                    }
+                    for player in 0..players {
+                        if state.is_terminal() {
+                            break;
+                        }
+                        state.current_player = player;
+                        state.players[player as usize].resources = [6; 5];
+                        let actions = state.legal_actions();
+                        let actual = [
+                            actions
+                                .iter()
+                                .any(|a| matches!(a, Action::BuildRoad { .. })),
+                            actions
+                                .iter()
+                                .any(|a| matches!(a, Action::BuildSettlement { .. })),
+                            actions
+                                .iter()
+                                .any(|a| matches!(a, Action::BuildCity { .. })),
+                            actions.contains(&Action::BuyDevelopment),
+                        ];
+                        // Bellman relaxation is a separate shortest-path oracle
+                        // for the optimized 0–1 BFS, including blocked vertices.
+                        let mut expected_routes = vec![u8::MAX; state.buildings.len()];
+                        for (vertex, building) in state.buildings.iter().enumerate() {
+                            if building.is_some_and(|b| b.player() == player) {
+                                expected_routes[vertex] = 0;
+                            }
+                        }
+                        for (edge, owner) in state.roads.iter().enumerate() {
+                            if *owner == Some(player) {
+                                for vertex in state.board.edges[edge].vertices {
+                                    expected_routes[vertex as usize] = 0;
+                                }
+                            }
+                        }
+                        loop {
+                            let mut changed = false;
+                            for vertex in 0..expected_routes.len() {
+                                if expected_routes[vertex] == u8::MAX
+                                    || state.buildings[vertex].is_some_and(|b| b.player() != player)
+                                {
+                                    continue;
+                                }
+                                for edge in &state.board.vertices[vertex].adjacent_edges {
+                                    let owner = state.roads[*edge as usize];
+                                    if owner.is_some_and(|owner| owner != player) {
+                                        continue;
+                                    }
+                                    let [a, b] = state.board.edges[*edge as usize].vertices;
+                                    let next = if a as usize == vertex { b } else { a } as usize;
+                                    let cost = expected_routes[vertex]
+                                        .saturating_add(u8::from(owner.is_none()));
+                                    if cost < expected_routes[next] {
+                                        expected_routes[next] = cost;
+                                        changed = true;
+                                    }
+                                }
+                            }
+                            if !changed {
+                                break;
+                            }
+                        }
+                        assert_eq!(super::road_distances(&state, player), expected_routes);
+                        assert_eq!(
+                            super::build_target_mask(&state, player),
+                            actual,
+                            "players={players} seed={seed} step={step} player={player}"
+                        );
+                        let builds = actions
+                            .into_iter()
+                            .filter(|a| {
+                                matches!(
+                                    a,
+                                    Action::BuildRoad { .. }
+                                        | Action::BuildSettlement { .. }
+                                        | Action::BuildCity { .. }
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        if !builds.is_empty() {
+                            state.apply(&builds[rng.range(builds.len())]).unwrap();
+                        }
+                    }
+                }
+                state.development_deck = [0; 5];
+                for player in 0..players {
+                    state.players[player as usize].roads_left = 0;
+                    state.players[player as usize].settlements_left = 0;
+                    state.players[player as usize].cities_left = 0;
+                    assert_eq!(super::build_target_mask(&state, player), [false; 4]);
+                }
+            }
+        }
     }
 
     #[test]

@@ -316,3 +316,200 @@ Repeat with 1/2/4/8 threads. The browser/offscreen harness is documented in
 Both harnesses leave search budgets unchanged in fixed work except disabling
 the clock and selecting depth 2. Timed `live-current` replay uses the existing
 four-player configuration.
+
+## 7. Resumed search fixes (2026-10-02)
+
+The interrupted session left trade-safety memoization, parallel root evidence,
+and threaded allocator/cancellation changes pending. Its `samply` output files
+were empty; no CPU-profile result or new speedup is established by that run.
+The earlier arena traces implicated tactical trade-safety probes, but a trace
+is not a held-out strength evaluation.
+
+- Tactical probes reuse subtrees keyed by state, action depth, and progress
+  origin. The no-exchange baseline is computed once per trade assessment.
+  Differential tests now require real reuse and nonempty threats, preserve
+  both road-building orders, and compare a nonzero Monopoly penalty against
+  the actual pre-trade baseline.
+- Root evidence runs through the existing order-preserving parallel map.
+  Safety thresholds and the canonical per-root accumulation order remain
+  the same. The stage still completes its safety evidence before returning;
+  the cooperative time budget does not yet bound every tactical probe.
+- Forced arena decisions skip search except pre-roll decisions by search
+  engines. Those must retain root values for the existing calibration sampling
+  protocol. Regressions cover MaxN, AlphaBeta, UCT, and PUCT with both belief
+  and perfect-information configurations. Skipping other forced searches
+  changes RNG consumption, so old seeded game trajectories need not match.
+- Threaded WASM caches small allocations per thread ahead of the shared heap.
+  Eight size classes, capped at 512 blocks each, retain at most about 2 MiB
+  per thread. The pool owns those caches for its lifetime.
+- Stale work sets a shared cancellation word; the engine checks it at its
+  cooperative checkpoints, and the offscreen queue clears it before dispatching
+  the next job. The worker validates the shared buffer, address alignment, and
+  bounds before reporting readiness. This is cooperative cancellation, without
+  a guaranteed stop latency inside an uninterrupted evidence stage.
+- Failed pools retry after a 60-second cooldown. Explicit terminal readiness
+  errors allow the failed document to close, including one inherited after a
+  service-worker restart. Transport failures and timed-out readiness probes
+  leave concurrent searches running.
+
+The resumed changes do not establish a higher win rate or native/WASM speed
+parity. Live search budgets, extension permissions, and export formats were
+not changed in this continuation.
+
+A small native release spot check compared memoized and reference probes on
+four synthetic three-player states (seeds 401–404), with builds, Road Building,
+Knight, and development-purchase continuations. Memoized probes took
+29.6–32.1 ms; reference probes took 52.5–59.0 ms. Every result map matched,
+with 405 main-phase and 281 chance subtrees retained per probe. This one-pass
+check isolates tactical memoization; it measures neither complete decisions
+nor live-game strength. The scratch harness and raw output are under
+`/tmp/colonist-tactical-bench/`, outside the repository.
+
+Verification of the rebuilt continuation:
+
+- `bun run check`: passed. `bun run test`: 48 files, 533 tests passed,
+  including the cold packaged-WASM smoke. `bun run build`: passed for both
+  WASM variants and the extension in `dist/`.
+- Focused arena forced-action regressions: 2 passed. Release trade-safety
+  tests: 9 passed with and without `parallel`. Release WASM tests: 8 passed,
+  including cross-thread freeing/reuse. The final rich-state differential
+  test is bounded to three resource-rich probes and finishes in about a second
+  in the release trade-safety suite.
+- The standard Rust verification passed the fixed-work parallel/sequential
+  identity gate, then reproduced the three failures already recorded above:
+  `strategic_particle_f14_full_posterior_preserves_monopoly_family`,
+  `road4311_d14_starved_floor_reproduces_live_values`, and
+  `two_player_save_for_city_matches_reference`. The debug workspace run was
+  stopped at a 180-second limit; it did not reach Clippy. Separate strict
+  workspace and parallel Clippy checks failed on existing argument-count,
+  return/borrow, collapsible-condition, and fixture-type warnings.
+- An actual rebuilt threaded-WASM ABI check in Node passed: shared aligned
+  cancellation address, visibility through the original buffer after memory
+  growth, cancelled analysis, and host reset. It did not initialize a browser
+  thread pool. Rust formatting and `git diff --check` passed.
+
+At this initial checkpoint the full Rust gate remained ungreen; the follow-up
+below resolves those failures. No new live-game run or held-out strength
+evaluation was performed during this continuation.
+
+
+## 8. Follow-up: regressions, bounded safety, and measured compute cost (2026-10-02)
+
+The recent sequence keeps observation-safe Deep MaxN as the default: standalone
+packaged WASM (`f32d83e`), removal of redundant sorting/ETA work (`e935f92`),
+opponent-mixture/threat/coverage corrections (`606e4b6`), then deterministic
+parallel native/browser search (`9eb7f4f`). This follow-up keeps that direction;
+AlphaBeta remains a defensive comparison and belief PUCT experimental.
+
+Three stale regression contracts are repaired without retuning the evaluator:
+
+- The synthetic F14 fixture now holds the same visible hand totals while
+  distinguishing full-posterior Lumber from compressed-posterior Grain.
+  Production and experimental strategic compression must both preserve the
+  full-posterior exact family choice.
+- The D14 floor pin and the two-player deep save pin pass at their introduction
+  (`a70bbc6`), then fail after the intentional persistent-production repair
+  (`35815e3`). The floor now checks the complete probability-weighted draw
+  evaluation for the acting seat across all 22 worlds. The city test still
+  asserts production saving and EndTurn retention at both budgets. A bounded
+  reference that flips between 40k and 120k nodes is not ground truth.
+- Strict Clippy findings were addressed with equivalent conditions, corrected
+  borrowing/returns, a fixture type alias, and feature-specific WASM imports.
+  The explicit transposition identity inputs retain a documented local lint
+  allowance rather than hiding semantically relevant cache inputs.
+
+Tactical safety now checks cooperative stop conditions inside exchange tails,
+main/chance recursion, and weighted-world aggregation. Interruption is sticky
+and returns incomplete evidence, never zero-risk evidence. Timed MaxN and exact
+family callers propagate that result; an unverified trade is pruned with
+`trade-safety-incomplete`, with a legal decline/pass recovered even under a
+root cap of one. Completed fixed-work probes retain the existing results.
+An already selected single action or legal-action generation still has bounded
+local work between checkpoints; this is not a hard real-time guarantee.
+
+The first instruction profile of a recovered four-player decision identifies
+build-target scans, expansion/arrival evaluation, production valuation, trade
+offer generation, and hashing as major compute consumers. The profile was
+bounded to 90 seconds and interrupted during the fixed-work warm-up, so it is
+hotspot evidence rather than an entire-decision timing or share estimate.
+Build targets now start from the player's occupied network. Route distances
+use 0–1 BFS because existing roads cost zero and new roads one, preserving
+opponent building/road blockers. Regression oracles compare build availability
+against legal actions and routes against independent Bellman relaxation on
+growing 2–4 player networks.
+
+Measured fixed-work comparisons, with initialization/warm-up excluded:
+
+- Native: the same 20 recovered fixture/seed requests, three repetitions per
+  build. Median batch time fell from 11.227 s to 9.684 s (13.7% less time).
+  All 60 chosen-action, action-value, node-count, depth, and authority signatures
+  were bit-identical. This comparison isolates the follow-up optimizations;
+  both builds already contain the continuation's tactical memoization.
+- Browser: the four recovered four-player seed-zero cases, eight WASM threads,
+  three repetitions at fixed requested depth two with clocks disabled. Median
+  batch time fell from 1.711 s to 1.520 s (11.2% less time). All 12 signatures
+  were bit-identical. These native and browser comparisons are within-platform
+  comparisons, not a cross-platform floating-point identity claim.
+
+Cooperative live-budget probes used the existing four-player 10 s / 48k nodes
+per wave profile on two heavy cases in isolated Chrome (16 logical CPUs).
+Each table entry is a single warmed run, not a confidence interval:
+
+| Case | WASM threads | Before nodes/s | After nodes/s | After elapsed | After nodes | Actual decision depth |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Hidden development | 4 | 14,731 | 18,768 | 9.998 s | 187,642 | 2 |
+| Eastern road chain | 4 | 23,592 | 27,766 | 6.916 s | 192,031 | 3 |
+| Hidden development | 8 | 29,831 | 29,740 | 6.825 s | 202,978 | 2 |
+| Eastern road chain | 8 | 36,159 | 41,626 | 4.613 s | 192,031 | 3 |
+
+The four-thread hidden-development case reached its time limit and searched
+27% more nodes in essentially the same time. The eight-thread version of that
+case shows no meaningful timing improvement in this single-run probe; the
+repeatable fixed-work comparison above is the stronger speed evidence.
+Deep waves account for approximately 90–96% of measured analysis time. Root
+scoring takes 0.17–0.48 s, threat safety 0.005–0.262 s; particle preparation and
+the one-ply floor are small in these cases.
+
+All ten retained roots in each probe received positive search work and the
+one-ply floor completed. Partial waves never replace the last complete wave.
+This establishes retained-root coverage in these probes, not unlimited search
+of every legal action. Requested wave depth four/five is not achieved decision
+depth: some domestic-trade branches exhaust their allocation before reaching
+the controlled player's next decision. The next quality bottleneck is that
+response branching and per-root cutoff distribution, not raising a nominal
+node-rate target or promoting experimental PUCT. No search budget, evaluator
+weight, or default algorithm was changed for this follow-up. No live-game or
+held-out strength result is claimed.
+
+The overlay now fixes its expanded frame to the existing viewport-aware height,
+keeps an engine-status chip present in both searching and ready states, and
+collapses alternative moves until requested. Saving advice says `BUILD GOAL`;
+a speculative negotiation says `TRADE OPTION`. Selected actions and mandatory
+trade/discard responses retain their existing execution and validation paths.
+In actual Chrome preview renders, nine expanded states measured the same
+662.39 px height at 1280×800 and 496.79 px at 800×600. Explicit collapse reduced
+the frame to 57.02 px. Opening alternatives left the frame height unchanged;
+overflow stayed inside the panel. Long player names, four-player tables, and
+trade-confirm controls were checked. This was fixture-based UI verification,
+not an automated live Colonist game.
+
+Final verification:
+
+- `bun run check`: passed. `bun run test`: 49 files / 541 tests passed, including
+  the cold packaged-WASM smoke (323 ms, below its one-second limit).
+  After the final disclosure affordance and explicit three/four-player matrix
+  regression, type checking and the four focused UI suites passed again
+  (67 tests). The packaged extension includes that final presentation.
+- `CARGO_BUILD_JOBS=2 CARGO_PROFILE_TEST_OPT_LEVEL=2 RAYON_NUM_THREADS=4 bun run
+  verify:rust`: passed formatting, fixed-work parallel/sequential identity,
+  workspace tests, strict workspace Clippy, and parallel Clippy. Optimization
+  was an environment override for this run; debug assertions and overflow
+  checks remain enabled. Sixteen existing ignored search tests stayed ignored.
+  The earlier unoptimized run was stopped during the expensive opening
+  portfolio test and is superseded by this complete run.
+- Both packaged WASM variants and the extension were rebuilt with `bun run
+  build`. The threaded nightly toolchain still reports its existing unstable
+  `atomics` target-feature warning; strict code Clippy gates pass.
+- Native/browser fixed-work comparisons and browser geometry checks above
+  passed. Raw recovered fixtures and temporary profiling/browser artifacts
+  remain outside versioned source. `git diff --check` passed.

@@ -22,6 +22,16 @@ export function analyze(request) {
 }
 
 /**
+ * Linear-memory byte address of the engine's cancellation word. The threaded
+ * host writes 1 there to stop the running search and 0 before the next one.
+ * @returns {number}
+ */
+export function cancel_word_address() {
+    const ret = wasm.cancel_word_address();
+    return ret >>> 0;
+}
+
+/**
  * @returns {string}
  */
 export function engine_version() {

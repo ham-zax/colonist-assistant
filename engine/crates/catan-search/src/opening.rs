@@ -837,15 +837,13 @@ impl OpeningSolver {
                 None
             };
             self.node_limit = parent_limit;
-            if let Some(candidate) = candidate.filter(|value| value.endpoint_complete) {
-                if let Some(evidence) = candidate.evidence {
-                    if best
-                        .as_ref()
-                        .is_none_or(|(_, score)| evidence.rival_value > *score)
-                    {
-                        best = Some((candidate, evidence.rival_value));
-                    }
-                }
+            if let Some(candidate) = candidate.filter(|value| value.endpoint_complete)
+                && let Some(evidence) = candidate.evidence
+                && best
+                    .as_ref()
+                    .is_none_or(|(_, score)| evidence.rival_value > *score)
+            {
+                best = Some((candidate, evidence.rival_value));
             }
             if self.deadline_reached {
                 break;

@@ -3,8 +3,19 @@ import type { DeepSearchExecutor } from "../worker/deep-search";
 
 const SETUP_TIMEOUT_MS = 5_000;
 const RESPONSE_TIMEOUT_MS = 12_000;
+/** A failed pool is retried after this long instead of for the worker's life. */
+export const THREADED_RETRY_COOLDOWN_MS = 60_000;
 export let threadedFallbackReason: string | undefined;
 let setup: Promise<ThreadedStatus | undefined> | undefined;
+let retryAfter = 0;
+// A status error returned by the offscreen document means its readiness has
+// failed. Transport errors and timeouts can happen while its worker is healthy.
+class ThreadedWorkerFailed extends Error {}
+const markUnavailable = (reason: string): undefined => {
+  threadedFallbackReason = `${reason}; using single-threaded WASM`;
+  retryAfter = Date.now() + THREADED_RETRY_COOLDOWN_MS;
+  return undefined;
+};
 
 const bounded = async <T>(work: Promise<T>, timeoutMs: number): Promise<T> => {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -17,14 +28,19 @@ const bounded = async <T>(work: Promise<T>, timeoutMs: number): Promise<T> => {
 const send = async (message: OffscreenRequest): Promise<OffscreenResponse> => {
   const response = await bounded(chrome.runtime.sendMessage<OffscreenResponse>(message), RESPONSE_TIMEOUT_MS);
   if (!response || response.token !== message.token) throw new Error("Threaded engine returned an invalid response");
-  if (response.error) throw new Error(response.error);
+  if (response.error) {
+    throw message.operation === "status"
+      ? new ThreadedWorkerFailed(response.error)
+      : new Error(response.error);
+  }
   return response;
 };
 
 /** Concurrent tabs share one document creation and pool initialization. Setup
  * failures select the packaged single-thread engine before any work is sent. */
 const initializeThreadedEngine = (): Promise<ThreadedStatus | undefined> => {
-  if (setup) return setup;
+  if (setup && (!retryAfter || Date.now() < retryAfter)) return setup;
+  retryAfter = 0;
   let created = false;
   let failed = false;
   const closeOwnedDocument = async (): Promise<void> => {
@@ -34,8 +50,7 @@ const initializeThreadedEngine = (): Promise<ThreadedStatus | undefined> => {
   };
   const initialize = async (): Promise<ThreadedStatus | undefined> => {
     if (!chrome.offscreen?.createDocument || !chrome.runtime.getContexts) {
-      threadedFallbackReason = "Offscreen worker API unavailable; using single-threaded WASM";
-      return undefined;
+      return markUnavailable("Offscreen worker API unavailable");
     }
     const documentUrl = chrome.runtime.getURL("offscreen.html");
     const contexts = await chrome.runtime.getContexts({
@@ -49,7 +64,7 @@ const initializeThreadedEngine = (): Promise<ThreadedStatus | undefined> => {
       });
       created = true;
       // A timed-out create call may finish later. Close our document before
-      // starting its engine; never close a document inherited after a restart.
+      // starting its engine. A transport timeout must leave inherited work alone.
       if (failed) { await closeOwnedDocument(); return undefined; }
     }
     const response = await send({ type: OFFSCREEN_MESSAGE_TYPE, operation: "status", token: crypto.randomUUID() });
@@ -58,9 +73,12 @@ const initializeThreadedEngine = (): Promise<ThreadedStatus | undefined> => {
   };
   setup = bounded(initialize(), SETUP_TIMEOUT_MS).catch(async (error: unknown) => {
     failed = true;
+    const owned = created;
     await closeOwnedDocument();
-    threadedFallbackReason = `${error instanceof Error ? error.message : "Thread pool setup failed"}; using single-threaded WASM`;
-    return undefined;
+    if (!owned && error instanceof ThreadedWorkerFailed) {
+      try { await bounded(chrome.offscreen.closeDocument(), 1_000); } catch { /* Already gone. */ }
+    }
+    return markUnavailable(error instanceof Error ? error.message : "Thread pool setup failed");
   });
   return setup;
 };
@@ -82,9 +100,13 @@ export const warmThreadedEngine = async (): Promise<ThreadedStatus | undefined> 
     }
     return response.status;
   } catch (error: unknown) {
-    threadedFallbackReason = `${error instanceof Error ? error.message : "Thread pool unavailable"}; using single-threaded WASM`;
+    // Terminal readiness failures settle all queued work in the offscreen
+    // document. A transient probe failure must leave other tabs' searches alive.
     setup = Promise.resolve(undefined);
-    return undefined;
+    if (error instanceof ThreadedWorkerFailed) {
+      try { await bounded(chrome.offscreen.closeDocument(), 1_000); } catch { /* Already gone. */ }
+    }
+    return markUnavailable(error instanceof Error ? error.message : "Thread pool unavailable");
   }
 };
 

@@ -1,5 +1,22 @@
+use std::sync::atomic::{AtomicU32, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+
+/// Host-owned cancellation word. The threaded browser engine shares its WASM
+/// memory with the offscreen document, which writes this word directly so a
+/// stale search stops at its next cooperative check instead of running out its
+/// budget. Nothing in the engine writes it; hosts that never set it are
+/// unaffected.
+static SEARCH_CANCEL: AtomicU32 = AtomicU32::new(0);
+
+/// Byte address of the cancellation word inside the module's linear memory.
+pub fn search_cancel_word_address() -> usize {
+    std::ptr::from_ref(&SEARCH_CANCEL) as usize
+}
+
+pub fn search_cancel_requested() -> bool {
+    SEARCH_CANCEL.load(Ordering::Relaxed) != 0
+}
 
 #[cfg(target_arch = "wasm32")]
 fn browser_now_ms() -> f64 {
@@ -40,6 +57,9 @@ impl CooperativeDeadline {
     }
 
     pub fn has_elapsed(&self) -> bool {
+        if search_cancel_requested() {
+            return true;
+        }
         if self.budget_ms == 0 {
             return false;
         }
@@ -68,6 +88,9 @@ impl CooperativeDeadline {
     }
 
     pub fn remaining_ms(&self) -> u32 {
+        if search_cancel_requested() {
+            return 0;
+        }
         if self.budget_ms == 0 {
             return u32::MAX;
         }

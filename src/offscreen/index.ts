@@ -8,6 +8,7 @@ interface Job {
   cancelled: boolean;
 }
 let worker: Worker | undefined;
+let cancelFlag: Int32Array | undefined;
 let active: Job | undefined;
 const queue: Job[] = [];
 let resolveReady: (status: ThreadedStatus) => void;
@@ -30,6 +31,7 @@ const pump = (): void => {
   try {
     const request = subtractQueueBudget(job.request, performance.now() - job.enqueuedAt);
     active = job;
+    if (cancelFlag) Atomics.store(cancelFlag, 0, 0);
     worker!.postMessage({ token: job.token, request });
   } catch (error) {
     active = undefined;
@@ -41,7 +43,11 @@ try {
   if (!crossOriginIsolated || typeof SharedArrayBuffer === "undefined") throw new Error("Extension page is not cross-origin isolated");
   worker = new Worker(chrome.runtime.getURL("offscreen-engine-worker.js"), { type: "module" });
   worker.onmessage = (event: MessageEvent<EngineWorkerResponse>) => {
-    if (event.data.status) { resolveReady(event.data.status); return; }
+    if (event.data.status) {
+      if (event.data.cancelWord) cancelFlag = new Int32Array(event.data.cancelWord.buffer, event.data.cancelWord.index * 4, 1);
+      resolveReady(event.data.status);
+      return;
+    }
     if (!active && event.data.error) { fail(event.data.error); return; }
     if (!active || event.data.token !== active.token) return;
     const job = active;
@@ -62,8 +68,10 @@ chrome.runtime.onMessage.addListener((value: unknown, sender, sendResponse) => {
     if (active?.token === message.token && !active.cancelled) {
       active.cancelled = true;
       active.respond({ token: message.token, error: "Decision cancelled as stale" });
-      // WASM is synchronous. Keep the active slot until its cooperative budget
-      // finishes; terminating its host would orphan rayon's child workers.
+      // The search polls this word as an expired deadline and returns quickly.
+      // Keep the slot until it does; terminating the host would orphan rayon's
+      // child workers.
+      if (cancelFlag) Atomics.store(cancelFlag, 0, 1);
     }
     const index = queue.findIndex((job) => job.token === message.token);
     if (index >= 0) queue.splice(index, 1)[0]!.respond({ token: message.token, error: "Decision cancelled as stale" });

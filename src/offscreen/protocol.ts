@@ -17,7 +17,12 @@ export interface OffscreenResponse {
   error?: string;
 }
 export type EngineWorkerRequest = { token: string; request: unknown };
-export type EngineWorkerResponse = OffscreenResponse;
+/** Shared Int32 word the search polls; nonzero stops the active analysis. */
+export interface CancelWord {
+  buffer: SharedArrayBuffer;
+  index: number;
+}
+export type EngineWorkerResponse = OffscreenResponse & { cancelWord?: CancelWord };
 
 /** Queue time is measured in the receiving document's own clock. */
 export const subtractQueueBudget = (request: unknown, elapsedMs: number): unknown => {

@@ -75,12 +75,62 @@ describe("threaded background routing", () => {
     expect(closeDocument).toHaveBeenCalledOnce();
     expect(chrome.runtime.sendMessage).not.toHaveBeenCalled();
   });
-  it("does not close an inherited offscreen document after setup failure", async () => {
-    const { dispatch, createDocument, closeDocument, getContexts } = await setup(async (message) => ({ token: message.token, error: "pool failed" }));
+  it("does not close an inherited offscreen document after a transport failure", async () => {
+    const { dispatch, createDocument, closeDocument, getContexts } = await setup(async () => { throw new Error("transport unavailable"); });
     getContexts.mockResolvedValueOnce([{}]);
     await dispatch({ type: DECISION_STATUS_MESSAGE_TYPE, id: 1 });
     expect(createDocument).not.toHaveBeenCalled();
     expect(closeDocument).not.toHaveBeenCalled();
+  });
+  it("closes an inherited document when it reports a terminal worker failure", async () => {
+    const { dispatch, createDocument, closeDocument, getContexts } = await setup(async (message) => ({ token: message.token, error: "pool failed" }));
+    getContexts.mockResolvedValueOnce([{}]);
+    await dispatch({ type: DECISION_STATUS_MESSAGE_TYPE, id: 1 });
+    expect(createDocument).not.toHaveBeenCalled();
+    expect(closeDocument).toHaveBeenCalledOnce();
+  });
+  it("keeps an active search alive when another tab's readiness probe times out", async () => {
+    vi.useFakeTimers();
+    let failProbe = false;
+    let completeAnalysis!: (response: unknown) => void;
+    let analysisToken = "";
+    const { dispatch, closeDocument } = await setup(async (message) => {
+      if (message.operation === "analyze") {
+        analysisToken = message.token;
+        return new Promise((resolve) => { completeAnalysis = resolve; });
+      }
+      if (message.operation === "status" && failProbe) return new Promise(() => undefined);
+      return { token: message.token, status: { engineRevision: "parallel", threadCount: 2, initializationMs: 1 } };
+    });
+    const first = dispatch(decision(1), { tab: { id: 1 } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(analysisToken).not.toBe("");
+    failProbe = true;
+    const probe = dispatch({ type: DECISION_STATUS_MESSAGE_TYPE, id: 2 }, { tab: { id: 2 } });
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(probe).resolves.toMatchObject({ runtime: "background-wasm" });
+    expect(closeDocument).not.toHaveBeenCalled();
+    completeAnalysis({ token: analysisToken, result: {} });
+    await expect(first).resolves.toMatchObject({ analysis: { runtime: "offscreen-wasm-threads" } });
+  });
+  it("closes a document that fails readiness and retries the pool after the cooldown", async () => {
+    let failed = false;
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const { dispatch, createDocument, closeDocument, getContexts } = await setup(async (message) => failed
+      ? { token: message.token, error: "worker disappeared" }
+      : { token: message.token, status: { engineRevision: "parallel", threadCount: 2, initializationMs: 1 } });
+    await dispatch({ type: DECISION_STATUS_MESSAGE_TYPE, id: 1 });
+    failed = true;
+    await expect(dispatch({ type: DECISION_STATUS_MESSAGE_TYPE, id: 2 })).resolves.toMatchObject({ runtime: "background-wasm" });
+    expect(closeDocument).toHaveBeenCalledOnce();
+    failed = false;
+    await expect(dispatch({ type: DECISION_STATUS_MESSAGE_TYPE, id: 3 })).resolves.toMatchObject({ runtime: "background-wasm" });
+    expect(createDocument).toHaveBeenCalledOnce();
+    const { THREADED_RETRY_COOLDOWN_MS } = await import("../src/background/threaded-engine");
+    now.mockReturnValue(1_000 + THREADED_RETRY_COOLDOWN_MS);
+    getContexts.mockResolvedValue([]);
+    await expect(dispatch({ type: DECISION_STATUS_MESSAGE_TYPE, id: 4 })).resolves.toMatchObject({ runtime: "offscreen-wasm-threads" });
+    expect(createDocument).toHaveBeenCalledTimes(2);
   });
   it("routes decisions through the pool without starting a fallback after execution failure", async () => {
     const { dispatch } = await setup(async (message) => message.operation === "analyze"

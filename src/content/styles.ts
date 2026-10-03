@@ -43,7 +43,7 @@ export const OVERLAY_STYLES = `
   .between-block h2,
   .single-tactic span,
   .dice-distribution header,
-  .alternatives-panel > header > span {
+  .alternatives-panel > summary > span {
     font-family: var(--ca-font-display);
   }
   button { color: inherit; font: inherit; }
@@ -61,6 +61,9 @@ export const OVERLAY_STYLES = `
     z-index: 2147483000;
     display: flex;
     width: var(--ca-interface-width, 392px);
+    /* Fixed chrome: state changes (thinking/ready/off-turn) scroll inside
+       .panel instead of growing and shrinking the whole overlay. */
+    height: var(--ca-interface-max-height, min(72vh, 650px));
     max-height: var(--ca-interface-max-height, min(72vh, 650px));
     flex-direction: column;
     overflow: hidden;
@@ -125,6 +128,7 @@ export const OVERLAY_STYLES = `
     align-items: center;
     gap: 5px;
     height: 22px;
+    flex: 0 0 auto;
     padding: 0 8px;
     border: 1px solid var(--ca-line);
     border-radius: 999px;
@@ -164,6 +168,10 @@ export const OVERLAY_STYLES = `
   .meta-engine-chip.error {
     color: var(--ca-danger);
     border-color: rgba(224, 86, 76, .35);
+  }
+  .meta-engine-chip.healthy {
+    color: var(--ca-success);
+    border-color: rgba(122, 215, 162, .3);
   }
   .icon-button {
     display: inline-flex;
@@ -259,6 +267,7 @@ export const OVERLAY_STYLES = `
     align-items: center;
     justify-content: space-between;
     gap: 10px;
+    min-height: 22px;
     margin-bottom: 12px;
     color: var(--ca-quiet);
     font-size: 11px;
@@ -267,7 +276,9 @@ export const OVERLAY_STYLES = `
   }
   .decision-meta span {
     min-width: 0;
-    overflow-wrap: anywhere;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .decision-meta span:first-child { color: var(--ca-label); letter-spacing: .08em; }
   .decision h1 {
@@ -279,6 +290,10 @@ export const OVERLAY_STYLES = `
     line-height: 1.1;
     letter-spacing: -.02em;
     text-wrap: balance;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
   }
   .decision-command {
     display: flex;
@@ -543,24 +558,34 @@ export const OVERLAY_STYLES = `
   .alternative strong { font-size: 12.5px; }
   .alternative small { margin-top: 2px; color: var(--ca-quiet); font-size: 11px; }
   .alternatives-panel {
-    padding: 10px 12px 12px;
+    padding: 0;
     border-bottom: 1px solid var(--ca-line);
     background: var(--ca-chrome);
   }
-  .alternatives-panel > header {
+  .alternatives-panel > summary {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     justify-content: space-between;
     gap: 10px;
-    margin-bottom: 7px;
+    min-height: 38px;
+    padding: 8px 12px;
+    cursor: pointer;
+    list-style-position: inside;
   }
-  .alternatives-panel > header > span {
+  .alternatives-panel > summary:hover > span { color: var(--ca-ink); }
+  .alternatives-panel > summary::before {
+    content: "▸";
+    color: var(--ca-quiet);
+  }
+  .alternatives-panel[open] > summary::before { content: "▾"; }
+  .alternatives-panel > summary > span {
+    flex: 1;
     color: var(--ca-label);
     font-size: 11px;
     font-weight: 700;
     letter-spacing: .08em;
   }
-  .alternatives-panel > header > small {
+  .alternatives-panel > summary > small {
     color: var(--ca-quiet);
     font-size: 10.5px;
     text-align: right;
@@ -568,6 +593,7 @@ export const OVERLAY_STYLES = `
   .alternatives-list {
     display: grid;
     gap: 6px;
+    padding: 0 12px 12px;
   }
   .alternative-choice {
     font-variant-numeric: tabular-nums;

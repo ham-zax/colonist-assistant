@@ -3,3 +3,5 @@
 export * from "../wasm/colonist_search.js";
 export { default } from "../wasm/colonist_search.js";
 export function initThreadPool(threadCount: number): Promise<void>;
+/** Byte address of the engine's shared cancellation word in linear memory. */
+export function cancel_word_address(): number;

@@ -67,6 +67,12 @@ impl EvaluatorBackend {
 #[cfg(feature = "cuda-exact")]
 static CUDA_EXACT_EVALUATOR: OnceLock<Mutex<CudaExactEvaluator>> = OnceLock::new();
 
+/// Per-decision stderr trace for watching long games, enabled by `COLONIST_ARENA_TRACE`.
+fn trace_decisions() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("COLONIST_ARENA_TRACE").is_some())
+}
+
 #[cfg(feature = "cuda-exact")]
 fn evaluator_benchmark_metrics(
     backend: EvaluatorBackend,
@@ -683,6 +689,7 @@ fn root_prune_reason(reason: RootPruneReason) -> &'static str {
         RootPruneReason::RootExcluded => "root-excluded",
         RootPruneReason::BranchTruncated => "branch-truncated",
         RootPruneReason::TradeSafety => "trade-safety",
+        RootPruneReason::TradeSafetyIncomplete => "trade-safety-incomplete",
         RootPruneReason::ExactFamilyCollapsed => "exact-family-collapsed",
     }
 }
@@ -2015,6 +2022,13 @@ fn choose_action(
     persistent_searches: &mut [Option<Mcts>],
 ) -> EngineChoice {
     let actions = state.legal_actions();
+    // A lone legal action (forced EndTurn, the only trade reply) needs no search.
+    // Pre-roll searches stay: their root value is the calibration sample.
+    if let [only] = actions.as_slice()
+        && !(state.phase == Phase::PreRoll && engine.uses_search_information())
+    {
+        return EngineChoice::simple(only.clone());
+    }
     let search_particles = engine
         .uses_search_information()
         .then(|| search_belief_particles(state, config))
@@ -2082,6 +2096,16 @@ fn choose_action(
                     }
                 }
                 .expect("arena belief particles share one public observation");
+                if trace_decisions() {
+                    eprintln!(
+                        "  search phase={:?} particles={} posterior={} deadline={} stages={:?}",
+                        state.phase,
+                        report.particles,
+                        report.posterior_particles,
+                        report.deadline_reached,
+                        report.stage_timings,
+                    );
+                }
                 EngineChoice {
                     action: report.chosen.clone().unwrap_or_else(|| actions[0].clone()),
                     root_value: Some(report.value),
@@ -3298,6 +3322,23 @@ fn play_game_from_state(
                 metrics.first_decisions[actor] = Some(choice.root_trace(actor));
             }
             metrics.decision_count[actor] += 1;
+            if trace_decisions() {
+                let points = state.players[..config.players as usize]
+                    .iter()
+                    .map(|player| player.victory_points().to_string())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                eprintln!(
+                    "turn={} seat={actor} engine={} ms={} nodes={} depth={} legal={} vp={points} action={:?}",
+                    state.turn,
+                    engines[actor].as_str(),
+                    started.elapsed().as_millis(),
+                    choice.nodes,
+                    choice.depth,
+                    legal_actions.len(),
+                    choice.action,
+                );
+            }
             if choice.root_value.is_some() {
                 metrics.search_decision_count[actor] += 1;
                 metrics.search_nodes[actor] += u64::from(choice.nodes);
@@ -4669,12 +4710,13 @@ fn main() {
 mod tests {
     use std::time::Duration;
 
-    use colonist_catan_core::{GameState, Phase, SyntheticBoardGenerator};
+    use colonist_catan_core::{Action, GameState, Phase, SplitMix64, SyntheticBoardGenerator};
 
     use super::{
         ArenaResult, ArenaSearchProfileSnapshot, ChallengeSnapshot, Config, Engine, GameMetrics,
-        GameResult, GameStateSnapshot, PartialArenaMetrics, belief_particles, information_mode,
-        ordinary_board_generator, play_game, search_belief_particles, write_checkpoint,
+        GameResult, GameStateSnapshot, PartialArenaMetrics, belief_particles, choose_action,
+        information_mode, ordinary_board_generator, play_game, search_belief_particles,
+        write_checkpoint,
     };
 
     fn snapshot_fixture(generator: SyntheticBoardGenerator, seed: u64) -> ChallengeSnapshot {
@@ -4987,6 +5029,73 @@ mod tests {
         };
         assert!(search_belief_particles(&state, &oracle_config).is_none());
         assert_eq!(information_mode(&oracle_config), "perfect-information");
+    }
+
+    #[test]
+    fn forced_roll_keeps_calibration_values_for_every_search_engine() {
+        let mut state = GameState::standard(23, 4);
+        state.phase = Phase::PreRoll;
+        assert_eq!(state.legal_actions(), vec![Action::Roll]);
+        for perfect_information_search in [false, true] {
+            let config = Config {
+                iterations: 1,
+                rollout_actions: 1,
+                belief_particles: 1,
+                strategic_particle_limit: 1,
+                maxn_depth: 1,
+                maxn_branch: 2,
+                maxn_nodes: Some(16),
+                perfect_information_search,
+                ..Config::default()
+            };
+            for engine in [Engine::MaxN, Engine::AlphaBeta, Engine::Uct, Engine::Puct] {
+                let choice = choose_action(
+                    engine,
+                    &state,
+                    &mut SplitMix64::new(1),
+                    &config,
+                    config.strategy_policy,
+                    &mut std::array::from_fn::<_, 4, _>(|_| None),
+                );
+                assert_eq!(choice.action, Action::Roll);
+                assert!(
+                    choice
+                        .root_value
+                        .is_some_and(|values| values.iter().all(|value| value.is_finite())),
+                    "{} must supply the pre-roll calibration sample",
+                    engine.as_str(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn forced_end_turn_skips_search_for_every_engine() {
+        let mut state = GameState::standard(23, 4);
+        state.phase = Phase::Main;
+        state.players[0].resources = [0; 5];
+        assert_eq!(state.legal_actions(), vec![Action::EndTurn]);
+        let config = Config::default();
+        for engine in [
+            Engine::Random,
+            Engine::Weighted,
+            Engine::MaxN,
+            Engine::AlphaBeta,
+            Engine::Uct,
+            Engine::Puct,
+        ] {
+            let choice = choose_action(
+                engine,
+                &state,
+                &mut SplitMix64::new(1),
+                &config,
+                config.strategy_policy,
+                &mut std::array::from_fn::<_, 4, _>(|_| None),
+            );
+            assert_eq!(choice.action, Action::EndTurn);
+            assert!(choice.root_value.is_none());
+            assert_eq!(choice.nodes, 0);
+        }
     }
 
     #[test]

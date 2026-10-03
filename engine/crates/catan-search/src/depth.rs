@@ -60,8 +60,7 @@ use crate::threats::{
     posterior_immediate_threat_weight,
 };
 use crate::trade_safety::{
-    DomesticTradeThreat, HARD_VETO_POSTERIOR, belief_domestic_trade_assessment,
-    belief_domestic_trade_threat,
+    DomesticTradeThreat, HARD_VETO_POSTERIOR, belief_domestic_trade_assessment_controlled,
 };
 
 // Convenience APIs must remain safe in UI/tests. Production callers that
@@ -102,6 +101,7 @@ pub enum RootPruneReason {
     RootExcluded,
     BranchTruncated,
     TradeSafety,
+    TradeSafetyIncomplete,
     ExactFamilyCollapsed,
 }
 
@@ -369,6 +369,7 @@ impl BeliefDepthConfig {
 pub enum DepthBeliefError {
     Empty,
     PublicStateMismatch,
+    NoSafeRoot,
     #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
     CudaSearchCancelled,
     #[cfg(all(feature = "cuda-exact", not(target_arch = "wasm32")))]
@@ -445,6 +446,8 @@ struct TranspositionIdentity {
     branch_cap: usize,
 }
 
+// Each field changes the cached subtree's semantics; keep those inputs explicit.
+#[allow(clippy::too_many_arguments)]
 fn transposition_identity(
     state: &GameState,
     algorithm: Algorithm,
@@ -1821,13 +1824,16 @@ impl Searcher {
                 let mut next = state.clone();
                 let ends_game = next.apply(action).is_ok() && next.is_terminal();
                 ends_game
-                    || belief_domestic_trade_threat(std::iter::once((state, 1.0)), action).is_none()
+                    || belief_domestic_trade_assessment_controlled(
+                        std::iter::once((state, 1.0)),
+                        action,
+                        &|| self.deadline.has_elapsed(),
+                    )
+                    .is_some_and(|assessment| !assessment.hard_veto)
             })
             .cloned()
             .collect::<Vec<_>>();
-        if !safe_ranked.is_empty() {
-            ranked = safe_ranked;
-        }
+        ranked = safe_ranked;
         let root_budgets = allocate_root_node_budgets(ranked.len(), self.maximum_nodes);
         let maximize = self.decision_maximizes(actor);
         let mut chosen = None;
@@ -2687,33 +2693,36 @@ fn belief_search_backend(
     } else {
         baseline_retained.clone()
     };
-    let mut root_evidence = ranked_diagnostics
-        .iter()
-        .map(|candidate| {
-            let impact = spatial_impact_report.as_ref().and_then(|report| {
-                report
-                    .actions
-                    .iter()
-                    .find(|impact| impact.action == candidate.action)
-            });
-            let trade = if retained
+    // Per-root trade-safety probes dominate this stage; each root is independent.
+    let assessed_roots = ordered_search_map(&ranked_diagnostics, |candidate| {
+        let impact = spatial_impact_report.as_ref().and_then(|report| {
+            report
+                .actions
                 .iter()
-                .any(|(action, _)| action == &candidate.action)
-            {
-                belief_domestic_trade_assessment(
-                    particles
-                        .iter()
-                        .map(|particle| (&particle.state, particle.weight)),
-                    &candidate.action,
-                )
-            } else {
-                Default::default()
-            };
-            let road_cut_continuation =
-                road_cut_continuation_for_root(posterior, observer, &candidate.action, impact);
-            let road_intent = particles.first().and_then(|particle| {
-                road_intent_for_root(&particle.state, observer, &candidate.action)
-            });
+                .find(|impact| impact.action == candidate.action)
+        });
+        let trade = if retained
+            .iter()
+            .any(|(action, _)| action == &candidate.action)
+        {
+            belief_domestic_trade_assessment_controlled(
+                particles
+                    .iter()
+                    .map(|particle| (&particle.state, particle.weight)),
+                &candidate.action,
+                &|| deadline.has_elapsed(),
+            )
+        } else {
+            Some(Default::default())
+        };
+        let complete = trade.is_some();
+        let trade = trade.unwrap_or_default();
+        let road_cut_continuation =
+            road_cut_continuation_for_root(posterior, observer, &candidate.action, impact);
+        let road_intent = particles.first().and_then(|particle| {
+            road_intent_for_root(&particle.state, observer, &candidate.action)
+        });
+        (
             RootCausalEvidence {
                 action: candidate.action.clone(),
                 promotion_reason: impact.and_then(|impact| impact.promotion),
@@ -2740,8 +2749,18 @@ fn belief_search_backend(
                 dirty_monopoly_posterior: trade.dirty_monopoly_posterior,
                 trade_hard_veto_posterior: trade.hard_veto_posterior,
                 trade_hard_veto: trade.hard_veto,
-            }
-        })
+            },
+            complete,
+        )
+    });
+    let incomplete_trades = assessed_roots
+        .iter()
+        .filter(|(_, complete)| !complete)
+        .map(|(evidence, _)| evidence.action.clone())
+        .collect::<Vec<_>>();
+    let mut root_evidence = assessed_roots
+        .into_iter()
+        .map(|(evidence, _)| evidence)
         .collect::<Vec<_>>();
     for (action, _) in &root_scored {
         if !retained
@@ -2784,17 +2803,33 @@ fn belief_search_backend(
                 <= 1
         );
     }
-    let safe_root_actions = root_actions
+    let mut safe_root_actions = root_actions
         .iter()
         .filter(|(action, _)| {
-            root_evidence
-                .iter()
-                .find(|evidence| evidence.action == *action)
-                .is_none_or(|evidence| !evidence.trade_hard_veto)
+            !incomplete_trades.contains(action)
+                && root_evidence
+                    .iter()
+                    .find(|evidence| evidence.action == *action)
+                    .is_none_or(|evidence| !evidence.trade_hard_veto)
         })
         .cloned()
         .collect::<Vec<_>>();
-    if !safe_root_actions.is_empty() {
+    if safe_root_actions.is_empty() {
+        // Even a cap of one may have admitted only the unsafe trade. Recover
+        // a legal decline/pass from the untruncated, non-excluded roots.
+        if let Some(fallback) = root_scored.iter().find(|(action, _)| {
+            matches!(
+                action,
+                Action::EndTurn | Action::RespondTrade { accept: false } | Action::CancelTrade
+            )
+        }) {
+            safe_root_actions.push(fallback.clone());
+            pruned_roots.retain(|root| root.action != fallback.0);
+        } else {
+            return Err(DepthBeliefError::NoSafeRoot);
+        }
+    }
+    {
         for (action, _) in &root_actions {
             if !safe_root_actions
                 .iter()
@@ -2806,7 +2841,11 @@ fn belief_search_backend(
                         .iter()
                         .find(|candidate| candidate.action == *action)
                         .map(|candidate| candidate.rank),
-                    reason: RootPruneReason::TradeSafety,
+                    reason: if incomplete_trades.contains(action) {
+                        RootPruneReason::TradeSafetyIncomplete
+                    } else {
+                        RootPruneReason::TradeSafety
+                    },
                 });
             }
         }
@@ -4404,11 +4443,9 @@ impl CudaDeferredSearcher<'_> {
         {
             return Some(self.tree.constant(value));
         }
-        let node = self
-            .local_transpositions
-            .get(&key)
-            .and_then(|(cached_state, node)| (cached_state == state).then_some(*node));
-        node
+        self.local_transpositions
+            .get(key)
+            .and_then(|(cached_state, node)| (cached_state == state).then_some(*node))
     }
 
     fn record_transposition(&mut self, key: TranspositionIdentity, state: &GameState, node: usize) {
@@ -6480,7 +6517,13 @@ mod tests {
                 let mut world = base.clone();
                 for (offset, grain) in grains.iter().copied().enumerate() {
                     let player = offset + 1;
-                    let ore = 4 - grain;
+                    // Keep public hand totals fixed while putting the two
+                    // near-tied Monopoly choices on opposite sides of the
+                    // experimental compression error (full: Lumber, subset: Grain).
+                    let ore = 1_u8.saturating_sub(grain);
+                    let lumber = 4 - grain - ore;
+                    world.players[player].resources[Resource::Lumber.index()] = lumber;
+                    world.bank[Resource::Lumber.index()] -= lumber;
                     world.players[player].resources[Resource::Grain.index()] = grain;
                     world.players[player].resources[Resource::Ore.index()] = ore;
                     world.bank[Resource::Grain.index()] -= grain;

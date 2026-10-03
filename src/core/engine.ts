@@ -194,6 +194,7 @@ export interface DeepSearchPrunedRoot {
     | "root-excluded"
     | "branch-truncated"
     | "trade-safety"
+    | "trade-safety-incomplete"
     | "exact-family-collapsed";
 }
 

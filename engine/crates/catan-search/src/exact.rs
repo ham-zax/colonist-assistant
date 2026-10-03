@@ -4,7 +4,7 @@ use crate::eval::{evaluate, public_strategic_utility, robber_denial, strategic_u
 use crate::mcts::BeliefParticle;
 use crate::planner::{TurnPlanConfig, plan_current_turn};
 use crate::policy::{actor_proposal_actions, trade_acceptance_probability};
-use crate::trade_safety::belief_domestic_trade_threat;
+use crate::trade_safety::belief_domestic_trade_assessment_controlled;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExactActionFamily {
@@ -598,13 +598,15 @@ where
                 lower[player] = lower[player].min(value[player]);
             }
         }
-        let hard_veto = belief_domestic_trade_threat(
+        let safety_stop = std::cell::RefCell::new(&mut should_stop);
+        let hard_veto = belief_domestic_trade_assessment_controlled(
             particles
                 .iter()
                 .map(|particle| (&particle.state, particle.weight)),
             &action,
-        )
-        .is_some();
+            &|| safety_stop.borrow_mut()(),
+        )?
+        .hard_veto;
         values.push(ExactActionValue {
             action,
             value: expected,
